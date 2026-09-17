@@ -271,6 +271,23 @@ def main(argv=None) -> None:
         action="store_true",
         help="run despite battery power or busy Metal memory (reasons are printed)",
     )
+    bench_p.add_argument(
+        "--fresh",
+        action="store_true",
+        help="rerun combos that already have complete results (default: skip them)",
+    )
+    bench_p.add_argument(
+        "--load-timeout",
+        type=float,
+        default=900.0,
+        help="seconds to wait for load_engine before recording a load_failed row (default 900)",
+    )
+    bench_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the machine tag, dataset build plan, combo list with output "
+        "folders, and a memory estimate per model, then exit without loading anything",
+    )
 
     report_p = sub.add_parser(
         "report",
@@ -419,6 +436,12 @@ def main(argv=None) -> None:
             argv += ["--models-file", args.models_file]
         if args.force:
             argv.append("--force")
+        if args.fresh:
+            argv.append("--fresh")
+        if args.load_timeout != 900.0:
+            argv += ["--load-timeout", str(args.load_timeout)]
+        if args.dry_run:
+            argv.append("--dry-run")
         raise SystemExit(bench_main(argv))
 
     elif args.command == "report":

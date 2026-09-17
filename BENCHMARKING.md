@@ -32,6 +32,20 @@ runs every (track, scorer, dataset) combination twice and keeps the warm run,
 writes `benchmarks/results/<machine>-<model-slug>/...`, and prints
 `SUMMARY.md` plus the exact PR instructions.
 
+Check the plan before spending an evening of GPU: `--dry-run` prints the
+machine tag, which datasets are cached vs to-build, every combo with its
+output folder, and a memory estimate per model — then exits without loading
+anything.
+
+Failure is a result, not a crash: a model that cannot load (or exceeds
+`--load-timeout`, default 900s) writes a `load_failed` `run.json` into each
+of its combos, and a combo that fails mid-run writes `run_failed` — both
+appear in `SUMMARY.md` with the error in the field-acc column. Exit code is
+0 as long as at least one combo succeeded; 1 only when EVERY combo failed.
+Reruns resume: a combo with `predictions.jsonl` + `run.json` + `report.json`
+tracks as complete and is skipped with a log line (state comes from the
+files, no manifest). Pass `--fresh` to force reruns.
+
 ## 3. Commit the results folder
 
 ```bash
@@ -56,7 +70,9 @@ Paste `SUMMARY.md` into the PR description and link the machine specs
 - Runs: for every (track, scorer, dataset) — `eval` in-process `--runs` times
   (default 2), last run kept, order-rotation permutations on for the parallel
   track. Writes `predictions.jsonl`, `run.json`, `report.json`, `report.md`
-  per combination, then `SUMMARY.md` across all of them.
+  per combination, then `SUMMARY.md` across all of them. Completed combos
+  are skipped on rerun (`--fresh` overrides); load/run failures become
+  `load_failed`/`run_failed` rows in the summary instead of crashing.
 
 ## What NOT to commit
 

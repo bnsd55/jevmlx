@@ -22,9 +22,39 @@ _MACHINE_RE = re.compile(r"^(?P<machine>[a-z0-9]+-\d+gb)-(?P<model>.+)$")
 
 
 def _row_from_folder(folder: Path) -> dict | None:
-    """One summary row from a combo folder, or None when it has no report."""
+    """One summary row from a combo folder (report or failure run.json)."""
     report_path = folder / "report.json"
     if not report_path.is_file():
+        # Failure rows: run.json with status load_failed/run_failed gets a
+        # summary row with the error in the accuracy column.
+        run_path = folder / "run.json"
+        if run_path.is_file():
+            try:
+                run = json.loads(run_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                return None
+            status = run.get("status")
+            if status in ("load_failed", "run_failed"):
+                machine, model = _machine_model(folder)
+                track, scorer, dataset = _combo_parts(folder)
+                err = run.get("error") or {}
+                msg = f"{status}: {err.get('type', 'Error')}: {err.get('message', '')}".strip()
+                return {
+                    "machine": machine,
+                    "model": model,
+                    "track": track,
+                    "scorer": scorer,
+                    "dataset": dataset,
+                    "field_accuracy": None,
+                    "accuracy_note": msg,
+                    "case_exact": None,
+                    "balanced_accuracy_mean": None,
+                    "ece": None,
+                    "any_flip_rate": None,
+                    "perturbation_flip_rate": None,
+                    "latency_ms_p50": None,
+                    "n_cases": None,
+                }
         return None
     run = json.loads(report_path.read_text(encoding="utf-8"))
     metrics = run.get("metrics") or {}
@@ -176,7 +206,14 @@ def summarize(out: Path) -> Path:
         "n_cases",
     ]
     for row in rows:
-        cells = [_cell(row.get(col)) for col in columns]
+        cells = []
+        for col in columns:
+            value = row.get(col)
+            if col == "field_accuracy" and value is None and row.get("accuracy_note"):
+                # Failure row: the error text replaces the accuracy number.
+                cells.append(row["accuracy_note"])
+            else:
+                cells.append(_cell(value))
         lines.append("| " + " | ".join(cells) + " |")
     if not rows:
         lines.append(f"(no report.json files found under {out})")

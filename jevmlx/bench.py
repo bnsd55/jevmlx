@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import json
 import shutil
 import subprocess
 import sys
@@ -236,6 +237,60 @@ def _track_scorer_grid(tracks: list[str], scorers: list[str]) -> list[tuple[str,
     return grid
 
 
+def _load_engine_with_timeout(model: str, load_timeout: float) -> tuple:
+    """load_engine in a thread, joined with ``load_timeout`` seconds.
+
+    Returns (model, tokenizer). On timeout the thread is abandoned (daemon;
+    the process may keep it alive but the bench moves on) and TimeoutError
+    is raised — callers treat it like any load failure.
+    """
+    import threading
+
+    from jevmlx.engine import load_engine
+
+    outcome: dict[str, Any] = {}
+
+    def _load() -> None:
+        try:
+            outcome["result"] = load_engine(model)
+        except BaseException as exc:  # noqa: BLE001 - the thread must not die silently
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=_load, daemon=True)
+    thread.start()
+    thread.join(load_timeout)
+    if thread.is_alive():
+        raise TimeoutError(f"load_engine did not finish within {load_timeout:.0f}s")
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["result"]
+
+
+def _write_failure_run(combo_dir: Path, status: str, exc: BaseException) -> Path:
+    """Write <combo>/run.json with status load_failed/run_failed; return it."""
+    first_line = str(exc).strip().splitlines()[0] if str(exc).strip() else repr(exc)
+    payload = {
+        "status": status,
+        "error": {
+            "type": type(exc).__name__,
+            "message": first_line,
+        },
+        "environment": environment(),
+    }
+    run_path = combo_dir / "run.json"
+    run_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return run_path
+
+
+def _combo_complete(combo_dir: Path) -> bool:
+    """Resume rule: predictions.jsonl + run.json + report.json all exist."""
+    return (
+        (combo_dir / "predictions.jsonl").is_file()
+        and (combo_dir / "run.json").is_file()
+        and (combo_dir / "report.json").is_file()
+    )
+
+
 def run_bench(
     model: str,
     datasets: list[str],
@@ -245,8 +300,20 @@ def run_bench(
     runs: int,
     machine_override: str | None = None,
     force: bool = False,
+    fresh: bool = False,
+    load_timeout: float = 900.0,
 ) -> Path:
-    """Run the full bench matrix for one model; returns the results folder."""
+    """Run the full bench matrix for one model; returns the results folder.
+
+    Failure is a result, not a crash: a model that cannot load (error or
+    ``--load-timeout``) writes a ``load_failed`` run.json into every combo
+    folder of that model, and a combo that fails mid-run writes
+    ``run_failed``. Both get a SUMMARY.md row (accuracy column: ``load
+    failed: <msg>`` / ``run failed: <msg>``). Completed combos
+    (predictions + run.json + report.json) are skipped on re-invocation
+    unless ``fresh`` forces a rerun — state is derived from files, no
+    manifest. Exit code 0 unless EVERY combo failed.
+    """
     tag = preflight(force, machine_override)
     print(f"machine: {tag}")
 
@@ -265,28 +332,55 @@ def run_bench(
             shutil.copy(lock_src, folder / f"{name}.dataset.lock.json")
 
     last_run: dict[str, dict[str, Any]] = {}
-    for track, scorer in _track_scorer_grid(tracks, scorers):
-        for dataset in datasets:
-            if dataset not in dataset_paths:
-                continue
+    failed_combos: dict[str, str] = {}
+    combos = [
+        (track, scorer, dataset)
+        for track, scorer in _track_scorer_grid(tracks, scorers)
+        for dataset in datasets
+        if dataset in dataset_paths
+    ]
+    engine_loaded = False
+    try:
+        for track, scorer, dataset in combos:
             combo = f"{track}-{scorer}-{dataset}"
             combo_dir = folder / combo
             combo_dir.mkdir(parents=True, exist_ok=True)
+            if not fresh and _combo_complete(combo_dir):
+                print(f"=== {combo}: complete, skipping (--fresh to rerun) ===")
+                continue
             print(f"=== {combo} ({runs} run(s)) ===")
-            result = None
-            for run_index in range(runs):
-                result = _run_one(model, track, scorer, dataset_paths[dataset], combo_dir)
-                print(f"  run {run_index + 1}/{runs} done")
-            assert result is not None
-            last_run[combo] = result
-
+            try:
+                if not engine_loaded:
+                    # Load once per model, lazily, inside the timeout guard.
+                    _load_engine_with_timeout(model, load_timeout)
+                    engine_loaded = True
+                result = None
+                for run_index in range(runs):
+                    result = _run_one(model, track, scorer, dataset_paths[dataset], combo_dir)
+                    print(f"  run {run_index + 1}/{runs} done")
+                assert result is not None
+                last_run[combo] = result
+            except Exception as exc:  # noqa: BLE001 - failure is a result
+                status = "load_failed" if not engine_loaded else "run_failed"
+                _write_failure_run(combo_dir, status, exc)
+                failed_combos[combo] = f"{type(exc).__name__}: {exc}"
+                print(f"FAILED combo {combo} ({status}): {failed_combos[combo]}", flush=True)
+    finally:
         # One model load per track group is enough; drop it between tracks so
         # memory returns to baseline before the next track's runs.
         from jevmlx.engine import clear_engine_cache
 
         clear_engine_cache()
 
-    summarize(folder)
+    if failed_combos:
+        summarize(folder)
+        for combo, err in failed_combos.items():
+            print(f"combo {combo} FAILED: {err}")
+        if len(failed_combos) == len(combos):
+            detail = "; ".join(f"{c}: {e}" for c, e in failed_combos.items())
+            raise SystemExit(f"every combo failed — {detail}")
+    else:
+        summarize(folder)
     _print_pr_instructions(folder, last_run)
     return folder
 
@@ -300,18 +394,26 @@ def run_bench_models(
     runs: int,
     machine_override: str | None = None,
     force: bool = False,
+    fresh: bool = False,
+    load_timeout: float = 900.0,
 ) -> Path:
     """Run the bench matrix for several models, sequentially.
 
     Each model gets its own ``<machine>-<slug>/`` folder under ``out``; ONE
     ``SUMMARY.md`` is written at ``out`` covering all of them. Between models
     the engine cache and the Metal buffer cache are released and memory is
-    logged before/after. A model that fails to bench (load error, crash) is
-    logged and skipped — the remaining models still run.
+    logged before/after.
+
+    Per-model failure handling is delegated to :func:`run_bench`, which
+    records ``load_failed``/``run_failed`` run.json rows per combo (the one
+    failure mechanism): a model whose engine cannot load leaves failure rows
+    in every one of its combos and the remaining models still run. This
+    wrapper only escalates when EVERY model left zero successful combos.
     """
     if not models:
         raise SystemExit("no models selected")
-    failures: dict[str, str] = {}
+    all_combos = 0
+    failed_combos = 0
     for model in models:
         print(f"\n=== model {model} ===", flush=True)
         try:
@@ -324,12 +426,22 @@ def run_bench_models(
                 runs=runs,
                 machine_override=machine_override,
                 force=force,
+                fresh=fresh,
+                load_timeout=load_timeout,
             )
+        except SystemExit as exc:
+            # run_bench exits 1 only when EVERY of its combos failed.
+            failed_combos += 1
+            print(f"FAILED model {model}: {exc}", flush=True)
         except Exception as exc:  # noqa: BLE001 - one model must not stop the next
-            failures[model] = f"{type(exc).__name__}: {exc}"
-            print(f"FAILED model {model}: {failures[model]}", flush=True)
+            failed_combos += 1
+            print(f"FAILED model {model}: {type(exc).__name__}: {exc}", flush=True)
+        else:
+            all_combos += 1
         finally:
             before = _metal_cache_memory_gb()
+            from jevmlx.engine import clear_engine_cache
+
             clear_engine_cache()
             _clear_metal_cache()
             after = _metal_cache_memory_gb()
@@ -337,12 +449,10 @@ def run_bench_models(
                 f"[memory] released {model}: metal cache {before} GB -> {after} GB",
                 flush=True,
             )
-    if len(failures) == len(models):
-        detail = "; ".join(f"{m}: {err}" for m, err in failures.items())
-        raise SystemExit(f"every model failed — {detail}")
+    if all_combos == 0 and failed_combos:
+        summarize(out)  # failure rows still get a summary
+        raise SystemExit("every model failed")
     summarize(out)
-    for model, err in failures.items():
-        print(f"model {model} FAILED (skipped in summary): {err}")
     return out
 
 
@@ -474,6 +584,67 @@ def enforce_folder_size(folder: Path) -> bool:
     return compressed
 
 
+# Rough constant-bytes-per-parameter factors for common quantizations; the
+# compat table's probe is the precise source but loading it would violate the
+# dry-run never-loads rule, so these heuristics only power the plan printout.
+_Q_SUFFIXES = ("4bit", "8bit", "mlxfp4")
+
+
+def _model_memory_estimate(model: str) -> str:
+    """Human memory estimate from the model id, else 'unknown'.
+
+    Parses the parameter count from the id (e.g. ``7b``, ``1.5b``,
+    ``0.5b``) and a quantization suffix (4bit ≈ 0.5 B/param + overhead,
+    8bit ≈ 1.0). Never loads anything — this is a plan-time guess, the
+    doctor/compat probe is the precise source.
+    """
+    import re
+
+    m = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*b\b", model.lower())
+    if not m:
+        return "unknown"
+    params_b = float(m.group(1))
+    if model.lower().endswith(("8bit", "8-bit")):
+        bytes_per_param = 1.0
+    elif model.lower().endswith(_Q_SUFFIXES) or "4bit" in model.lower():
+        bytes_per_param = 0.55
+    else:
+        bytes_per_param = 2.0
+    gb = params_b * bytes_per_param + 0.5  # + runtime overhead
+    return f"~{gb:.1f} GB (estimate)"
+
+
+def dry_run(
+    models: list[str],
+    datasets: list[str],
+    scorers: list[str],
+    tracks: list[str],
+    out: Path,
+    machine_override: str | None = None,
+) -> int:
+    """Print the run plan and exit 0 without loading anything."""
+    tag = machine_tag(machine_override)
+    print(f"machine: {tag}")
+    print("datasets:")
+    cached = build_datasets(datasets) if datasets else {}
+    for name in datasets:
+        path = cached.get(name)
+        state = "cached" if path is not None and Path(path).is_file() else "to build"
+        print(f"  {name}: {state}")
+    print("combos:")
+    for model in models:
+        slug = model_slug(model)
+        folder = out / f"{tag}-{slug}"
+        print(f"  model {model} (memory {_model_memory_estimate(model)}) -> {folder}")
+        for track, scorer in _track_scorer_grid(tracks, scorers):
+            for dataset in datasets:
+                combo = f"{track}-{scorer}-{dataset}"
+                combo_dir = folder / combo
+                state = "complete, would skip" if _combo_complete(combo_dir) else "would run"
+                print(f"    {combo} -> {combo_dir} [{state}]")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="jevmlx bench",
@@ -510,6 +681,23 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="run despite battery power or busy Metal memory (reasons are printed)",
     )
+    parser.add_argument(
+        "--fresh",
+        action="store_true",
+        help="rerun combos that already have complete results (default: skip them)",
+    )
+    parser.add_argument(
+        "--load-timeout",
+        type=float,
+        default=900.0,
+        help="seconds to wait for load_engine before recording a load_failed row (default 900)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the machine tag, dataset build plan, combo list with output "
+        "folders, and a memory estimate per model, then exit without loading anything",
+    )
     args = parser.parse_args(argv)
 
     if args.models_file:
@@ -533,6 +721,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.runs < 1:
         parser.error("--runs must be >= 1")
 
+    if args.dry_run:
+        return dry_run(
+            models=models,
+            datasets=datasets,
+            scorers=scorers,
+            tracks=tracks,
+            out=Path(args.out),
+            machine_override=args.machine,
+        )
+
     if len(models) == 1:
         run_bench(
             model=models[0],
@@ -543,6 +741,8 @@ def main(argv: list[str] | None = None) -> int:
             runs=args.runs,
             machine_override=args.machine,
             force=args.force,
+            fresh=args.fresh,
+            load_timeout=args.load_timeout,
         )
     else:
         run_bench_models(
@@ -554,6 +754,8 @@ def main(argv: list[str] | None = None) -> int:
             runs=args.runs,
             machine_override=args.machine,
             force=args.force,
+            fresh=args.fresh,
+            load_timeout=args.load_timeout,
         )
     return 0
 
