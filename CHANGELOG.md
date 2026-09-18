@@ -73,7 +73,14 @@ First release.
   (parity verdict, compatibility table inputs, eval reports, environment
   metadata), single model or a comma-separated list run sequentially; a
   model that fails to load or fails parity is recorded and skipped, not
-  fatal.
+  fatal. Every combo folder carries a `timing.json` (median timing split
+  over the same decide calls the predictions came from).
+- Standalone timing report (`benchmarks/timing.py`): decide() per bundled
+  preset for N repetitions with the engine's full timing split — prior,
+  prefill, plan compile, cache broadcast, suffix eval, lm-head gather,
+  second pass, total — plus rows, padded token positions, forward passes,
+  rescored fields, and the second-pass rerun rate; median/p95/min/max over
+  repetitions with per-rep raw numbers alongside.
 - `jevmlx serve`: a local HTTP server exposing `POST /decide` so one Metal
   GPU can back several clients, serially.
 - `jevmlx validate` / `jevmlx lint`: schema validation for structural

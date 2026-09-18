@@ -33,6 +33,7 @@ trust the code over this document when they drift.
 | [`benchmarks/invariance.py`](benchmarks/invariance.py) | Irrelevant-field invariance benchmark (an invariance gate). |
 | [`benchmarks/check_results.py`](benchmarks/check_results.py) | Results-folder audit: recomputes metrics from `predictions.jsonl`, verifies committed `report.json` numbers, and `--check-readme` compares the README leaderboard block against a rebuilt table. |
 | [`benchmarks/summarize_results.py`](benchmarks/summarize_results.py) | Results directories → `SUMMARY.md` (marks `parity_failed` rows for models whose parity check failed). |
+| [`benchmarks/timing.py`](benchmarks/timing.py) | Timing report: decide() per bundled preset, N reps; the engine's full split (median/p95/min/max) plus rows, padded token positions, passes, rescored count, rerun rate; per-rep raw numbers alongside. |
 | [`benchmarks/leaderboard.py`](benchmarks/leaderboard.py) | README leaderboard table (TypeSafe agreement + local rows). |
 | [`benchmarks/compat.py`](benchmarks/compat.py) | Model compatibility table (latency/memory) generator. |
 | [`benchmarks/naive_vs_parallel.py`](benchmarks/naive_vs_parallel.py) | Quick parallel-vs-naive side-by-side comparison. |
@@ -57,9 +58,10 @@ prompt  (PROMPT_VERSION = "jevmlx-parallel-v7" from the engine;
   │  prefill ONCE (make_prompt_cache + model(base_arr))  →  KV cache
   │    →  broadcast ×rows (prior pass runs first only with prior_correction)
   ▼
-batched suffix pass(es)  (_score_rows; chunked by the memory
-  │    heuristic _rows_per_chunk, halve-and-retry on Metal
-  │    allocation failure, width bucketing)
+batched suffix pass(es)  (_score_rows -> ScoreRowsResult(row_logits,
+  │    row_legal_mass_log, passes, gather_ms, broadcast_ms, chunk_shapes);
+  │    chunked by the memory heuristic _rows_per_chunk, halve-and-retry on
+  │    Metal allocation failure, width bucketing)
   │  branch-point logits at each row's decision position (gather-only eval)
   ▼
 trie scoring  (score_trie: P(choice) = Π branch softmax factors, T applied
@@ -88,7 +90,8 @@ selective second pass  (depends_on children whose parent is confident and
 assembly  (winners → typed values via alias_map; multi = per-option Y/N
   │    codes at T=1; row codes '00','01',… map back to choices)
   ▼
-result dict  {parsed_json, field_telemetry, prompt_sha256, timing split, …}
+result dict  {parsed_json, field_telemetry, prompt_sha256, full timing
+  │    split incl. plan_compile_ms / cache_broadcast_ms / padded_token_positions, …}
   │
   ├──► api.Decision / FieldResult        (Python)
   └──► evalrun predictions.jsonl lines   (eval) / CLI table       (decide)
@@ -106,8 +109,9 @@ called in run_bench_models right after the engine load).
 | Key | Meaning |
 |---|---|
 | `elapsed_ms` | Wall clock for the decision (excludes the prior pass). |
-| `prior_ms` / `prefill_ms` / `suffix_eval_ms` / `lm_head_gather_ms` / `total_ms` | The honest timing split: neutral prior pass (0.0 when `prior_correction` is off), prefill, batched suffix, decision gather+eval inside the suffix window, and everything (`total_ms == elapsed_ms + prior_ms`). |
+| `prior_ms` / `prefill_ms` / `plan_compile_ms` / `cache_broadcast_ms` / `suffix_eval_ms` / `lm_head_gather_ms` / `total_ms` | The honest timing split: neutral prior pass (0.0 when `prior_correction` is off), prefill, plan compilation (plan cache makes it ~0 warm), broadcast+prepare+eval of the per-chunk cache copies (distinct from the forwards), batched suffix, decision gather inside the suffix window, and everything (`total_ms == elapsed_ms + prior_ms`). |
 | `second_pass_ms` / `rerun_fields` / `rerun_rows` | The `depends_on` second pass: wall time, which fields were re-decided, how many conditioned rows ran (0.0/[] when no `depends_on`). |
+| `padded_token_positions` | W3-R: total suffix token positions including right padding — sum of (chunk width x chunk rows), the tiling shape the forwards actually ran at. |
 | `rescored_fields` | Fields whose batched result was replaced by the batch=1 canonical rescore. |
 | `total_tokens_generated` | Always 0: no text is generated. |
 | `peak_active_bytes` | Peak Metal active memory from `mx.get_peak_memory()`. |
@@ -249,6 +253,26 @@ dataset_path, permutations, split, model_revision, quantization,
 prompt_version read from the engine, tokenizer chat-template SHA-256,
 compiled plan SHA-256, dataset lock SHA-256), and `counts` (cases, fields,
 prediction_lines).
+
+### `timing.json` (per combo) — written by `run_eval` when the parallel track ran
+
+`{"calls": <canonical decide calls>, "median": {<split key>: <median over
+cases>}}` — split keys ride the parallel `_meta` (`latency_ms`, the full
+engine split, `peak_active_bytes`, `padded_token_positions`,
+`rescored_fields_count`, `rerun_fields_count`, `num_fields`). Same calls the
+predictions came from — no second run. Naive/openai tracks write none (no
+engine split exists there).
+
+### `benchmarks/timing.py` report (standalone) — `run_timing` / `aggregate`
+
+`{model, reps, prior_correction, presets: {<preset>: {title,
+num_fields, aggregate, raw}}}`; aggregate = median + p95 (nearest-rank) +
+min/max per key over `TIMING_KEYS` (prior_ms, prefill_ms, plan_compile_ms,
+cache_broadcast_ms, suffix_eval_ms, lm_head_gather_ms, second_pass_ms,
+total_ms) plus `COUNT_KEYS` (peak_active_bytes, rows,
+padded_token_positions, sequential_forward_passes, rescored_fields_count,
+num_fields) and `rerun_rate` (rerun fields / fields). CLI:
+`python -m benchmarks.timing --model <id> [--reps N] [--out DIR]`.
 
 ### `dataset.lock.json` — `typesafe/fetch.write_outputs` and `to_jsonl.main`
 
