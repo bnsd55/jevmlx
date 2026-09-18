@@ -95,7 +95,7 @@ def test_valid_constraints_compile_and_roundtrip():
             }
         }
     )
-    assert schema["flags"].set_constraints_list == constraints
+    assert schema["flags"].set_constraints == constraints
     assert schema["flags"].to_dict()["set_constraints"] == constraints
 
 
@@ -170,7 +170,7 @@ def test_set_constraints_on_non_multi_raises():
         {"topic": {"type": "enum", "description": "d", "choices": ["a", "b"]}}
     )
     with pytest.raises(SchemaCompileError, match="multi fields only"):
-        schema["topic"].set_constraints([{"type": "mutually_exclusive", "options": ["a"]}])
+        schema["topic"].compile_set_constraints([{"type": "mutually_exclusive", "options": ["a"]}])
 
 
 def test_unknown_constraint_type_raises():
@@ -192,9 +192,9 @@ def test_set_constraints_require_dict_list():
         {"flags": {"type": "multi", "description": "d", "choices": ["x", "y"]}}
     )
     with pytest.raises(SchemaCompileError):
-        schema["flags"].set_constraints(["not-a-dict"])
+        schema["flags"].compile_set_constraints(["not-a-dict"])
     with pytest.raises(SchemaCompileError):
-        schema["flags"].set_constraints([])
+        schema["flags"].compile_set_constraints([])
 
 
 # ----------------------------------------------------------------- solver --

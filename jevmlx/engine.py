@@ -25,6 +25,7 @@ from typing import Any
 from jinja2.exceptions import TemplateError
 
 from jevmlx.schema import StructuredSchema, _common_token_prefix, count_key, is_count_key
+from jevmlx.setcons import select_constrained_set
 from jevmlx.trie import build_trie, logsumexp, score_trie, softmax
 
 logger = logging.getLogger(__name__)
@@ -1619,22 +1620,18 @@ def run_parallel_generation(
             # score-maximizing set under the constraints, so a count- or
             # threshold-proposed set that violates a declared constraint is
             # corrected rather than emitted. Scores: the calibrated
-            # log-odds when a calibrator ran, else the log-odds of P(yes)
-            # (logit(p) — monotone in P(yes), same ranking as the threshold
-            # rule, so a non-binding constraint set reproduces the proposal
-            # exactly).
-            set_constraints = getattr(fdef, "set_constraints_list", []) or []
+            # log-odds when a calibrator ran, else the RAW yes/no log-odds
+            # (the same per-option quantity calibration rescales — F3: no
+            # clamped logit(p), no magic constants; monotone in P(yes)
+            # either way, so a non-binding constraint set reproduces the
+            # proposal exactly).
+            set_constraints = fdef.set_constraints
             if set_constraints:
-                from jevmlx.setcons import select_constrained_set
-
                 if calibrated_log_odds is not None:
                     option_scores = dict(calibrated_log_odds)
                 else:
-                    # logit(p_yes): log-odds, monotone in p_yes; p=0/1 clamp
-                    # keeps the sum finite (clamped at ±35 ≈ p 1e-16).
                     option_scores = {
-                        o: (35.0 if p >= 1.0 else -35.0 if p <= 0.0 else math.log(p / (1.0 - p)))
-                        for o, p in probs_yes.items()
+                        option: float(pair[0] - pair[1]) for option, pair in raw_pairs.items()
                     }
                 selected, setcons_rule = select_constrained_set(
                     list(p["options"]),

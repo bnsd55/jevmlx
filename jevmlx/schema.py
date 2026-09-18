@@ -209,8 +209,8 @@ class FieldDefinition:
         # prompt v2 renders them; the engine never reads them.)
         self.choice_descriptions: dict[str, str] = dict(choice_descriptions or {})
         # W2-SETCONS: hard set constraints for multi fields. Populated only
-        # via set_constraints() (validated there); default empty.
-        self.set_constraints_list: list[dict] = []
+        # via compile_set_constraints() (validated there); default empty.
+        self.set_constraints: list[dict] = []
 
         if self.field_type == "boolean":
             self.choices = ["true", "false"]
@@ -258,8 +258,9 @@ class FieldDefinition:
     def cardinality(self) -> int:
         return len(self.choices)
 
-    def set_constraints(self, constraints: list[dict] | None) -> None:
-        """Attach W2-SETCONS hard set constraints to this multi field.
+    def compile_set_constraints(self, constraints: list[dict] | None) -> None:
+        """Validate and attach W2-SETCONS hard set constraints to this multi
+        field.
 
         Accepted types (all validated at SET time — contradictory or
         malformed sets raise SchemaCompileError here, at compile time, never
@@ -285,7 +286,7 @@ class FieldDefinition:
         raise SchemaCompileError immediately.
         """
         if constraints is None:
-            self.set_constraints_list = []
+            self.set_constraints = []
             return
         if self.field_type != "multi":
             raise SchemaCompileError(
@@ -421,7 +422,7 @@ class FieldDefinition:
                             f"set constraint contradiction: '{a}' implies '{b}' "
                             f"but the exact_k=0 group excludes '{b}'",
                         )
-        self.set_constraints_list = list(constraints)
+        self.set_constraints = list(constraints)
 
     def to_dict(self) -> dict[str, Any]:
         d = {
@@ -434,8 +435,8 @@ class FieldDefinition:
         }
         if self.depends_on is not None:
             d["depends_on"] = self.depends_on
-        if self.set_constraints_list:
-            d["set_constraints"] = list(self.set_constraints_list)
+        if self.set_constraints:
+            d["set_constraints"] = list(self.set_constraints)
         return d
 
 
@@ -481,7 +482,7 @@ class StructuredSchema:
                 # W2-SETCONS: schema-dict-declared set constraints are
                 # validated at construction (compile time) — contradictory
                 # sets raise SchemaCompileError before any engine runs.
-                self.fields[field_name].set_constraints(spec["set_constraints"])
+                self.fields[field_name].compile_set_constraints(spec["set_constraints"])
         # Compiled plans, keyed by tokenizer OBJECT IDENTITY (P2: a
         # WeakKeyDictionary keys by __eq__/__hash__, so two equal-but-distinct
         # tokenizers would wrongly share one plan). dict[id] =
