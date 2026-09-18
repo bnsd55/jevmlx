@@ -12,6 +12,7 @@ import pytest
 from conftest import make_engine_result, make_field_telemetry
 
 from jevmlx.constraints import check_constraint, validate_constraints
+from jevmlx.schema import StructuredSchema
 
 # ---------------------------------------------------------------------------
 # F1: constraints.py is the single source of truth
@@ -19,10 +20,11 @@ from jevmlx.constraints import check_constraint, validate_constraints
 
 
 def test_check_constraint_shared_implementation():
-    """Both engine and evalmetrics import the same check_constraint."""
-    from jevmlx.evalmetrics import _check_constraint as eval_check
+    """W5b-11: the single source of truth is the COMPILED path — engine MAP
+    and evalmetrics both evaluate CompiledConstraints (no dict-walking
+    helper left anywhere)."""
+    from jevmlx.constraints import compile_constraints as compile_c
 
-    # The evalmetrics _check_constraint delegates to constraints.check_constraint.
     assignment = {"intent": "billing", "subtype": "refund"}
     c = {
         "type": "implies",
@@ -30,11 +32,22 @@ def test_check_constraint_shared_implementation():
         "child": "subtype",
         "mapping": {"billing": ["refund", "dispute"], "technical": ["bug"]},
     }
-    assert eval_check(c, assignment) is True
-    assert check_constraint(c, assignment) is True
+    schema = StructuredSchema(
+        {
+            "intent": {"type": "enum", "description": "d", "choices": ["billing", "technical"]},
+            "subtype": {
+                "type": "enum",
+                "description": "d",
+                "choices": ["refund", "dispute", "bug"],
+            },
+        }
+    )
+    compiled = compile_c([c], schema)
+    assert compiled.satisfied(assignment) is True
+    assert check_constraint(c, assignment) is True  # raw semantics unchanged
 
     assignment["subtype"] = "bug"  # violates implies
-    assert eval_check(c, assignment) is False
+    assert compiled.satisfied(assignment) is False
     assert check_constraint(c, assignment) is False
 
 
@@ -259,7 +272,7 @@ def test_evalrun_constraint_violation_rate_zero_with_map(monkeypatch):
             }
         )
 
-    rate = constraint_violation_rate(records)
+    rate = constraint_violation_rate(records, schema=StructuredSchema(schema_dict))
     assert rate is not None, "expected constraints to be detected"
     assert rate["overall"] == 0.0, f"expected 0 violations with MAP, got {rate}"
 
@@ -336,6 +349,6 @@ def test_evalrun_constraint_violation_without_map(monkeypatch):
             }
         )
 
-    rate = constraint_violation_rate(records)
+    rate = constraint_violation_rate(records, schema=StructuredSchema(schema_dict))
     assert rate is not None
     assert rate["overall"] > 0.0, "expected violation without MAP"

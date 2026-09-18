@@ -145,17 +145,38 @@ class TestMapIdenticalOnDependentFixture:
         assert changed == []
 
 
-def test_evalmetrics_accepts_compiled(monkeypatch):
-    """evalmetrics._check_constraint takes compiled objects (constraint_
-    violation_rate consumes the compiled form)."""
-    from jevmlx.evalmetrics import _check_constraint
+def test_evalmetrics_compiled_only():
+    """W5b-11 review fix: evalmetrics has NO dict-walking dual path —
+    constraint_violation_rate compiles per case and evaluates
+    compiled.satisfied (and _check_constraint is gone)."""
+    import jevmlx.evalmetrics as em
 
-    compiled = compile_constraints([_IMPLIES], _schema())
-    # Compiled objects expose .satisfied — the name-keyed view.
-    assert _check_constraint(
-        compiled.implications[0].__class__ and compiled,
+    assert not hasattr(em, "_check_constraint"), "dual path must be deleted"
+
+    records = [
         {
-            "intent": "billing",
-            "subtype": "refund",
+            "case_id": "c1",
+            "field": "intent",
+            "label": "billing",
+            "prediction": "billing",
+            "constraints": [_IMPLIES],
         },
-    )
+        {
+            "case_id": "c1",
+            "field": "subtype",
+            "label": "bug",
+            "prediction": "bug",
+            "constraints": [_IMPLIES],
+        },
+    ]
+    rate = em.constraint_violation_rate(records, schema=_schema())
+    assert rate["overall"] == 1.0  # billing + bug violates
+    assert rate["by_type"]["implies"] == 1.0
+
+    # No schema -> loud failure, never a silent dict fallback.
+    import pytest
+
+    from jevmlx.constraints import ConstraintError
+
+    with pytest.raises(ConstraintError, match="no dict-walking fallback"):
+        em.constraint_violation_rate(records, schema=None)

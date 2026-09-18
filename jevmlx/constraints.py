@@ -357,6 +357,11 @@ class CompiledConstraints:
     def name_idx_pairs(self) -> tuple[tuple[str, int], ...]:
         return tuple((name, idx) for idx, name in enumerate(self.field_names))
 
+    def name_index_values(self, assignment: dict[str, object]) -> dict[int, object]:
+        """A NAME-keyed assignment as the index-keyed map the members'
+        ``satisfied`` consume (one translation, no per-member probes)."""
+        return {idx: assignment.get(name) for name, idx in self.name_idx_pairs()}
+
 
 def compile_constraints(constraints: list[dict], schema) -> CompiledConstraints:
     """Compile case-level constraints ONCE against a StructuredSchema.
