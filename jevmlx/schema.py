@@ -40,10 +40,25 @@ _CODEBOOK_SINGLE = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 _CODEBOOK_DIGITS = "0123456789"
 
 # W2-E step 3 (count row): the candidate codes for the per-multi-field count
-# row. '4+' means "four or more". A multi field has at most 64 choices, but
+# row. '4' means "four or more". A multi field has at most 64 choices, but
 # the reconciliation only needs a coarse bucket: k is capped at the field's
-# option count, so 4+ behaves as k = min(4, len(options)).
-COUNT_CODES: list[str] = ["0", "1", "2", "3", "4+"]
+# option count, so 4 behaves as k = min(4, len(options)).
+COUNT_CODES: list[str] = ["0", "1", "2", "3", "4"]
+
+
+def count_key(fname: str) -> str:
+    """The '<field>#count' telemetry/trie/prior key for a multi field's count
+    row. One helper so the key format lives in exactly one place (F4, PR #24
+    review) — callers must not rebuild it by concatenation. Field names
+    cannot contain '#' (C3), so the key is injective against plain field
+    names and never collides with '<field>/<code>' option-row keys."""
+    return f"{fname}#count"
+
+
+def is_count_key(key: str) -> bool:
+    """True when `key` names a count row (a `count_key` output). Structural
+    check via the helper, not substring sniffing."""
+    return key.endswith("#count") and len(key) > len("#count")
 
 
 def _variance(values: list[int]) -> float:
@@ -143,13 +158,6 @@ def _search_codebook(
     trie = build_trie(remainders)
     single_branch = len(trie) <= 1
     return codes, single_branch
-
-
-# W2-E step 3 (count row): the candidate codes for the per-multi-field count
-# row. '4+' means "four or more". A multi field has at most 64 choices, but
-# the reconciliation only needs a coarse bucket: k is capped at the field's
-# option count, so 4+ behaves as k = min(4, len(options)).
-COUNT_CODES: list[str] = ["0", "1", "2", "3", "4+"]
 
 
 def _common_token_prefix(sequences: list[list[int]]) -> list[int]:
@@ -345,7 +353,8 @@ class StructuredSchema:
         exact code for every option) with explicit Y/N meanings (Q6-6: the
         scorer expects quoted Y/N), plus the count question (W2-E step 3:
         the engine always asks '<field>#count' how many options apply and
-        the model must see the exact answer codes 0..4+). Every displayed
+        the model must see the exact answer codes 0..4, where 4 means
+        # four or more). Every displayed
         name, label, option and gloss is json.dumps-escaped so
         quotes/newlines cannot break the schema block (Q2 'System text' /
         'Schema block format')."""
@@ -705,7 +714,7 @@ class StructuredSchema:
             # W2-E step 3: the COUNT row. One extra row per multi field asking
             # how many options apply, scored like a scalar enum: the
             # candidates are the quoted count codes ('0', '1', '2', '3',
-            # '4+' — 4+ = four or more) scored through the same trie
+            # '4' — 4 = four or more) scored through the same trie
             # machinery as any scalar field. The row key '<field>#count' is
             # injective (C3: '#' is rejected in field names) and never
             # collides with '<field>/<code>' option rows. The count is a
@@ -716,7 +725,7 @@ class StructuredSchema:
             count_remainders = []
             for count_code in COUNT_CODES:
                 candidate = tokenizer.encode(
-                    candidate_text(f"{fname}#count", f'"{count_code}"'),
+                    candidate_text(count_key(fname), f'"{count_code}"'),
                     add_special_tokens=False,
                 )
                 count_shared_ids.append(candidate)

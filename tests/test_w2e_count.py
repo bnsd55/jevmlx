@@ -1,7 +1,7 @@
 """W2-E step 3: the multi-field count row and reconciliation.
 
 One extra row per multi field ('<field>#count') asks how many options apply;
-candidates '0','1','2','3','4+' are scored like a scalar enum through the
+candidates '0','1','2','3','4' are scored like a scalar enum through the
 trie. The row ALWAYS runs (no flag). When its top-2 margin clears
 COUNT_MARGIN_MIN (0.7 nats) the selected set is reconciled to top-k by
 calibrated log-odds (P(yes) order uncalibrated — monotone-equivalent);
@@ -66,7 +66,7 @@ class _BiasedModel:
                 )
         out = mx.zeros((batch, seq_len, self.vocab_size))
         for ch, bump in self.count_bias.items():
-            # The count codes are read at their divergence tokens: '4+' is a
+            # The count codes are read at their divergence tokens: '4' is a
             # two-char code whose first token is '4' — bias that id.
             out[:, :, ord(ch[0]) % 97 + 1] = bump
         out[:, :, ord("Y") % 97 + 1] = self.yes_logit
@@ -87,12 +87,12 @@ def test_count_row_always_runs_and_lands_in_telemetry():
     model = _BiasedModel(count_bias={}, yes_logit=1.0, no_logit=-1.0)
     result = run_parallel_generation(model, _CountTokenizer(), "ctx", _multi_schema())
     telemetry = result["field_telemetry"]["flags"]
-    assert telemetry["count_choice"] in ("0", "1", "2", "3", "4+")
+    assert telemetry["count_choice"] in ("0", "1", "2", "3", "4")
     assert isinstance(telemetry["count_margin"], float)
     assert telemetry["reconciled_by"] in ("per_option", "count")
     count_entry = result["field_telemetry"]["flags#count"]
     assert count_entry["type"] == "enum"
-    assert set(count_entry["log_scores"]) == {"0", "1", "2", "3", "4+"}
+    assert set(count_entry["log_scores"]) == {"0", "1", "2", "3", "4"}
     # All logits zero -> margin 0 < gate -> per_option rule stands.
     assert telemetry["count_margin"] == pytest.approx(0.0)
     assert telemetry["reconciled_by"] == "per_option"
@@ -125,7 +125,7 @@ def test_count_gate_above_margin_reconciles_top_k():
     top-k by P(yes) (uncalibrated; monotone in log-odds), k from the count
     bucket. With distinct Y/N per option, top-k is deterministic."""
     # Strong confident '1': margin is large (0.31 - (-1.69) >> 0.7 given the
-    # zero baseline for 2..4+; keep 2..4+ far below).
+    # zero baseline for 2..4; keep 2..4 far below).
     model = _BiasedModel(count_bias={"0": -1.0, "1": 3.0}, yes_logit=1.0, no_logit=-1.0)
     result = run_parallel_generation(model, _CountTokenizer(), "ctx", _multi_schema())
     telemetry = result["field_telemetry"]["flags"]
@@ -162,17 +162,17 @@ def test_count_reconciliation_respects_k_with_calibrated_log_odds():
 
 
 def test_count_bucket_capped_at_option_count():
-    """'4+' with only 3 options: k = min(4, 3) = 3 -> all options selected
+    """'4' with only 3 options: k = min(4, 3) = 3 -> all options selected
     (in P(yes)/calibrated order, ties by schema order)."""
     model = _BiasedModel(
-        count_bias={"0": -1.0, "1": -1.0, "2": -1.0, "3": -1.0, "4+": 3.0},
+        count_bias={"0": -1.0, "1": -1.0, "2": -1.0, "3": -1.0, "4": 3.0},
         yes_logit=1.0,
         no_logit=-1.0,
     )
     result = run_parallel_generation(model, _CountTokenizer(), "ctx", _multi_schema())
     telemetry = result["field_telemetry"]["flags"]
     assert telemetry["count_margin"] > COUNT_MARGIN_MIN
-    assert telemetry["count_choice"] == "4+"
+    assert telemetry["count_choice"] == "4"
     assert telemetry["reconciled_by"] == "count"
     assert result["parsed_json"]["flags"]["value"] == ["x", "y", "z"]
 
@@ -198,4 +198,76 @@ def test_scalar_fields_unaffected_by_count_rows():
     result = run_parallel_generation(FakeModel(), FakeTokenizer(), "ctx", schema)
     assert result["field_telemetry"]["topic"]["rows"] == 1  # single branch, unchanged
     assert "count_choice" not in result["field_telemetry"]["topic"]
-    assert result["field_telemetry"]["flags"]["count_choice"] in ("0", "1", "2", "3", "4+")
+    assert result["field_telemetry"]["flags"]["count_choice"] in ("0", "1", "2", "3", "4")
+
+
+def test_count_code_4_no_token_prefix_collision():
+    """F2 (PR #24 review): a tokenizer where '"4' is a strict token-prefix of
+    '"4+' must still compile with the new codes '0'..'4' — the old '4+' code
+    raised SchemaCompileError on every multi field here. Then a negative
+    control: with '4+' injected into COUNT_CODES the same tokenizer fails."""
+
+    class _GreedyTokenizer:
+        """Tokenizer where '"4' (quote + digit 4) is ONE token: the candidate
+        row for code '4' is then a strict token-prefix of the row for '4+'
+        (['"4', ...] vs ['"4', '+', ...]) — the review's collision case."""
+
+        name_or_path = "fake-greedy"
+        pad_token_id = 0
+
+        def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+            out = []
+            i = 0
+            while i < len(text):
+                if text[i] == '"':
+                    j = i + 1
+                    if j < len(text) and text[j].isdigit():
+                        # '"<digit>' merges into one token (BPE-style).
+                        out.append(110 + int(text[j]))
+                        i = j + 1
+                        continue
+                    out.append(109)
+                    i += 1
+                    continue
+                if text[i] == "+":
+                    out.append(149)
+                    i += 1
+                    continue
+                out.append(ord(text[i]) % 97 + 1)
+                i += 1
+            return out or [1]
+
+        def apply_chat_template(self, messages, add_generation_prompt=True, tokenize=True):
+            assert tokenize
+            return self.encode("\n".join(m["content"] for m in messages))
+
+    from jevmlx.schema import SchemaCompileError
+
+    schema = _multi_schema()
+    # Compiles clean: codes are '"0"'..'"4"', no token-prefix pairs.
+    plan = schema.compile_slot_plan(_GreedyTokenizer())
+    remainders = plan["fields"]["flags"]["count"]["remainders"]
+    assert all(r for r in remainders), "every count code needs a remainder token"
+
+    # Negative control: a tokenizer that merges quote+digit into one token
+    # AND truncates the candidate at the value's end turns code '4' into a
+    # strict token-prefix of '4+' (["\"4"] vs ["\"4", "+"]) — exactly the
+    # review's collision shape. The guard must raise SchemaCompileError.
+    # Proof the prefix detector actually fires on a quote-digit-merging
+    # tokenizer; codes '0'..'4' above never trigger it.
+    import jevmlx.schema as schema_mod
+
+    class _TruncatingTokenizer(_GreedyTokenizer):
+        def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+            # 17 tokens: the full '{"flags#count": "<code>"}' row minus the
+            # closing quote/brace tail — the scored candidate ends at the
+            # code, so '4' = ['"4'] and '4+' = ['"4', '+'] collide.
+            return super().encode(text, add_special_tokens)[:17]
+
+    old = schema_mod.COUNT_CODES
+    schema_mod.COUNT_CODES = ["0", "1", "2", "3", "4", "4+"]
+    try:
+        with pytest.raises(SchemaCompileError):
+            _multi_schema().compile_slot_plan(_TruncatingTokenizer())
+    finally:
+        schema_mod.COUNT_CODES = old

@@ -24,7 +24,7 @@ from typing import Any
 
 from jinja2.exceptions import TemplateError
 
-from jevmlx.schema import StructuredSchema, _common_token_prefix
+from jevmlx.schema import StructuredSchema, _common_token_prefix, count_key, is_count_key
 from jevmlx.trie import build_trie, logsumexp, score_trie, softmax
 
 logger = logging.getLogger(__name__)
@@ -33,6 +33,14 @@ logger = logging.getLogger(__name__)
 # prompt_sha256, so result sets from different prompt versions are not
 # comparable).
 PROMPT_VERSION = "jevmlx-parallel-v7"
+
+# W2-E step 3: the count row's answer is trusted over the per-option rule
+# only when the row's top-2 log-score margin clears this many NATS. Below
+# the gate the model is not confidently naming a bucket and the count is
+# ignored (the per-option rule stands). Nats, not probabilities: this gate
+# measures the confidence of a 5-way bucket choice, a different question
+# from the per-option P(yes) >= 0.5 cut.
+COUNT_MARGIN_MIN = 0.7
 
 
 @dataclass(frozen=True)
@@ -684,7 +692,16 @@ def _get_or_compute_prior(
 
     prior: dict[str, Any] = {}
     for fname, telemetry in result["field_telemetry"].items():
-        if telemetry["type"] == "multi":
+        if is_count_key(fname):
+            # W2-E step 3: count rows surface in telemetry under
+            # '<field>#count' as scalar-type entries — cache their
+            # log_scores verbatim (the evidence path subtracts them like
+            # any scalar prior).
+            prior[fname] = {
+                "type": "scalar",
+                "log_scores": dict(telemetry["log_scores"]),
+            }
+        elif telemetry["type"] == "multi":
             # Raw Y/N logits at T=1, carried on the telemetry by the engine's
             # option-row loop (option_logit_pairs). Additive prior in log
             # space on the Y/N pair — same units as the evidence logits.
@@ -1285,6 +1302,7 @@ def run_parallel_generation(
     row_field: list[str] = []  # field each row belongs to
     row_branch: dict[int, int] = {}  # row idx -> branch-node index within its field
     row_option: dict[int, int] = {}  # row idx -> option index (multi fields only)
+    row_count: dict[int, int] = {}  # row idx -> count-code index (multi count rows only)
     tries: dict[str, list[dict]] = {}
     lead_in = plan["lead_in_ids"]
     field_plans = plan["fields"]
@@ -1299,6 +1317,16 @@ def run_parallel_generation(
                 rows.append(lead_in + list(suffix_ids))
                 row_field.append(fname)
                 row_option[len(rows) - 1] = oi
+            # W2-E step 3: the count row — always present for a multi field
+            # (no flag). One scalar-enum-style row scored through the same
+            # trie machinery; its decision feeds the reconciliation gate.
+            count_plan = p["count"]
+            field_trie = build_trie(count_plan["remainders"])
+            tries[count_key(fname)] = field_trie
+            for bi, node in enumerate(field_trie):
+                rows.append(lead_in + list(count_plan["shared_ids"]) + list(node["path"]))
+                row_field.append(fname)
+                row_count[len(rows) - 1] = bi
             continue
         field_trie = build_trie(p["remainders"])
         tries[fname] = field_trie
@@ -1337,23 +1365,20 @@ def run_parallel_generation(
     _eval_cache_state(cache)
     t_prefill = (time.perf_counter() - t_pre0) * 1000
 
-    # 3. Memory budget (W3-C, bug 17): live-measured, not a static guess.
-    #    Budget base = Metal working-set limit minus the memory the process
-    #    already holds (active or peak — weights + prefill cache), times the
-    #    configurable target fraction. Rows are BUCKETED BY SUFFIX WIDTH:
-    #    the chunking loop below groups rows with similar lengths so a chunk
-    #    is not padded to one extreme width, and bytes_per_row uses the
-    #    bucket's own width.
+    # 3. Memory guard: rows are broadcast copies of the prefill cache. The
+    #    estimate includes the [rows, width, vocab] output logits for one chunk
+    #    (float32 logits are the dominant activation). This is a chunking
+    #    heuristic, not a hard bound on peak Metal memory.
     bytes_per_row = _cache_nbytes(cache)
+    width_max = max(len(r) for r in rows) if rows else 0
     vocab_size = (
         model.args.vocab_size
         if hasattr(model, "args") and hasattr(model.args, "vocab_size")
         else model.model.embed_tokens.weight.shape[0]
     )  # simplest correct static source; falls back to the embedding row count (= vocab)
-    row_widths = [len(r) for r in rows]
-    width_max = max(row_widths) if row_widths else 0
     bytes_per_row += width_max * vocab_size * 4
-    budget = max(1, _memory_budget_bytes(_CHUNK_TARGET_FRACTION))
+    weight_bytes = _model_weight_bytes(model)
+    budget = max(1, _max_recommended_working_set() // 2 - weight_bytes)
     auto_max_rows = _rows_per_chunk(budget, bytes_per_row, max_rows)
     num_passes = max(1, math.ceil(len(rows) / auto_max_rows))
     if num_passes > 1:
@@ -1374,13 +1399,6 @@ def run_parallel_generation(
     #    [arange(chunk_len), positions] and the allowed columns, and only that
     #    [rows, allowed] gather is evaluated — never the full
     #    [rows, width, vocab] output (F3).
-    #    W3-C: rows are BUCKETED BY SUFFIX WIDTH (adjacent rows of similar
-    #    row length share a chunk, up to auto_max_rows) so a chunk is never
-    #    padded to one outlier width; a Metal allocation failure halves the
-    #    chunk's row count once and retries before giving up. Score parity:
-    #    the split only changes WHICH rows share a forward pass — W1-A proved
-    #    per-row logits are batch-shape invariant, and every row's tokens,
-    #    decision position and allowed set are unchanged.
     t_suf0 = time.perf_counter()
     t_gather_ms = 0.0
     peak_active_bytes = int(mx.get_peak_memory())
@@ -1397,6 +1415,13 @@ def run_parallel_generation(
             # in remainder order ["Y", "N"].
             position = len(lead_in) + len(p["suffix_ids_list"][row_option[ridx]]) - 1
             allowed = [t[0] for t in p["remainders"][row_option[ridx]]]
+        elif ridx in row_count:
+            # W2-E step 3 count row: a scalar-enum-style trie row over the
+            # count plan (tries live under the '<field>#count' key).
+            cp = p["count"]
+            node = tries[count_key(row_field[ridx])][row_count[ridx]]
+            position = len(lead_in) + len(cp["shared_ids"]) + len(node["path"]) - 1
+            allowed = list(node["children"])
         else:
             node = tries[row_field[ridx]][row_branch[ridx]]
             position = len(lead_in) + len(p["shared_ids"]) + len(node["path"]) - 1
@@ -1408,6 +1433,10 @@ def run_parallel_generation(
     # order of the remainders pair, ["Y", "N"); used both for the P(yes)
     # softmax and, verbatim at T=1, as the cached prior pair (bug 8).
     option_pair: dict[int, list[float]] = {}
+    # W2-E step 3: count-row branch logits - {row idx -> {count-branch idx
+    # -> [child logits in children order]}}. Kept separate from node_logits
+    # (a field could legally have both a scalar trie and a count row).
+    count_node_logits: dict[int, dict[int, list[float]]] = {}
     # W2-E step 3: count-row branch logits — {row idx -> {count-branch idx
     # -> [child logits in children order]}}. Kept separate from node_logits
     # (a field could legally have both a scalar trie and a count row).
@@ -1462,6 +1491,15 @@ def run_parallel_generation(
     for fname, fdef in schema.fields.items():
         p = field_plans[fname]
         idxs = field_rows.get(fname, [])
+        # W2-E step 3: the count rows ride in the same field_rows bucket as
+        # the option rows (both carry row_field=fname). Split them here: the
+        # option loop walks ONLY option rows, the count reconciliation walks
+        # ONLY count rows.
+        if "options" in p:
+            idxs = [ridx for ridx in idxs if ridx in row_option]
+            count_idxs_all = [ridx for ridx in field_rows.get(fname, []) if ridx in row_count]
+        else:
+            count_idxs_all = []
 
         if "options" in p:
             # multi: one-vs-rest classification — each option is an independent
@@ -1513,6 +1551,68 @@ def run_parallel_generation(
             else:
                 selected, _prob, margin = _fold_multi(probs_yes)
                 calibrated_log_odds = None
+            # W2-E step 3 reconciliation: the count row ALWAYS ran (no
+            # flag). F1 (PR #24 review): score it through score_trie exactly
+            # like a scalar enum — the count trie may have multiple branch
+            # nodes (codes diverging over several tokens), so hand-rolling a
+            # softmax over node 0's children is only accidentally right when
+            # every code diverges at one token. score_trie multiplies the
+            # per-branch factors along each code's path.
+            # Its use is gated on the row's top-2 margin in NATS (nats, not
+            # probabilities — this gate measures how confidently the model
+            # named a bucket, a different question from the per-option
+            # P(yes) cut).
+            count_idxs = count_idxs_all
+            count_trie = tries[count_key(fname)]
+            count_logits_by_branch: dict[int, list[float]] = {}
+            for ridx in count_idxs:
+                count_logits_by_branch.update(count_node_logits[ridx])
+            count_branch_index = {id(node): bi for bi, node in enumerate(count_trie)}
+
+            def count_logits_at_node(
+                node: dict, _lookup=count_logits_by_branch, _index=count_branch_index
+            ) -> list[float]:
+                return _lookup[_index[id(node)]]
+
+            count_scores_raw, _count_legal = score_trie(
+                count_trie, len(p["count"]["codes"]), count_logits_at_node
+            )
+            # Prior correction on the count row, same shape as the enum
+            # path (subtract the neutral-context log-score per code, then
+            # log-softmax renormalise) — the neutral pass caches count rows
+            # under '<field>#count' as a scalar-type prior.
+            prior_count_entry = prior.get(count_key(fname)) if prior is not None else None
+            count_scores = [
+                s - prior_count_entry["log_scores"][code]
+                if prior_count_entry is not None and code in prior_count_entry["log_scores"]
+                else s
+                for s, code in zip(count_scores_raw, p["count"]["codes"], strict=True)
+            ]
+            m = max(count_scores)
+            total = sum(math.exp(v - m) for v in count_scores)
+            count_log_probs = [v - (m + math.log(total)) for v in count_scores]
+            count_order = sorted(
+                range(len(count_scores)), key=count_scores.__getitem__, reverse=True
+            )
+            count_choice = p["count"]["codes"][count_order[0]]
+            count_margin = (
+                count_scores[count_order[0]] - count_scores[count_order[1]]
+                if len(count_scores) > 1
+                else float("inf")
+            )
+            reconciled_by = "per_option"
+            if count_margin > COUNT_MARGIN_MIN:
+                # Confident count: pick top-k by calibrated log-odds when a
+                # calibrator ran, else by P(yes) (monotone in log-odds —
+                # same ordering). k comes from the count bucket, capped at
+                # the field's option count ('4' = four or more).
+                k = min(4 if count_choice == "4" else int(count_choice), len(p["options"]))
+                if multi_ab is not None:
+                    ranked_by = sorted(calibrated_log_odds.items(), key=lambda kv: -kv[1])
+                else:
+                    ranked_by = sorted(probs_yes.items(), key=lambda kv: -kv[1])
+                selected = [option for option, _score in ranked_by[:k]]
+                reconciled_by = "count"
             ranked = sorted(probs_yes.items(), key=lambda kv: -kv[1])
             parsed_json[fname] = {
                 "value": selected,
@@ -1554,6 +1654,11 @@ def run_parallel_generation(
                     if calibrated_log_odds is not None
                     else {}
                 ),
+                # W2-E step 3: the count row's answer and confidence, plus
+                # which rule produced the selected set.
+                "count_choice": count_choice,
+                "count_margin": count_margin,
+                "reconciled_by": reconciled_by,
                 # W2-D: legal_mass for multi = product of per-option legal
                 # masses (each option's Y/N branch has its own leakage
                 # signal). Low mass at any option's Y/N position flags that
@@ -1573,6 +1678,31 @@ def run_parallel_generation(
                     k: list(v) for k, v in prior_pairs.items()
                 }
                 field_telemetry[fname]["prior_corrected"] = True
+
+            # W2-E step 3: the count row surfaces as its own scalar-type
+            # telemetry entry keyed '<field>#count' (the prior pass reads
+            # it; parsed_json stays multi-field only).
+            count_display = list(p["count"]["codes"])
+            count_probs = [math.exp(lp) for lp in count_log_probs]
+            field_telemetry[count_key(fname)] = {
+                "value": count_choice,
+                "type": "enum",
+                "probability": max(count_probs),
+                "cardinality": len(count_display),
+                "log_scores": {
+                    code: lp for code, lp in zip(count_display, count_log_probs, strict=True)
+                },
+                "top_choices": sorted(
+                    (
+                        {"choice": c, "probability": pr}
+                        for c, pr in zip(count_display, count_probs, strict=True)
+                    ),
+                    key=lambda x: x["probability"],
+                    reverse=True,
+                ),
+                "rows": len(count_idxs),
+                "margin_nats": count_margin,
+            }
             continue
 
         if scoring == "slots":
@@ -1828,12 +1958,8 @@ def run_parallel_generation(
         "lm_head_gather_ms": round(t_gather_ms, 2),
         "total_ms": round(prior_ms + total_elapsed_ms, 2),
         "total_tokens_generated": 0,
-        "sequential_forward_passes": passes,
-        # W3-C: measured, not estimated — the Metal peak active bytes the
-        # whole decision observed (weights + caches + gathers), and the
-        # actual forward-pass count after width bucketing and any
-        # halve-and-retry.
         "peak_active_bytes": peak_active_bytes,
+        "sequential_forward_passes": passes,
         "schema_match": True,  # keys/enums guaranteed by construction; bench_model comparison
         # The per-choice probabilities are the constrained path probability
         # (product of masked branch softmaxes), not a normalized full-sequence
