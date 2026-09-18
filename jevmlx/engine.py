@@ -1278,9 +1278,12 @@ def _rescore_rows_batch1(
     node_logits: dict[int, dict[int, list[float]]] = {}
     node_legal_mass_log: dict[int, Any] = {}
     option_pair: dict[int, list[float]] = {}
+    # _score_rows re-indexes the rows it receives (bucket sort runs over
+    # range(len(rows))), so its returned keys are POSITIONS in idxs, not the
+    # caller's global row indexes — map back through idxs.
     for i, ridx in enumerate(idxs):
-        values = row_logits[ridx]
-        mass_log = row_mass_log[ridx]
+        values = row_logits[i]
+        mass_log = row_mass_log[i]
         if ridx in row_option:
             # Multi option row: RAW [yes_logit, no_logit] + flat legal mass.
             option_pair[ridx] = values
@@ -1295,6 +1298,7 @@ def _rescore_rows_batch1(
         "node_legal_mass_log": node_legal_mass_log,
         "option_pair": option_pair,
     }
+
 
 def run_parallel_generation(
     model,
@@ -1620,7 +1624,15 @@ def run_parallel_generation(
             if rescored_oids:
                 rescore_ridxs = [ridx for oi, ridx in enumerate(idxs) if oi in rescored_oids]
                 rescored_raw = _rescore_rows_batch1(
-                    model, cache, rows, rescore_ridxs, row_decision, row_branch, row_option
+                    model,
+                    cache,
+                    rows,
+                    rescore_ridxs,
+                    row_decision,
+                    row_branch,
+                    row_option,
+                    vocab_size,
+                    pad_id,
                 )
                 multi_rescored = True
                 rescored_fields.append(fname)
@@ -1910,7 +1922,7 @@ def run_parallel_generation(
         band_candidates = [i for i in order if scores[order[0]] - scores[i] < INSTABILITY_BAND]
         if len(band_candidates) > 1:
             rescored_raw = _rescore_rows_batch1(
-                model, cache, rows, idxs, row_decision, row_branch, row_option
+                model, cache, rows, idxs, row_decision, row_branch, row_option, vocab_size, pad_id
             )
             rescored = True
             rescored_fields.append(fname)
