@@ -9,7 +9,8 @@ Check status semantics:
 - OK: the probe ran and the condition holds.
 - WARN: not fatal for an issue report, but degrades comparability (battery,
   low memory, stale mlx-lm, HF unreachable, tokenizer without system role).
-- FAIL: the environment cannot run jevmlx at all (wrong platform, no Metal).
+- FAIL: the environment cannot run jevmlx at all (wrong platform, no Metal,
+  conda interpreter / hung subprocess, editable install from another tree).
 """
 
 from __future__ import annotations
@@ -21,12 +22,13 @@ import platform
 import re
 import subprocess
 import sys
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
 from jevmlx.models import DEFAULT_MODEL, resolve_model
 
-__all__ = ["Check", "doctor_checks", "run_doctor"]
+__all__ = ["Check", "doctor_checks", "run_doctor", "check_venv", "check_editable_install"]
 
 
 @dataclasses.dataclass
@@ -142,6 +144,105 @@ def check_python_and_versions(env: dict) -> list[Check]:
             checks.append(_ok("mlx-lm", mlx_lm))
     checks.append(_ok("jevmlx", jevmlx or "unknown (not installed as a package)"))
     return checks
+
+
+def check_venv() -> list[Check]:
+    """The running interpreter must not be conda, and a trivial subprocess
+    must return within 2 s.
+
+    conda-provided interpreters have been observed to hang at exec under
+    endpoint-security load; jevmlx expects a uv-managed CPython, so
+    ``sys.base_prefix`` under a miniconda/anaconda path is a FAIL. The
+    subprocess probe catches the same hang from the outside: any Python
+    that cannot run ``python -c print(1)`` within 2 s cannot run jevmlx.
+    """
+    checks: list[Check] = []
+    base = sys.base_prefix
+    lowered = base.lower()
+    if "miniconda" in lowered or "anaconda" in lowered:
+        checks.append(
+            _fail(
+                "venv",
+                f"interpreter is conda ({base})",
+                "uv venv --python-preference only-managed --python 3.12",
+            )
+        )
+    else:
+        checks.append(_ok("venv", f"not conda ({base})"))
+    try:
+        subprocess.run(
+            [sys.executable, "-c", "print(1)"],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            check=True,
+        )
+    except (OSError, subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
+        detail = f"subprocess python -c print(1) failed: {type(e).__name__}"
+        fix = "uv venv --python-preference only-managed --python 3.12"
+        checks.append(_fail("venv", detail, fix))
+    else:
+        checks.append(_ok("venv", "subprocess python -c print(1) returned within 2 s"))
+    return checks
+
+
+def check_editable_install() -> Check:
+    """Editable installs must point at this checkout; package installs are OK.
+
+    Reads ``direct_url.json`` from the installed jevmlx dist-info. pip
+    writes it only for direct-URL installs (``uv pip install -e``) and
+    marks them ``dir_info.editable``; a normal wheel install (PyPI) has no
+    direct_url.json at all. So: no direct_url.json or not editable -> OK
+    ("installed as a package" — the normal end-user case). Editable -> its
+    ``url`` must be the current checkout, otherwise the venv imports a
+    different jevmlx tree than the one being tested or benchmarked.
+    """
+    checkout = Path(__file__).resolve().parent.parent
+    try:
+        dist = importlib.metadata.distribution("jevmlx")
+        raw = dist.read_text("direct_url.json")
+    except importlib.metadata.PackageNotFoundError:
+        return _fail(
+            "editable-install",
+            "jevmlx is not installed in this environment",
+            "uv pip install -e '.[dev]'",
+        )
+    if not raw:
+        return _ok("editable-install", "installed as a package (no direct_url.json)")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return _ok("editable-install", "installed as a package (direct_url.json unreadable)")
+    if not payload.get("dir_info", {}).get("editable"):
+        return _ok("editable-install", "installed as a package (not editable)")
+    url = payload.get("url", "")
+    installed = _direct_url_path(url)
+    if installed is None:
+        return _fail(
+            "editable-install",
+            f"editable install url is not a local path: {url}",
+            "uv pip install -e '.[dev]' from the checkout you are testing",
+        )
+    if installed.resolve() != checkout.resolve():
+        return _fail(
+            "editable-install",
+            f"venv installs jevmlx editable from {installed}, not this checkout ({checkout})",
+            "uv pip install -e '.[dev]' from the checkout you are testing",
+        )
+    return _ok("editable-install", f"editable install -> {installed}")
+
+
+def _direct_url_path(url: str) -> Path | None:
+    """Local filesystem path from a direct_url.json url, None otherwise.
+
+    file:// URLs are converted; plain /absolute/path strings pass through.
+    """
+    if url.startswith("file://"):
+        parsed = urllib.parse.urlparse(url)
+        return Path(urllib.parse.unquote(parsed.path))
+    if url.startswith("/"):
+        return Path(url)
+    return None
 
 
 def check_memory(env: dict) -> Check:
@@ -346,6 +447,8 @@ def doctor_checks(model: str | None = None) -> tuple[list[Check], dict]:
     env = environment()
     checks: list[Check] = [check_platform(env)]
     checks += check_python_and_versions(env)
+    checks += check_venv()
+    checks.append(check_editable_install())
     checks.append(check_memory(env))
     checks.append(check_power())
     checks.append(check_metal())

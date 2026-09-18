@@ -7,11 +7,14 @@ from __future__ import annotations
 
 import json
 import platform
+import subprocess
+import types
 
 import pytest
 
 from jevmlx import doctor
 from jevmlx.doctor import (
+    check_editable_install,
     check_hf_cache,
     check_memory,
     check_metal,
@@ -19,6 +22,7 @@ from jevmlx.doctor import (
     check_network,
     check_platform,
     check_power,
+    check_venv,
     doctor_checks,
     run_doctor,
 )
@@ -369,3 +373,139 @@ class TestAssembly:
         )
         run_doctor(as_json=False)
         assert "fix: plug in" in capsys.readouterr().out
+
+
+class TestVenv:
+    def test_non_conda_ok_and_subprocess_ok(self):
+        checks = check_venv()
+        assert [c.status for c in checks] == ["OK", "OK"]
+        assert "not conda" in checks[0].detail
+
+    def test_conda_base_prefix_fails_with_uv_fix(self, monkeypatch):
+        monkeypatch.setattr(doctor.sys, "base_prefix", "/opt/miniconda3")
+        checks = check_venv()
+        venv = checks[0]
+        assert venv.status == "FAIL"
+        assert "uv venv --python-preference only-managed --python 3.12" in venv.fix
+
+    def test_anaconda_base_prefix_fails(self, monkeypatch):
+        monkeypatch.setattr(doctor.sys, "base_prefix", "/opt/anaconda3")
+        assert check_venv()[0].status == "FAIL"
+
+    def test_subprocess_timeout_fails(self, monkeypatch):
+        def hang(*args, **kwargs):
+            raise subprocess.TimeoutExpired(cmd="python", timeout=2)
+
+        monkeypatch.setattr(doctor.sys, "executable", "/fake/python")
+        monkeypatch.setattr(doctor.subprocess, "run", hang)
+        checks = check_venv()
+        assert checks[1].status == "FAIL"
+        assert "2 s" in checks[1].detail or "TimeoutExpired" in checks[1].detail
+        assert "uv venv --python-preference only-managed --python 3.12" in checks[1].fix
+
+    def test_subprocess_oserror_fails(self, monkeypatch):
+        def boom(*args, **kwargs):
+            raise OSError("no such interpreter")
+
+        monkeypatch.setattr(doctor.sys, "executable", "/fake/python")
+        monkeypatch.setattr(doctor.subprocess, "run", boom)
+        assert check_venv()[1].status == "FAIL"
+
+    def test_subprocess_nonzero_exit_fails(self, monkeypatch):
+        def fail(*args, **kwargs):
+            raise subprocess.CalledProcessError(returncode=1, cmd="python")
+
+        monkeypatch.setattr(doctor.sys, "executable", "/fake/python")
+        monkeypatch.setattr(doctor.subprocess, "run", fail)
+        assert check_venv()[1].status == "FAIL"
+
+
+class TestEditableInstall:
+    def test_points_at_current_checkout_ok(self):
+        check = check_editable_install()
+        assert check.status == "OK"
+        assert "editable install" in check.detail
+
+    def test_wheel_install_no_direct_url_ok(self, monkeypatch):
+        # Normal PyPI install: no direct_url.json -> the normal end-user
+        # case, doctor must not fail it.
+        monkeypatch.setattr(
+            doctor.importlib.metadata,
+            "distribution",
+            lambda name: types.SimpleNamespace(read_text=lambda _n: None),
+        )
+        check = check_editable_install()
+        assert check.status == "OK"
+        assert "installed as a package" in check.detail
+
+    def test_direct_url_not_editable_ok(self, monkeypatch, tmp_path):
+        other = tmp_path / "some-wheel-tree"
+        payload = json.dumps({"url": other.as_uri(), "dir_info": {"editable": False}})
+        monkeypatch.setattr(
+            doctor.importlib.metadata,
+            "distribution",
+            lambda name: types.SimpleNamespace(read_text=lambda _n: payload),
+        )
+        check = check_editable_install()
+        assert check.status == "OK"
+        assert "not editable" in check.detail
+
+    def test_other_checkout_fails(self, monkeypatch, tmp_path):
+        fake = tmp_path / "other-checkout"
+        fake.mkdir()
+        payload = json.dumps({"url": fake.as_uri(), "dir_info": {"editable": True}})
+        monkeypatch.setattr(
+            doctor.importlib.metadata,
+            "distribution",
+            lambda name: types.SimpleNamespace(read_text=lambda _n: payload),
+        )
+        check = check_editable_install()
+        assert check.status == "FAIL"
+        assert "not this checkout" in check.detail
+
+    def test_not_installed_fails(self, monkeypatch):
+        def raise_pnf(name):
+            raise doctor.importlib.metadata.PackageNotFoundError(name)
+
+        monkeypatch.setattr(doctor.importlib.metadata, "distribution", raise_pnf)
+        check = check_editable_install()
+        assert check.status == "FAIL"
+        assert "uv pip install -e" in check.fix
+
+    def test_no_direct_url_fails(self, monkeypatch):
+        # No dist-info at all is still a FAIL (jevmlx not installed),
+        # distinct from a package install whose dist-info lacks
+        # direct_url.json (F1: OK).
+        monkeypatch.setattr(
+            doctor.importlib.metadata,
+            "distribution",
+            lambda name: types.SimpleNamespace(read_text=lambda _n: None),
+        )
+        check = check_editable_install()
+        assert check.status == "OK"
+
+    def test_file_url_with_spaces_unquoted(self, monkeypatch, tmp_path):
+        checkout = tmp_path / "my checkout"
+        checkout.mkdir()
+        monkeypatch.setattr(
+            doctor.importlib.metadata,
+            "distribution",
+            lambda name: types.SimpleNamespace(
+                read_text=lambda _n: json.dumps(
+                    {"url": checkout.as_uri(), "dir_info": {"editable": True}}
+                )
+            ),
+        )
+        # The installed url points at a different tree than this test file's
+        # checkout, and the space in the path must survive unquoting.
+        check = check_editable_install()
+        assert check.status == "FAIL"
+        assert "my checkout" in check.detail
+
+
+class TestAssemblyVenv:
+    def test_healthy_run_includes_venv_checks(self, healthy):
+        checks, _ = doctor_checks()
+        names = {c.name for c in checks}
+        assert "venv" in names
+        assert "editable-install" in names
