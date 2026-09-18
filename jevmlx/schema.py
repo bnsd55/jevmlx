@@ -39,6 +39,27 @@ def _alias_code(index: int) -> str:
 _CODEBOOK_SINGLE = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 _CODEBOOK_DIGITS = "0123456789"
 
+# W2-E step 3 (count row): the candidate codes for the per-multi-field count
+# row. '4' means "four or more". A multi field has at most 64 choices, but
+# the reconciliation only needs a coarse bucket: k is capped at the field's
+# option count, so 4 behaves as k = min(4, len(options)).
+COUNT_CODES: list[str] = ["0", "1", "2", "3", "4"]
+
+
+def count_key(fname: str) -> str:
+    """The '<field>#count' telemetry/trie/prior key for a multi field's count
+    row. One helper so the key format lives in exactly one place (F4, PR #24
+    review) — callers must not rebuild it by concatenation. Field names
+    cannot contain '#' (C3), so the key is injective against plain field
+    names and never collides with '<field>/<code>' option-row keys."""
+    return f"{fname}#count"
+
+
+def is_count_key(key: str) -> bool:
+    """True when `key` names a count row (a `count_key` output). Structural
+    check via the helper, not substring sniffing."""
+    return key.endswith("#count") and len(key) > len("#count")
+
 
 def _variance(values: list[int]) -> float:
     """Population variance of a non-empty int list (0.0 for a single value)."""
@@ -270,6 +291,14 @@ class StructuredSchema:
                     f"Field name '{field_name}' contains '/'; slash-free field "
                     "names keep multi option row keys '<field>/<code>' injective"
                 )
+            if "#" in field_name:
+                # The count row for a multi field is keyed '<field>#count'
+                # (W2-E step 3); a '#' inside a field name would collide with
+                # a field's count row (C3: row keys must be injective).
+                raise ValueError(
+                    f"Field name '{field_name}' contains '#'; hash-free field "
+                    "names keep the '<field>#count' count-row keys injective"
+                )
             self.fields[field_name] = FieldDefinition(
                 name=field_name,
                 field_type=spec.get("type", "enum"),
@@ -322,16 +351,25 @@ class StructuredSchema:
         yes/no menu mapping code = option (W2-E row codes: the engine's
         decision rows are keyed '<field>/<code>', so the model must see the
         exact code for every option) with explicit Y/N meanings (Q6-6: the
-        scorer expects quoted Y/N). Every displayed name, label, option and
-        gloss is json.dumps-escaped so quotes/newlines cannot break the
-        schema block (Q2 'System text' / 'Schema block format')."""
+        scorer expects quoted Y/N), plus the count question (W2-E step 3:
+        the engine always asks '<field>#count' how many options apply and
+        the model must see the exact answer codes 0..4, where 4 means
+        # four or more). Every displayed
+        name, label, option and gloss is json.dumps-escaped so
+        quotes/newlines cannot break the schema block (Q2 'System text' /
+        'Schema block format')."""
         parts = []
         for i, choice in enumerate(field.choices):
             safe_choice = json.dumps(choice, ensure_ascii=False)
             gloss = field.choice_descriptions.get(choice)
             gloss_part = f" — {json.dumps(gloss, ensure_ascii=False)}" if gloss else ""
             parts.append(f"{self.code_for_index(i)} = {safe_choice}{gloss_part}")
-        return "; ".join(parts)
+        return (
+            "; ".join(parts)
+            + " — how many of these apply? Answer one of "
+            + ", ".join(json.dumps(c) for c in COUNT_CODES)
+            + "."
+        )
 
     @staticmethod
     def code_for_index(index: int) -> str:
@@ -557,12 +595,23 @@ class StructuredSchema:
         # suffix_ids_list (B1/Q6-1: the lead-in must be the common prefix of
         # ALL row prefixes, never computed from scalars alone). Strip exactly
         # once, after the complete final mode plan exists.
-        row_prefixes = [p["shared_ids"] for p in fields_plan.values() if "shared_ids" in p] + [
-            ids
-            for p in fields_plan.values()
-            if "suffix_ids_list" in p
-            for ids in p["suffix_ids_list"]
-        ]
+        row_prefixes = (
+            [p["shared_ids"] for p in fields_plan.values() if "shared_ids" in p]
+            + [
+                ids
+                for p in fields_plan.values()
+                if "suffix_ids_list" in p
+                for ids in p["suffix_ids_list"]
+            ]
+            + [
+                # W2-E step 3: the count row is a real scored row — its shared
+                # prefix must join the lead-in candidates (the count row's
+                # shared_ids start with the same '{\n  "field#' text).
+                p["count"]["shared_ids"]
+                for p in fields_plan.values()
+                if "count" in p
+            ]
+        )
         lead_in = _common_token_prefix(row_prefixes) if row_prefixes else []
         if lead_in:
             for p in fields_plan.values():
@@ -572,6 +621,8 @@ class StructuredSchema:
                     # lead_in is the common prefix of all row_prefixes by
                     # construction — strip unconditionally, no fallback.
                     p["suffix_ids_list"] = [ids[len(lead_in) :] for ids in p["suffix_ids_list"]]
+                if "count" in p:
+                    p["count"]["shared_ids"] = p["count"]["shared_ids"][len(lead_in) :]
         result = {"lead_in_ids": list(lead_in), "fields": fields_plan}
         self._cache_plan(tokenizer, result, mode="slots")
         return result
@@ -660,6 +711,49 @@ class StructuredSchema:
                     )
                 suffix_ids_list.append(option_shared)
                 remainders_per_option.append(option_remainders)
+            # W2-E step 3: the COUNT row. One extra row per multi field asking
+            # how many options apply, scored like a scalar enum: the
+            # candidates are the quoted count codes ('0', '1', '2', '3',
+            # '4' — 4 = four or more) scored through the same trie
+            # machinery as any scalar field. The row key '<field>#count' is
+            # injective (C3: '#' is rejected in field names) and never
+            # collides with '<field>/<code>' option rows. The count is a
+            # RECONCILIATION signal only: the engine gates its use on the
+            # row's top-2 margin (COUNT_MARGIN_MIN) and falls back to the
+            # per-option rule otherwise.
+            count_shared_ids = []
+            for count_code in COUNT_CODES:
+                candidate = tokenizer.encode(
+                    candidate_text(count_key(fname), f'"{count_code}"'),
+                    add_special_tokens=False,
+                )
+                count_shared_ids.append(candidate)
+            count_shared = _common_token_prefix(count_shared_ids)
+            count_remainders = [full[len(count_shared) :] for full in count_shared_ids]
+            for i, remainder in enumerate(count_remainders):
+                for j, other in enumerate(count_remainders):
+                    if i == j or other[: len(remainder)] != remainder:
+                        continue
+                    if other == remainder:
+                        raise SchemaCompileError(
+                            fname,
+                            f"field '{fname}': count codes '{COUNT_CODES[i]}' and "
+                            f"'{COUNT_CODES[j]}' are token-identical; the engine "
+                            "cannot distinguish them",
+                        )
+                    raise SchemaCompileError(
+                        fname,
+                        f"field '{fname}': count code '{COUNT_CODES[i]}' is a strict "
+                        f"token-prefix of '{COUNT_CODES[j]}' in token space; the "
+                        "engine would never distinguish them",
+                    )
+            if not count_shared and len({r[0] for r in count_remainders}) > 1:
+                raise SchemaCompileError(
+                    fname,
+                    f"field '{fname}': count candidates share no token prefix "
+                    f"(tokenizer {type(tokenizer).__name__}); cannot place the "
+                    "count row",
+                )
             plan[fname] = {
                 "options": list(fdef.choices),
                 # W2-E row codes, choices order — telemetry maps code ->
@@ -667,6 +761,15 @@ class StructuredSchema:
                 "codes": codes,
                 "suffix_ids_list": suffix_ids_list,
                 "remainders": remainders_per_option,
+                # W2-E step 3: the always-on count row (built above). Its
+                # shared_ids/remainders ride the field plan; the engine
+                # scores it like a scalar enum and reconciles with the
+                # per-option rule through COUNT_MARGIN_MIN.
+                "count": {
+                    "shared_ids": count_shared,
+                    "remainders": count_remainders,
+                    "codes": list(COUNT_CODES),
+                },
             }
         return plan
 
@@ -774,9 +877,17 @@ class StructuredSchema:
         # AND multi option prefixes (B1: with only a multi field, the lead-in
         # must still be the common prefix of the option rows, never their
         # longer per-option text).
-        field_shared_prefixes = [p["shared_ids"] for p in plan.values() if "shared_ids" in p] + [
-            ids for p in plan.values() if "suffix_ids_list" in p for ids in p["suffix_ids_list"]
-        ]
+        field_shared_prefixes = (
+            [p["shared_ids"] for p in plan.values() if "shared_ids" in p]
+            + [ids for p in plan.values() if "suffix_ids_list" in p for ids in p["suffix_ids_list"]]
+            + [
+                # W2-E step 3: the count row is a real scored row — its shared
+                # prefix joins the lead-in candidates.
+                p["count"]["shared_ids"]
+                for p in plan.values()
+                if "count" in p
+            ]
+        )
         if not field_shared_prefixes:
             wrapped: dict[str, Any] = {"lead_in_ids": [], "fields": plan}
             self._cache_plan(tokenizer, wrapped, mode="labels")
@@ -792,6 +903,8 @@ class StructuredSchema:
         for p in plan.values():
             if "suffix_ids_list" in p and lead_in:
                 p["suffix_ids_list"] = [ids[len(lead_in) :] for ids in p["suffix_ids_list"]]
+            if "count" in p and lead_in:
+                p["count"]["shared_ids"] = p["count"]["shared_ids"][len(lead_in) :]
         for p in plan.values():
             if "shared_ids" in p:
                 p["shared_ids"] = p["shared_ids"][len(lead_in) :]
