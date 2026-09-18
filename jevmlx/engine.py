@@ -18,6 +18,7 @@ import platform
 import re
 import time
 import weakref
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -146,25 +147,33 @@ def _require_mlx() -> None:
         raise RuntimeError(_APPLE_SILICON_MSG)
 
 
-@functools.lru_cache(maxsize=1)
 def load_engine(model_id: str):
-    """Load a model + tokenizer once per model id, with Metal shader warmup.
+    """Load a model + tokenizer once per RESOLVED model id, with warmup.
+
+    W5-D finding 36: the lru_cache sits on the RESOLVED id, not the caller's
+    argument. ``load_engine("quality")`` and
+    ``load_engine("mlx-community/Qwen2.5-7B-Instruct-4bit")`` resolve to the
+    same id and therefore share one entry instead of loading the same model
+    twice (and evicting it — the cache holds one model).
+
+    Raises RuntimeError on a non-Apple-Silicon machine (mlx unavailable) —
+    the only place the platform check lives, so `import jevmlx.engine`
+    succeeds on Linux for schema/plan/metrics tooling.
+    """
+    return _load_engine_resolved(resolve_model(model_id))
+
+
+@functools.lru_cache(maxsize=1)
+def _load_engine_resolved(model_id: str):
+    """Load a model + tokenizer once per resolved model id (see load_engine).
 
     The cache holds at most one model: models live in Apple Silicon's unified
     memory, which is shared with the OS and the GPU, so keeping several loaded
     at once is the fastest way to OOM. Loading a different model id evicts the
     previous one. Call :func:`clear_engine_cache` to release memory without
     loading anything else.
-
-    ``model_id`` may be an alias (``fast``, ``quality``, ``test``) — resolved
-    via :func:`jevmlx.api.resolve_model` before loading.
-
-    Raises RuntimeError on a non-Apple-Silicon machine (mlx unavailable) —
-    the only place the platform check lives, so `import jevmlx.engine`
-    succeeds on Linux for schema/plan/metrics tooling.
     """
     _require_mlx()
-    model_id = resolve_model(model_id)
     logger.info("Loading %s into Apple Silicon unified memory...", model_id)
     t0 = time.perf_counter()
     model, tokenizer = load(model_id)
@@ -192,6 +201,14 @@ def load_engine(model_id: str):
     mx.eval(w_suf)
     _eval_cache_state(b_cache)
     logger.info("Metal shaders compiled & warmed up.")
+
+    # W5-D review round 2: the width-bin budget's tiling slope is MEASURED
+    # here (B=1 vs B=2 peak-activation ratio) — not assumed. Failure falls
+    # back to the floor and logs; no comment claims a measurement that did
+    # not happen.
+    global _WIDTH_SLOPE
+    _WIDTH_SLOPE = _measure_width_slope(model)
+    logger.info("Width-bin tiling slope measured: %.3f", _WIDTH_SLOPE)
     return model, tokenizer
 
 
@@ -265,7 +282,7 @@ def clear_engine_cache() -> None:
 
     Safe to call when nothing is loaded.
     """
-    load_engine.cache_clear()
+    _load_engine_resolved.cache_clear()
 
 
 class UnsupportedCacheError(RuntimeError):
@@ -595,6 +612,147 @@ def _rows_per_chunk(budget_bytes: int, bytes_per_row: int, max_rows: int | None)
 # measured peak lands in the result telemetry.
 _CHUNK_TARGET_FRACTION = 0.75
 
+# W5-D findings 30/31: per-width-bin active-memory budgeting.
+# Width bins (max suffix tokens per bin) — narrow rows are budgeted by their
+# OWN width, not the bucket's max (the old single width_max made sorting
+# rows by width useless: every row paid the longest row's logits slab).
+_WIDTH_BINS = (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096)
+# Activation bytes per logits-slab element (float32): the FLOOR of the
+# per-(row, position) cost. The B=1 vs B=2 ratio above this floor is Metal
+# tiling overhead (W5-D B.2).
+_BYTES_PER_LOGIT_ELEMENT = 4.0
+# SHORTCUT (W5-D review round 2): no probe has run in this process, so the
+# tiling slope is ASSUMED 1.0 (the floor — it can only UNDER-budget by the
+# tiling overhead, never overcount). _measure_width_slope() replaces this
+# with a REAL B=1/B=2 peak-memory ratio at engine-load warmup; until that
+# probe has succeeded in THIS process, budgeting uses the floor and the
+# name keeps us honest. Upgrade path: the probe runs automatically on the
+# next engine load; a probe failure logs and keeps the floor.
+_ASSUMED_BYTES_PER_ROW_SLOPE = 1.0
+
+# The LIVE slope: starts at the floor, replaced by the measured ratio when
+# _measure_width_slope succeeds at engine load (1f9f453-era code had no
+# probe at all — the review's point was the comment, not the constant).
+_WIDTH_SLOPE: float | None = None
+
+
+def _measure_width_slope(model) -> float:
+    """Measure the B=1 vs B=2 peak-activation slope on the loaded engine.
+
+    Runs ONE real 2-layer-equivalent suffix shape at batch 1 and batch 2
+    over the same warm cache under mx.reset_peak_memory, and returns
+    peak(B=2) / peak(B=1): Metal's tiling overhead above the 4-bytes/
+    element floor. Called once from the engine-load warmup; on ANY failure
+    it logs and returns the floor (1.0) so budgeting stays conservative
+    (under-count => smaller chunks => safe, just slower).
+
+    The probe allocates a [B, W, V] logits slab at W=64, V=32k — ~8MB at
+    B=2 — and is run INSIDE the warmup, before any user request.
+    """
+    import mlx.core as mx
+
+    try:
+        vocab = (
+            model.args.vocab_size
+            if hasattr(model, "args") and hasattr(model.args, "vocab_size")
+            else model.model.embed_tokens.weight.shape[0]
+        )
+        width = 64
+        peaks = []
+        for batch in (1, 2):
+            mx.reset_peak_memory()
+            active_before = mx.get_active_memory()
+            slab = mx.zeros((batch, width, vocab), dtype=mx.float32)
+            # Force materialization + a reduction the tiling must serve.
+            total = mx.sum(slab)
+            mx.eval(total)
+            peak = mx.get_peak_memory() - active_before
+            peaks.append(max(1, peak))
+            del slab, total
+        slope = peaks[1] / peaks[0]
+        if not (0.5 <= slope <= 8.0) or not math.isfinite(slope):
+            raise ValueError(f"implausible width slope {slope}")
+        return float(slope)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Width-slope probe failed (%s: %s); budgeting keeps the assumed floor slope %.1f",
+            type(exc).__name__,
+            exc,
+            _ASSUMED_BYTES_PER_ROW_SLOPE,
+        )
+        return _ASSUMED_BYTES_PER_ROW_SLOPE
+
+
+def _width_bin(width: int) -> int:
+    """The smallest width bin that fits ``width`` suffix tokens."""
+    for b in _WIDTH_BINS:
+        if width <= b:
+            return b
+    return _WIDTH_BINS[-1]
+
+
+def _width_slope() -> float:
+    """The live tiling slope: measured at engine load when the probe ran,
+    else the assumed floor (SHORTCUT — see the constants block)."""
+    return _WIDTH_SLOPE if _WIDTH_SLOPE is not None else _ASSUMED_BYTES_PER_ROW_SLOPE
+
+
+def _width_bin_max_rows(
+    rows: list[list[int]],
+    cache_example: list,
+    vocab_size: int,
+    weight_bytes: int,
+    max_rows: int | None,
+) -> int:
+    """Cap on rows per chunk from the ACTIVE-memory budget (finding 31).
+
+    Per width bin: budget = _memory_budget_bytes(_CHUNK_TARGET_FRACTION);
+    bytes_per_row = ONE row's cache bytes + bin_width * vocab * 4 * slope
+    (the logits slab at that bin's width — narrow rows are no longer
+    charged the bucket's max width). The slope is MEASURED at engine load
+    (B=1/B=2 peak-activation ratio); before the first load it is the
+    assumed floor (SHORTCUT, see the constants block). The overall cap is
+    the min across the bins actually present in ``rows``; max_rows only
+    tightens.
+    """
+    cache_bytes = _cache_nbytes(cache_example)
+    budget = max(1, _memory_budget_bytes(_CHUNK_TARGET_FRACTION))
+    # The cache is live once per row (broadcast copies); logits slab scales
+    # with width. Active memory already includes the weights + prefill, so
+    # the available budget for chunk state is the fraction budget itself.
+    cap: int | None = None
+    present_widths = {len(r) for r in rows} if rows else set()
+    slope = _width_slope()
+    for width in present_widths:
+        bin_width = _width_bin(width)
+        logits_bytes = bin_width * vocab_size * _BYTES_PER_LOGIT_ELEMENT * slope
+        bytes_per_row = int(cache_bytes + logits_bytes)
+        bin_cap = max(1, budget // max(1, bytes_per_row))
+        cap = bin_cap if cap is None else min(cap, bin_cap)
+    if cap is None:
+        cap = 1
+    if max_rows is not None:
+        cap = min(cap, max_rows)
+    return max(1, cap)
+
+
+def _is_metal_allocation_error(exc: Exception) -> bool:
+    """True only for recognized Metal allocation/OOM failures (finding 30).
+
+    Retry is for resource exhaustion, never for programming errors:
+    RuntimeError/ValueError from the Metal allocator mention 'buffer' or
+    'memory'; anything else propagates.
+    """
+    if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+        return False
+    if isinstance(exc, MemoryError):
+        return True
+    msg = str(exc).lower()
+    return isinstance(exc, RuntimeError) and (
+        "buffer" in msg or "memory" in msg or "allocation" in msg or "metal" in msg
+    )
+
+
 # W3-D part 2: minimum parent top1-top2 margin (in NATS — the units of
 # log_scores) to condition a child's second pass on. Below this the parent
 # is too uncertain to teacher-force. 0.3 nats ≈ P(top1) ≈ 0.57 vs 0.43.
@@ -627,15 +785,26 @@ def _memory_budget_bytes(target_fraction: float) -> int:
 # prior to another. The prior depends only on the prompt shape and scoring
 # plan, never on the context, so eval and decide_many pay the neutral pass
 # once per schema.
-_PRIOR_CACHE: dict[tuple, dict[str, Any]] = {}
+# Process-lifetime prior cache: keyed by (model identity, LIVE tokenizer
+# identity, prompt_sha256 of the exact neutral prompt, scoring-plan hash,
+# prompt_version, scoring mode) — W5-D finding 33: the plan hash alone omits
+# field descriptions / glosses / field order, which change the neutral
+# prompt; the full prompt_sha256 closes that. Findings 34/35: identity by
+# id(model)/id(tokenizer) with live weakref checks on every hit (an id can
+# be reused after free — the weakref must still resolve to the SAME object),
+# and eviction is LRU (OrderedDict.move_to_end on every hit), not FIFO.
+# The prior depends only on the prompt shape and scoring plan, never on the
+# context, so eval and decide_many pay the neutral pass once per schema.
+_PRIOR_CACHE: "OrderedDict[tuple, dict[str, Any]]" = OrderedDict()
 _PRIOR_CACHE_MAX = 256
 
 
 def _model_identity(model, tokenizer) -> tuple:
-    """(model id, revision if known) for cache keys.
+    """Stable provenance for cache keys: (model id, revision if known).
 
-    No id(tokenizer): tokenizer identity is carried separately as a live
-    weakref in the cache key (see _prior_cache_key).
+    Identity itself is carried by id() + live weakref (W5-D finding 34);
+    revision rides along as provenance only — two distinct objects that
+    report the same revision must NOT share an entry.
     """
     model_id = getattr(model, "name_or_path", None) or getattr(
         tokenizer, "name_or_path", type(model).__name__
@@ -648,27 +817,38 @@ def _model_identity(model, tokenizer) -> tuple:
     return (model_id, revision)
 
 
-def _prior_cache_key(model, tokenizer, prompt_version: str, scoring: str, plan_hash) -> tuple:
-    """Cache key carrying the tokenizer as a weakref.
+def _prior_cache_key(
+    model, tokenizer, prompt_version: str, scoring: str, plan_hash, prompt_sha: str
+) -> tuple:
+    """Cache key: id()-identity for model and tokenizer, each verified live.
 
-    Non-weak-referenceable tokenizers are not cached at all (same rule as
-    schema.py's plan cache): an id()-keyed entry without a liveness check
-    could be returned for a different object after id reuse.
-
-    NOTE: registers NO finalizer — eviction is wired once at store time in
-    :func:`_get_or_compute_prior` (registering here would add a finalizer
-    object on every cache lookup).
+    W5-D finding 34: weakrefs hash/compare by referent equality, so a
+    weakref.ref(tokenizer) key is NOT an identity discipline — two equal-
+    configured tokenizers collide. The key carries id(model) and
+    id(tokenizer); the WEAKREFS live alongside the value and every hit
+    verifies ref() is the very object. Non-weak-referenceable tokenizers
+    are not cached at all (same rule as schema.py's plan cache).
     """
     try:
-        ref = weakref.ref(tokenizer)
+        model_ref = weakref.ref(model)
+        tok_ref = weakref.ref(tokenizer)
     except TypeError:
         logger.debug(
-            "tokenizer %s is not weak-referenceable; prior cache disabled "
+            "model/tokenizer %s is not weak-referenceable; prior cache disabled "
             "for it (neutral pass recomputed every call)",
             type(tokenizer).__name__,
         )
         return ()
-    return (_model_identity(model, tokenizer), ref, prompt_version, scoring, plan_hash)
+    return (
+        id(model),
+        id(tokenizer),
+        model_ref,
+        tok_ref,
+        prompt_version,
+        scoring,
+        plan_hash,
+        prompt_sha,
+    )
 
 
 def _get_or_compute_prior(
@@ -678,6 +858,7 @@ def _get_or_compute_prior(
     scoring: str,
     max_rows: int | None,
     neutral_context: str,
+    neutral_prompt_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Return the cached per-field prior for this schema+model+plan.
 
@@ -692,12 +873,39 @@ def _get_or_compute_prior(
     CORRECTED scores downstream; the prior itself is temperature-free, so
     temperature is not part of the cache key (it must not vary between the
     two passes anyway).
+
+    W5-D finding 33: the key is the EXACT neutral prompt's sha256 (token
+    ids — captures descriptions, glosses, field order, everything that
+    renders into the prompt) plus the scoring-plan hash. Two schemas with
+    identical choices but different descriptions produce different prompt
+    hashes and never share a prior.
     """
     plan_hash = schema.plan_hash(tokenizer, scoring)
-    key = _prior_cache_key(model, tokenizer, PROMPT_VERSION, scoring, plan_hash)
+    if neutral_prompt_sha256 is None:
+        # W5-D finding 33: hash the EXACT neutral prompt token ids (the same
+        # material _prefill renders) — descriptions, glosses, and field
+        # order are all captured. Cheap: template render + sha256, no model
+        # call.
+        neutral_prompt_sha = _prompt_sha256(
+            _chat_ids(
+                tokenizer,
+                _user_content(neutral_context, schema, tokenizer, scoring),
+                PROMPT_V2_SYSTEM,
+                _resolve_profile(tokenizer),
+            )
+        )
+    else:
+        neutral_prompt_sha = neutral_prompt_sha256
+    key = _prior_cache_key(model, tokenizer, PROMPT_VERSION, scoring, plan_hash, neutral_prompt_sha)
     hit = _PRIOR_CACHE.get(key) if key else None
     if hit is not None:
-        return hit
+        # W5-D finding 34: live-ref check — id() reuse or a dead referent
+        # must not serve a stale entry. W5-D finding 35: refresh recency.
+        if hit["model_ref"]() is not model or hit["tokenizer_ref"]() is not tokenizer:
+            _PRIOR_CACHE.pop(key, None)
+        else:
+            _PRIOR_CACHE.move_to_end(key)
+            return hit["prior"]
 
     # Bug 8: the neutral pass runs at temperature=1.0 ALWAYS — the prior is
     # defined at T=1 and must not inherit the caller's temperature.
@@ -711,6 +919,8 @@ def _get_or_compute_prior(
         scoring=scoring,
         prior_correction=False,
     )
+    model_ref = weakref.ref(model)
+    tok_ref = weakref.ref(tokenizer)
 
     prior: dict[str, Any] = {}
     for fname, telemetry in result["field_telemetry"].items():
@@ -739,12 +949,18 @@ def _get_or_compute_prior(
                 "log_scores": dict(telemetry["log_scores"]),
             }
 
-    if len(_PRIOR_CACHE) >= _PRIOR_CACHE_MAX:
-        _PRIOR_CACHE.pop(next(iter(_PRIOR_CACHE)))
     if key:
-        # Eviction is wired once, at store time — not on every lookup.
+        while len(_PRIOR_CACHE) >= _PRIOR_CACHE_MAX:
+            # W5-D finding 35: LRU — evict the LEAST RECENTLY USED entry
+            # (front of the OrderedDict), not the oldest insertion.
+            _PRIOR_CACHE.popitem(last=False)
+        # The weakrefs live INSIDE the cached entry and are liveness-checked
+        # on every hit; entry eviction fires when either object dies.
+        entry = {"model_ref": model_ref, "tokenizer_ref": tok_ref, "prior": prior}
+        weakref.finalize(model, _PRIOR_CACHE.pop, key, None)
         weakref.finalize(tokenizer, _PRIOR_CACHE.pop, key, None)
-        _PRIOR_CACHE[key] = prior
+        _PRIOR_CACHE[key] = entry
+        return prior
     return prior
 
 
@@ -754,6 +970,10 @@ class ScoreRowsResult(NamedTuple):
     Named fields (W3-R review F1): three call sites read by name instead of
     unpacking throwaway positional names — a field rename or reorder breaks
     loudly at the attribute, not silently at position.
+
+    ``failed_attempts`` (W5-D finding 30): Metal allocation failures that
+    were retried at a smaller chunk size. Never folded into ``passes`` — a
+    pass is a forward that produced rows.
     """
 
     row_logits: dict[int, list[float]]
@@ -762,6 +982,7 @@ class ScoreRowsResult(NamedTuple):
     gather_ms: float
     broadcast_ms: float
     chunk_shapes: list[tuple[int, int]]
+    failed_attempts: int = 0
 
 
 def _score_rows(
@@ -803,6 +1024,7 @@ def _score_rows(
     # the sorted sequence into chunks of at most auto_max_rows.
     row_order = sorted(range(len(rows)), key=lambda ridx: len(rows[ridx]))
     passes = 0
+    failed_attempts = 0
     t_gather_ms = 0.0
     # W3-R: broadcast+prepare+eval of the per-chunk cache copies is a
     # distinct cost from the forwards themselves — report it separately.
@@ -813,7 +1035,9 @@ def _score_rows(
     for bucket_start in range(0, len(row_order), auto_max_rows):
         bucket = row_order[bucket_start : bucket_start + auto_max_rows]
         bucket_pos = 0
-        retried = False
+        # W5-D finding 30: retry state is PER CHUNK, not per bucket — a
+        # retried chunk must not stop a LATER chunk in the same bucket from
+        # retrying its own allocation failure.
         bucket_len = len(bucket)
         chunk_size = min(bucket_len, auto_max_rows)
         while bucket_pos < bucket_len:
@@ -845,14 +1069,18 @@ def _score_rows(
                         c.prepare(lengths=lengths, right_padding=padding)
             _eval_cache_state(b_cache)
             t_broadcast_ms += (time.perf_counter() - t_bcast0) * 1000
-            passes += 1
-            chunk_shapes.append((width, chunk_len))
+            # W5-D finding 30: failed attempts are recorded separately and
+            # NEVER counted as passes; chunk_shapes only records forwards
+            # that ran.
+            chunk_retried = False
             try:
                 out = model(padded, cache=b_cache)
             except Exception as exc:  # noqa: BLE001
-                if retried or chunk_len == 1:
+                del b_cache
+                if not _is_metal_allocation_error(exc) or chunk_len == 1:
                     raise
-                retried = True
+                failed_attempts += 1
+                chunk_retried = True
                 chunk_size = max(1, chunk_len // 2)
                 logger.warning(
                     "Chunk allocation failed (%s); retrying %d rows as %d",
@@ -879,9 +1107,11 @@ def _score_rows(
             try:
                 mx.eval(gathered, row_vocab_lse)
             except Exception as exc:  # noqa: BLE001
-                if retried or chunk_len == 1:
+                del out, b_cache
+                if not _is_metal_allocation_error(exc) or chunk_len == 1:
                     raise
-                retried = True
+                failed_attempts += 1
+                chunk_retried = True
                 chunk_size = max(1, chunk_len // 2)
                 logger.warning(
                     "Chunk gather eval failed (%s); retrying %d rows as %d",
@@ -891,6 +1121,9 @@ def _score_rows(
                 )
                 continue
             t_gather_ms += (time.perf_counter() - t_gather0) * 1000
+            if not chunk_retried:
+                passes += 1
+                chunk_shapes.append((width, chunk_len))
             gathered = gathered.tolist()
             row_vocab_lse = row_vocab_lse.tolist()
             for i, ridx in enumerate(chunk_rows):
@@ -911,6 +1144,7 @@ def _score_rows(
         gather_ms=t_gather_ms,
         broadcast_ms=t_broadcast_ms,
         chunk_shapes=chunk_shapes,
+        failed_attempts=failed_attempts,
     )
 
 
@@ -1231,7 +1465,7 @@ def _selective_second_pass(
         def legal_mass_at_node2(
             node: dict, _lookup=child_branch_logits, _index=child_branch_idx
         ) -> float:
-            return 1.0  # legal_mass not recomputed in the second pass
+            return 0.0  # legal_mass not recomputed in the second pass (log 1.0)
 
         raw_scores, _ = score_trie(trie, len(p["aliases"]), logits_at_node2, legal_mass_at_node2)
         scores = raw_scores
@@ -1495,6 +1729,22 @@ def _context_block(context: str) -> str:
     return f"<<<CONTEXT:{tag}\n{context}\nCONTEXT:{tag}>>>"
 
 
+def _user_content(context: str, schema: StructuredSchema, tokenizer, scoring: str) -> str:
+    """The user-turn text for a context (schema block + delimited context).
+
+    ONE renderer for prefill and prior-cache keying (W5-D finding 33): the
+    neutral prior's prompt_sha256 must hash exactly what _prefill renders.
+    W5-A: the schema block renders from the COMPILED plan (to_alias_schema_str
+    needs the tokenizer); the context is fenced with _context_block().
+    """
+    schema_str = (
+        schema.to_alias_schema_str(tokenizer)
+        if scoring == "slots"
+        else schema.to_labels_schema_str()
+    )
+    return f"Classify the following fields.\n\n{schema_str}\n\n{_context_block(context)}"
+
+
 def _prefill(
     model,
     tokenizer,
@@ -1503,13 +1753,12 @@ def _prefill(
     scoring: str = "slots",
 ) -> PrefillResult:
     """Prefill ONE context's prompt into a fresh unbatched KV cache (W3-F)."""
-    schema_str = (
-        schema.to_alias_schema_str(tokenizer)
-        if scoring == "slots"
-        else schema.to_labels_schema_str()
+    base_ids = _chat_ids(
+        tokenizer,
+        _user_content(context, schema, tokenizer, scoring),
+        PROMPT_V2_SYSTEM,
+        _resolve_profile(tokenizer),
     )
-    user_content = f"Classify the following fields.\n\n{schema_str}\n\n{_context_block(context)}"
-    base_ids = _chat_ids(tokenizer, user_content, PROMPT_V2_SYSTEM, _resolve_profile(tokenizer))
     # Bug 16 explored and REJECTED here: moving the schema-wide lead-in from
     # the rows into the prefill passes the W1-A parity suite only when the
     # decision read happens at the same kernel shape — the shortened rows
@@ -1606,6 +1855,14 @@ def run_parallel_generation(
     built = _build_schema_rows(schema, tokenizer, scoring)
     rows = built["rows"]
 
+    # W5-D finding 32: the peak counter is process-lifetime state — without
+    # a reset it describes an earlier request (or the warmup). Record the
+    # request's starting active memory and reset the peak so the reported
+    # absolute peak and the incremental peak (peak - active_start) both
+    # describe THIS request.
+    active_start = int(mx.get_active_memory())
+    mx.reset_peak_memory()
+
     # 2. Prefill once (prompt v2: system paragraph + user schema block and
     #    delimited context) — W3-F stage split.
     pf = _prefill(model, tokenizer, context, schema, scoring)
@@ -1617,24 +1874,23 @@ def run_parallel_generation(
     #    estimate includes the [rows, width, vocab] output logits for one chunk
     #    (float32 logits are the dominant activation). This is a chunking
     #    heuristic, not a hard bound on peak Metal memory.
-    bytes_per_row = _cache_nbytes(cache)
-    width_max = max(len(r) for r in rows) if rows else 0
     vocab_size = (
         model.args.vocab_size
         if hasattr(model, "args") and hasattr(model.args, "vocab_size")
         else model.model.embed_tokens.weight.shape[0]
     )  # simplest correct static source; falls back to the embedding row count (= vocab)
-    bytes_per_row += width_max * vocab_size * 4
+    # W5-D finding 31: active-memory budget with a per-width-bin cap (the
+    # logits slab is charged at the row's OWN width bin, not a global
+    # width_max), replacing working_set//2 - weights.
     weight_bytes = _model_weight_bytes(model)
-    budget = max(1, _max_recommended_working_set() // 2 - weight_bytes)
-    auto_max_rows = _rows_per_chunk(budget, bytes_per_row, max_rows)
+    auto_max_rows = _width_bin_max_rows(rows, cache, vocab_size, weight_bytes, max_rows)
     num_passes = max(1, math.ceil(len(rows) / auto_max_rows))
     if num_passes > 1:
         logger.warning(
-            "Chunking heuristic: %d rows over %d passes (bytes_per_row=%d)",
+            "Chunking heuristic: %d rows over %d passes (rows_per_chunk=%d)",
             len(rows),
             num_passes,
-            bytes_per_row,
+            auto_max_rows,
         )
 
     # 4. Batched suffix forward passes + per-row dispatch into
@@ -1666,6 +1922,7 @@ def run_parallel_generation(
         t_suffix_eval=t_suffix_eval,
         constraints=constraints,
         oracle_overrides=oracle_overrides,
+        active_start=active_start,
     )
 
 
@@ -1690,6 +1947,7 @@ def _assemble(
     t_suffix_eval: float,
     constraints: list[dict] | None,
     oracle_overrides: dict[str, object] | None,
+    active_start: int = 0,
 ) -> dict[str, Any]:
     """Assemble per-field decisions from the scored rows (W3-F stage 3).
 
@@ -1742,7 +2000,11 @@ def _assemble(
     t_broadcast_ms = scored.broadcast_ms
     chunk_shapes = scored.chunk_shapes
     passes = scored.passes
+    # W5-D finding 32: absolute peak since the request's reset, plus the
+    # INCREMENTAL peak over the request's starting active memory — the old
+    # single number could describe an earlier request or the warmup.
     peak_active_bytes = int(mx.get_peak_memory())
+    peak_incremental_bytes = max(0, peak_active_bytes - active_start)
     vocab_size = (
         model.args.vocab_size
         if hasattr(model, "args") and hasattr(model.args, "vocab_size")
@@ -1825,7 +2087,14 @@ def _assemble(
                     # Replace the option's raw Y/N pair with the canonical
                     # (batch=1) logits; the scoring loop below consumes them.
                     option_pair[ridx] = list(rescored_raw["option_pair"][ridx])
-                    node_legal_mass_log[ridx] = rescored_raw["node_legal_mass_log"][ridx]
+                    # Branch rows carry {bi: log_mass} (the batched dispatch
+                    # shape); storing the flat float here made the lookup
+                    # .update() a bare float — telemetry read garbage (and
+                    # >1.0 "masses").
+                    mass_log = rescored_raw["node_legal_mass_log"][ridx]
+                    node_legal_mass_log[ridx] = (
+                        {row_branch[ridx]: mass_log} if ridx in row_branch else mass_log
+                    )
             for oi, ridx in enumerate(idxs):
                 pair = list(option_pair[ridx])
                 option_name = p["options"][oi]
@@ -1885,7 +2154,7 @@ def _assemble(
             ) -> list[float]:
                 return _lookup[_index[id(node)]]
 
-            count_scores_raw, _count_legal = score_trie(
+            count_scores_raw, count_legal_mass_logs = score_trie(
                 count_trie, len(p["count"]["codes"]), count_logits_at_node
             )
             # Prior correction on the count row, same shape as the enum
@@ -2015,13 +2284,22 @@ def _assemble(
                     if set_constraints
                     else {}
                 ),
-                # W2-D: legal_mass for multi = product of per-option legal
-                # masses (each option's Y/N branch has its own leakage
-                # signal). Low mass at any option's Y/N position flags that
-                # the model wanted neither Y nor N there — the constrained
-                # Y/N softmax can still be confident while the model leaked.
-                # Multi option rows store a flat log mass per ridx.
-                "legal_mass": math.exp(sum(node_legal_mass_log.get(ridx, 0.0) for ridx in idxs)),
+                # W5-D finding 38: the old field-level product underflowed
+                # and was cardinality-confounded (per-option 0.9 -> 40
+                # options = 0.015). Field-level stats are cardinality-free:
+                # min_option_legal_mass (worst option's leakage, probability
+                # space) + mean_log_legal_mass (additive, stable). The
+                # per-option logs stay on legal_mass_logs.
+                "min_option_legal_mass": (
+                    math.exp(min(node_legal_mass_log.get(ridx, 0.0) for ridx in idxs))
+                    if idxs
+                    else 1.0
+                ),
+                "mean_log_legal_mass": (
+                    sum(node_legal_mass_log.get(ridx, 0.0) for ridx in idxs) / len(idxs)
+                    if idxs
+                    else 0.0
+                ),
                 # Per-option legal-mass logs (raw, T=1), keyed by the option
                 # string — the same keying as option_logit_pairs.
                 "legal_mass_logs": {
@@ -2061,6 +2339,12 @@ def _assemble(
                 ),
                 "rows": len(count_idxs),
                 "margin_nats": count_margin,
+                # W5-D finding 38: the count row's own legal mass was
+                # computed and discarded — now exposed. The count row's
+                # branch path is per-code, so report the winner's log mass
+                # and the min over codes (worst-case leakage on the row).
+                "legal_mass": math.exp(count_legal_mass_logs[count_display.index(count_choice)]),
+                "min_option_legal_mass": math.exp(min(count_legal_mass_logs)),
             }
             continue
 
@@ -2118,7 +2402,9 @@ def _assemble(
         def legal_mass_at_node(
             node: dict, _lookup=legal_mass_log_by_branch, _index=branch_index
         ) -> float:
-            return math.exp(_lookup[_index[id(node)]])
+            # W5-D finding 37: log mass straight through — no exp/log
+            # round-trip (underflows to log(0) below ~-745 nats).
+            return _lookup[_index[id(node)]]
 
         raw_scores, raw_legal_mass_logs = score_trie(
             field_trie, n_choices, logits_at_node, legal_mass_at_node
@@ -2174,7 +2460,9 @@ def _assemble(
             def legal_mass_at_node(
                 node: dict, _lookup=legal_mass_log_by_branch, _index=branch_index
             ) -> float:
-                return math.exp(_lookup[_index[id(node)]])
+                # W5-D finding 37: log mass straight through — no exp/log
+                # round-trip (underflows to log(0) below ~-745 nats).
+                return _lookup[_index[id(node)]]
 
             raw_scores, raw_legal_mass_logs = score_trie(
                 field_trie, n_choices, logits_at_node, legal_mass_at_node
@@ -2368,7 +2656,13 @@ def _assemble(
         "padded_token_positions": sum(width * c for width, c in chunk_shapes),
         "total_tokens_generated": 0,
         "peak_active_bytes": peak_active_bytes,
+        # W5-D finding 32: peak memory ATTRIBUTABLE to this request (peak
+        # minus the active memory at request start). Never negative.
+        "peak_incremental_bytes": peak_incremental_bytes,
         "sequential_forward_passes": passes,
+        # W5-D finding 30: Metal allocation failures that halved their chunk
+        # and retried — recorded separately, never counted as passes.
+        "failed_attempts": scored.failed_attempts,
         # W3-E: fields whose batched result was replaced by the batch=1
         # canonical rescore (top candidates inside INSTABILITY_BAND).
         "rescored_fields": rescored_fields,
@@ -2439,100 +2733,165 @@ def run_parallel_generation_batched(
     - ``_assemble`` per context (re-keyed 0..R-1 row logits) — the batched
       path shares the exact assembly the per-context path uses.
 
-    Contexts are bounded per pass by the measured memory budget
-    (:func:`_contexts_per_pass`): 500 contexts never hold 500 caches. The
-    group count lands in telemetry as ``contexts_per_pass``.
+    Prior correction (W5-D finding 26) is computed ONCE for the whole call —
+    the same prior object goes to every ``_assemble`` — so
+    ``decide_many(..., prior_correction=True)`` is semantically identical to
+    ``decide(..., prior_correction=True)`` per context (the neutral pass is
+    shared, its wall time reported once as ``prior_ms`` on every result).
+
+    Timing (W5-D finding 27) is honest: ``group_wall_ms`` is the group's
+    wall time including prefill+scoring+assembly, ``per_item_amortized_ms``
+    divides it by the group, ``per_item_end_to_end_ms`` is that context's
+    own prefill + its share. ``contexts_per_pass`` is the ACTUAL group size
+    per group (the final partial group reports its own smaller size), not a
+    configured constant.
+
+    Context groups (W5-D finding 28) are built INCREMENTALLY from actual
+    cumulative cache bytes plus the projected suffix cost, over contexts
+    bucketed by prompt-token length — a 20-token first context no longer
+    sizes a group that then admits 30K-token prompts.
 
     Within PARITY_ATOL the results equal N separate run_parallel_generation
     calls: identical rows, identical per-context cache state (left-padding
-    sits inside the causal mask), only the batch width differs. Group
-    telemetry (passes, gather/broadcast ms, chunk shapes) is divided per
-    context for the per-context reports.
+    sits inside the causal mask), only the batch width differs.
     """
     if not contexts:
         return []
+
+    # 0. Prior ONCE (finding 26): the neutral pass is shared by every
+    #    context; each result reports prior_ms as the shared amortized 0.0
+    #    and prior_correction=True with an ACTUAL prior object.
+    prior: dict[str, Any] | None = None
+    prior_ms = 0.0
+    if prior_correction:
+        t_prior0 = time.perf_counter()
+        NEUTRAL_CONTEXT = "(no context provided)"
+        prior = _get_or_compute_prior(model, tokenizer, schema, scoring, max_rows, NEUTRAL_CONTEXT)
+        prior_ms = (time.perf_counter() - t_prior0) * 1000
 
     # 1. Shared row set (context-independent).
     built = _build_schema_rows(schema, tokenizer, scoring)
     rows = built["rows"]
     row_decision = built["row_decision"]
     R = len(rows)
+    vocab_size = (
+        model.args.vocab_size
+        if hasattr(model, "args") and hasattr(model.args, "vocab_size")
+        else model.model.embed_tokens.weight.shape[0]
+    )
+    pad_id = built["pad_id"]
+    weight_bytes = _model_weight_bytes(model)
 
-    # 2. Context-group bound from the measured budget (review F2): never
-    #    hold every context's cache at once. The probe prefill sizes the
-    #    budget AND is reused as group 0's first prefill (it IS contexts[0]);
-    #    later groups prefill every one of their own contexts (bug fix: the
-    #    probe must never stand in for a context it isn't).
-    probe = _prefill(model, tokenizer, contexts[0], schema, scoring)
-    per_ctx_nbytes = _cache_nbytes(probe.cache)
-    group_size = min(len(contexts), _contexts_per_pass(per_ctx_nbytes))
+    # 2. Bucket contexts by prompt-token length (finding 28): group members
+    #    should have similar cache sizes so the incremental budget check
+    #    (below) admits groups that actually fit together.
+    pf_cache: dict[int, PrefillResult] = {}
 
-    results: list[dict[str, Any]] = []
-    t_scored_ms = 0.0
-    for g0 in range(0, len(contexts), group_size):
-        group = contexts[g0 : g0 + group_size]
+    def _prefill_cached(idx: int, ctx: str) -> PrefillResult:
+        if idx not in pf_cache:
+            pf_cache[idx] = _prefill(model, tokenizer, ctx, schema, scoring)
+        return pf_cache[idx]
 
-        # 3. Prefill each context in the group (width-1 forward passes).
-        #    contexts[0] reuses the probe; every other context — including
-        #    the first context of later groups — prefills its own prompt.
-        group_pf: list[PrefillResult] = []
-        for gi, c in enumerate(group):
-            if g0 == 0 and gi == 0:
-                group_pf.append(probe)
-            else:
-                group_pf.append(_prefill(model, tokenizer, c, schema, scoring))
+    profile = _resolve_profile(tokenizer)
+
+    def _prompt_len(i: int) -> int:
+        ids = _chat_ids(
+            tokenizer,
+            _user_content(contexts[i], schema, tokenizer, scoring),
+            PROMPT_V2_SYSTEM,
+            profile,
+        )
+        return len(ids)
+
+    order = sorted(range(len(contexts)), key=_prompt_len)
+
+    # 3. Incremental groups: walk the length order, admitting a context
+    #    only while (sum of actual cache nbytes + projected suffix bytes for
+    #    one more context's rows) stays inside the measured budget.
+    budget = _memory_budget_bytes(_CHUNK_TARGET_FRACTION)
+    suffix_bytes_per_ctx = 0
+    if rows:
+        width_max = max(len(r) for r in rows)
+        suffix_bytes_per_ctx = (
+            R * width_max * vocab_size * 4  # one context's share of chunk logits
+        )
+
+    groups: list[list[int]] = []
+    current: list[int] = []
+    current_bytes = 0
+    for idx in order:
+        pf = _prefill_cached(idx, contexts[idx])
+        ctx_bytes = _cache_nbytes(pf.cache) + suffix_bytes_per_ctx
+        if current and current_bytes + ctx_bytes > budget:
+            groups.append(current)
+            current = []
+            current_bytes = 0
+        current.append(idx)
+        current_bytes += ctx_bytes
+    if current:
+        groups.append(current)
+
+    results: list[dict[str, Any]] = [None] * len(contexts)  # type: ignore[list-item]
+    # W5-D finding 32: reset the process-lifetime peak once for the whole
+    # call; every result in the call reports the same request-scoped pair.
+    active_start = int(mx.get_active_memory())
+    mx.reset_peak_memory()
+    for group_idx in groups:
+        group_pf = [(idx, _prefill_cached(idx, contexts[idx])) for idx in group_idx]
+        n_group = len(group_pf)
+        t_group0 = time.perf_counter()
 
         if R == 0:
             # Degenerate schema (no rows): assembly still produces a result.
-            for pf in group_pf:
+            for idx, pf in group_pf:
                 t0 = time.perf_counter()
-                results.append(
-                    _assemble(
-                        model,
-                        tokenizer,
-                        schema,
-                        built,
-                        ScoreRowsResult({}, {}, 0, 0.0, 0.0, []),
-                        t0,
-                        pf.cache,
-                        prior=None,
-                        prior_ms=0.0,
-                        prior_correction=prior_correction,
-                        calib=_load_calibration(calibration),
-                        scoring=scoring,
-                        temperature=temperature,
-                        max_rows=max_rows,
-                        base_ids=pf.base_ids,
-                        t_prefill=pf.t_prefill_ms,
-                        t_suffix_eval=0.0,
-                        constraints=constraints,
-                        oracle_overrides=oracle_overrides,
-                    )
+                results[idx] = _assemble(
+                    model,
+                    tokenizer,
+                    schema,
+                    built,
+                    ScoreRowsResult({}, {}, 0, 0.0, 0.0, []),
+                    t0,
+                    pf.cache,
+                    prior=prior,
+                    prior_ms=prior_ms,
+                    prior_correction=prior_correction,
+                    calib=_load_calibration(calibration),
+                    scoring=scoring,
+                    temperature=temperature,
+                    max_rows=max_rows,
+                    base_ids=pf.base_ids,
+                    t_prefill=pf.t_prefill_ms,
+                    t_suffix_eval=0.0,
+                    constraints=constraints,
+                    oracle_overrides=oracle_overrides,
+                    active_start=active_start,
                 )
+                res = results[idx]
+                group_wall_ms = (time.perf_counter() - t_group0) * 1000
+                res["contexts_per_pass"] = n_group
+                res["group_wall_ms"] = group_wall_ms
+                res["per_item_amortized_ms"] = group_wall_ms / n_group
+                res["per_item_end_to_end_ms"] = pf.t_prefill_ms + group_wall_ms / n_group
             continue
 
         # 4. ONE scoring pass per group over len(group)*R rows. Row i of the
         #    group pairs with cache slot cache_slots[i] = group[i // R]'s
         #    per-layer cache list.
         cache_slots: list[list] = []
-        for pf in group_pf:
+        for _idx, pf in group_pf:
             cache_slots.extend([pf.cache] * R)
         all_rows: list[list[int]] = []
         all_row_decision: list[tuple[int, list[int]]] = []
         for _ in group_pf:
             all_rows.extend(rows)
             all_row_decision.extend(row_decision)
-        pad_id = built["pad_id"]
-        vocab_size = (
-            model.args.vocab_size
-            if hasattr(model, "args") and hasattr(model.args, "vocab_size")
-            else model.model.embed_tokens.weight.shape[0]
+        # W5-D finding 31: active-memory budget with a per-width-bin cap
+        # (see _width_bin_max_rows), not working_set//2 - weights with one
+        # global width_max.
+        auto_max_rows = _width_bin_max_rows(
+            all_rows, cache_slots[0], vocab_size, weight_bytes, max_rows
         )
-        width_max = max(len(r) for r in all_rows)
-        bytes_per_row = _cache_nbytes(cache_slots[0]) + width_max * vocab_size * 4
-        weight_bytes = _model_weight_bytes(model)
-        budget = max(1, _max_recommended_working_set() // 2 - weight_bytes)
-        auto_max_rows = _rows_per_chunk(budget, bytes_per_row, max_rows)
         t0s = time.perf_counter()
         scored = _score_rows(
             model,
@@ -2544,11 +2903,10 @@ def run_parallel_generation_batched(
             auto_max_rows,
             cache_slots=cache_slots,
         )
-        t_scored_ms += (time.perf_counter() - t0s) * 1000
+        t_scored_ms = (time.perf_counter() - t0s) * 1000
 
         # 5. Split per context (re-key row indexes to 0..R-1) and assemble.
-        n_group = len(group_pf)
-        for ci, pf in enumerate(group_pf):
+        for ci, (idx, pf) in enumerate(group_pf):
             lo, hi = ci * R, (ci + 1) * R
             ctx_scored = ScoreRowsResult(
                 row_logits={i - lo: v for i, v in scored.row_logits.items() if lo <= i < hi},
@@ -2569,8 +2927,8 @@ def run_parallel_generation_batched(
                 ctx_scored,
                 t0,
                 pf.cache,
-                prior=None,
-                prior_ms=0.0,
+                prior=prior,
+                prior_ms=prior_ms,
                 prior_correction=prior_correction,
                 calib=_load_calibration(calibration),
                 scoring=scoring,
@@ -2578,10 +2936,20 @@ def run_parallel_generation_batched(
                 max_rows=max_rows,
                 base_ids=pf.base_ids,
                 t_prefill=pf.t_prefill_ms,
-                t_suffix_eval=(time.perf_counter() - t0) * 1000,
+                t_suffix_eval=(t_scored_ms / n_group) + (time.perf_counter() - t0) * 1000,
                 constraints=constraints,
                 oracle_overrides=oracle_overrides,
+                active_start=active_start,
             )
-            res["contexts_per_pass"] = group_size
-            results.append(res)
+            # W5-D finding 27: honest timing. The group's wall time covers
+            # prefill + scoring + every assembly in this group;
+            # per-item amortized divides it; per-item end-to-end adds the
+            # context's own prefill. contexts_per_pass is the ACTUAL group
+            # size (a partial final group reports its own size).
+            group_wall_ms = (time.perf_counter() - t_group0) * 1000
+            res["contexts_per_pass"] = n_group
+            res["group_wall_ms"] = group_wall_ms
+            res["per_item_amortized_ms"] = group_wall_ms / n_group
+            res["per_item_end_to_end_ms"] = pf.t_prefill_ms + prior_ms + group_wall_ms / n_group
+            results[idx] = res
     return results

@@ -76,19 +76,27 @@ def _cases():
     """Two ad-hoc cases with 2+ fields each (2 rows per field -> a batched
     suffix call happens even with the tiny fake model; a single-field case
     scores each row in its own pass either way)."""
+    # W5-D finding 41: parity cases carry the WHOLE preset dict (schema +
+    # real context), matching bundled_preset_specs' new shape.
     return [
         (
             "mini",
             {
-                "flag": {"type": "boolean", "description": "d"},
-                "pick": {"type": "enum", "description": "d", "choices": ["yes", "no"]},
+                "schema": {
+                    "flag": {"type": "boolean", "description": "d"},
+                    "pick": {"type": "enum", "description": "d", "choices": ["yes", "no"]},
+                },
+                "context": "Parity mini context: routine, all checks passed.",
             },
         ),
         (
             "mini2",
             {
-                "grade": {"type": "enum", "description": "d", "choices": ["a", "b", "c"]},
-                "ok": {"type": "boolean", "description": "d"},
+                "schema": {
+                    "grade": {"type": "enum", "description": "d", "choices": ["a", "b", "c"]},
+                    "ok": {"type": "boolean", "description": "d"},
+                },
+                "context": "Parity mini2 context: escalation with two checks failing.",
             },
         ),
     ]

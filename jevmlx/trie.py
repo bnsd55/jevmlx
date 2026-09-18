@@ -154,9 +154,10 @@ def score_trie(
     the model want *any* valid code here?" — a branch can confidently pick A
     over B even when almost all unconstrained mass is on a reasoning token,
     newline, or label text. Legal mass is that leakage signal. The callback
-    returns the per-node mass float (the caller computes it from the
-    full-vocab logits it holds; the trie is MLX-free). None (default) leaves
-    every legal mass at 1.0 — the MLX-free unit tests use this.
+    returns the per-node mass as a NATURAL-LOG float (W5-D finding 37: log
+    space end to end — the caller computes it from the full-vocab logits it
+    holds; the trie is MLX-free). None (default) leaves every legal mass at
+    log 1.0 = 0.0 — the MLX-free unit tests use this.
 
     Returns ``(log_probs, legal_mass_logs)``: the natural-log constrained-path
     probability per choice and the natural log of the per-choice legal-mass
@@ -171,9 +172,10 @@ def score_trie(
         if not all(math.isfinite(value) for value in child_logits):
             raise ValueError(f"non-finite logits at branch node {node['path']!r}: {child_logits!r}")
         child_log_probs = log_softmax(child_logits)
-        node_legal_mass_log = (
-            math.log(legal_mass_at_node(node)) if legal_mass_at_node is not None else 0.0
-        )
+        # W5-D finding 37: the callback returns the LOG mass (never a
+        # probability) — adding logs directly avoids the exp-then-log
+        # round-trip that underflowed to log(0) on extreme values.
+        node_legal_mass_log = legal_mass_at_node(node) if legal_mass_at_node is not None else 0.0
         for token, log_prob in zip(node["children"], child_log_probs, strict=True):
             for choice_index in node["children"][token]:
                 log_probs[choice_index] += log_prob

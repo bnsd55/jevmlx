@@ -194,14 +194,18 @@ def test_pep604_union_of_two_still_rejected():
 
 
 def test_load_engine_logs_model_load_once(capsys):
-    # Source-level check: the load_engine body contains exactly one
-    # "Engine loaded" line (the old code logged it twice).
+    # Source-level check: the CACHED loader body contains exactly one
+    # "Engine loaded" line (the old code logged it twice). W5-D finding 36:
+    # the cached body is _load_engine_resolved; the public wrapper resolves
+    # the id and delegates.
     import inspect
 
     from jevmlx import engine
 
-    src = inspect.getsource(engine.load_engine)
+    src = inspect.getsource(engine._load_engine_resolved)
     assert src.count('"Engine loaded in %.2fs.') == 1
+    wrapper = inspect.getsource(engine.load_engine)
+    assert "Engine loaded" not in wrapper
 
 
 # --- bug 24: unk token must not become a stop token -----------------------------

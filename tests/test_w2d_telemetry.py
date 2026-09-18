@@ -72,9 +72,9 @@ def test_score_trie_returns_tuple():
     remainders = [[10], [30]]
     nodes = build_trie(remainders)
     logits = [1.0, 2.0]  # branch node 0, children in sorted-token order
-    log_probs, lm_logs = score_trie(nodes, 2, lambda n: logits, lambda n: 0.5)
-    # log_probs are the constrained-path log-probs (log_softmax of the logits).
-    # legal_mass_at_node=0.5 -> log = ln(0.5); both choices pass the one branch.
+    log_probs, lm_logs = score_trie(nodes, 2, lambda n: logits, lambda n: math.log(0.5))
+    # W5-D finding 37: the callback returns the LOG mass; both choices pass
+    # the one branch, so each carries ln(0.5).
     assert lm_logs == [math.log(0.5), math.log(0.5)]
     # Without the callback, legal mass logs are 0.0 (mass 1.0) — for the
     # MLX-free unit tests.

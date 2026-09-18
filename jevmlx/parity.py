@@ -44,7 +44,13 @@ import json
 from importlib import resources
 from typing import Any
 
-__all__ = ["PARITY_TEST_NAME", "check_scoring_parity", "parity_report", "bundled_preset_specs"]
+__all__ = [
+    "PARITY_TEST_NAME",
+    "check_scoring_parity",
+    "check_batched_parity",
+    "parity_report",
+    "bundled_preset_specs",
+]
 
 # The slow twin this check mirrors (tests/test_engine.py).
 PARITY_TEST_NAME = "test_w1a_scoring_parity_batch_vs_chunked_real_model"
@@ -59,14 +65,20 @@ PARITY_TEST_NAME = "test_w1a_scoring_parity_batch_vs_chunked_real_model"
 
 
 def bundled_preset_specs() -> list[tuple[str, dict]]:
-    """(preset_id, schema) for every bundled preset, loaded from the
-    package. ``id`` inside the JSON wins when present; else the stem."""
+    """(preset_id, preset) for every bundled preset, loaded from the
+    package. W5-D finding 41: the WHOLE preset dict is returned (schema +
+    context + description), not just spec["schema"] — the parity run must
+    score the preset's REAL context, not generic filler. ``id`` inside the
+    JSON wins when present; else the stem. The single-context consumers
+    (:func:`check_scoring_parity`, :func:`parity_report`) read
+    ``preset["schema"]`` and ``preset.get("context")`` through
+    :func:`_case_context`."""
     specs: list[tuple[str, dict]] = []
     preset_dir = resources.files("jevmlx") / "presets"
     for entry in sorted(preset_dir.iterdir()):
         if entry.name.endswith(".json"):
             spec = json.loads(entry.read_text(encoding="utf-8"))
-            specs.append((spec.get("id", entry.stem), spec["schema"]))
+            specs.append((spec.get("id", entry.stem), spec))
     return specs
 
 
@@ -105,9 +117,9 @@ def check_scoring_parity(
     max_abs_drift = 0.0
     per_case: dict[str, dict[str, float]] = {}
 
-    for case_id, schema_dict in cases:
-        schema = _make_schema(case_id, schema_dict)
-        context = _case_context(case_id, schema_dict)
+    for case_id, preset in cases:
+        schema = _make_schema(case_id, preset["schema"])
+        context = _case_context(case_id, preset)
         full = run_parallel_generation(model_obj, tokenizer, context, schema)
         case_drift = 0.0
         for max_rows in max_rows_options:
@@ -160,7 +172,7 @@ def parity_report(
         "passed": bool(
             result["winners_identical"] and result["max_abs_drift_nats"] < INSTABILITY_BAND
         ),
-        "cases": [case_id for case_id, _schema in (cases or bundled_preset_specs())],
+        "cases": [case_id for case_id, _preset in (cases or bundled_preset_specs())],
         "test": PARITY_TEST_NAME,
         "run_at": datetime.datetime.now(datetime.UTC)
         .isoformat(timespec="seconds")
@@ -203,13 +215,169 @@ def _make_schema(case_id: str, schema_dict: dict) -> Any:
     return StructuredSchema(fields)
 
 
-def _case_context(case_id: str, schema_dict: dict) -> str:
-    """A representative context per case. Presets carry a real ``context``
-    field; when absent (bare schema dicts in tests) a stable filler keeps
-    the run deterministic."""
+def _case_context(case_id: str, preset: dict) -> str:
+    """The preset's REAL context (W5-D finding 41: bundled_preset_specs now
+    returns the whole preset, so the recorded cases use the recorded
+    evidence). When absent (bare schema dicts in tests) a stable filler
+    keeps the run deterministic."""
     return (
-        schema_dict.get("context")
+        preset.get("context")
         or f"Parity check context for {case_id}. Routine request with all "
         "validation checks passed; process according to the standard policy "
         "and select the appropriate fields."
     )
+
+
+# ---------------------------------------------------------------- batched --
+
+
+def check_batched_parity(
+    model_obj: Any,
+    tokenizer: Any,
+    cases: list[tuple[str, dict]] | None = None,
+    context_counts: tuple[int, ...] = (1, 2, 4),
+    prior_correction: bool = False,
+) -> dict[str, Any]:
+    """Batched-vs-independent parity matrix (W5-D findings 40/42).
+
+    The W1-A gate only ever exercised run_parallel_generation — every
+    decide_many bug passed it. This matrix runs each case at 1/2/4
+    contexts, equal and MIXED prompt lengths, and compares:
+
+    - RAW row logits before near-tie rescore (finding 42): one scoring
+      pass per context through the shared _score_rows at identical chunk
+      shapes — batched results re-keyed per context — against the
+      independent path's rows. Final decisions are compared separately so
+      a batch-1 rescore cannot mask raw batch drift.
+    - Final decisions (parsed values + log_scores) batched vs independent.
+    - prior on/off (prior_correction=True computes the shared prior and
+      must still match decide-per-context).
+
+    Returns the same shape as check_scoring_parity plus a
+    ``batched_matrix`` section per case.
+    """
+    from jevmlx.engine import (
+        _build_schema_rows,
+        _prefill,
+        _score_rows,
+        run_parallel_generation,
+        run_parallel_generation_batched,
+    )
+
+    if cases is None:
+        cases = bundled_preset_specs()
+
+    winners_identical = True
+    max_abs_drift = 0.0
+    max_raw_drift = 0.0
+    per_case: dict[str, dict[str, Any]] = {}
+
+    built_cache: dict[str, Any] = {}
+    for case_id, preset in cases:
+        schema = _make_schema(case_id, preset["schema"])
+        context = _case_context(case_id, preset)
+        built = _build_schema_rows(schema, tokenizer, "slots")
+        built_cache[case_id] = built
+
+        # --- RAW row logits (finding 42): score the SAME rows for one
+        # context three ways — alone (the independent reference), and as
+        # rows 2..n of a batched group — before any near-tie rescore.
+        raw_drift = 0.0
+        if built["rows"]:
+            vocab_size = (
+                model_obj.args.vocab_size
+                if hasattr(model_obj, "args") and hasattr(model_obj.args, "vocab_size")
+                else model_obj.model.embed_tokens.weight.shape[0]
+            )
+            pf = _prefill(model_obj, tokenizer, context, schema, "slots")
+            # The reference is the CANONICAL batch=1 shape (one row per
+            # forward) — the same shape the near-tie rescore trusts. The
+            # batched side runs 4 context-copies of the rows in merged
+            # chunks (the decide_many row shape), so raw batch drift shows.
+            # Reference: the context's rows alone at the CANONICAL batch=1
+            # shape (one row per forward) — the shape the near-tie rescore
+            # trusts. The batched side runs 4 context-copies of the rows in
+            # merged chunks (the decide_many row shape — one merged pass
+            # per group), so raw batch drift shows.
+            ref = _score_rows(
+                model_obj,
+                pf.cache,
+                built["rows"],
+                built["row_decision"],
+                vocab_size,
+                built["pad_id"],
+                1,
+            )
+            # The batched side runs 4 context-copies of the rows in merged
+            # chunks (the decide_many row shape — one merged pass per
+            # group), so raw batch drift shows against the batch=1
+            # reference the near-tie rescore trusts.
+            cache_slots = [pf.cache] * (4 * len(built["rows"]))
+            all_rows = built["rows"] * 4
+            all_decisions = built["row_decision"] * 4
+            batched = _score_rows(
+                model_obj,
+                pf.cache,
+                all_rows,
+                all_decisions,
+                vocab_size,
+                built["pad_id"],
+                max(2, 4 * len(built["rows"])),
+                cache_slots=cache_slots,
+            )
+            for ridx in range(len(built["rows"])):
+                ref_vals = ref.row_logits.get(ridx)
+                got_vals = batched.row_logits.get(ridx)
+                if ref_vals is None or got_vals is None:
+                    winners_identical = False
+                    continue
+                for a, b in zip(ref_vals, got_vals, strict=True):
+                    raw_drift = max(raw_drift, abs(a - b))
+        max_raw_drift = max(max_raw_drift, raw_drift)
+
+        # --- Final decisions at 1/2/4 contexts, equal + mixed lengths.
+        case_drift = 0.0
+        n_ctx = max(context_counts)
+        contexts = [context] * n_ctx
+        # Mixed prompt lengths: pad later contexts with distinct tails.
+        mixed = [context + f" Additional evidence block {i}." for i in range(n_ctx)]
+        for ctx_list in (contexts, mixed):
+            independent = [
+                run_parallel_generation(
+                    model_obj, tokenizer, c, schema, prior_correction=prior_correction
+                )
+                for c in ctx_list
+            ]
+            batched_results = run_parallel_generation_batched(
+                model_obj,
+                tokenizer,
+                ctx_list,
+                schema,
+                prior_correction=prior_correction,
+            )
+            for ind, bat in zip(independent, batched_results, strict=True):
+                for fname, entry in ind["parsed_json"].items():
+                    if bat["parsed_json"].get(fname, {}).get("value") != entry["value"]:
+                        winners_identical = False
+                for fname, tel in ind["field_telemetry"].items():
+                    ls_ind = tel.get("log_scores")
+                    if ls_ind is None:
+                        continue
+                    ls_bat = bat["field_telemetry"].get(fname, {}).get("log_scores")
+                    if ls_bat is None or set(ls_ind) != set(ls_bat):
+                        winners_identical = False
+                        continue
+                    for choice, ls in ls_ind.items():
+                        case_drift = max(case_drift, abs(ls - ls_bat[choice]))
+        per_case[case_id] = {
+            "max_abs_drift_nats": case_drift,
+            "max_raw_row_drift_nats": raw_drift,
+        }
+        max_abs_drift = max(max_abs_drift, case_drift)
+
+    return {
+        "winners_identical": winners_identical,
+        "max_abs_drift_nats": max_abs_drift,
+        "max_raw_row_drift_nats": max_raw_drift,
+        "per_case": per_case,
+    }
