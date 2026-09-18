@@ -675,6 +675,163 @@ def _get_or_compute_prior(
     return prior
 
 
+def _constrained_map(
+    field_log_scores: dict[str, dict[str, float]],
+    field_values: dict[str, dict],
+    constraints: list[dict],
+    schema: StructuredSchema,
+) -> tuple[dict[str, object], list[str]]:
+    """Choose the joint assignment maximizing the sum of per-field log
+    scores subject to case-level constraints (EV1 / W3-D Q1).
+
+    Returns ``(reconciled_values, reconciled_field_names)`` where
+    ``reconciled_values`` maps field name -> chosen value and
+    ``reconciled_field_names`` lists the fields whose value changed from
+    the independent argmax.
+
+    Constraint types (mirroring EV1):
+    - implies / requires_parent: parent -> child mapping
+    - excludes: field==value -> other must be empty/falsy
+    - exclusivity: at most one of the group options in a multi field
+
+    Enumerates valid assignments per connected component when the product
+    space is under 5000; raises NotImplementedError naming the component
+    size otherwise (no silent skip).
+    """
+    import itertools
+
+    # Build the set of constrained fields.
+    constrained_fields: set[str] = set()
+    for c in constraints:
+        if c.get("type") in ("implies", "requires_parent"):
+            constrained_fields.add(c["parent"])
+            constrained_fields.add(c["child"])
+        elif c.get("type") == "excludes":
+            constrained_fields.add(c["field"])
+            constrained_fields.add(c["other"])
+        elif c.get("type") == "exclusivity":
+            constrained_fields.add(c["field"])
+
+    if not constrained_fields:
+        return {}, []
+
+    # Build adjacency for connected components.
+    adj: dict[str, set[str]] = {f: set() for f in constrained_fields}
+    for c in constraints:
+        if c.get("type") in ("implies", "requires_parent"):
+            adj.setdefault(c["parent"], set()).add(c["child"])
+            adj.setdefault(c["child"], set()).add(c["parent"])
+        elif c.get("type") == "excludes":
+            adj.setdefault(c["field"], set()).add(c["other"])
+            adj.setdefault(c["other"], set()).add(c["field"])
+
+    # Find connected components (BFS).
+    visited: set[str] = set()
+    components: list[set[str]] = []
+    for f in constrained_fields:
+        if f in visited:
+            continue
+        queue = [f]
+        component: set[str] = set()
+        while queue:
+            node = queue.pop()
+            if node in visited:
+                continue
+            visited.add(node)
+            component.add(node)
+            queue.extend(adj.get(node, set()) - visited)
+        components.append(component)
+
+    reconciled: dict[str, object] = {}
+    changed: list[str] = []
+
+    def _check_constraint(c: dict, assignment: dict[str, object]) -> bool:
+        """True if constraint is SATISFIED."""
+        ctype = c.get("type")
+        if ctype in ("implies", "requires_parent"):
+            parent_val = assignment.get(c["parent"])
+            child_val = assignment.get(c["child"])
+            if parent_val is None or child_val is None:
+                return True
+            return child_val in c.get("mapping", {}).get(parent_val, [])
+        if ctype == "excludes":
+            if assignment.get(c["field"]) == c["value"]:
+                other = assignment.get(c["other"])
+                if isinstance(other, list):
+                    return len(other) == 0
+                return other in (None, "", False)
+            return True
+        if ctype == "exclusivity":
+            field_val = assignment.get(c["field"])
+            if field_val is None:
+                return True
+            if not isinstance(field_val, list):
+                field_val = [field_val] if field_val else []
+            selected = set(field_val) & set(c.get("options", []))
+            return len(selected) <= 1
+        return True
+
+    for component in components:
+        # Get the candidate values for each field in this component.
+        field_candidates: dict[str, list[object]] = {}
+        for fname in component:
+            if fname not in field_log_scores:
+                # Multi field: candidates are the options (each on/off).
+                # For enumeration, use the current value as the only candidate
+                # (multi fields are handled via exclusivity, not implies).
+                fdef = schema.fields.get(fname)
+                if fdef and fdef.field_type == "multi":
+                    field_candidates[fname] = [field_values.get(fname, {}).get("value", [])]
+                else:
+                    field_candidates[fname] = [field_values.get(fname, {}).get("value")]
+            else:
+                field_candidates[fname] = list(field_log_scores[fname].keys())
+
+        # Check product space size.
+        product = 1
+        for fname in component:
+            product *= len(field_candidates[fname])
+        if product > 5000:
+            raise NotImplementedError(
+                f"constrained MAP component too large: {len(component)} fields, "
+                f"{product} assignments (> 5000); fields={sorted(component)}"
+            )
+
+        # Enumerate valid assignments, pick the joint MAP.
+        best_assignment: dict[str, object] | None = None
+        best_score = float("-inf")
+        fields_in_component = sorted(component)
+        for combo in itertools.product(*(field_candidates[f] for f in fields_in_component)):
+            assignment = dict(zip(fields_in_component, combo, strict=True))
+            # Check all constraints that touch this component.
+            if not all(_check_constraint(c, assignment) for c in constraints):
+                continue
+            # Sum per-field log scores.
+            score = 0.0
+            for fname, val in assignment.items():
+                if fname in field_log_scores:
+                    score += field_log_scores[fname].get(str(val), float("-inf"))
+                # Multi fields don't contribute to the MAP score (their
+                # per-option yes/no is independent under the current engine).
+            if score > best_score:
+                best_score = score
+                best_assignment = assignment
+
+        if best_assignment is None:
+            raise NotImplementedError(
+                f"no valid assignment exists for constrained component {sorted(component)}"
+            )
+
+        # Record reconciled values and track changes.
+        for fname, val in best_assignment.items():
+            old_val = field_values.get(fname, {}).get("value")
+            if val != old_val:
+                changed.append(fname)
+            reconciled[fname] = val
+
+    return reconciled, changed
+
+
 def run_parallel_generation(
     model,
     tokenizer,
@@ -685,6 +842,7 @@ def run_parallel_generation(
     scoring: str = "slots",
     calibration: str | dict | None = None,
     prior_correction: bool = False,
+    constraints: list[dict] | None = None,
 ) -> dict[str, Any]:
     """Decide every schema field in one batched forward pass.
 
@@ -1252,6 +1410,30 @@ def run_parallel_generation(
             field_telemetry[fname]["prior_log_scores"] = dict(prior_entry["log_scores"])
             field_telemetry[fname]["prior_corrected"] = True
 
+    # W3-D: constrained MAP. After every field has log_scores and before
+    # assembly, choose the joint assignment maximizing the sum of per-field
+    # log scores subject to the case-level constraints (EV1 shape).
+    reconciled_fields: list[str] = []
+    if constraints:
+        field_log_scores = {
+            fname: ft["log_scores"] for fname, ft in field_telemetry.items() if "log_scores" in ft
+        }
+        field_values = {fname: {"value": pj["value"]} for fname, pj in parsed_json.items()}
+        reconciled, reconciled_fields = _constrained_map(
+            field_log_scores, field_values, constraints, schema
+        )
+        for fname, val in reconciled.items():
+            if fname in parsed_json:
+                old_val = parsed_json[fname]["value"]
+                if val != old_val:
+                    parsed_json[fname]["value"] = val
+                    # Update the field telemetry to reflect the reconciled value.
+                    field_telemetry[fname]["value"] = val
+                    if fname in field_log_scores and str(val) in field_log_scores[fname]:
+                        field_telemetry[fname]["probability"] = math.exp(
+                            field_log_scores[fname][str(val)]
+                        )
+
     total_elapsed_ms = (time.perf_counter() - t0) * 1000
     confidence_model = scoring
 
@@ -1314,6 +1496,8 @@ def run_parallel_generation(
         "prompt_version": PROMPT_VERSION,
         "probability_status": probability_status,
         "prior_correction": prior_correction,
+        "constraints_applied": bool(constraints),
+        "reconciled_fields": reconciled_fields,
         "parsed_json": parsed_json,
         "field_telemetry": field_telemetry,
         "num_fields": len(schema),
