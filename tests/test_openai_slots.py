@@ -14,6 +14,24 @@ from jevmlx.openai_slots import decide_openai
 from jevmlx.schema import StructuredSchema
 
 
+class _FakeTokenizer:
+    """Character tokenizer for schema-block rendering (W5-A plan-driven)."""
+
+    name_or_path = "fake-openai"
+
+    def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+        return [ord(c) % 60 for c in text]
+
+    pad_token_id = 0
+
+    def __len__(self) -> int:
+        return 64
+
+
+def _tok() -> _FakeTokenizer:
+    return _FakeTokenizer()
+
+
 def _schema() -> StructuredSchema:
     return StructuredSchema(
         {
@@ -84,6 +102,7 @@ def test_scalar_field_reads_top_logprobs_and_renormalises():
             None,
             _schema(),
             "ctx",
+            _tok(),
         )
     finally:
         server.shutdown()
@@ -126,7 +145,7 @@ def test_missing_alias_gets_floor_and_truncated_flag():
     )
     try:
         result = decide_openai(
-            f"http://127.0.0.1:{server.server_port}", "m", None, _schema(), "ctx"
+            f"http://127.0.0.1:{server.server_port}", "m", None, _schema(), "ctx", _tok()
         )
     finally:
         server.shutdown()
@@ -173,7 +192,9 @@ def test_multi_field_one_request_per_option():
         }
     )
     try:
-        result = decide_openai(f"http://127.0.0.1:{server.server_port}", "m", None, schema, "ctx")
+        result = decide_openai(
+            f"http://127.0.0.1:{server.server_port}", "m", None, schema, "ctx", _tok()
+        )
     finally:
         server.shutdown()
         thread.join()
@@ -189,7 +210,7 @@ def test_multi_field_one_request_per_option():
 def test_request_payload_shape():
     server, thread = _make_server([{"body": _completion([{"token": '"A"', "logprob": -0.1}])}])
     try:
-        decide_openai(f"http://127.0.0.1:{server.server_port}", "m", None, _schema(), "ctx")
+        decide_openai(f"http://127.0.0.1:{server.server_port}", "m", None, _schema(), "ctx", _tok())
     finally:
         server.shutdown()
         thread.join()
@@ -212,7 +233,9 @@ def test_http_500_raises_baseline_error():
     server, thread = _make_server([{"status": 500, "body": {"error": {"message": "kaboom"}}}])
     try:
         with pytest.raises(ChatCompletionsError, match="500"):
-            decide_openai(f"http://127.0.0.1:{server.server_port}", "m", None, _schema(), "ctx")
+            decide_openai(
+                f"http://127.0.0.1:{server.server_port}", "m", None, _schema(), "ctx", _tok()
+            )
     finally:
         server.shutdown()
         thread.join()

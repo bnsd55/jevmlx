@@ -17,14 +17,14 @@ explicit: aliases missing from the returned top-k get a floor probability of
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import math
 import time
 from typing import Any
 
-from jevmlx.engine import PROMPT_V2_SYSTEM
+from jevmlx.engine import PROMPT_V2_SYSTEM, _context_block
 from jevmlx.http import ChatCompletionsError, chat_completions_raw
+from jevmlx.json_text import json_text
 from jevmlx.schema import StructuredSchema
 
 __all__ = [
@@ -40,17 +40,19 @@ OPENAI_SLOTS_PROMPT_VERSION = "jevmlx-openai-slots-v1"
 _TOP_LOGPROBS = 20
 
 
-def _user_content(schema: StructuredSchema, context: str) -> str:
-    """The prompt-v2 user turn: alias schema block + delimited context.
+def _user_content(schema: StructuredSchema, context: str, tokenizer) -> str:
+    """The prompt-v2 user turn: alias schema block + nonce-delimited context.
 
-    Identical text to the native slots mode's prefill prompt (the system
-    paragraph travels in the system message; here and natively).
+    Schema block rendered from the COMPILED slot plan (W5-A finding 1) —
+    identical text to the native slots mode's prefill prompt (the system
+    paragraph travels in the system message; here and natively). The
+    delimiter is the W5-A nonce (finding 44), same as the engine.
     """
-    schema_str = schema.to_alias_schema_str()
-    return f"Classify the following fields.\n\n{schema_str}\n\n<<<CONTEXT\n{context}\nCONTEXT>>>"
+    schema_str = schema.to_alias_schema_str(tokenizer)
+    return f"Classify the following fields.\n\n{schema_str}\n\n{_context_block(context)}"
 
 
-def _scalar_messages(schema: StructuredSchema, context: str, name: str) -> list[dict]:
+def _scalar_messages(schema: StructuredSchema, context: str, name: str, tokenizer) -> list[dict]:
     """Messages for one scalar field: system + user + assistant row prefill.
 
     The assistant prefix is the JSON decision row, byte-identical to the
@@ -59,10 +61,10 @@ def _scalar_messages(schema: StructuredSchema, context: str, name: str) -> list[
     assistant turn as ordinary history — the payload is still well-formed and
     the top-k read just degrades (logged once per field).
     """
-    row = "{\n" + f"  {json.dumps(name)}: "
+    row = "{\n" + f"  {json_text(name)}: "
     return [
         {"role": "system", "content": PROMPT_V2_SYSTEM},
-        {"role": "user", "content": _user_content(schema, context)},
+        {"role": "user", "content": _user_content(schema, context, tokenizer)},
         {"role": "assistant", "content": row, "prefix": True},
     ]
 
@@ -107,12 +109,13 @@ def _decide_scalar_field(
     name: str,
     field,
     timeout: float,
+    tokenizer,
 ) -> tuple[dict, dict]:
     """One request for one enum/boolean field. Returns (parsed, telemetry)."""
     choices_list = ["true", "false"] if field.field_type == "boolean" else list(field.choices)
     aliases = [schema.alias_for_index(i) for i in range(len(choices_list))]
 
-    messages = _scalar_messages(schema, context, name)
+    messages = _scalar_messages(schema, context, name, tokenizer)
     t0 = time.perf_counter()
     choice = chat_completions_raw(
         base_url,
@@ -207,6 +210,7 @@ def _decide_multi_field(
     field,
     timeout: float,
     calibration: dict | None,
+    tokenizer,
 ) -> tuple[dict, dict, int]:
     """One Y/N request per option. Returns (parsed, telemetry, n_requests)."""
     per_option: dict[str, float] = {}
@@ -216,11 +220,11 @@ def _decide_multi_field(
         # The option row as assistant prefill: the same natural yes/no
         # question the native multi rows pose ('"<field>/<option>": ' with
         # the quoted Y/N aliases), so both backends answer the same question.
-        row_key = json.dumps(f"{name}/{option}")
+        row_key = json_text(f"{name}/{option}")
         row = "{\n" + f'  {row_key}: "'
         messages = [
             {"role": "system", "content": PROMPT_V2_SYSTEM},
-            {"role": "user", "content": _user_content(schema, context)},
+            {"role": "user", "content": _user_content(schema, context, tokenizer)},
             {"role": "assistant", "content": row, "prefix": True},
         ]
         choice = chat_completions_raw(
@@ -278,6 +282,7 @@ def decide_openai(
     api_key: str | None,
     schema: StructuredSchema,
     context: str,
+    tokenizer,
     *,
     timeout: float = 120.0,
     calibration: str | dict | None = None,
@@ -312,18 +317,19 @@ def decide_openai(
                 field,
                 timeout,
                 calib,
+                tokenizer,
             )
             n_requests += n
         else:
             parsed, telemetry = _decide_scalar_field(
-                base_url, model, api_key, schema, context, name, field, timeout
+                base_url, model, api_key, schema, context, name, field, timeout, tokenizer
             )
             n_requests += 1
         parsed_json[name] = parsed
         field_telemetry[name] = telemetry
 
     elapsed_ms = (time.perf_counter() - t0) * 1000
-    user_content = _user_content(schema, context)
+    user_content = _user_content(schema, context, tokenizer)
     return {
         "elapsed_ms": round(elapsed_ms, 2),
         "prefill_ms": None,

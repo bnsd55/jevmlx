@@ -236,7 +236,8 @@ def test_multi_prompt_shows_yn_codes():
     """Q6-6 + W2-E: the multi section maps code = option (choices order) and
     shows the exact quoted Y/N codes the scorer reads."""
     schema = _multi_only_schema()
-    block = schema.to_schema_str("slots")
+    tok2 = CharTokenizer()
+    block = schema.to_schema_str("slots", tokenizer=tok2)
     assert '"Y" = applies or "N" = does not apply' in block
     assert '00 = "alpha"' in block and '01 = "beta"' in block
 
@@ -253,7 +254,8 @@ def test_field_names_json_dumps_escaped():
             },
         }
     )
-    block = schema.to_schema_str("slots")
+    tok2 = CharTokenizer()
+    block = schema.to_schema_str("slots", tokenizer=tok2)
     # json.dumps escapes the quotes — the block should contain escaped quotes
     # and never raw unescaped quotes that would break parsing.
     assert '\\"' in block  # escaped quotes present
@@ -263,4 +265,4 @@ def test_prompt_version_bumped():
     """PROMPT_VERSION is now v3 (W1-B)."""
     from jevmlx.engine import PROMPT_VERSION
 
-    assert PROMPT_VERSION == "jevmlx-parallel-v7"
+    assert PROMPT_VERSION == "jevmlx-parallel-v8"

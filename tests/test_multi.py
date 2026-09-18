@@ -144,8 +144,11 @@ def test_multi_prompt_describes_options_and_yes_no_contract():
             }
         }
     )
+    from tests.test_w1b_slot_multi import CharTokenizer
+
+    tok = CharTokenizer()
     for mode in ("slots", "labels"):
-        block = schema.to_schema_str(mode)
+        block = schema.to_schema_str(mode, tokenizer=tok)
         # W2-E row codes: the block maps code = option in choices order.
         assert '00 = "billing" — "money issues"' in block
         assert '01 = "tech" — "software faults"' in block

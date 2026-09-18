@@ -10,6 +10,9 @@ import logging
 import weakref
 from typing import Any
 
+# W5-A finding 39: ONE canonical JSON serializer (see jevmlx/json_text.py).
+from jevmlx.json_text import json_text
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -74,15 +77,18 @@ def _search_codebook(
 ) -> tuple[list[str], bool]:
     """Search a codebook for the best alias set for one field.
 
-    GREEDY (F1): tokenize each candidate row ONCE per code (a code's tokens
-    do not depend on the other codes), then pick n_choices codes greedily in
-    priority order, skipping any code whose remainder equals or is a
-    token-prefix of an already chosen one. O(pool) tokenizations.
+    BOUNDED SEARCH (W5-A finding 2, was F1 greedy): tokenize each candidate
+    row ONCE per code (a code's tokens do not depend on the other codes),
+    build the prefix-conflict graph over the pool, and search for the best
+    size-n prefix-free independent set with bounded backtracking. Greedy
+    never revisited: an A-is-a-prefix-of-B/C/D pool raised even though
+    {B, C, D} was valid. The lexicographic objective (branch nodes, max
+    trie depth, max candidate tokens, token-length variance, code length)
+    scores every COMPLETE set; the best set wins. Pools are small (36
+    singles, 1296 pairs) and the visited-node cap (200k) bounds the work.
 
     Candidate codes: A-Z, then digits, then 2-char alphanumerics. Homogeneous
     pools first (letters, then digits, then mixed), then 2-char. DETERMINISTIC.
-    The lexicographic objective (branch nodes, max trie depth, max candidate
-    tokens, token-length variance, code length) is computed on the FINAL set.
 
     Returns ``(codes, single_branch)``. Raises :class:`SchemaCompileError`
     when no valid set exists (F2: no silent fallback).
@@ -99,24 +105,79 @@ def _search_codebook(
         return a[: len(b)] == b or b[: len(a)] == a
 
     def _greedy_pick(pool: list[str]) -> list[str] | None:
-        # Pre-tokenize each code's complete candidate row (once per code).
+        # W5-A finding 2: BOUNDED backtracking search, not greedy. Greedy
+        # never revisits: if code A is a token-prefix of B, C and D, it
+        # commits to A, rejects B/C/D, and raises even though {B, C, D} is a
+        # valid set. Pre-tokenize each candidate row once (a code's tokens do
+        # not depend on the other codes), then search the conflict graph for
+        # a size-n prefix-free independent set, scoring every COMPLETE set
+        # with the existing lexicographic objective. Pools are small (36
+        # singles, 1296 pairs); n <= 64; bounded by a visited-node cap.
         tokenized = {
             code: tokenizer.encode(candidate_text_fn(code), add_special_tokens=False)
             for code in pool
         }
+
+        # Conflict iff one candidate's remainder (under the pair's common
+        # prefix) equals or is a token-prefix of the other's — those two
+        # codes can never coexist in a distinguishable set.
+        def conflicts(a: str, b: str) -> bool:
+            full_a, full_b = tokenized[a], tokenized[b]
+            shared = _common_token_prefix([full_a, full_b])
+            rem_a = full_a[len(shared) :]
+            rem_b = full_b[len(shared) :]
+            return _is_prefix_pair(rem_a, rem_b)
+
+        best: tuple[tuple, list[str]] | None = None
         chosen: list[str] = []
-        for code in pool:
-            full = tokenized[code]
-            all_fulls = [tokenized[c] for c in chosen] + [full]
-            shared = _common_token_prefix(all_fulls)
-            remainder = full[len(shared) :]
-            prior_remainders = [tokenized[c][len(shared) :] for c in chosen]
-            if any(_is_prefix_pair(remainder, pr) for pr in prior_remainders):
-                continue
-            chosen.append(code)
+        visited = 0
+        # Bounded: 20k node visits per pool. Pools are priority-ordered and
+        # the caller picks the lexicographic best across pools, so the cap
+        # trades a hair of optimality for compile latency (the 26-choose-26
+        # worst case must stay <1s).
+        # Tighter cap for large n: the tree is C(pool, n)-shaped; for
+        # n > 16 the exhaustive part must give way to the cap quickly.
+        max_visits = 20_000 if n_choices <= 16 else 2_000
+
+        def record(complete: list[str]) -> None:
+            nonlocal best
+            key = _score(complete)
+            if best is None or key < best[0]:
+                best = (key, list(complete))
+
+        def backtrack(start: int) -> None:
+            nonlocal visited
+            if visited >= max_visits:
+                return
+            visited += 1
             if len(chosen) == n_choices:
-                return chosen
-        return None if len(chosen) < n_choices else chosen
+                record(chosen)
+                return
+            # Bound 1: can we still reach n_choices from here?
+            if len(pool) - start < n_choices - len(chosen):
+                return
+            # Bound 2: are there enough NON-CONFLICTING codes left? A node
+            # whose residual conflict graph cannot supply the rest is cut
+            # without visiting its subtree.
+            remaining = [pool[i] for i in range(start, len(pool))]
+            still_ok = sum(1 for c in remaining if not any(conflicts(c, x) for x in chosen))
+            if still_ok < n_choices - len(chosen):
+                return
+            # Prune: if a complete set is already recorded with a better
+            # possible prefix... (no cheap admissible bound beyond the pool
+            # check; the visited cap bounds the search).
+            for idx in range(start, len(pool)):
+                code = pool[idx]
+                if any(conflicts(code, c) for c in chosen):
+                    continue
+                chosen.append(code)
+                backtrack(idx + 1)
+                chosen.pop()
+                if best is not None and visited >= max_visits:
+                    return
+
+        backtrack(0)
+        return best[1] if best is not None else None
 
     def _score(codes: list[str]) -> tuple[int, int, int, float, int]:
         fulls = [tokenizer.encode(candidate_text_fn(c), add_special_tokens=False) for c in codes]
@@ -138,12 +199,25 @@ def _search_codebook(
     for pool in pools:
         if not pool or n_choices > len(pool):
             continue
+        # _greedy_pick now returns the best COMPLETE set it found (bounded
+        # backtracking + lexicographic objective), or None.
         codes = _greedy_pick(pool)
         if codes is None:
             continue
         key = _score(codes)
         if best is None or key < best[0]:
             best = (key, codes)
+        # Early exit on a single-branch-node set: 1 branch node is the
+        # objective's first component at its minimum (n >= 2 needs exactly
+        # one node), and pool order is priority — later pools can only tie
+        # on node count while paying full search cost. Keeps the
+        # 26-choice compile under a second (the C(36,26) backtracking tree
+        # never runs to its cap); determinism unaffected (fixed pool
+        # order). If no pool reaches 1 node, the full bounded search
+        # across all pools still picks the lexicographic best.
+        if key[0] == 1:
+            best = (key, codes)
+            break
     if best is None:
         raise SchemaCompileError(
             field_name,
@@ -536,14 +610,14 @@ class StructuredSchema:
         'Schema block format')."""
         parts = []
         for i, choice in enumerate(field.choices):
-            safe_choice = json.dumps(choice, ensure_ascii=False)
+            safe_choice = json_text(choice)
             gloss = field.choice_descriptions.get(choice)
-            gloss_part = f" — {json.dumps(gloss, ensure_ascii=False)}" if gloss else ""
+            gloss_part = f" — {json_text(gloss)}" if gloss else ""
             parts.append(f"{self.code_for_index(i)} = {safe_choice}{gloss_part}")
         return (
             "; ".join(parts)
             + " — how many of these apply? Answer one of "
-            + ", ".join(json.dumps(c) for c in COUNT_CODES)
+            + ", ".join(json_text(c) for c in COUNT_CODES)
             + "."
         )
 
@@ -554,27 +628,49 @@ class StructuredSchema:
         choices, so two digits always suffice)."""
         return f"{index:02d}"
 
-    def to_schema_str(self, mode: str = "slots") -> str:
+    def to_schema_str(self, mode: str = "slots", tokenizer=None) -> str:
         """Schema block for prompt v2, rendered per scoring mode.
 
-        mode ``"slots"`` lists each field's choices as neutral aliases
-        (``A) <choice>`` plus `` — <gloss>`` when a gloss exists); mode
-        ``"labels"`` lists the real choice strings (``LOW | MEDIUM``). The
-        aliases are what slot-trie scoring reads back on assembly; labels
-        mode shows exactly the text the scorer reads.
+        mode ``"slots"`` lists each field's choices under the aliases THE
+        COMPILED PLAN scored for this tokenizer (``A) <choice>`` when the
+        search picks the index aliases, ``0) <choice>`` when it picks
+        digits, etc.), plus `` — <gloss>`` when a gloss exists; mode
+        ``"labels"`` lists the real choice strings — exactly the text the
+        scorer reads.
+
+        W5-A finding 1: the compiled plan OWNS the displayed aliases. The
+        old independent ``_alias_code(i)`` rendering path taught the model
+        one protocol (A, B, C...) while the scorer judged another (whatever
+        ``_search_codebook`` picked, e.g. digits). Prompt and scorer can no
+        longer disagree because they are the same data: the slot block is
+        rendered from ``plan['fields'][name]['aliases']``.
+
+        ``tokenizer`` is REQUIRED for mode ``"slots"`` (the plan must be
+        compiled to know the searched codes) and ignored for ``"labels"``.
 
         Multi fields render once as a described yes/no menu — the field
         header states that each option is answered yes or no; the per-option
-        decision rows below (``"<field>/<option>"``) are answered with the
-        aliases Y/N.
+        decision rows below (``"<field>/<code>"``) are answered with Y/N.
         """
         if mode not in ("slots", "labels"):
             raise ValueError(f"mode must be 'slots' or 'labels', got {mode!r}")
+        slot_plan: dict[str, dict[str, Any]] | None = None
+        if mode == "slots":
+            if tokenizer is None:
+                raise ValueError(
+                    "to_schema_str(mode='slots') needs the tokenizer: the "
+                    "displayed aliases come from the COMPILED plan (W5-A "
+                    "finding 1 — the prompt must show the codebook the "
+                    "scorer reads), and that is tokenizer-specific"
+                )
+            slot_plan = self._cached_plan(tokenizer, mode="slots") or self.compile_slot_plan(
+                tokenizer
+            )
         lines = []
         for name, field in self.fields.items():
-            safe_name = json.dumps(name, ensure_ascii=False)
+            safe_name = json_text(name)
             desc = field.description.split("\n")[0].strip()
-            safe_desc = json.dumps(desc, ensure_ascii=False)
+            safe_desc = json_text(desc)
             if field.field_type == "multi":
                 menu = self._multi_field_header(field)
                 lines.append(
@@ -586,26 +682,36 @@ class StructuredSchema:
                 ["true", "false"] if field.field_type == "boolean" else list(field.choices)
             )
             if mode == "slots":
+                # W5-A finding 1: display the aliases the compiled plan
+                # scored (tokenizer-specific searched codes), never an
+                # independent index-derived rendering.
+                assert slot_plan is not None
+                displayed_aliases = slot_plan["fields"][name]["aliases"]
+                assert len(displayed_aliases) == len(choices_list), (
+                    f"plan aliases for {name!r} do not cover the choices"
+                )
                 parts = []
                 for i, choice in enumerate(choices_list):
-                    alias = _alias_code(i)
-                    safe_choice = json.dumps(choice, ensure_ascii=False)
+                    alias = displayed_aliases[i]
+                    safe_choice = json_text(choice)
                     gloss = field.choice_descriptions.get(choice)
-                    gloss_part = f" — {json.dumps(gloss, ensure_ascii=False)}" if gloss else ""
+                    gloss_part = f" — {json_text(gloss)}" if gloss else ""
                     parts.append(f"{alias}) {safe_choice}{gloss_part}")
             else:
                 parts = []
                 for choice in choices_list:
-                    safe_choice = json.dumps(choice, ensure_ascii=False)
+                    safe_choice = json_text(choice)
                     gloss = field.choice_descriptions.get(choice)
-                    gloss_part = f" — {json.dumps(gloss, ensure_ascii=False)}" if gloss else ""
+                    gloss_part = f" — {json_text(gloss)}" if gloss else ""
                     parts.append(f"{safe_choice}{gloss_part}")
             lines.append(f"  {safe_name}: {'  '.join(parts)}  // {safe_desc}")
         return "\n".join(lines)
 
-    def to_alias_schema_str(self) -> str:
-        """Schema block in slots mode (neutral aliases)."""
-        return self.to_schema_str("slots")
+    def to_alias_schema_str(self, tokenizer) -> str:
+        """Schema block in slots mode: aliases from the COMPILED plan for
+        ``tokenizer`` (W5-A finding 1 — the prompt shows the codebook the
+        scorer reads)."""
+        return self.to_schema_str("slots", tokenizer=tokenizer)
 
     def to_labels_schema_str(self) -> str:
         """Schema block in labels mode (real choice strings)."""
@@ -613,7 +719,12 @@ class StructuredSchema:
 
     @staticmethod
     def alias_for_index(index: int) -> str:
-        """The neutral alias for the choice at ``index`` (A, B, ..., AA, AB...)."""
+        """The index-derived alias (A, B, ..., AA, AB...).
+
+        W5-A finding 1: this is NO LONGER the prompt's displayed alias —
+        prompts render from the compiled plan. It remains only for the
+        OpenAI-compatible endpoint adapter's per-field requests, which do
+        not go through the compiled plan (openai_slots.py:113)."""
         return _alias_code(index)
 
     def plan_hash(self, tokenizer, mode: str) -> str:
@@ -699,7 +810,7 @@ class StructuredSchema:
             """The complete one-field JSON object for one alias row (W2-B:
             the candidate row protocol is the complete object, not a
             dangling '{\n  "field": "A",\n')."""
-            return json.dumps({name: alias}, ensure_ascii=False)
+            return json_text({name: alias})
 
         # Lead-in candidates: scalar fields' shared prefixes. Computed after
         # the per-field plans exist (same two-pass shape as labels mode).
@@ -829,7 +940,7 @@ class StructuredSchema:
             '{\n  "field": value,\n'). value_text is a pre-serialized JSON
             value (e.g. '"LOW"', 'true'), so we build the object string
             directly rather than double-encoding through json.dumps."""
-            return "{" + f"{json.dumps(name, ensure_ascii=False)}: {value_text}" + "}"
+            return "{" + f"{json_text(name)}: {value_text}" + "}"
 
         for fname, fdef in self.fields.items():
             if fdef.field_type != "multi":
@@ -991,7 +1102,7 @@ class StructuredSchema:
             keys and '<field>/<option>' option keys are injective across
             (field, option) pairs and field names).
             """
-            return "{" + f"{json.dumps(name, ensure_ascii=False)}: {value_text}" + "}"
+            return "{" + f"{json_text(name)}: {value_text}" + "}"
 
         multi_plan = self._compile_multi_plan(tokenizer)
         for fname, fdef in self.fields.items():
@@ -1005,7 +1116,7 @@ class StructuredSchema:
             if fdef.field_type == "boolean":
                 value_texts = ["true", "false"]
             else:
-                value_texts = [json.dumps(choice) for choice in fdef.choices]
+                value_texts = [json_text(choice) for choice in fdef.choices]
             candidates = [
                 tokenizer.encode(candidate_text(fname, value_text), add_special_tokens=False)
                 for value_text in value_texts

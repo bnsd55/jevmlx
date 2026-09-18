@@ -306,6 +306,7 @@ def test_openai_multi_calibrated_selection_and_no_threshold_key():
             field,
             5.0,
             {"multi": {"a": 1.0, "b": 0.0}},
+            FakeTokenizer(),
         )
     assert "threshold" not in telemetry
     assert telemetry["calibrated"] == {"a": 1.0, "b": 0.0}
@@ -315,7 +316,7 @@ def test_openai_multi_calibrated_selection_and_no_threshold_key():
 
     with patch("jevmlx.openai_slots.chat_completions_raw", side_effect=fake_chat):
         _parsed, telemetry_off, _n = _decide_multi_field(
-            "http://x", "m", None, schema, "ctx", "flags", field, 5.0, None
+            "http://x", "m", None, schema, "ctx", "flags", field, 5.0, None, FakeTokenizer()
         )
     assert telemetry_off["calibrated"] is None
     assert telemetry_off["value"] == ["x", "y", "z"]  # 0.9 >= 0.5 uncalibrated

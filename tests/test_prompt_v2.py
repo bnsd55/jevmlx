@@ -1,4 +1,4 @@
-"""Prompt v2 (jevmlx-parallel-v7) contract tests: system + user messages,
+"""Prompt v2 (jevmlx-parallel-v8) contract tests: system + user messages,
 hard-delimited context, and the neutral alias schema block."""
 
 import mlx.core as mx
@@ -86,7 +86,8 @@ def test_alias_codes_base26():
 
 
 def test_alias_schema_block_lists_aliases_with_gloss():
-    block = SCHEMA.to_alias_schema_str()
+    tok = FakeTokenizer()
+    block = SCHEMA.to_alias_schema_str(tok)
     assert 'A) "LOW" — "stable income"' in block  # gloss present, json.dumps-escaped
     assert 'C) "HIGH" — "many missed payments"' in block  # gloss present
     assert 'B) "MEDIUM"\n' in block or 'B) "MEDIUM" ' in block  # MEDIUM: no gloss part
@@ -108,14 +109,21 @@ def test_prompt_v2_sends_system_and_user():
     assert roles == ["system", "user"]
     assert tok.messages[0]["content"] == PROMPT_V2_SYSTEM
     user = tok.messages[1]["content"]
-    assert "<<<CONTEXT" in user and "ctx text" in user and "CONTEXT>>>" in user
+    # W5-A finding 44: the delimiter carries the deterministic per-context
+    # nonce on both fences (old bare CONTEXT>>> could be impersonated by an
+    # interior context line).
+    import hashlib
+
+    tag = "C" + hashlib.sha256(b"ctx text").hexdigest()[:16]
+    assert f"<<<CONTEXT:{tag}" in user and f"CONTEXT:{tag}>>>" in user
+    assert "ctx text" in user
     assert "Classify" in user
 
 
 def test_prompt_version_is_v2():
     tok = FakeTokenizer()
     result = run_parallel_generation(FakeModel(), tok, "ctx", SCHEMA)
-    assert result["prompt_version"] == PROMPT_VERSION == "jevmlx-parallel-v7"
+    assert result["prompt_version"] == PROMPT_VERSION == "jevmlx-parallel-v8"
 
 
 def test_slot_plan_maps_aliases_to_values():
@@ -166,7 +174,7 @@ def test_gemma_style_template_rejects_system_role():
     ]
 
     result = run_parallel_generation(FakeModel(), tok, "ctx", SCHEMA)
-    assert result["prompt_version"] == "jevmlx-parallel-v7"
+    assert result["prompt_version"] == "jevmlx-parallel-v8"
     # The scoring prompt is a single user turn with the merged system text.
     assert all(m["role"] != "system" for m in seen[-1])
     assert PROMPT_V2_SYSTEM in seen[-1][0]["content"]
