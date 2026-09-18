@@ -12,7 +12,8 @@ First release.
   pools; the set whose complete candidate rows tokenize most cleanly wins).
   `--scoring labels` scores real choice text when spelling is the signal.
 - Multi-select fields as independent per-option yes/no decisions plus an
-  always-on count row (`<field>#count`, buckets 0..4+) that reconciles the
+  always-on count row (`<field>#count`, answer codes '0'..'4' where 4 means
+  four or more) that reconciles the
   selected set to the top-k options when its own confidence clears a margin
   gate; otherwise the per-option rule stands.
 - Hard set constraints for multi fields: declare mutually-exclusive / at-most

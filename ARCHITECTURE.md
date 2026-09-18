@@ -1,8 +1,8 @@
 # ARCHITECTURE.md
 
-For people who want to read or change the code. Line references cite
-`file:line` at the time of writing (branch point `a26a114`); trust the code
-over this document when they drift.
+For people who want to read or change the code. References cite function,
+constant, and key names (they survive refactors; line numbers don't) —
+trust the code over this document when they drift.
 
 ## Module map
 
@@ -51,40 +51,39 @@ schema (Pydantic or JSON)
 plan {lead_in_ids, fields: {shared_ids, remainders/trie, alias_map?, count?}}
   │  (identity-keyed plan cache per tokenizer; weakref-evicted)
   ▼
-prompt  (PROMPT_VERSION = "jevmlx-parallel-v7", engine.py:36;
-  │      system paragraph engine.py:300, user schema block + <<<CONTEXT …>>>:
-  │      engine.py:1430-1434; chat template via PromptProfile)
-  │  prefill ONCE (engine.py:1446-1453)  →  KV cache  →  broadcast ×rows
-  │    (prior pass runs first only with prior_correction, engine.py:1365)
+prompt  (PROMPT_VERSION = "jevmlx-parallel-v7" from the engine;
+  │      PROMPT_V2_SYSTEM paragraph, user schema block + <<<CONTEXT …>>>
+  │      built inside run_parallel_generation; chat template via PromptProfile)
+  │  prefill ONCE (make_prompt_cache + model(base_arr))  →  KV cache
+  │    →  broadcast ×rows (prior pass runs first only with prior_correction)
   ▼
-batched suffix pass(es)  (_score_rows engine.py:740; chunked by the memory
-  │    heuristic _rows_per_chunk engine.py:564, halve-and-retry on Metal
+batched suffix pass(es)  (_score_rows; chunked by the memory
+  │    heuristic _rows_per_chunk, halve-and-retry on Metal
   │    allocation failure, width bucketing)
   │  branch-point logits at each row's decision position (gather-only eval)
   ▼
 trie scoring  (score_trie: P(choice) = Π branch softmax factors, T applied
   │    once downstream; legal-mass logs per branch from the full-vocab
-  │    logsumexp, trie.py:125)
+  │    logsumexp)
   ▼
 near-tie rescore  (scalar top candidates and multi Y/N pairs inside
   │    INSTABILITY_BAND (5e-2 nats) rescored at the canonical batch=1 shape,
-  │    engine.py:1608-1645, 1959-1990; rescored_fields telemetry)
+  │    multi branch at option_pair, scalar at scores; rescored_fields telemetry)
   ▼
 multi selection  (calibrated log-odds a*(yes-no)+b > 0, else P(yes) >= 0.5;
   │    count row <field>#count reconciles the set to top-k by calibrated
-  │    log-odds when its margin clears COUNT_MARGIN_MIN = 0.7 nats,
-  │    engine.py:1731)
+  │    COUNT_MARGIN_MIN = 0.7 nats)
   ▼
 hard set constraints  (setcons.select_constrained_set: threshold/count
   │    propose, the exact DP picks the score-maximizing feasible set;
-  │    applies LAST, after count reconciliation — engine.py:1754-1770)
+  │    applies LAST, after count reconciliation)
   ▼
 constrained MAP  (case-level constraints: _constrained_map maximizes summed
-  │    log scores over the joint assignment, engine.py:2085-2110)
+  │    log scores over the joint assignment)
   ▼
 selective second pass  (depends_on children whose parent is confident and
   │    own margin low / MAP-changed: one conditioned batch=1 pass,
-  │    _selective_second_pass engine.py:994)
+  │    _selective_second_pass)
   ▼
 assembly  (winners → typed values via alias_map; multi = per-option Y/N
   │    codes at T=1; row codes '00','01',… map back to choices)
@@ -96,13 +95,13 @@ result dict  {parsed_json, field_telemetry, prompt_sha256, timing split, …}
 
 bench: after the engine load, jevmlx/parity.py runs the batch=1 vs batched
 vs chunked parity check over the four bundled presets and writes
-<model folder>/parity.json BEFORE any eval combo (bench.py:285-303, called
-at bench.py:403).
+<model folder>/parity.json BEFORE any eval combo (bench._run_model_parity,
+called in run_bench_models right after the engine load).
 ```
 
 ## Contracts
 
-### Engine result dict — `engine.py:2164-2204`
+### Engine result dict — the dict `run_parallel_generation` returns
 
 | Key | Meaning |
 |---|---|
@@ -123,7 +122,7 @@ at bench.py:403).
 | `field_telemetry` | `{field: entry}` — see next table. |
 | `num_fields` | Field count. |
 
-### `field_telemetry` entry — `engine.py:1781-1845` (multi), `:2044-2084` (scalar), `:1862-1882` (count row)
+### `field_telemetry` entry — built in `run_parallel_generation`'s field loop (multi), scalar branch, and the `<field>#count` branch
 
 | Key | Meaning |
 |---|---|
@@ -135,7 +134,7 @@ at bench.py:403).
 | `per_option` | multi only: independent per-option P(yes) (post prior/softmax). |
 | `option_logit_pairs` | multi only: raw [yes, no] logits per option at T=1 (what the prior cache and the multi calibrator consume). |
 | `calibrated` | multi only: the applied `{"a", "b"}` pooled-logistic calibrator, or None (fixed P(yes) >= 0.5 rule; the threshold knob is deleted). With calibration, `calibrated_log_odds` rides alongside. |
-| `count_choice` / `count_margin` / `reconciled_by` | multi only: the `<field>#count` row's winning bucket ('0'..'4+'), its top-2 log-score margin (nats), and which rule produced the selected set ('count' when the margin cleared `COUNT_MARGIN_MIN`, else 'per_option'). The count row itself surfaces as a separate `<field>#count` telemetry entry (scalar-shaped, `margin_nats`). |
+| `count_choice` / `count_margin` / `reconciled_by` | multi only: the `<field>#count` row's winning bucket ('0'..'4', where 4 means four or more), its top-2 log-score margin (nats), and which rule produced the selected set ('count' when the margin cleared `COUNT_MARGIN_MIN`, else 'per_option'). The count row itself surfaces as a separate `<field>#count` telemetry entry (scalar-shaped, `margin_nats`). |
 | `set_constraints` / `set_selection` | multi only, present only when the field declares set constraints: the constraints verbatim and whether the solver changed the selection ("constraints") or they didn't bind ("per_option"). |
 | `margin` | Multi only: min \|P(yes) - cut\| over the final set in probability units (engine-side name; the API exposes it as `threshold_distance`; an option forced in against its P(yes) shows 0). |
 | `top_choices` | Top (choice, probability) pairs, most probable first (top 5). |
@@ -145,7 +144,7 @@ at bench.py:403).
 | `legal_mass_logs` | Per-choice (scalar) / per-option (multi) natural-log legal-mass product along the branch path, keyed by the real choice/option string. Raw, T=1. Calibration feature for the abstention model. |
 | `oracle_prediction` / `oracle_log_scores` | Present only under `oracle_overrides` (DAG evaluation): the field was forced to the given value and re-scored conditioned on it. |
 
-### `FieldResult` — `api.py:69-109` (built by `_build_field_results`, `api.py:276-350`)
+### `FieldResult` — `api.FieldResult` (built by `_build_field_results`)
 
 | Field | Meaning |
 |---|---|
@@ -160,7 +159,7 @@ at bench.py:403).
 | `alternatives` | Top 3 (choice, probability) pairs; multi: per-option (option, P(yes)) sorted desc. |
 | `reason` | None, `"none_of_above"` (caller opted in via `allow_none_of_above=True`, model picked the explicit opt-out → None), or `"abstain"` (`abstain_below_margin` set and the field's margin — `probability_margin` scalar / `threshold_distance` multi — fell below the cut; value withheld from the validated instance, raw kept for provenance). The single source of truth — no separate abstain flag. |
 
-### Case-level constraints — `constraints.py`, applied at `engine.py:2085`
+### Case-level constraints — `constraints.py`, applied by `_constrained_map`
 
 | Type | Shape | Meaning |
 |---|---|---|
@@ -168,11 +167,11 @@ at bench.py:403).
 | `excludes` | `{field, value, other}` | when `field == value`, `other` must be empty/falsy. |
 | `exclusivity` | `{group}` | at most one member of the group may hold a value. |
 
-`check_constraint` (constraints.py:18) is the one evaluator, shared by the
+`check_constraint` is the one evaluator, shared by the
 engine's MAP reconciliation and `evalmetrics.constraint_violation_rate`;
-`validate_constraints` (constraints.py:62) checks shapes up front.
+`validate_constraints` checks shapes up front.
 
-### Per-field set constraints — `schema.py:261` (`compile_set_constraints`), solver `setcons.py`
+### Per-field set constraints — `FieldDefinition.compile_set_constraints`, solver `setcons.select_constrained_set`
 
 Schema-dict key `set_constraints` on a multi field; validated at
 construction, so contradictory sets raise `SchemaCompileError` before any
@@ -184,10 +183,10 @@ unknown options, self-implication. The solver selects the score-maximizing
 feasible set (calibrated log-odds, else raw yes/no log-odds); non-binding
 constraint sets reproduce the proposal exactly.
 
-### `parity.json` — producer `parity.py:171` (`write_parity_json`), gate `check_results.py`
+### `parity.json` — producer `parity.write_parity_json`, gate `summarize_results`
 
 Written by the bench into each model folder right after the engine load
-(`bench.py:285-303`), before any eval combo:
+(`bench._run_model_parity`), before any eval combo:
 
 ```json
 {
@@ -209,10 +208,10 @@ match `parity.py` verbatim: `model`, `prompt_version`, `max_abs_drift_nats`,
 `run_at`.)
 
 One check, two consumers: the slow parity test and the bench share
-`check_scoring_parity` (parity.py:73). A model without a passing
-`parity.json` gets `parity_failed` rows in SUMMARY.md
-(`summarize_results.py:158`, which also gates a MISSING parity.json) and
-cannot enter the README compat table.
+`check_scoring_parity`. A model without a passing `parity.json` gets
+`parity_failed` rows in SUMMARY.md (`summarize_results._model_parity_note`,
+which also gates a MISSING parity.json) and cannot enter the README compat
+table.
 
 ### Eval `cases.jsonl` line — writers: `to_jsonl.py`, `typesafe/fetch.py`
 
@@ -226,10 +225,10 @@ cannot enter the README compat table.
 | `schema` | Field → {type, description, choices}. |
 | `context` | Documents rendered into one string. |
 | `labels` | Field → consensus label. |
-| `split` | `train`/`holdout` (TypeSafe: deterministic sha1-of-id rule, fetch.py:63; synthetic: every fifth case). |
+| `split` | `train`/`holdout` (TypeSafe: deterministic sha1-of-id rule in the fetcher's `split_for`; synthetic: every fifth case). |
 | `meta` | Provenance: consensus distributions, ambiguity, per-model answers. |
 
-### `predictions.jsonl` line — `evalrun.py:59-83` (`PREDICTION_LINE_KEYS`), written at `:504`
+### `predictions.jsonl` line — `evalrun.PREDICTION_LINE_KEYS` (frozen), written by `run_eval`
 
 Frozen contract; `check_results.py` imports this list instead of retyping it.
 
@@ -243,7 +242,7 @@ Frozen contract; `check_results.py` imports this list instead of retyping it.
 | `error`, `salvage_prediction` | Failure provenance. |
 | `perturbation`, `consensus` | Optional; present only with `carry_perturbation` / `carry_consensus`. |
 
-### `run.json` — `evalrun.py:334, 462-502`
+### `run.json` — written by `run_eval`
 
 `run_id`, `environment`, `config` (model, temperature 1.0, track,
 dataset_path, permutations, split, model_revision, quantization,
@@ -251,7 +250,7 @@ prompt_version read from the engine, tokenizer chat-template SHA-256,
 compiled plan SHA-256, dataset lock SHA-256), and `counts` (cases, fields,
 prediction_lines).
 
-### `dataset.lock.json` — `typesafe/fetch.py:455-472` (`write_outputs`), `to_jsonl.py:61-75`
+### `dataset.lock.json` — `typesafe/fetch.write_outputs` and `to_jsonl.main`
 
 TypeSafe: `sources` [{url, sha256, fetched_at, etag}], `parser_version`,
 `counts`, `cases_sha256` (sha256 of the JSONL written next to it). Bundled
@@ -265,12 +264,13 @@ conversion: same shape with empty `sources` plus `fetched_at`.
   score tokens the model never sees.
 - **One lead-in for every row.** Plans store suffixes *without* the schema
   lead-in; the engine prepends it exactly once per row, one rule for scalar,
-  multi, count, and cardinality-1 rows (`engine.py:1398-1424`).
-- **Compile-time rejections** (`schema.py:443-495`): dots/slashes/'#' in
-  field names (row-key injectivity), duplicate choices (schema.py:252),
-  token-identical alias candidates (schema.py:737, count:917, labels:1024),
-  strict token-prefix pairs (schema.py:741), candidates sharing no token
-  prefix (schema.py:748), contradictory set constraints (schema.py:402) —
+  multi, count, and cardinality-1 rows (the row-build loop in
+  `run_parallel_generation`).
+- **Compile-time rejections** (`StructuredSchema.__init__` + plan
+  compilation): dots/slashes/'#' in field names (row-key injectivity),
+  duplicate choices, token-identical alias candidates (alias, count-row,
+  and labels compilers), strict token-prefix pairs, candidates sharing no
+  token prefix, contradictory set constraints (`compile_set_constraints`) —
   all raise before any model load.
 - **Probability semantics.** `log_scores` are constrained-path log
   probabilities at T=1; temperature is applied once to the final per-choice
@@ -278,12 +278,11 @@ conversion: same shape with empty `sources` plus `fetched_at`.
   a fitted calibrator runs. For multi fields `probability` is `None` — the
   engine does not claim a field-level probability for an option set
   (per-option decisions only).
-- **One tolerance number.** `INSTABILITY_BAND` (engine.py:561, 5e-2 nats)
-  is the single source of truth for batch-shape FP noise; the test suite
-  re-exports it as `PARITY_ATOL` (tests/conftest.py:22) and `parity.json`
-  records it as `atol`. Near-tie rescoring, the parity test, the memory probe,
-  and the parity producer all read the same constant — no second
-  tolerance literal anywhere.
+- **One tolerance number.** `engine.INSTABILITY_BAND` (5e-2 nats) is the
+  single source of truth for batch-shape FP noise; the test suite re-exports
+  it as `PARITY_ATOL` and `parity.json` records it as `atol`. Near-tie
+  rescoring, the parity test, the memory probe, and the parity producer all
+  read the same constant — no second tolerance literal anywhere.
 - **One parity implementation.** The slow test and the bench's
   `parity.json` producer call the same `jevmlx/parity.py` function; recorded
   parity and tested parity cannot drift apart.
@@ -292,7 +291,7 @@ conversion: same shape with empty `sources` plus `fetched_at`.
   attribute read directly (no getattr fallback); `summarize` lives in
   `benchmarks/summarize_results.py` and bench calls it directly.
 - **Prompt version read, never written.** `PROMPT_VERSION` lives once in
-  `engine.py:36`; every consumer (result dict, prior cache key, parity
+  `jevmlx.engine`; every consumer (result dict, prior cache key, parity
   payload) reads it.
 - **No backward compatibility.** Changes replace: old paths, keys, flags and
   names are deleted with their callers and tests in the same change. No
@@ -304,7 +303,7 @@ conversion: same shape with empty `sources` plus `fetched_at`.
   exercised through `tests/test_engine_fake.py` (`FakeModel` +
   `FakeTokenizer`), a fake tokenizer mapping words to crc32 ids in
   `tests/test_lint.py`, and `decide_fn` seams in `tests/test_evalrun.py`.
-- Slow tests (marker `slow`, `pyproject.toml:54-56`) load
+- Slow tests (marker `slow`) load
   `mlx-community/Qwen2.5-0.5B-Instruct-4bit`. Run one locally with
   `uv run pytest tests/test_engine.py -m slow -k slots -q`.
 - The parity check has both paths by design: exact assertions on the
@@ -319,7 +318,7 @@ conversion: same shape with empty `sources` plus `fetched_at`.
 1. **Trie over first tokens.** Scoring whole choices as branch paths gives a
    proper distribution and lets shared token prefixes be paid for once.
 2. **Codebook search, not pinned letters.** The compiler searches alias
-   codes per field and tokenizer (`schema.py:72`) and picks the set whose
+   codes per field and tokenizer (`_search_codebook`) and picks the set whose
    complete rows tokenize most cleanly (branch nodes, trie depth, length
    variance); a pinned index-based mapping survives only as a documented
    fallback for index-based callers.
