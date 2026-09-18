@@ -8,54 +8,11 @@ parity_failed in SUMMARY.md and cannot enter the README compat table
 """
 
 import json
-import sys
 
 import pytest
-
-sys.path.insert(0, "tests")
-
-from conftest import PARITY_ATOL  # noqa: E402 (engine fixture now shared too)
-
-
-class _CountTokenizer:
-    name_or_path = "fake-w4b"
-    pad_token_id = 0
-
-    def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
-        return [ord(c) % 97 + 1 for c in text] or [1]
-
-    def apply_chat_template(self, messages, add_generation_prompt=True, tokenize=True):
-        assert tokenize
-        return self.encode("\n".join(m["content"] for m in messages))
-
-
-class _StableModel:
-    """Deterministic, batch-shape-independent outputs (the FakeModel path:
-    parity is EXACT — drift 0.0, winners identical)."""
-
-    def __init__(self, vocab: int = 128, winner_bias: float = 1.0):
-        self.vocab_size = vocab
-        self.n_layers = 2
-        self.args = type("Args", (), {"vocab_size": vocab})()
-        self.layers = [None] * self.n_layers
-        self.winner_bias = winner_bias
-
-    def parameters(self):
-        return {}
-
-    def __call__(self, tokens, cache=None):
-        import mlx.core as mx
-
-        batch, seq_len = tokens.shape
-        if cache is not None:
-            for c in cache:
-                c.update_and_fetch(
-                    mx.zeros((batch, 2, seq_len, 8)), mx.zeros((batch, 2, seq_len, 8))
-                )
-        out = mx.zeros((batch, seq_len, self.vocab_size))
-        out[:, :, ord("Y") % 97 + 1] = self.winner_bias
-        out[:, :, ord("N") % 97 + 1] = -self.winner_bias
-        return out
+from conftest import PARITY_ATOL
+from conftest import YNLogitModel as _StableModel
+from conftest import _Mod97Tokenizer as _CountTokenizer
 
 
 class _DriftingModel(_StableModel):

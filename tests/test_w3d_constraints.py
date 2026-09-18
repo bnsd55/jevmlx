@@ -9,6 +9,7 @@ F2: decide()/decide_many() accept constraints=, CLI --constraints path, and
 from __future__ import annotations
 
 import pytest
+from conftest import make_engine_result, make_field_telemetry
 
 from jevmlx.constraints import check_constraint, validate_constraints
 
@@ -82,27 +83,16 @@ def test_decide_passes_constraints_to_engine(monkeypatch):
         constraints=None,
     ):
         captured["constraints"] = constraints
-        return {
-            "parsed_json": {"risk": {"value": "LOW"}},
-            "field_telemetry": {"risk": {"value": "LOW", "probability": 0.9}},
-            "confidence_model": "slots",
-            "elapsed_ms": 5.0,
-            "prompt_sha256": "abc",
-            "prompt_version": "v6",
-            "probability_status": "test",
-            "prior_correction": False,
-            "constraints_applied": True,
-            "reconciled_fields": ["risk"],
-            "prior_ms": 0.0,
-            "prefill_ms": 1.0,
-            "suffix_eval_ms": 1.0,
-            "lm_head_gather_ms": 1.0,
-            "total_ms": 5.0,
-            "total_tokens_generated": 0,
-            "sequential_forward_passes": 1,
-            "schema_match": True,
-            "num_fields": 1,
-        }
+        return make_engine_result(
+            fields={
+                "risk": make_field_telemetry(value="LOW", choices=["LOW", "HIGH"], probability=0.9)
+            },
+            parsed={"risk": {"value": "LOW"}},
+            prompt_version="v6",
+            probability_status="test",
+            constraints_applied=True,
+            reconciled_fields=["risk"],
+        )
 
     monkeypatch.setattr("jevmlx.api.load_engine", lambda model: (object(), object()))
     monkeypatch.setattr("jevmlx.api.run_parallel_generation", fake_run_parallel)
@@ -146,27 +136,15 @@ def test_decide_many_passes_constraints_to_engine(monkeypatch):
         constraints=None,
     ):
         captured.append(constraints)
-        return {
-            "parsed_json": {"risk": {"value": "LOW"}},
-            "field_telemetry": {"risk": {"value": "LOW", "probability": 0.9}},
-            "confidence_model": "slots",
-            "elapsed_ms": 5.0,
-            "prompt_sha256": "abc",
-            "prompt_version": "v6",
-            "probability_status": "test",
-            "prior_correction": False,
-            "constraints_applied": True,
-            "reconciled_fields": [],
-            "prior_ms": 0.0,
-            "prefill_ms": 1.0,
-            "suffix_eval_ms": 1.0,
-            "lm_head_gather_ms": 1.0,
-            "total_ms": 5.0,
-            "total_tokens_generated": 0,
-            "sequential_forward_passes": 1,
-            "schema_match": True,
-            "num_fields": 1,
-        }
+        return make_engine_result(
+            fields={
+                "risk": make_field_telemetry(value="LOW", choices=["LOW", "HIGH"], probability=0.9)
+            },
+            parsed={"risk": {"value": "LOW"}},
+            prompt_version="v6",
+            probability_status="test",
+            constraints_applied=True,
+        )
 
     monkeypatch.setattr("jevmlx.api.load_engine", lambda model: (object(), object()))
     monkeypatch.setattr("jevmlx.api.run_parallel_generation", fake_run_parallel)
@@ -200,8 +178,6 @@ def test_evalrun_constraint_violation_rate_zero_with_map(monkeypatch):
     """A constrained fixture where the independent argmax would violate an
     implies constraint, but the MAP reconciler flips the child. The
     evalrun records carry constraints and constraint_violation_rate hits 0."""
-    import math
-
     import jevmlx.engine as engine_mod
     import jevmlx.evalrun as er
     from jevmlx.evalmetrics import constraint_violation_rate
@@ -226,49 +202,22 @@ def test_evalrun_constraint_violation_rate_zero_with_map(monkeypatch):
     ):
         # Simulate the constrained MAP: with constraints, subtype flips to refund.
         reconciled_subtype = "refund" if constraints else "bug"
-        return {
-            "field_telemetry": {
-                "intent": {
-                    "value": "billing",
-                    "type": "enum",
-                    "probability": 0.9,
-                    "log_scores": {
-                        "billing": math.log(0.9),
-                        "technical": math.log(0.1),
-                    },
-                },
-                "subtype": {
-                    "value": reconciled_subtype,
-                    "type": "enum",
-                    "probability": 0.3 if constraints else 0.55,
-                    "log_scores": {
-                        "refund": math.log(0.3),
-                        "dispute": math.log(0.15),
-                        "bug": math.log(0.55),
-                    },
-                },
+        return make_engine_result(
+            fields={
+                "intent": make_field_telemetry(
+                    value="billing",
+                    choices=["billing", "technical"],
+                    probability=0.9,
+                ),
+                "subtype": make_field_telemetry(
+                    value=reconciled_subtype,
+                    choices=["refund", "dispute", "bug"],
+                    probability=0.3 if constraints else 0.55,
+                ),
             },
-            "elapsed_ms": 5.0,
-            "rows": 2,
-            "passes": 1,
-            # W3-R review F2: parallel_decide_fn reads the timing split
-            # strictly — the fake carries the engine's full result shape.
-            "prior_ms": 0.0,
-            "prefill_ms": 2.0,
-            "plan_compile_ms": 0.1,
-            "cache_broadcast_ms": 0.2,
-            "suffix_eval_ms": 2.5,
-            "lm_head_gather_ms": 0.3,
-            "second_pass_ms": 0.0,
-            "total_ms": 5.0,
-            "peak_active_bytes": 1024,
-            "padded_token_positions": 6,
-            "rescored_fields": [],
-            "rerun_fields": [],
-            "num_fields": 1,
-            "constraints_applied": bool(constraints),
-            "reconciled_fields": ["subtype"] if constraints else [],
-        }
+            constraints_applied=bool(constraints),
+            reconciled_fields=["subtype"] if constraints else [],
+        )
 
     monkeypatch.setattr(engine_mod, "run_parallel_generation", fake_rpg)
     decide = er.parallel_decide_fn(model=object(), tokenizer=object())
@@ -319,8 +268,6 @@ def test_evalrun_constraint_violation_without_map(monkeypatch):
     """Without constraints (no MAP), the independent argmax violates the
     implies constraint -> violation_rate > 0. This proves the MAP actually
     prevents the violation in the test above."""
-    import math
-
     import jevmlx.engine as engine_mod
     import jevmlx.evalrun as er
     from jevmlx.evalmetrics import constraint_violation_rate
@@ -337,46 +284,20 @@ def test_evalrun_constraint_violation_without_map(monkeypatch):
         oracle_overrides=None,
     ):
         # No MAP: subtype stays at argmax 'bug'.
-        return {
-            "field_telemetry": {
-                "intent": {
-                    "value": "billing",
-                    "type": "enum",
-                    "probability": 0.9,
-                    "log_scores": {"billing": math.log(0.9), "technical": math.log(0.1)},
-                },
-                "subtype": {
-                    "value": "bug",
-                    "type": "enum",
-                    "probability": 0.55,
-                    "log_scores": {
-                        "refund": math.log(0.3),
-                        "dispute": math.log(0.15),
-                        "bug": math.log(0.55),
-                    },
-                },
-            },
-            "elapsed_ms": 5.0,
-            "rows": 2,
-            "passes": 1,
-            # W3-R review F2: parallel_decide_fn reads the timing split
-            # strictly — the fake carries the engine's full result shape.
-            "prior_ms": 0.0,
-            "prefill_ms": 2.0,
-            "plan_compile_ms": 0.1,
-            "cache_broadcast_ms": 0.2,
-            "suffix_eval_ms": 2.5,
-            "lm_head_gather_ms": 0.3,
-            "second_pass_ms": 0.0,
-            "total_ms": 5.0,
-            "peak_active_bytes": 1024,
-            "padded_token_positions": 6,
-            "rescored_fields": [],
-            "rerun_fields": [],
-            "num_fields": 1,
-            "constraints_applied": False,
-            "reconciled_fields": [],
-        }
+        return make_engine_result(
+            fields={
+                "intent": make_field_telemetry(
+                    value="billing",
+                    choices=["billing", "technical"],
+                    probability=0.9,
+                ),
+                "subtype": make_field_telemetry(
+                    value="bug",
+                    choices=["refund", "dispute", "bug"],
+                    probability=0.55,
+                ),
+            }
+        )
 
     monkeypatch.setattr(engine_mod, "run_parallel_generation", fake_rpg)
     decide = er.parallel_decide_fn(model=object(), tokenizer=object())

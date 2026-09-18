@@ -2,6 +2,7 @@ import enum
 from typing import Literal
 
 import pytest
+from conftest import make_engine_result, make_field_telemetry
 from pydantic import BaseModel, Field
 
 import jevmlx
@@ -78,39 +79,41 @@ def test_decide_many_uses_one_engine_and_one_schema(monkeypatch):
         constraints=None,
     ):
         run_calls.append((engine_model, tokenizer, context, schema, temperature))
-        return {
-            "parsed_json": {
+        return make_engine_result(
+            fields={
+                "is_fraudulent": make_field_telemetry(
+                    value=True, type_="boolean", choices=["true", "false"], probability=0.9
+                ),
+                "risk_tier": make_field_telemetry(
+                    value="HIGH", choices=["LOW", "MEDIUM", "HIGH"], probability=0.8
+                ),
+            },
+            parsed={
                 "is_fraudulent": {"value": True},
                 "risk_tier": {"value": "HIGH"},
             },
-            "field_telemetry": {
-                "is_fraudulent": {"value": True, "probability": 0.9},
-                "risk_tier": {"value": "HIGH", "probability": 0.8},
-            },
-            "confidence_model": "slots",
-            "elapsed_ms": 5.0,
-        }
+        )
 
     monkeypatch.setattr("jevmlx.api.load_engine", fake_load_engine)
     monkeypatch.setattr("jevmlx.api.run_parallel_generation", fake_run_parallel)
 
     def fake_batched(engine, tok, contexts, schema, **k):
         run_calls.extend((engine, tok, ctx, schema, k.get("temperature")) for ctx in contexts)
-        return [
-            {
-                "parsed_json": {
-                    "is_fraudulent": {"value": True},
-                    "risk_tier": {"value": "HIGH"},
-                },
-                "field_telemetry": {
-                    "is_fraudulent": {"value": True, "probability": 0.9},
-                    "risk_tier": {"value": "HIGH", "probability": 0.8},
-                },
-                "confidence_model": "slots",
-                "elapsed_ms": 5.0,
-            }
-            for _ctx in contexts
-        ]
+        result = make_engine_result(
+            fields={
+                "is_fraudulent": make_field_telemetry(
+                    value=True, type_="boolean", choices=["true", "false"], probability=0.9
+                ),
+                "risk_tier": make_field_telemetry(
+                    value="HIGH", choices=["LOW", "MEDIUM", "HIGH"], probability=0.8
+                ),
+            },
+            parsed={
+                "is_fraudulent": {"value": True},
+                "risk_tier": {"value": "HIGH"},
+            },
+        )
+        return [result for _ in contexts]
 
     monkeypatch.setattr("jevmlx.api.run_parallel_generation_batched", fake_batched)
 
@@ -377,19 +380,18 @@ def test_allow_none_of_above_appends_choice_and_maps_to_none(monkeypatch):
     def fake_run_parallel(engine_model, tokenizer, context, schema, **kwargs):
         captured["choices"] = schema.fields["risk_tier"].choices
         captured["descriptions"] = schema.fields["risk_tier"].choice_descriptions
-        return {
-            "parsed_json": {"risk_tier": {"value": "NONE_OF_ABOVE"}},
-            "field_telemetry": {
-                "risk_tier": {
-                    "value": "NONE_OF_ABOVE",
-                    "probability": 0.4,
-                    "log_scores": {"LOW": -2.1, "HIGH": -3.0, "NONE_OF_ABOVE": -1.1},
-                    "top_choices": [{"choice": "NONE_OF_ABOVE", "probability": 0.4}],
-                }
+        return make_engine_result(
+            fields={
+                "risk_tier": make_field_telemetry(
+                    value="NONE_OF_ABOVE",
+                    choices=["LOW", "HIGH", "NONE_OF_ABOVE"],
+                    probability=0.4,
+                    log_scores={"LOW": -2.1, "HIGH": -3.0, "NONE_OF_ABOVE": -1.1},
+                    top_choices=[{"choice": "NONE_OF_ABOVE", "probability": 0.4}],
+                )
             },
-            "confidence_model": "slots",
-            "elapsed_ms": 5.0,
-        }
+            parsed={"risk_tier": {"value": "NONE_OF_ABOVE"}},
+        )
 
     monkeypatch.setattr("jevmlx.api.load_engine", lambda model_id: ("engine", "tokenizer"))
     monkeypatch.setattr("jevmlx.api.run_parallel_generation", fake_run_parallel)
@@ -427,12 +429,14 @@ def test_allow_none_of_above_off_leaves_schema_untouched(monkeypatch):
 
     def fake_run_parallel(engine_model, tokenizer, context, schema, **kwargs):
         captured["choices"] = schema.fields["risk_tier"].choices
-        return {
-            "parsed_json": {"risk_tier": {"value": "LOW"}},
-            "field_telemetry": {"risk_tier": {"value": "LOW", "probability": 0.9}},
-            "confidence_model": "slots",
-            "elapsed_ms": 5.0,
-        }
+        return make_engine_result(
+            fields={
+                "risk_tier": make_field_telemetry(
+                    value="LOW", choices=["LOW", "HIGH"], probability=0.9
+                )
+            },
+            parsed={"risk_tier": {"value": "LOW"}},
+        )
 
     monkeypatch.setattr("jevmlx.api.load_engine", lambda model_id: ("engine", "tokenizer"))
     monkeypatch.setattr("jevmlx.api.run_parallel_generation", fake_run_parallel)
@@ -455,31 +459,29 @@ def test_allow_none_of_above_rejects_existing_choice():
 def _abstain_result(margin: float):
     """Engine result shaped so risk_tier's probability_margin == margin."""
     p1, p2 = 0.5 + margin / 2, 0.5 - margin / 2
-    return {
-        "parsed_json": {"risk_tier": {"value": "HIGH"}, "tags": {"value": ["a"]}},
-        "field_telemetry": {
-            "risk_tier": {
-                "value": "HIGH",
-                "probability": p1,
-                "log_scores": {"LOW": -1.0, "HIGH": -0.5},
-                "top_choices": [
+    return make_engine_result(
+        fields={
+            "risk_tier": make_field_telemetry(
+                value="HIGH",
+                choices=["HIGH", "LOW"],
+                probability=p1,
+                log_scores={"LOW": -1.0, "HIGH": -0.5},
+                top_choices=[
                     {"choice": "HIGH", "probability": p1},
                     {"choice": "LOW", "probability": p2},
                 ],
-            },
-            "tags": {
-                "value": ["a"],
-                "type": "multi",
-                "probability": None,
-                "margin": margin,
-                "per_option": {"a": 0.5 + margin / 2, "b": 0.5 - margin / 2},
-                "top_choices": [],
-                "rows": 2,
-            },
+            ),
+            "tags": make_field_telemetry(
+                type_="multi",
+                choices=["a", "b"],
+                value=["a"],
+                per_option={"a": p1, "b": p2},
+                margin=margin,
+                top_choices=[],
+            ),
         },
-        "confidence_model": "slots",
-        "elapsed_ms": 5.0,
-    }
+        parsed={"risk_tier": {"value": "HIGH"}, "tags": {"value": ["a"]}},
+    )
 
 
 class AbstainModel(BaseModel):
@@ -598,29 +600,30 @@ def test_decide_many_abstain(monkeypatch):
 
 
 def _fake_result(confidence_model="slots"):
-    return {
-        "parsed_json": {"risk_tier": {"value": "HIGH"}, "tags": {"value": ["a"]}},
-        "field_telemetry": {
-            "risk_tier": {
-                "value": "HIGH",
-                "probability": 0.7,
-                "log_scores": {"LOW": -0.5, "HIGH": -0.1, "CRITICAL": -2.0},
-                "top_choices": [
+    return make_engine_result(
+        fields={
+            "risk_tier": make_field_telemetry(
+                value="HIGH",
+                choices=["HIGH", "LOW", "CRITICAL"],
+                probability=0.7,
+                log_scores={"LOW": -0.5, "HIGH": -0.1, "CRITICAL": -2.0},
+                top_choices=[
                     {"choice": "HIGH", "probability": 0.7},
                     {"choice": "LOW", "probability": 0.2},
                     {"choice": "CRITICAL", "probability": 0.1},
                 ],
-            },
-            "tags": {
-                "value": ["a"],
-                "probability": None,
-                "per_option": {"a": 0.8, "b": 0.1},
-                "margin": 0.3,
-            },
+            ),
+            "tags": make_field_telemetry(
+                type_="multi",
+                choices=["a", "b"],
+                value=["a"],
+                per_option={"a": 0.8, "b": 0.1},
+                margin=0.3,
+            ),
         },
-        "confidence_model": confidence_model,
-        "elapsed_ms": 5.0,
-    }
+        parsed={"risk_tier": {"value": "HIGH"}, "tags": {"value": ["a"]}},
+        confidence_model=confidence_model,
+    )
 
 
 def test_field_result_built_from_fake_engine_result(monkeypatch):

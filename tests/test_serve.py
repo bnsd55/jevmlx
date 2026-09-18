@@ -8,10 +8,14 @@ import urllib.request
 from http.server import HTTPServer
 
 import pytest
+from conftest import make_engine_result, make_field_telemetry
 
 from jevmlx.serve import make_handler
 
-FAKE_RESULT = {"parsed_json": {"action": {"value": "APPROVE", "prob": 0.9}}, "elapsed_ms": 1.0}
+FAKE_RESULT = make_engine_result(
+    fields={"action": make_field_telemetry(value="APPROVE", choices=["APPROVE"], probability=0.9)},
+    elapsed_ms=1.0,
+)
 
 
 def _start_server(decide_fn, model_id="fake"):

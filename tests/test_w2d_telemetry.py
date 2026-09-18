@@ -12,11 +12,11 @@ within atol PARITY_ATOL).
 import math
 
 import pytest
+from conftest import FakeModel, FakeTokenizer
 
 from jevmlx import StructuredSchema
 from jevmlx.engine import run_parallel_generation
 from jevmlx.trie import score_trie
-from tests.test_prompt_v2 import FakeModel, FakeTokenizer
 
 SCHEMA = StructuredSchema(
     {

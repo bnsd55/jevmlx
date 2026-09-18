@@ -8,6 +8,7 @@ import enum
 from typing import Literal
 
 import pytest
+from conftest import FakeModel, FakeTokenizer
 from pydantic import BaseModel
 
 import jevmlx.api as api
@@ -20,7 +21,6 @@ from jevmlx.engine import (
     run_parallel_generation,
 )
 from jevmlx.schema import StructuredSchema
-from tests.test_prompt_v2 import FakeModel, FakeTokenizer
 
 # --- bug 3 / Q5: PromptProfile -------------------------------------------------
 

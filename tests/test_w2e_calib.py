@@ -11,72 +11,12 @@ import math
 import random
 
 import pytest
+from conftest import YNLogitModel as _BiasedMultiModel
+from conftest import _Mod97Tokenizer as FakeTokenizer
 
 from jevmlx.calibrate import calibrated_log_odds, fit_logistic
 from jevmlx.engine import run_parallel_generation
 from jevmlx.schema import StructuredSchema
-
-
-class FakeTokenizer:
-    """Char tokenizer, ids start at 1."""
-
-    name_or_path = "fake-w2e2"
-    pad_token_id = 0
-
-    def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
-        return [ord(c) % 97 + 1 for c in text] or [1]
-
-    def apply_chat_template(self, messages, add_generation_prompt=True, tokenize=True):
-        assert tokenize
-        return self.encode("\n".join(m["content"] for m in messages))
-
-
-class _BiasedMultiModel:
-    """Returns per-row constant logits so each option's Y/N pair is known.
-
-    Row order is the batched chunk order; the logits the engine reads are
-    vocab-wide vectors. We key bias by (row length mod 7, row content hash)
-    — simpler: bias by the ROW's token identity of its last option char.
-    Instead of guessing rows, bias by option name letters: options 'hi' get
-    a strong yes bias, 'lo' a strong no bias. The model sees the padded row
-    ids; we can't decode them — so instead we make ALL rows return the same
-    logits vector with yes > no, and differentiate options through the
-    calibration test by injecting per-row logits via a closure the engine
-    cannot see... Simplest correct approach: constant logits; per-option
-    differences then don't exist, and the tests exercise sign/margin
-    mechanics rather than per-option separation (covered by fit tests).
-    """
-
-    # Remainder continuation ids (quoted \"Y\"/\"N\" rows): 'Y'->90, 'N'->79
-    # then '": ' ... — the DECISION happens at the first continuation token,
-    # so the bias lives on ids 90 (yes) and 79 (no).
-    YES_ID = ord("Y") % 97 + 1  # 90
-    NO_ID = ord("N") % 97 + 1  # 79
-
-    def __init__(self, yes_logit: float = 1.0, no_logit: float = -1.0, vocab: int = 128):
-        self.yes_logit = yes_logit
-        self.no_logit = no_logit
-        self.vocab_size = vocab
-        self.n_layers = 1
-        self.args = type("Args", (), {"vocab_size": vocab})()
-        self.layers = [None]
-
-    def parameters(self):
-        return {}
-
-    def __call__(self, tokens, cache=None):
-        import mlx.core as mx
-
-        batch, seq_len = tokens.shape
-        if cache is not None:
-            for c in cache:
-                c.update_and_fetch(
-                    mx.zeros((batch, 2, seq_len, 8)), mx.zeros((batch, 2, seq_len, 8))
-                )
-        out = mx.zeros((batch, seq_len, self.vocab_size))
-        out[:, :, self.YES_ID] = self.yes_logit
-        out[:, :, self.NO_ID] = self.no_logit
-        return out
 
 
 def _multi_schema():

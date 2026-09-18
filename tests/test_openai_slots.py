@@ -8,24 +8,11 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
+from conftest import FakeTokenizer as _FakeTokenizer
 
 from jevmlx.http import ChatCompletionsError
 from jevmlx.openai_slots import decide_openai
 from jevmlx.schema import StructuredSchema
-
-
-class _FakeTokenizer:
-    """Character tokenizer for schema-block rendering (W5-A plan-driven)."""
-
-    name_or_path = "fake-openai"
-
-    def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
-        return [ord(c) % 60 for c in text]
-
-    pad_token_id = 0
-
-    def __len__(self) -> int:
-        return 64
 
 
 def _tok() -> _FakeTokenizer:

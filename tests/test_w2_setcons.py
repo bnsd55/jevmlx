@@ -10,56 +10,11 @@ Telemetry: set_constraints (verbatim) + set_selection
 declares no set constraints.
 """
 
-import sys
-
 import pytest
+from conftest import YNLogitModel as _YNModel
+from conftest import _Mod97Tokenizer as _CountTokenizer
 
 from jevmlx.schema import SchemaCompileError, StructuredSchema
-
-sys.path.insert(0, "tests")
-
-
-class _CountTokenizer:
-    """Char tokenizer, ids = ord(c) % 97 + 1 (same shape as test_w2e_count)."""
-
-    name_or_path = "fake-w2setcons"
-    pad_token_id = 0
-
-    def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
-        return [ord(c) % 97 + 1 for c in text] or [1]
-
-    def apply_chat_template(self, messages, add_generation_prompt=True, tokenize=True):
-        assert tokenize
-        return self.encode("\n".join(m["content"] for m in messages))
-
-
-class _YNModel:
-    """Y always wins (P(yes) = sigmoid(2) ≈ 0.88 for every option)."""
-
-    def __init__(self, yes_logit: float = 1.0, no_logit: float = -1.0, vocab: int = 128):
-        self.yes_logit = yes_logit
-        self.no_logit = no_logit
-        self.vocab_size = vocab
-        self.n_layers = 2
-        self.args = type("Args", (), {"vocab_size": vocab})()
-        self.layers = [None] * self.n_layers
-
-    def parameters(self):
-        return {}
-
-    def __call__(self, tokens, cache=None):
-        import mlx.core as mx
-
-        batch, seq_len = tokens.shape
-        if cache is not None:
-            for c in cache:
-                c.update_and_fetch(
-                    mx.zeros((batch, 2, seq_len, 8)), mx.zeros((batch, 2, seq_len, 8))
-                )
-        out = mx.zeros((batch, seq_len, self.vocab_size))
-        out[:, :, ord("Y") % 97 + 1] = self.yes_logit
-        out[:, :, ord("N") % 97 + 1] = self.no_logit
-        return out
 
 
 def _schema(constraints, choices=("x", "y", "z")):

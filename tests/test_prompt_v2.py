@@ -1,56 +1,12 @@
 """Prompt v2 (jevmlx-parallel-v8) contract tests: system + user messages,
 hard-delimited context, and the neutral alias schema block."""
 
-import mlx.core as mx
 import pytest
+from conftest import FakeModel, FakeTokenizer
 from jinja2.exceptions import TemplateError
 
 from jevmlx.engine import PROMPT_V2_SYSTEM, PROMPT_VERSION, run_parallel_generation
 from jevmlx.schema import StructuredSchema, _alias_code
-
-
-class FakeModel:
-    """Minimal model: zeros logits, real KVCache objects sized by layers."""
-
-    def __init__(self, vocab_size: int = 64, n_layers: int = 2):
-        self.vocab_size = vocab_size
-        self.n_layers = n_layers
-        self.args = type("Args", (), {"vocab_size": vocab_size})()
-        self.layers = [None] * n_layers  # make_prompt_cache counts these
-
-    def parameters(self):
-        return {}
-
-    def __call__(self, tokens, cache=None):
-        batch, seq_len = tokens.shape
-        if cache is not None:
-            for c in cache:
-                # Drive the cache like a real layer (update_and_fetch): the
-                # merge-based broadcast produces BatchKVCache whose offsets a
-                # direct keys/values stomp cannot maintain.
-                c.update_and_fetch(
-                    mx.zeros((batch, 2, seq_len, 8)), mx.zeros((batch, 2, seq_len, 8))
-                )
-        return mx.zeros((batch, seq_len, self.vocab_size))
-
-
-class FakeTokenizer:
-    """Character tokenizer mirroring test_engine_fake's fake."""
-
-    name_or_path = "fake-prompt"
-
-    def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
-        return [ord(c) % 60 for c in text]
-
-    pad_token_id = 0
-
-    def apply_chat_template(self, messages, add_generation_prompt=True, tokenize=True):
-        assert tokenize
-        return self.encode("\n".join(m["content"] for m in messages))
-
-    def __len__(self) -> int:
-        return 64
-
 
 SCHEMA = StructuredSchema(
     {
