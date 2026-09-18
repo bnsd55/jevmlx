@@ -243,6 +243,11 @@ def make_field_telemetry(
             "count_margin": count_margin,
             "reconciled_by": reconciled_by,
             "legal_mass": 1.0,
+            # W5-D finding 38: cardinality-free field-level stats replace the
+            # old underflowing product as the headline numbers; the per-option
+            # logs stay on legal_mass_logs.
+            "min_option_legal_mass": 1.0,
+            "mean_log_legal_mass": 0.0,
             "legal_mass_logs": {o: 0.0 for o in opts},
             "rescored": False,
         }
@@ -261,6 +266,10 @@ def make_field_telemetry(
             ],
             "rows": 5,
             "margin_nats": count_margin,
+            # W5-D finding 38: the count row exposes its own legal mass —
+            # the winner's and the min over codes (worst-case leakage).
+            "legal_mass": 1.0,
+            "min_option_legal_mass": 1.0,
         }
     else:
         opts = list(choices) if choices is not None else ["A", "B"]
@@ -323,8 +332,14 @@ def make_engine_result(
         "padded_token_positions": 6,
         "total_tokens_generated": 0,
         "peak_active_bytes": 1024,
+        # W5-D finding 32: incremental peak over the request's starting
+        # active memory (the absolute peak lives in peak_active_bytes).
+        "peak_incremental_bytes": 1024,
         "sequential_forward_passes": 1,
         "rescored_fields": [],
+        # W5-D finding 30: Metal allocation failures the per-chunk retry
+        # absorbed (0 on the fake path).
+        "failed_attempts": 0,
         "schema_match": True,
         "confidence_model": "slots",
         "prompt_sha256": "abc",
