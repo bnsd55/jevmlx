@@ -842,13 +842,12 @@ def run_parallel_generation(
             probs_yes = {}
             prior_entry = prior.get(fname) if prior is not None else None
             prior_pairs = prior_entry["option_pairs"] if prior_entry else None
-            # W2-E row codes: rows are keyed '<field>/<code>'; map each
-            # option's row back to its option NAME through plan['codes']
-            # (choices order) so results and telemetry stay option-keyed.
-            code_to_option = dict(zip(p["codes"], p["options"], strict=True))
+            # W2-E row codes: rows are keyed '<field>/<code>', but codes are
+            # positional (choices order), so row oi IS options[oi] — no map
+            # needed; results and telemetry stay option-keyed directly.
             for oi, ridx in enumerate(idxs):
                 pair = list(option_pair[ridx])
-                option_name = code_to_option[p["codes"][oi]]
+                option_name = p["options"][oi]
                 if prior_pairs is not None and option_name in prior_pairs:
                     # Per-option additive prior in log space on the Y/N pair
                     # (P(yes) semantics: prior_pairs[option] =
@@ -883,8 +882,7 @@ def run_parallel_generation(
                 # scale — logits are what the prior cache stores and what
                 # log-odds shrinkage consumes.
                 "option_logit_pairs": {
-                    code_to_option[p["codes"][oi]]: list(option_pair[ridx])
-                    for oi, ridx in enumerate(idxs)
+                    p["options"][oi]: list(option_pair[ridx]) for oi, ridx in enumerate(idxs)
                 },
                 "alternatives": tuple(ranked),
                 "top_choices": [
