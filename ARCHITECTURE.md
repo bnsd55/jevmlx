@@ -58,7 +58,7 @@ result dict  {parsed_json, field_telemetry, prompt_sha256, …}
 
 ## Contracts
 
-### Engine result dict — `engine.py:469-488`
+### Engine result dict — `engine.py:1238-1260`
 
 | Key | Meaning |
 |---|---|
@@ -73,7 +73,7 @@ result dict  {parsed_json, field_telemetry, prompt_sha256, …}
 | `field_telemetry` | `{field: entry}` — see next table. |
 | `num_fields` | Field count. |
 
-### `field_telemetry` entry — `engine.py:619-627`
+### `field_telemetry` entry — `engine.py:996-1020` (multi), `:1095-1120` (scalar)
 
 | Key | Meaning |
 |---|---|
@@ -87,6 +87,8 @@ result dict  {parsed_json, field_telemetry, prompt_sha256, …}
 | `top_choices` | Top (choice, probability) pairs, most probable first (top 5). |
 | `rows` | Rows the field consumed (0 for cardinality-1 fields). |
 | `margin` | Multi only: min |P(yes) - threshold| (engine-side name; the API exposes it as `threshold_distance`). |
+| `legal_mass` | W2-D: probability the model assigned to the union of allowed continuations at the winner's branch point(s), against the full vocabulary = sum(exp(z_allowed)) / sum(exp(z_vocab)). Per-branch leakage signal — the constrained distribution can confidently pick A over B even when almost all unconstrained mass is on a reasoning token/newline/label text. Product over the winner's branch path (scalar); product over per-option Y/N branches (multi). 1.0 for cardinality-1 fields (nothing branched). Always computed (the ~0.002 Metal FP drift from the full-vocab logsumexp means bit-identical batch=1 vs batch=N parity was never a real invariant on Metal; W1-A asserts winners identical + log_scores within atol 5e-3). Raw, pre-prior-correction logits. |
+| `legal_mass_logs` | W2-D: per-choice (scalar) / per-option (multi) natural-log legal-mass product along the branch path, keyed by the real choice/option string. Raw, T=1. Calibration feature for the abstention model. |
 
 ### `FieldResult` — `api.py` (built by `_build_field_results`)
 

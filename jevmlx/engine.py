@@ -25,7 +25,7 @@ from typing import Any
 from jinja2.exceptions import TemplateError
 
 from jevmlx.schema import StructuredSchema
-from jevmlx.trie import build_trie, score_trie, softmax
+from jevmlx.trie import build_trie, logsumexp, score_trie, softmax
 
 logger = logging.getLogger(__name__)
 
@@ -831,6 +831,14 @@ def run_parallel_generation(
     # order of the remainders pair, ["Y", "N"); used both for the P(yes)
     # softmax and, verbatim at T=1, as the cached prior pair (bug 8).
     option_pair: dict[int, list[float]] = {}
+    # Per branch row: the natural-log legal mass = logsumexp(allowed) -
+    # logsumexp(full vocab) at the branch position. The probability the model
+    # assigned to the union of allowed continuations against the full
+    # vocabulary — a per-branch leakage signal (legal_mass telemetry, W2-D).
+    # Trie-branch rows: {row idx -> {branch-node idx -> log legal mass}}
+    # (mirrors node_logits). Multi option rows: {row idx -> log legal mass}
+    # (one Y/N branch per option row; no branch-node index).
+    node_legal_mass_log: dict[int, Any] = {}
     for chunk_start in range(0, len(rows), auto_max_rows):
         chunk = rows[chunk_start : chunk_start + auto_max_rows]
         chunk_len = len(chunk)
@@ -874,9 +882,21 @@ def run_parallel_generation(
             dtype=mx.int32,
         )
         gathered = mx.take(rows_at_pos.reshape(-1), flat_idx)  # [chunk_len * max_allowed]
-        mx.eval(gathered)
+        # W2-D legal_mass: full-vocab logsumexp per row, for the leakage
+        # signal (probability the model wanted any valid code at this
+        # branch). Computed as a reduction over the already-sliced
+        # [chunk_len, vocab] rows_at_pos — NOT the full 3D `out` (W3-A's
+        # constraint: only the decision slice is evaluated). The result is
+        # [chunk_len], one float per row, far cheaper than eval'ing `out`.
+        # Always computed: the ~0.002 Metal FP drift it introduces means
+        # bit-identical batch=1 vs batch=N parity was never a real invariant
+        # on Metal (GPT Q4 confirms); the W1-A parity test asserts winners
+        # identical + log_scores within atol 5e-3 instead.
+        row_vocab_lse = mx.logsumexp(rows_at_pos, axis=1)  # [chunk_len]
+        mx.eval(gathered, row_vocab_lse)
         t_gather_ms += (time.perf_counter() - t_gather0) * 1000
         gathered = gathered.tolist()
+        row_vocab_lse = row_vocab_lse.tolist()
         for i, ridx in enumerate(range(chunk_start, chunk_start + chunk_len)):
             p = field_plans[row_field[ridx]]
             allowed = chunk_decisions[i][1]
@@ -890,6 +910,16 @@ def run_parallel_generation(
                 option_pair[ridx] = values
             else:
                 node_logits[ridx] = {row_branch[ridx]: values}
+            # legal_mass = sum(exp(z_allowed)) / sum(exp(z_vocab))
+            #           = exp(logsumexp(allowed) - logsumexp(vocab)).
+            # Trie-branch rows key by branch-node idx (mirrors node_logits);
+            # multi option rows store a flat float (one Y/N branch per row).
+            allowed_lse = logsumexp(values)
+            mass_log = allowed_lse - row_vocab_lse[i]
+            if ridx in row_option:
+                node_legal_mass_log[ridx] = mass_log
+            else:
+                node_legal_mass_log[ridx] = {row_branch[ridx]: mass_log}
         del out
 
     t_suffix_eval = (time.perf_counter() - t_suf0) * 1000
@@ -966,6 +996,19 @@ def run_parallel_generation(
                 ],
                 "rows": len(idxs),
                 "threshold": multi_threshold,
+                # W2-D: legal_mass for multi = product of per-option legal
+                # masses (each option's Y/N branch has its own leakage
+                # signal). Low mass at any option's Y/N position flags that
+                # the model wanted neither Y nor N there — the constrained
+                # Y/N softmax can still be confident while the model leaked.
+                # Multi option rows store a flat log mass per ridx.
+                "legal_mass": math.exp(sum(node_legal_mass_log.get(ridx, 0.0) for ridx in idxs)),
+                # Per-option legal-mass logs (raw, T=1), keyed by the option
+                # string — the same keying as option_logit_pairs.
+                "legal_mass_logs": {
+                    p["options"][oi]: node_legal_mass_log.get(ridx, 0.0)
+                    for oi, ridx in enumerate(idxs)
+                },
             }
             if prior_entry is not None:
                 field_telemetry[fname]["prior_option_pairs"] = {
@@ -998,6 +1041,9 @@ def run_parallel_generation(
                     {"choice": val if isinstance(val, str) else str(val), "probability": 1.0}
                 ],
                 "rows": 0,
+                # No branch points: legal_mass is 1.0 by definition (nothing
+                # branched, nowhere to leak). W2-D.
+                "legal_mass": 1.0,
             }
             continue
 
@@ -1009,8 +1055,12 @@ def run_parallel_generation(
         # per field so the score_trie callback cannot see a later iteration's
         # dictionaries.
         logits_by_branch: dict[int, list[float]] = {}
+        # legal_mass_log per branch-node index (W2-D): the per-branch leakage
+        # signal captured during the suffix pass.
+        legal_mass_log_by_branch: dict[int, float] = {}
         for ridx in idxs:
             logits_by_branch.update(node_logits[ridx])
+            legal_mass_log_by_branch.update(node_legal_mass_log.get(ridx, {}))
         branch_index = {id(node): bi for bi, node in enumerate(field_trie)}
 
         def logits_at_node(
@@ -1018,7 +1068,14 @@ def run_parallel_generation(
         ) -> list[float]:
             return _lookup[_index[id(node)]]
 
-        raw_scores = score_trie(field_trie, n_choices, logits_at_node)
+        def legal_mass_at_node(
+            node: dict, _lookup=legal_mass_log_by_branch, _index=branch_index
+        ) -> float:
+            return math.exp(_lookup[_index[id(node)]])
+
+        raw_scores, raw_legal_mass_logs = score_trie(
+            field_trie, n_choices, logits_at_node, legal_mass_at_node
+        )
         # Prior correction (V2): subtract the neutral-context prior per
         # choice, then renormalise (log-softmax) over the choices. The
         # winner, probability, margin, tie policy and telemetry all use the
@@ -1100,6 +1157,21 @@ def run_parallel_generation(
             # Set when top1-top2 < 1e-6 in log-score space: the winner was
             # resolved by schema order, not by the model.
             "tie": is_tie,
+            # W2-D: legal_mass — probability the model assigned to the union
+            # of allowed continuations at the winner's branch point(s),
+            # against the FULL vocabulary. A per-branch leakage signal:
+            # the constrained distribution can confidently pick A over B
+            # even when almost all unconstrained mass is on a reasoning
+            # token, newline, or label text. Low legal_mass flags that.
+            # Product over the winner's branch path (raw, pre-prior-
+            # correction logits: legal mass is a property of the model's
+            # branch output, not of the corrected distribution).
+            "legal_mass": math.exp(raw_legal_mass_logs[w_idx]),
+            # Per-choice legal-mass logs (raw, T=1) for calibration feature
+            # extraction; keyed by the real choice string like log_scores.
+            "legal_mass_logs": {
+                choice: lm for choice, lm in zip(display_choices, raw_legal_mass_logs, strict=True)
+            },
         }
         if prior_entry is not None:
             field_telemetry[fname]["prior_log_scores"] = dict(prior_entry["log_scores"])

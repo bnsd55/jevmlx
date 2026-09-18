@@ -136,7 +136,7 @@ def test_trie_probabilities_match_manual_computation():
     split_logits = [0.5, -0.5]  # token 3 vs token 4 after token 2
     tables = [root_logits, split_logits]
     by_path = {tuple(node["path"]): values for node, values in zip(nodes, tables, strict=True)}
-    scores = score_trie(nodes, 3, lambda node: by_path[tuple(node["path"])])
+    scores, _ = score_trie(nodes, 3, lambda node: by_path[tuple(node["path"])])
 
     # Manual computation, natural log.
     lse_root = math.log(math.exp(1.0) + math.exp(2.0))
@@ -301,7 +301,7 @@ def test_score_trie_rejects_non_finite_logits():
     """T6: NaN/inf logits raise ValueError naming the branch node."""
     nodes = build_trie([[1], [2]])
     with pytest.raises(ValueError, match="non-finite"):
-        score_trie(nodes, 2, lambda node: [float("nan"), 1.0])
+        score_trie(nodes, 2, lambda node: [float("nan"), 1.0])[0]
 
 
 def test_score_trie_tiny_temperature_ranking_invariant():
@@ -310,7 +310,7 @@ def test_score_trie_tiny_temperature_ranking_invariant():
     nodes = build_trie(remainders)
     tables = [[1.0, 2.0], [0.5, -0.5]]
     by_path = {tuple(n["path"]): v for n, v in zip(nodes, tables, strict=True)}
-    scores = score_trie(nodes, 3, lambda node: by_path[tuple(node["path"])])
+    scores, _ = score_trie(nodes, 3, lambda node: by_path[tuple(node["path"])])
 
     probs_t1 = softmax(scores)
     probs_tiny = softmax(scores, temperature=1e-3)
@@ -329,7 +329,7 @@ def test_single_choice_enum_scores_one_point_oh():
     assert len(remainders) == 1
     nodes = build_trie(remainders)
     assert nodes == []  # single leaf: no branch points
-    scores = score_trie(nodes, 1, lambda node: [])
+    scores, _ = score_trie(nodes, 1, lambda node: [])
     assert scores == [0.0]
     assert softmax(scores)[0] == pytest.approx(1.0)
 

@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- W2-D legal_mass telemetry: per-branch leakage signal added to engine
+  field telemetry. legal_mass = sum(exp(z_allowed)) / sum(exp(z_vocab)) —
+  the probability the model assigned to the union of allowed continuations
+  at the branch position, against the full vocabulary. A branch can
+  confidently pick A over B even when almost all unconstrained mass is on a
+  reasoning token, newline, or label text; legal_mass flags that leakage.
+  Product over the winner's branch path (scalar fields) / per-option Y/N
+  branches (multi fields); 1.0 for cardinality-1 fields. Raw, pre-prior-
+  correction logits. Always computed: the ~0.002 Metal FP drift from the
+  full-vocab mx.logsumexp means bit-identical batch=1 vs batch=N parity was
+  never a real invariant on Metal (GPT Q4 confirms); the W1-A parity test
+  now asserts winners identical + log_scores within tests/conftest.py's
+  PARITY_ATOL = 1e-2 (measured Metal batch-shape drift ~0.004 nats, winners
+  stable; coder1's PR #21 imports the same constant post-merge; exact
+  equality still holds on the deterministic FakeModel path). trie.py:
+  score_trie returns (log_probs, legal_mass_logs) — one function, the
+  legal_mass_at_node callback optional (None = mass 1.0, for the MLX-free
+  unit tests); score_trie_with_legal_mass removed. Calibration feature for
+  the abstention model (R9, bug 10). forced_prefix_logprob deferred (needs
+  prefix-position logits the engine currently discards; conflicts with
+  W3-A's gather-only constraint — noted in ROADMAP).
+
 - Apple Silicon platform check moved from engine.py import time into
   `load_engine` (via `_require_mlx`): `import jevmlx`, `import jevmlx.engine`,
   and schema/plan/metrics tooling now work on Linux (ubuntu-latest CI);

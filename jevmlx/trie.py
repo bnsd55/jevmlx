@@ -126,7 +126,8 @@ def score_trie(
     branch_nodes: list[dict],
     n_choices: int,
     logits_at_node: Callable[[dict], list[float]],
-) -> list[float]:
+    legal_mass_at_node: Callable[[dict], float] | None = None,
+) -> tuple[list[float], list[float]]:
     """Natural-log constrained-path probability per choice, at temperature 1.
 
     ``logits_at_node(node)`` must return the child logits in the same order as
@@ -145,14 +146,36 @@ def score_trie(
     Choices with no branch nodes on their path score log P = 0.0: their value
     is fully determined by the field's other branch decisions. A field with a
     single choice therefore scores log P = 0 (probability 1.0) with no rows.
+
+    When ``legal_mass_at_node`` is provided, also returns the per-choice
+    legal-mass product. The legal mass at a branch node is the probability
+    the model assigns to the union of allowed continuations, against the full
+    vocabulary: ``sum(exp(z_allowed)) / sum(exp(z_vocab))``. It answers "did
+    the model want *any* valid code here?" — a branch can confidently pick A
+    over B even when almost all unconstrained mass is on a reasoning token,
+    newline, or label text. Legal mass is that leakage signal. The callback
+    returns the per-node mass float (the caller computes it from the
+    full-vocab logits it holds; the trie is MLX-free). None (default) leaves
+    every legal mass at 1.0 — the MLX-free unit tests use this.
+
+    Returns ``(log_probs, legal_mass_logs)``: the natural-log constrained-path
+    probability per choice and the natural log of the per-choice legal-mass
+    product along the branch path. A choice with no branch nodes scores
+    ``log legal_mass = 0.0`` (mass 1.0): nothing branched, so there was
+    nowhere to leak.
     """
     log_probs = [0.0] * n_choices
+    legal_mass_logs = [0.0] * n_choices
     for node in branch_nodes:
         child_logits = logits_at_node(node)
         if not all(math.isfinite(value) for value in child_logits):
             raise ValueError(f"non-finite logits at branch node {node['path']!r}: {child_logits!r}")
         child_log_probs = log_softmax(child_logits)
+        node_legal_mass_log = (
+            math.log(legal_mass_at_node(node)) if legal_mass_at_node is not None else 0.0
+        )
         for token, log_prob in zip(node["children"], child_log_probs, strict=True):
             for choice_index in node["children"][token]:
                 log_probs[choice_index] += log_prob
-    return log_probs
+                legal_mass_logs[choice_index] += node_legal_mass_log
+    return log_probs, legal_mass_logs
