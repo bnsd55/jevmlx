@@ -197,12 +197,17 @@ class StructuredSchema:
 
     def _multi_field_header(self, field: FieldDefinition) -> str:
         """Schema-block text for one multi field: options as a described
-        yes/no menu ('each option is answered yes or no')."""
+        yes/no menu with explicit Y/N codes (Q6-6: the scorer expects quoted
+        Y/N; the model must see the exact codes and meanings). Every
+        displayed name, label, option and gloss is json.dumps-escaped so
+        quotes/newlines cannot break the schema block (Q2 'System text' /
+        'Schema block format')."""
         parts = []
         for choice in field.choices:
+            safe_choice = json.dumps(choice, ensure_ascii=False)
             gloss = field.choice_descriptions.get(choice)
-            gloss_part = f" — {gloss}" if gloss else ""
-            parts.append(f"{choice}{gloss_part}")
+            gloss_part = f" — {json.dumps(gloss, ensure_ascii=False)}" if gloss else ""
+            parts.append(f"{safe_choice} (Y = applies, N = does not apply){gloss_part}")
         return "; ".join(parts)
 
     def to_schema_str(self, mode: str = "slots") -> str:
@@ -223,12 +228,14 @@ class StructuredSchema:
             raise ValueError(f"mode must be 'slots' or 'labels', got {mode!r}")
         lines = []
         for name, field in self.fields.items():
+            safe_name = json.dumps(name, ensure_ascii=False)
             desc = field.description.split("\n")[0].strip()
+            safe_desc = json.dumps(desc, ensure_ascii=False)
             if field.field_type == "multi":
                 menu = self._multi_field_header(field)
                 lines.append(
-                    f'  "{name}": {menu}  // {desc} (select all that apply; '
-                    "each option is answered yes or no)"
+                    f"  {safe_name}: {menu}  // {safe_desc} (select all that apply; "
+                    "each option is answered Y or N)"
                 )
                 continue
             choices_list = (
@@ -238,14 +245,18 @@ class StructuredSchema:
                 parts = []
                 for i, choice in enumerate(choices_list):
                     alias = _alias_code(i)
+                    safe_choice = json.dumps(choice, ensure_ascii=False)
                     gloss = field.choice_descriptions.get(choice)
-                    parts.append(f"{alias}) {choice} — {gloss}" if gloss else f"{alias}) {choice}")
+                    gloss_part = f" — {json.dumps(gloss, ensure_ascii=False)}" if gloss else ""
+                    parts.append(f"{alias}) {safe_choice}{gloss_part}")
             else:
                 parts = []
                 for choice in choices_list:
+                    safe_choice = json.dumps(choice, ensure_ascii=False)
                     gloss = field.choice_descriptions.get(choice)
-                    parts.append(f"{choice} — {gloss}" if gloss else choice)
-            lines.append(f'  "{name}": {"  ".join(parts)}  // {desc}')
+                    gloss_part = f" — {json.dumps(gloss, ensure_ascii=False)}" if gloss else ""
+                    parts.append(f"{safe_choice}{gloss_part}")
+            lines.append(f"  {safe_name}: {'  '.join(parts)}  // {safe_desc}")
         return "\n".join(lines)
 
     def to_alias_schema_str(self) -> str:
@@ -395,16 +406,29 @@ class StructuredSchema:
             }
 
         if any(f.field_type == "multi" for f in self.fields.values()):
-            labels_plan = self.compile_labels_plan(tokenizer)
+            multi_plan = self._compile_multi_plan(tokenizer)
             for fname, fdef in self.fields.items():
                 if fdef.field_type == "multi":
-                    fields_plan[fname] = labels_plan["fields"][fname]
-        row_prefixes = [p["shared_ids"] for p in fields_plan.values() if "shared_ids" in p]
+                    fields_plan[fname] = multi_plan[fname]
+        # Factor the global lead-in once over scalar shared_ids AND multi
+        # suffix_ids_list (B1/Q6-1: the lead-in must be the common prefix of
+        # ALL row prefixes, never computed from scalars alone). Strip exactly
+        # once, after the complete final mode plan exists.
+        row_prefixes = [p["shared_ids"] for p in fields_plan.values() if "shared_ids" in p] + [
+            ids
+            for p in fields_plan.values()
+            if "suffix_ids_list" in p
+            for ids in p["suffix_ids_list"]
+        ]
         lead_in = _common_token_prefix(row_prefixes) if row_prefixes else []
         if lead_in:
             for p in fields_plan.values():
                 if "shared_ids" in p:
                     p["shared_ids"] = p["shared_ids"][len(lead_in) :]
+                if "suffix_ids_list" in p:
+                    # lead_in is the common prefix of all row_prefixes by
+                    # construction — strip unconditionally, no fallback.
+                    p["suffix_ids_list"] = [ids[len(lead_in) :] for ids in p["suffix_ids_list"]]
         result = {"lead_in_ids": list(lead_in), "fields": fields_plan}
         self._cache_plan(tokenizer, result, mode="slots")
         return result
@@ -415,6 +439,75 @@ class StructuredSchema:
         engine maps winners straight to the choice strings (no alias hop).
         """
         return self._compile_labels(tokenizer)
+
+    def _compile_multi_plan(self, tokenizer) -> dict[str, dict[str, Any]]:
+        """Build ONLY the multi-field plans, returning UNSTRIPPED full option
+        prefixes (suffix_ids_list + remainders per option, before any
+        schema-wide lead-in stripping).
+
+        This is the private multi-plan builder shared by both scoring modes.
+        compile_slot_plan calls this instead of compile_labels_plan (Q6-1/Q6-2:
+        slot mode must not invoke the whole labels compiler — a scalar
+        real-label collision should not fail slot mode, and the multi option
+        prefixes must NOT have the labels lead-in pre-stripped).
+        """
+        plan: dict[str, dict[str, Any]] = {}
+
+        def candidate_text(name: str, value_text: str) -> str:
+            return "{\n" + f"  {json.dumps(name)}: {value_text}" + ",\n"
+
+        for fname, fdef in self.fields.items():
+            if fdef.field_type != "multi":
+                continue
+            suffix_ids_list = []
+            remainders_per_option = []
+            for option in fdef.choices:
+                pair = [
+                    tokenizer.encode(
+                        candidate_text(f"{fname}/{option}", f'"{alias}"'),
+                        add_special_tokens=False,
+                    )
+                    for alias in ("Y", "N")
+                ]
+                option_shared = _common_token_prefix(pair)
+                option_remainders = [full[len(option_shared) :] for full in pair]
+                if not option_shared:
+                    raise SchemaCompileError(
+                        fname,
+                        f"field '{fname}': option '{option}' Y/N "
+                        f"candidates share no token prefix (tokenizer "
+                        f"{type(tokenizer).__name__}); cannot place the "
+                        "decision row",
+                    )
+                if option_remainders[0] == option_remainders[1]:
+                    raise SchemaCompileError(
+                        fname,
+                        f"field '{fname}': option '{option}' tokenizes to "
+                        "identical Y/N candidates; the engine cannot "
+                        "distinguish them",
+                    )
+                if len(option_remainders[0]) < len(option_remainders[1]):
+                    shorter, longer = option_remainders
+                    short_name, long_name = "Y", "N"
+                else:
+                    shorter, longer = option_remainders[1], option_remainders[0]
+                    short_name, long_name = "N", "Y"
+                if longer[: len(shorter)] == shorter:
+                    raise SchemaCompileError(
+                        fname,
+                        f"field '{fname}': option '{option}' has a strict "
+                        f"token-prefix continuation ({short_name} is a prefix of "
+                        f"{long_name} in token space); the engine would never "
+                        "distinguish them",
+                    )
+                suffix_ids_list.append(option_shared)
+                remainders_per_option.append(option_remainders)
+            plan[fname] = {
+                "options": list(fdef.choices),
+                "suffix_ids_list": suffix_ids_list,
+                "remainders": remainders_per_option,
+            }
+        return plan
 
     def _compile_labels(self, tokenizer) -> dict[str, dict[str, Any]]:  # noqa: D401
         """Pre-index everything the engine needs for the batched suffix pass.
@@ -456,75 +549,13 @@ class StructuredSchema:
             """
             return "{\n" + f"  {json.dumps(name)}: {value_text}" + ",\n"
 
+        multi_plan = self._compile_multi_plan(tokenizer)
         for fname, fdef in self.fields.items():
             if fdef.field_type == "multi":
-                # One yes/no row per option. The row is the natural question
-                # ('"<field>/<option>": '), and the scored candidates are the
-                # QUOTED aliases "Y"/"N" — the same slot machinery enums use
-                # (V4: the model never sees a synthetic 'field.option' JSON
-                # key; the schema block describes each option and states that
-                # every option is answered yes or no).
-                # The plan is built PER OPTION from that option's own candidate
-                # pair: shared = everything up to the Y/N divergence (the
-                # option's full row lead-in plus any common token start of
-                # 'Y'/'N'), remainders = the two continuations. A single
-                # cross-option prefix would put branch nodes at the option-name
-                # position and read the Y/N logits at the wrong spot.
-                suffix_ids_list = []
-                remainders_per_option = []
-                for option in fdef.choices:
-                    pair = [
-                        tokenizer.encode(
-                            candidate_text(f"{fname}/{option}", f'"{alias}"'),
-                            add_special_tokens=False,
-                        )
-                        for alias in ("Y", "N")
-                    ]
-                    option_shared = _common_token_prefix(pair)
-                    option_remainders = [full[len(option_shared) :] for full in pair]
-                    if not option_shared:
-                        # Zero-length row: the Y/N decision would sit
-                        # directly at the generation boundary (C2, same rule
-                        # as the scalar guard).
-                        raise SchemaCompileError(
-                            fname,
-                            f"field '{fname}': option '{option}' Y/N "
-                            f"candidates share no token prefix (tokenizer "
-                            f"{type(tokenizer).__name__}); cannot place the "
-                            "decision row",
-                        )
-                    if option_remainders[0] == option_remainders[1]:
-                        raise SchemaCompileError(
-                            fname,
-                            f"field '{fname}': option '{option}' tokenizes to "
-                            "identical Y/N candidates; the engine cannot "
-                            "distinguish them",
-                        )
-                    # Same rule as enums (R5): a strict-prefix continuation can
-                    # never be distinguished by branch scoring.
-                    if len(option_remainders[0]) < len(option_remainders[1]):
-                        shorter, longer = option_remainders
-                        short_name, long_name = "Y", "N"
-                    else:
-                        shorter, longer = option_remainders[1], option_remainders[0]
-                        short_name, long_name = "N", "Y"
-                    if longer[: len(shorter)] == shorter:
-                        raise SchemaCompileError(
-                            fname,
-                            f"field '{fname}': option '{option}' has a strict "
-                            f"token-prefix continuation ({short_name} is a prefix of "
-                            f"{long_name} in token space); the engine would never "
-                            "distinguish them",
-                        )
-                    suffix_ids_list.append(option_shared)
-                    remainders_per_option.append(option_remainders)
-                plan[fname] = {
-                    "options": list(fdef.choices),
-                    # Stored WITHOUT the schema-wide lead-in; the engine
-                    # prepends it to every row (one rule for all row types).
-                    "suffix_ids_list": suffix_ids_list,
-                    "remainders": remainders_per_option,
-                }
+                # Built by the shared private multi-plan builder (Q6-1: same
+                # UNSTRIPPED prefixes used by slot mode; the lead-in strip
+                # happens once, below, after the full plan exists).
+                plan[fname] = multi_plan[fname]
                 continue
 
             if fdef.field_type == "boolean":
@@ -592,12 +623,10 @@ class StructuredSchema:
         # field's full shared_ids.
         # Apply the same strip to multi option prefixes so the engine can
         # prepend lead_in uniformly to every row (R1: one rule for all rows).
+        # lead_in is the common prefix by construction — strip unconditionally.
         for p in plan.values():
             if "suffix_ids_list" in p and lead_in:
-                p["suffix_ids_list"] = [
-                    ids[len(lead_in) :] if ids[: len(lead_in)] == lead_in else ids
-                    for ids in p["suffix_ids_list"]
-                ]
+                p["suffix_ids_list"] = [ids[len(lead_in) :] for ids in p["suffix_ids_list"]]
         for p in plan.values():
             if "shared_ids" in p:
                 p["shared_ids"] = p["shared_ids"][len(lead_in) :]
