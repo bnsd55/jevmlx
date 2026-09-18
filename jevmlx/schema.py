@@ -227,7 +227,7 @@ class StructuredSchema:
             if field.field_type == "multi":
                 menu = self._multi_field_header(field)
                 lines.append(
-                    f'  {json.dumps(name)}: {menu}  // {json.dumps(desc)} '
+                    f"  {json.dumps(name)}: {menu}  // {json.dumps(desc)} "
                     '(select all that apply; "Y" = applies, "N" = does not apply)'
                 )
                 continue
@@ -253,7 +253,7 @@ class StructuredSchema:
                         if gloss
                         else json.dumps(choice)
                     )
-            lines.append(f'  {json.dumps(name)}: {"  ".join(parts)}  // {json.dumps(desc)}')
+            lines.append(f"  {json.dumps(name)}: {'  '.join(parts)}  // {json.dumps(desc)}")
         return "\n".join(lines)
 
     def to_alias_schema_str(self) -> str:
@@ -526,7 +526,9 @@ class StructuredSchema:
         # is factored exactly once below, over scalar shared_ids AND multi
         # prefixes (bug 1).
         fields_plan.update(self._compile_multi_plans(tokenizer))
-        result = self._factor_lead_in(fields_plan, key_scalar="shared_ids", key_multi="prefix_ids_list")
+        result = self._factor_lead_in(
+            fields_plan, key_scalar="shared_ids", key_multi="prefix_ids_list"
+        )
         # Multi rows keep the engine-facing name suffix_ids_list.
         for p in result["fields"].values():
             if "prefix_ids_list" in p:
