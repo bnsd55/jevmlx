@@ -79,10 +79,11 @@ result dict  {parsed_json, field_telemetry, prompt_sha256, …}
 |---|---|
 | `value` | Decided value (str / bool / list[str]). |
 | `type` | `boolean`, `enum`, or `multi`. |
-| `probability` | P of the winner (multi: weakest per-option decision). |
+| `probability` | P of the winner; multi: `None` — no field-level probability is claimed (per-option decisions only). |
 | `cardinality` | Number of choices. |
 | `log_scores` | Constrained-path log P per choice at T=1, keyed by real choice string. Absent for multi. |
-| `per_option` | multi only: independent per-option `p_true`. |
+| `per_option` | multi only: independent per-option P(yes). |
+| `option_logit_pairs` | multi only: raw [yes, no] logits per option at T=1 (what the prior cache stores). |
 | `top_choices` | Top (choice, probability) pairs, most probable first (top 5). |
 | `rows` | Rows the field consumed (0 for cardinality-1 fields). |
 
@@ -141,8 +142,9 @@ SHA-256, compiled plan SHA-256, dataset lock SHA-256), and
 - **Probability semantics.** `log_scores` are constrained-path log
   probabilities at T=1; temperature is applied once to the final per-choice
   distribution (ranking-invariant); `FieldResult.calibrated` is False until
-  a fitted calibrator runs. For multi fields `probability` is the weakest
-  per-option decision, not a subset probability.
+  a fitted calibrator runs. For multi fields `probability` is `None` — the
+  engine does not claim a field-level probability for an option set
+  (per-option decisions only).
 - **No backward compatibility.** Changes replace: old paths, keys, flags and
   names are deleted with their callers and tests in the same change. No
   aliases, no shims, no deprecation periods.

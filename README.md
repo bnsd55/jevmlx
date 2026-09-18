@@ -58,6 +58,7 @@ for name, f in result.fields.items():
 - `allow_unknown=True` adds an `UNKNOWN` choice when the model is unsure (fields map to `None`).
 - `alternatives` lists the other options with their probabilities.
 - `multi_threshold=0.5` sets the P(yes) cut for multi-select options.
+- Margins are unit-split and nullable: `log_score_margin` (scalar fields, top1-top2 log-score gap at T=1), `probability_margin` (scalar fields, top1-top2 probability after temperature), `threshold_distance` (multi fields, min |P(yes) - threshold|). A field carries exactly one of the three.
 - CLI equivalent: `jevmlx decide --help`.
 
 ## Use it from any OpenAI-compatible server
