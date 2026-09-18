@@ -1305,7 +1305,13 @@ def _rescore_rows_batch1(
     sub_rows = [rows[ridx] for ridx in idxs]
     sub_decisions = [row_decision[ridx] for ridx in idxs]
     scored = _score_rows(
-        model, cache, sub_rows, sub_decisions, vocab_size, pad_id, auto_max_rows=1
+        model,
+        cache,
+        sub_rows,
+        sub_decisions,
+        vocab_size,
+        pad_id,
+        auto_max_rows=1,
     )
     node_logits: dict[int, dict[int, list[float]]] = {}
     node_legal_mass_log: dict[int, Any] = {}
@@ -1578,9 +1584,7 @@ def run_parallel_generation(
     # logits in remainder order ["Y", "N"]; bug 8: these raw logits are what
     # the prior cache stores — no reconstruction from scaled probabilities)
     # or count_node_logits (W2-E step 3 count rows, keyed by count-branch idx).
-    scored = _score_rows(
-        model, cache, rows, row_decision, vocab_size, pad_id, auto_max_rows
-    )
+    scored = _score_rows(model, cache, rows, row_decision, vocab_size, pad_id, auto_max_rows)
     for ridx in range(len(rows)):
         values = scored.row_logits[ridx]
         mass_log = scored.row_legal_mass_log[ridx]
