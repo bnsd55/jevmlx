@@ -116,14 +116,18 @@ def _write_local_result(tmp_path: Path) -> Path:
     run = {
         "run_id": "r1",
         "environment": {"chip": "fake"},
-        "config": {"model": "fake-1b", "track": "parallel", "dataset": "typesafe"},
+        "config": {
+            "model": "fake-1b",
+            "track": "parallel",
+            "dataset_path": "/cache/jevmlx/bench/typesafe.jsonl",
+        },
         "counts": {"cases": 4, "fields": 4, "prediction_lines": 4},
     }
     (combo / "run.json").write_text(json.dumps(run), encoding="utf-8")
     report = {
         "environment": {"chip": "fake"},
         "metrics": {
-            "typesafe_agreement": {
+            "agreement": {
                 "agreement_common_subset": 0.75,
                 "by_workflow": {"customer_service": 0.8, "invoice_processing": 0.7},
                 "n_fields": 4,
@@ -203,6 +207,12 @@ def test_local_rows_render_when_results_present(tmp_path):
     assert "local" in table
     # Accuracy 0.75 -> 75.0%, time per case = median(500,600,700,800)ms = 0.65s -> 0.7s (1dp).
     assert "75.0%" in table
+    # Per-workflow agreement must land in its column (guards the by_workflow
+    # key-name mapping: report uses full names customer_service /
+    # invoice_processing, not short aliases).
+    local_line = next(line for line in table.splitlines() if line.startswith("| fake-1b |"))
+    assert "80.0%" in local_line  # customer_service 0.8
+    assert "70.0%" in local_line  # invoice_processing 0.7
     assert "0.7s" in table
     assert "$0 (local)" in table
     assert "| 4 |" in table  # cases
@@ -296,7 +306,8 @@ def test_main_check_readme_exits_0_when_fresh(tmp_path, capsys):
     published = _write_published(tmp_path)
     readme = tmp_path / "README.md"
     readme.write_text("intro\n", encoding="utf-8")
-    table = build_table(None, published, official)
+    empty_results = tmp_path / "noresults"
+    table = build_table(empty_results, published, official)
     write_readme_block(readme, table)
     rc = main(
         [
@@ -307,6 +318,8 @@ def test_main_check_readme_exits_0_when_fresh(tmp_path, capsys):
             str(official),
             "--published",
             str(published),
+            "--results",
+            str(empty_results),
         ]
     )
     assert rc == 0

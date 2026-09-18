@@ -583,7 +583,7 @@ class StructuredSchema:
         ]
         if not field_shared_prefixes:
             wrapped: dict[str, Any] = {"lead_in_ids": [], "fields": plan}
-            self._cache_plan(tokenizer, wrapped)
+            self._cache_plan(tokenizer, wrapped, mode="labels")
             return wrapped
         lead_in = _common_token_prefix(field_shared_prefixes)
         # An empty schema-wide lead-in is legal (e.g. char-level tokenizers

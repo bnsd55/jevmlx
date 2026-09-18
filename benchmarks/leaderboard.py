@@ -173,12 +173,12 @@ def _local_rows(results_root: Path) -> list[dict]:
             run = json.loads(run_path.read_text(encoding="utf-8")) if run_path.exists() else {}
             config = run.get("config", {})
             track = config.get("track", "")
-            dataset = config.get("dataset", "")
+            dataset = config.get("dataset_path", "") or ""
             dataset_name = dataset if "/" not in dataset else Path(dataset).stem
             if track != "parallel" or dataset_name != "typesafe":
                 continue
             metrics = report.get("metrics", {})
-            ta = metrics.get("typesafe_agreement", {})
+            ta = metrics.get("agreement", {})
             ta = ta if isinstance(ta, dict) else {}
             agreement = ta.get("agreement_common_subset")
             by_workflow = (
@@ -203,9 +203,9 @@ def _local_rows(results_root: Path) -> list[dict]:
                     "accuracy": agreement,
                     "by_workflow": {
                         "customer_service": by_workflow.get("customer_service"),
-                        "agent_trace": by_workflow.get("agent_trace"),
-                        "security": by_workflow.get("security"),
-                        "invoices": by_workflow.get("invoices"),
+                        "agent_trace_observability": by_workflow.get("agent_trace_observability"),
+                        "security_incidents": by_workflow.get("security_incidents"),
+                        "invoice_processing": by_workflow.get("invoice_processing"),
                     },
                     "time_per_case_s": time_per_case_s,
                     "cost_per_case_usd": "$0 (local)",
