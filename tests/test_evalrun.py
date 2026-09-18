@@ -340,6 +340,21 @@ def test_parallel_log_scores_reads_finalized_dict(tmp_path, monkeypatch):
             "elapsed_ms": 5.0,
             "rows": 2,
             "passes": 1,
+            # W3-R review F2: parallel_decide_fn reads the timing split
+            # strictly — the fake must carry the engine's full result shape.
+            "prior_ms": 0.0,
+            "prefill_ms": 2.0,
+            "plan_compile_ms": 0.1,
+            "cache_broadcast_ms": 0.2,
+            "suffix_eval_ms": 2.5,
+            "lm_head_gather_ms": 0.3,
+            "second_pass_ms": 0.0,
+            "total_ms": 5.0,
+            "peak_active_bytes": 1024,
+            "padded_token_positions": 6,
+            "rescored_fields": [],
+            "rerun_fields": [],
+            "num_fields": 1,
         }
 
     import jevmlx.engine as engine_mod
@@ -503,3 +518,63 @@ def test_carry_consensus_flag_adds_consensus_distribution(tmp_path):
         by_case.setdefault(line["case_id"], []).append(line.get("consensus"))
     assert by_case["wf/case-1"] == [{"true": 0.9, "false": 0.1}, {"true": 0.9, "false": 0.1}]
     assert by_case["wf/case-2"] == [None, None]
+
+
+def test_run_eval_writes_timing_json_for_parallel_track(tmp_path):
+    """W3-R: the parallel track's _meta timing split is aggregated into
+    <combo>/timing.json (median over canonical calls; no second run). A
+    _meta without the split keys (mock decide_fn) still yields a file with
+    defaults, and the naive track writes none."""
+    cases = _two_cases()
+
+    def parallel_decide(schema_dict, context):
+        return {
+            "priority": {"prediction": "P1", "probability": 0.9},
+            "_meta": {
+                "latency_ms": 10.0,
+                "rows": 3,
+                "passes": 1,
+                "prior_ms": 0.0,
+                "prefill_ms": 5.0,
+                "plan_compile_ms": 0.1,
+                "cache_broadcast_ms": 0.2,
+                "suffix_eval_ms": 4.0,
+                "lm_head_gather_ms": 0.3,
+                "second_pass_ms": 0.0,
+                "total_ms": 10.0,
+                "peak_active_bytes": 2048,
+                "padded_token_positions": 24,
+                "rescored_fields_count": 0,
+                "rerun_fields_count": 0,
+                "num_fields": 1,
+            },
+        }
+
+    evalrun.run_eval(
+        cases,
+        parallel_decide,
+        track="parallel",
+        model="fake/model",
+        out_dir=str(tmp_path),
+        run_id="r-timing",
+    )
+    timing = json.load(open(tmp_path / "timing.json"))
+    assert timing["calls"] == 2
+    assert timing["median"]["total_ms"] == 10.0
+    assert timing["median"]["prefill_ms"] == 5.0
+    assert timing["median"]["padded_token_positions"] == 24
+    # Contract keys all present with 0 defaults for anything a caller omits.
+    assert timing["median"]["prior_ms"] == 0.0
+    assert timing["median"]["rescored_fields_count"] == 0
+
+    # The naive track: no timing.json (no engine split exists there).
+    out2 = tmp_path / "naive"
+    evalrun.run_eval(
+        cases,
+        lambda s, c: {"priority": {"prediction": "P1", "valid": True}},
+        track="naive_local",
+        model="fake/model",
+        out_dir=str(out2),
+        run_id="r-naive",
+    )
+    assert not (out2 / "timing.json").exists()

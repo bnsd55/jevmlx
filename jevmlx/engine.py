@@ -20,7 +20,7 @@ import time
 import weakref
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from jinja2.exceptions import TemplateError
 
@@ -737,6 +737,22 @@ def _get_or_compute_prior(
     return prior
 
 
+class ScoreRowsResult(NamedTuple):
+    """What _score_rows produces for the shared padded/broadcast/gather loop.
+
+    Named fields (W3-R review F1): three call sites read by name instead of
+    unpacking throwaway positional names — a field rename or reorder breaks
+    loudly at the attribute, not silently at position.
+    """
+
+    row_logits: dict[int, list[float]]
+    row_legal_mass_log: dict[int, float]
+    passes: int
+    gather_ms: float
+    broadcast_ms: float
+    chunk_shapes: list[tuple[int, int]]
+
+
 def _score_rows(
     model,
     cache,
@@ -745,7 +761,7 @@ def _score_rows(
     vocab_size: int,
     pad_id: int,
     auto_max_rows: int,
-) -> tuple[dict[int, list[float]], dict[int, float], int, float]:
+) -> ScoreRowsResult:
     """Run batched suffix forward passes over prefill cache and gather logits.
 
     Shared by the main scoring loop (run_parallel_generation) and the
@@ -763,13 +779,19 @@ def _score_rows(
     row_legal_mass_log: dict[int, float] = {}
 
     if not rows:
-        return row_logits, row_legal_mass_log, 0, 0.0
+        return ScoreRowsResult(row_logits, row_legal_mass_log, 0, 0.0, 0.0, [])
 
     # Bucket rows by suffix width: sort row indexes by row length, then cut
     # the sorted sequence into chunks of at most auto_max_rows.
     row_order = sorted(range(len(rows)), key=lambda ridx: len(rows[ridx]))
     passes = 0
     t_gather_ms = 0.0
+    # W3-R: broadcast+prepare+eval of the per-chunk cache copies is a
+    # distinct cost from the forwards themselves — report it separately.
+    t_broadcast_ms = 0.0
+    # W3-R: (width, chunk_len) per forward pass — total padded token
+    # positions is sum(width * chunk_len), the tiling shape the model ran.
+    chunk_shapes: list[tuple[int, int]] = []
     for bucket_start in range(0, len(row_order), auto_max_rows):
         bucket = row_order[bucket_start : bucket_start + auto_max_rows]
         bucket_pos = 0
@@ -786,6 +808,7 @@ def _score_rows(
                 [rows[ridx] + [pad_id] * (width - len(rows[ridx])) for ridx in chunk_rows],
                 dtype=mx.int32,
             )
+            t_bcast0 = time.perf_counter()
             b_cache = _broadcast_cache(cache, chunk_len)
             max_padding = max(padding) if padding else 0
             if max_padding > 0:
@@ -793,7 +816,9 @@ def _score_rows(
                     if hasattr(c, "prepare"):
                         c.prepare(lengths=lengths, right_padding=padding)
             _eval_cache_state(b_cache)
+            t_broadcast_ms += (time.perf_counter() - t_bcast0) * 1000
             passes += 1
+            chunk_shapes.append((width, chunk_len))
             try:
                 out = model(padded, cache=b_cache)
             except Exception as exc:  # noqa: BLE001
@@ -851,7 +876,14 @@ def _score_rows(
             del out
             bucket_pos += len(chunk_rows)
 
-    return row_logits, row_legal_mass_log, passes, t_gather_ms
+    return ScoreRowsResult(
+        row_logits=row_logits,
+        row_legal_mass_log=row_legal_mass_log,
+        passes=passes,
+        gather_ms=t_gather_ms,
+        broadcast_ms=t_broadcast_ms,
+        chunk_shapes=chunk_shapes,
+    )
 
 
 def _constrained_map(
@@ -1136,7 +1168,7 @@ def _selective_second_pass(
 
     # Run ONE suffix pass over the same prefill cache via _score_rows (F3:
     # the ONE copy of the padded/broadcast/gather scoring loop).
-    row_logits2, _legal, _passes, _t = _score_rows(
+    scored = _score_rows(
         model,
         cache,
         conditioned_rows,
@@ -1148,7 +1180,7 @@ def _selective_second_pass(
     # Map per-row logits back to branch-node logits for trie scoring.
     node_logits2: dict[int, dict[int, list[float]]] = {}
     for ridx in range(len(conditioned_rows)):
-        node_logits2[ridx] = {row_branch2[ridx]: row_logits2[ridx]}
+        node_logits2[ridx] = {row_branch2[ridx]: scored.row_logits[ridx]}
 
     # Re-score each child through its conditioned trie.
     for fname, _parent in children_to_rerun:
@@ -1273,8 +1305,14 @@ def _rescore_rows_batch1(
         return {"node_logits": {}, "node_legal_mass_log": {}, "option_pair": {}}
     sub_rows = [rows[ridx] for ridx in idxs]
     sub_decisions = [row_decision[ridx] for ridx in idxs]
-    row_logits, row_mass_log, _passes, _t = _score_rows(
-        model, cache, sub_rows, sub_decisions, vocab_size, pad_id, auto_max_rows=1
+    scored = _score_rows(
+        model,
+        cache,
+        sub_rows,
+        sub_decisions,
+        vocab_size,
+        pad_id,
+        auto_max_rows=1,
     )
     node_logits: dict[int, dict[int, list[float]]] = {}
     node_legal_mass_log: dict[int, Any] = {}
@@ -1283,8 +1321,8 @@ def _rescore_rows_batch1(
     # range(len(rows))), so its returned keys are POSITIONS in idxs, not the
     # caller's global row indexes — map back through idxs.
     for i, ridx in enumerate(idxs):
-        values = row_logits[i]
-        mass_log = row_mass_log[i]
+        values = scored.row_logits[i]
+        mass_log = scored.row_legal_mass_log[i]
         if ridx in row_option:
             # Multi option row: RAW [yes_logit, no_logit] + flat legal mass.
             option_pair[ridx] = values
@@ -1378,11 +1416,15 @@ def run_parallel_generation(
     # 1. Batch plan, then rows per field: one row per branch point of the
     #    candidate remainders (fields with distinct first tokens: exactly one
     #    row). Slots mode scores quoted aliases and maps them back after.
+    #    Timed (W3-R: plan_compile_ms) — the plan cache makes this ~0 on warm
+    #    runs, but the first call is pure Python work the report should see.
+    t_plan0 = time.perf_counter()
     plan = (
         schema.compile_slot_plan(tokenizer)
         if scoring == "slots"
         else schema.compile_labels_plan(tokenizer)
     )
+    plan_compile_ms = (time.perf_counter() - t_plan0) * 1000
 
     rows: list[list[int]] = []  # token ids per row (WITHOUT the lead-in —
     # the lead-in lives in the prefill cache, bug 16)
@@ -1543,12 +1585,10 @@ def run_parallel_generation(
     # logits in remainder order ["Y", "N"]; bug 8: these raw logits are what
     # the prior cache stores — no reconstruction from scaled probabilities)
     # or count_node_logits (W2-E step 3 count rows, keyed by count-branch idx).
-    row_logits, row_legal_mass_log, passes, t_gather_ms = _score_rows(
-        model, cache, rows, row_decision, vocab_size, pad_id, auto_max_rows
-    )
+    scored = _score_rows(model, cache, rows, row_decision, vocab_size, pad_id, auto_max_rows)
     for ridx in range(len(rows)):
-        values = row_logits[ridx]
-        mass_log = row_legal_mass_log[ridx]
+        values = scored.row_logits[ridx]
+        mass_log = scored.row_legal_mass_log[ridx]
         if ridx in row_option:
             option_pair[ridx] = values
             node_legal_mass_log[ridx] = mass_log
@@ -1562,6 +1602,10 @@ def run_parallel_generation(
             node_logits[ridx] = {row_branch[ridx]: values}
             node_legal_mass_log[ridx] = {row_branch[ridx]: mass_log}
 
+    passes = scored.passes
+    t_gather_ms = scored.gather_ms
+    t_broadcast_ms = scored.broadcast_ms
+    chunk_shapes = scored.chunk_shapes
     t_suffix_eval = (time.perf_counter() - t_suf0) * 1000
     peak_active_bytes = max(peak_active_bytes, int(mx.get_peak_memory()))
 
@@ -2153,10 +2197,13 @@ def run_parallel_generation(
         total_elapsed_ms,
         extra={
             "prefill_ms": round(t_prefill, 2),
+            "plan_compile_ms": round(plan_compile_ms, 2),
+            "cache_broadcast_ms": round(t_broadcast_ms, 2),
             "suffix_eval_ms": round(t_suffix_eval, 2),
             "lm_head_gather_ms": round(t_gather_ms, 2),
             "rows": len(rows),
             "passes": passes,
+            "padded_token_positions": sum(width * c for width, c in chunk_shapes),
             "num_fields": len(schema),
         },
     )
@@ -2171,9 +2218,14 @@ def run_parallel_generation(
         # suffix_eval_ms) keep their meaning; total_ms == elapsed_ms.
         "prior_ms": round(prior_ms, 2),
         "prefill_ms": round(t_prefill, 2),
+        "plan_compile_ms": round(plan_compile_ms, 2),
+        "cache_broadcast_ms": round(t_broadcast_ms, 2),
         "suffix_eval_ms": round(t_suffix_eval, 2),
         "lm_head_gather_ms": round(t_gather_ms, 2),
         "total_ms": round(prior_ms + total_elapsed_ms, 2),
+        # W3-R: total suffix token positions including right padding — the
+        # tiling shape the forwards actually ran at.
+        "padded_token_positions": sum(width * c for width, c in chunk_shapes),
         "total_tokens_generated": 0,
         "peak_active_bytes": peak_active_bytes,
         "sequential_forward_passes": passes,
