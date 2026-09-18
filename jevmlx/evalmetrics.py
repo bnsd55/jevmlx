@@ -21,6 +21,10 @@ __all__ = [
     "compute_metrics",
     "typesafe_agreement",
     "tvd_vs_consensus",
+    "exact_record_accuracy",
+    "constraint_violation_rate",
+    "child_accuracy_given_parent_correct",
+    "order_flip_rate",
 ]
 
 
@@ -622,6 +626,213 @@ def tvd_vs_consensus(records: list[dict]) -> dict:
     return result
 
 
+# ----------------------------------------------------- dependent-schema metrics
+
+
+def _case_predictions(records: list[dict]) -> dict[str, dict[str, object]]:
+    """Group records by case_id -> {field: prediction}.
+
+    Only fields with a label are kept (constraints only apply to labelled
+    fields). Multi predictions are normalized to a list (or empty list).
+    """
+    by_case: dict[str, dict[str, object]] = defaultdict(dict)
+    for r in records:
+        case_id = r.get("case_id")
+        if case_id is None or r.get("label") is None:
+            continue
+        pred = r.get("prediction")
+        if r.get("type") == "multi":
+            if isinstance(pred, list):
+                pass
+            elif isinstance(pred, str):
+                pred = [pred] if pred else []
+            else:
+                pred = []
+        by_case[case_id][r["field"]] = pred
+    return by_case
+
+
+def _case_labels(records: list[dict]) -> dict[str, dict[str, object]]:
+    """Group records by case_id -> {field: label}."""
+    by_case: dict[str, dict[str, object]] = defaultdict(dict)
+    for r in records:
+        case_id = r.get("case_id")
+        if case_id is None or r.get("label") is None:
+            continue
+        by_case[case_id][r["field"]] = r["label"]
+    return by_case
+
+
+def _case_constraints(records: list[dict]) -> dict[str, list[dict]]:
+    """Group records by case_id -> constraints list (from the first record
+    that carries them)."""
+    by_case: dict[str, list[dict]] = {}
+    for r in records:
+        case_id = r.get("case_id")
+        if case_id is None:
+            continue
+        constraints = r.get("constraints")
+        if isinstance(constraints, list) and constraints and case_id not in by_case:
+            by_case[case_id] = constraints
+    return by_case
+
+
+def _check_constraint(constraint: dict, preds: dict[str, object]) -> bool:
+    """Return True if the constraint is SATISFIED, False if VIOLATED."""
+    ctype = constraint.get("type")
+    if ctype == "implies":
+        parent = constraint.get("parent")
+        child = constraint.get("child")
+        mapping = constraint.get("mapping", {})
+        parent_val = preds.get(parent)
+        child_val = preds.get(child)
+        if parent_val is None or child_val is None:
+            return True  # unmeasured field can't violate
+        allowed = mapping.get(parent_val, [])
+        return child_val in allowed
+    if ctype == "excludes":
+        field = constraint.get("field")
+        value = constraint.get("value")
+        other = constraint.get("other")
+        field_val = preds.get(field)
+        other_val = preds.get(other)
+        if field_val is None or other_val is None:
+            return True
+        if field_val == value:
+            # When field==value, other must be empty/falsy
+            if isinstance(other_val, list):
+                return len(other_val) == 0
+            return other_val in (None, "", False)
+        return True
+    if ctype == "requires_parent":
+        parent = constraint.get("parent")
+        child = constraint.get("child")
+        mapping = constraint.get("mapping", {})
+        parent_val = preds.get(parent)
+        child_val = preds.get(child)
+        if parent_val is None or child_val is None:
+            return True
+        allowed = mapping.get(parent_val, [])
+        return child_val in allowed
+    if ctype == "exclusivity":
+        field = constraint.get("field")
+        options = set(constraint.get("options", []))
+        field_val = preds.get(field)
+        if field_val is None:
+            return True
+        if not isinstance(field_val, list):
+            field_val = [field_val] if field_val else []
+        selected = set(field_val) & options
+        return len(selected) <= 1  # at most one from the exclusivity group
+    return True  # unknown constraint type: assume satisfied
+
+
+def constraint_violation_rate(records: list[dict]) -> dict | None:
+    """Fraction of cases with ≥1 constraint violation, and per-constraint-type
+    breakdown. Returns None when no case carries constraints."""
+    preds = _case_predictions(records)
+    constraints_by_case = _case_constraints(records)
+    if not constraints_by_case:
+        return None
+    n_cases = len(constraints_by_case)
+    violated = 0
+    by_type: dict[str, int] = defaultdict(int)
+    total_by_type: dict[str, int] = defaultdict(int)
+    for case_id, constraints in constraints_by_case.items():
+        case_preds = preds.get(case_id, {})
+        case_violated = False
+        for c in constraints:
+            ctype = c.get("type", "unknown")
+            total_by_type[ctype] += 1
+            if not _check_constraint(c, case_preds):
+                by_type[ctype] += 1
+                case_violated = True
+        if case_violated:
+            violated += 1
+    result = {"overall": violated / n_cases if n_cases else 0.0}
+    if total_by_type:
+        result["by_type"] = {
+            t: by_type[t] / total_by_type[t] if total_by_type[t] else 0.0
+            for t in sorted(total_by_type)
+        }
+    return result
+
+
+def child_accuracy_given_parent_correct(records: list[dict]) -> dict | None:
+    """For each implies/requires_parent constraint, child field accuracy
+    among cases where the parent was predicted correctly. Returns None when
+    no such constraints exist."""
+    preds = _case_predictions(records)
+    labels = _case_labels(records)
+    constraints_by_case = _case_constraints(records)
+    if not constraints_by_case:
+        return None
+    # Collect (parent, child) pairs from constraints.
+    pairs: dict[tuple[str, str], list[bool]] = defaultdict(list)
+    for case_id, constraints in constraints_by_case.items():
+        case_preds = preds.get(case_id, {})
+        case_labels = labels.get(case_id, {})
+        for c in constraints:
+            if c.get("type") not in ("implies", "requires_parent"):
+                continue
+            parent = c.get("parent")
+            child = c.get("child")
+            parent_pred = case_preds.get(parent)
+            parent_label = case_labels.get(parent)
+            child_pred = case_preds.get(child)
+            child_label = case_labels.get(child)
+            if parent_pred is None or parent_label is None:
+                continue
+            if parent_pred != parent_label:
+                continue  # parent wrong: skip
+            if child_pred is None or child_label is None:
+                continue
+            pairs[(parent, child)].append(child_pred == child_label)
+    if not pairs:
+        return None
+    return {
+        f"{parent}→{child}": sum(v) / len(v) if v else 0.0
+        for (parent, child), v in sorted(pairs.items())
+    }
+
+
+def exact_record_accuracy(records: list[dict]) -> float | None:
+    """Fraction of cases where EVERY labelled field is correct AND no
+    constraint is violated. Stricter than case_exact_match (which ignores
+    constraints). Returns None when no cases carry labels."""
+    by_case: dict[str, list[dict]] = defaultdict(list)
+    for r in records:
+        if r.get("label") is not None or r.get("correct") is not None:
+            by_case[r["case_id"]].append(r)
+    if not by_case:
+        return None
+    preds = _case_predictions(records)
+    constraints_by_case = _case_constraints(records)
+    perfect = 0
+    for case_id, case_records in by_case.items():
+        labelled = _labelled(case_records)
+        if not labelled or not all(_valid_correct(r) for r in labelled):
+            continue
+        # If this case has constraints, they must all be satisfied too.
+        constraints = constraints_by_case.get(case_id, [])
+        if constraints:
+            case_preds = preds.get(case_id, {})
+            if not all(_check_constraint(c, case_preds) for c in constraints):
+                continue
+        perfect += 1
+    return perfect / len(by_case)
+
+
+def order_flip_rate(records: list[dict]) -> dict | None:
+    """Fraction of cases where the prediction for a field flips when field
+    order changes (permutation != 'canonical'). Reuses any_flip_rate when
+    permutation data is present; returns None otherwise."""
+    existing = any_flip_rate(records)
+    if existing:
+        return existing
+    return None
+
+
 def compute_metrics(records: list[dict]) -> dict:
     """Assemble the metrics dict for evalreport.write_report.
 
@@ -683,4 +894,18 @@ def compute_metrics(records: list[dict]) -> dict:
     tvd = tvd_vs_consensus(records)
     if tvd:
         metrics["tvd_vs_consensus"] = tvd
+    # Dependent-schema metrics (EV1: review Q1 'The correct diagnostic').
+    exact_record = exact_record_accuracy(records)
+    if exact_record is not None:
+        metrics["exact_record_accuracy"] = exact_record
+    violations = constraint_violation_rate(records)
+    if violations:
+        metrics["constraint_violation_rate"] = violations
+    child_acc = child_accuracy_given_parent_correct(records)
+    if child_acc:
+        metrics["child_accuracy_given_parent_correct"] = child_acc
+    # oracle_parent_gap: needs a conditioned rerun (W3-D); None until then.
+    flips = order_flip_rate(records)
+    if flips:
+        metrics["order_flip_rate"] = flips
     return metrics

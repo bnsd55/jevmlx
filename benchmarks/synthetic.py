@@ -354,6 +354,186 @@ def build_dependent(seed: int = SEED) -> list[dict]:
     return records
 
 
+# ---------------------------------------------------- 5. dependent2 (EV1)
+
+# A richer dependent-schema set exercising all four failure modes from
+# review Q1 'Where independence actually hurts': hierarchy, hard coupling,
+# shared latent choice, and multi with exclusivity. Each case carries
+# declarative constraint metadata in the schema so evalmetrics can compute
+# constraint_violation_rate, child_accuracy_given_parent_correct, etc.
+# Constraint shape (proposed in the PR body, minimal and declarative):
+#   {"type": "implies", "parent": "intent", "child": "subtype",
+#    "mapping": {"billing": ["refund", "dispute"], ...}}
+#   {"type": "excludes", "field": "approved", "value": true,
+#    "other": "rejection_reason"}
+#   {"type": "requires_parent", "parent": "stage", "child": "stage_detail",
+#    "mapping": {"lead": ["new", "qualified"], ...}}
+#   {"type": "exclusivity", "field": "channels", "group": "premium",
+#    "options": ["enterprise", "partner"]}
+
+DEPENDENT2_SCHEMA = {
+    "intent": {
+        "type": "enum",
+        "description": "Top-level customer intent",
+        "choices": ["billing", "technical", "sales"],
+    },
+    "subtype": {
+        "type": "enum",
+        "description": "Sub-category; determined by intent",
+        "choices": ["refund", "dispute", "bug", "feature", "upgrade", "cancel"],
+    },
+    "approved": {
+        "type": "boolean",
+        "description": "Whether the request was approved",
+    },
+    "rejection_reason": {
+        "type": "enum",
+        "description": "Why rejected; empty when approved",
+        "choices": ["policy", "eligibility", "duplicate"],
+    },
+    "stage": {
+        "type": "enum",
+        "description": "Pipeline stage (shared latent choice)",
+        "choices": ["lead", "opportunity", "closed"],
+    },
+    "stage_detail": {
+        "type": "enum",
+        "description": "Stage sub-state; determined by stage",
+        "choices": ["new", "qualified", "negotiation", "won", "lost"],
+    },
+    "channels": {
+        "type": "multi",
+        "description": "Acquisition channels (enterprise+partner mutually exclusive)",
+        "choices": ["organic", "enterprise", "partner", "referral"],
+    },
+}
+
+DEPENDENT2_CONSTRAINTS = [
+    {
+        "type": "implies",
+        "parent": "intent",
+        "child": "subtype",
+        "mapping": {
+            "billing": ["refund", "dispute"],
+            "technical": ["bug", "feature"],
+            "sales": ["upgrade", "cancel"],
+        },
+    },
+    {
+        "type": "excludes",
+        "field": "approved",
+        "value": True,
+        "other": "rejection_reason",
+    },
+    {
+        "type": "requires_parent",
+        "parent": "stage",
+        "child": "stage_detail",
+        "mapping": {
+            "lead": ["new", "qualified"],
+            "opportunity": ["negotiation"],
+            "closed": ["won", "lost"],
+        },
+    },
+    {
+        "type": "exclusivity",
+        "field": "channels",
+        "group": "premium",
+        "options": ["enterprise", "partner"],
+    },
+]
+
+_INTENT_SUBTYPES = {
+    "billing": ["refund", "dispute"],
+    "technical": ["bug", "feature"],
+    "sales": ["upgrade", "cancel"],
+}
+_STAGE_DETAILS = {
+    "lead": ["new", "qualified"],
+    "opportunity": ["negotiation"],
+    "closed": ["won", "lost"],
+}
+_DEPENDENT2_CONTEXTS = (
+    "Customer {entity} contacted about {topic}. Intent: {intent_desc}.",
+    "Inbound from {entity}: {intent_desc}. Resolve and route.",
+    "Ticket from {entity} — {intent_desc}. Classify all fields.",
+)
+
+
+def build_dependent2(seed: int = SEED) -> list[dict]:
+    """~200 cases with dependent fields: hierarchy (intent→subtype), hard
+    coupling (approved excludes rejection_reason), shared latent choice
+    (stage→stage_detail), and multi with exclusivity (enterprise+partner
+    mutually exclusive in channels). Each case carries constraint metadata
+    in schema['constraints'] so evalmetrics can detect violations."""
+    records: list[dict] = []
+    intents = list(_INTENT_SUBTYPES)
+    stages = list(_STAGE_DETAILS)
+    entities = ["Acme Corp", "Globex", "Initech", "Umbrella", "Hooli", "Pied Piper"]
+    intent_descs = {
+        "billing": "a billing issue",
+        "technical": "a technical problem",
+        "sales": "a sales inquiry",
+    }
+    n = 200
+    for i in range(n):
+        rng_i = random.Random(f"{seed}/dep2/{i}")
+        intent = rng_i.choice(intents)
+        subtype = rng_i.choice(_INTENT_SUBTYPES[intent])
+        approved = rng_i.random() < 0.6
+        rejection_reason = "" if approved else rng_i.choice(["policy", "eligibility", "duplicate"])
+        stage = rng_i.choice(stages)
+        stage_detail = rng_i.choice(_STAGE_DETAILS[stage])
+        # Channels: pick 1-3 from all 4, but never both enterprise+partner.
+        available = ["organic", "enterprise", "partner", "referral"]
+        n_channels = rng_i.randint(1, 3)
+        channels = []
+        for _ in range(n_channels):
+            remaining = [c for c in available if c not in channels]
+            if not remaining:
+                break
+            pick = rng_i.choice(remaining)
+            # Exclusivity: if enterprise is already picked, partner is forbidden.
+            if "enterprise" in channels and pick == "partner":
+                continue
+            if "partner" in channels and pick == "enterprise":
+                continue
+            channels.append(pick)
+        if not channels:
+            channels = ["organic"]
+        entity = rng_i.choice(entities)
+        template = rng_i.choice(_DEPENDENT2_CONTEXTS)
+        context = template.format(
+            entity=entity,
+            topic=intent_descs[intent],
+            intent_desc=intent_descs[intent],
+        )
+        records.append(
+            _record(
+                "dependent2",
+                i,
+                f"dep2-{intent}-{stage}",
+                DEPENDENT2_SCHEMA,
+                context,
+                {
+                    "intent": intent,
+                    "subtype": subtype,
+                    "approved": approved,
+                    "rejection_reason": rejection_reason,
+                    "stage": stage,
+                    "stage_detail": stage_detail,
+                    "channels": channels,
+                },
+            )
+        )
+        # F1: constraints live at the CASE level (case['constraints']), not
+        # inside case['schema'] — StructuredSchema.__init__ iterates every key
+        # of the schema dict as a field, so a 'constraints' key there would
+        # be parsed as a field named 'constraints' with a list spec.
+        records[-1]["constraints"] = DEPENDENT2_CONSTRAINTS
+    return records
+
+
 # ------------------------------------------------------------------- assembly
 
 SETS = {
@@ -361,6 +541,7 @@ SETS = {
     "cardinality": build_cardinality,
     "injection": build_injection,
     "dependent": build_dependent,
+    "dependent2": build_dependent2,
 }
 
 
