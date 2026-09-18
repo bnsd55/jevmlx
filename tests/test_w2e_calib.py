@@ -14,7 +14,7 @@ import pytest
 from conftest import YNLogitModel as _BiasedMultiModel
 from conftest import _Mod97Tokenizer as FakeTokenizer
 
-from jevmlx.calibrate import calibrated_log_odds, fit_logistic
+from jevmlx.calibrate import CalibrationBundle, calibrated_log_odds, fit_logistic
 from jevmlx.engine import run_parallel_generation
 from jevmlx.schema import StructuredSchema
 
@@ -245,7 +245,9 @@ def test_openai_multi_calibrated_selection_and_no_threshold_key():
             "flags",
             field,
             5.0,
-            {"multi": {"a": 1.0, "b": 0.0}},
+            # W5-C finding 22: typed CalibrationBundle (from_payload accepts
+            # the legacy dict shape too).
+            CalibrationBundle.from_payload({"multi": {"a": 1.0, "b": 0.0}}),
             FakeTokenizer(),
         )
     assert "threshold" not in telemetry

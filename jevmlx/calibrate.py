@@ -265,7 +265,7 @@ class CalibrationBundle:
             raise ValueError(f"bundle scoring must be 'slots' or 'labels', got {self.scoring!r}")
 
     @classmethod
-    def from_payload(cls, payload: dict) -> "CalibrationBundle":
+    def from_payload(cls, payload: dict) -> CalibrationBundle:
         """Parse a JSON payload: the review shape (model_revision,
         prompt_version, scoring, prior_mode, scalar, multi) or the legacy
         CLI shape ("temperature": .., "multi": {"a", "b"})."""
@@ -281,7 +281,7 @@ class CalibrationBundle:
             try:
                 temperature = float(scalar["temperature"])
             except (KeyError, TypeError, ValueError) as exc:
-                raise ValueError(f'calibration["scalar"] must carry numeric "temperature"') from exc
+                raise ValueError('calibration["scalar"] must carry numeric "temperature"') from exc
         elif "scalar" in payload and scalar is not None:
             raise ValueError('calibration["scalar"] must be a dict {"temperature": ..}')
         if temperature is None and "temperature" in payload:
@@ -310,7 +310,7 @@ class CalibrationBundle:
         )
 
     @classmethod
-    def load(cls, path: str) -> "CalibrationBundle":
+    def load(cls, path: str) -> CalibrationBundle:
         """Load and validate a calibration JSON file (file I/O lives here,
         at the boundary — never inside the engine's hot path)."""
         try:
