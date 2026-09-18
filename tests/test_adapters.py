@@ -189,11 +189,27 @@ def test_unsupported_model_type_raises():
     assert "gemma3_text" in exc.value.supported
 
 
-def test_structural_fallback_accepts_standard_layout_novel_type():
+def test_unknown_type_raises_even_with_standard_layout():
+    """No structural fallback, full stop (review F1): a model whose type is
+    unknown raises UnsupportedModelError even though its attribute layout
+    matches _StandardAdapter — adding a family means adding a registry
+    entry + a test, never attribute-shape guessing."""
     model = _std_model(tied=False, mt="brand_new_family")
-    adapter = adapter_for(model)
-    tokens = mx.array([[1, 2]])
-    assert mx.allclose(adapter.lm_head(adapter.backbone(tokens)), model(tokens)).item()
+    with pytest.raises(UnsupportedModelError) as exc:
+        adapter_for(model)
+    assert exc.value.model_type == "brand_new_family"
+
+
+def test_missing_model_type_raises():
+    """The single source of truth is model.model_type (review F2): an
+    object without it raises instead of being probed through args/config
+    dicts."""
+
+    class _NoType:
+        args = type("Args", (), {"model_type": "qwen2"})()  # decoy
+
+    with pytest.raises(UnsupportedModelError):
+        adapter_for(_NoType())
 
 
 def test_list_supported_model_types():

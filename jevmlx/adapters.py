@@ -162,53 +162,32 @@ _REGISTRY: dict[str, type] = {
 
 
 def _model_type_of(model: Any) -> str | None:
-    mt = getattr(model, "model_type", None)
-    if isinstance(mt, str):
-        return mt
-    args = getattr(model, "args", None)
-    mt = getattr(args, "model_type", None)
-    if isinstance(mt, str):
-        return mt
-    # mlx_lm sets model_type as an instance attr on most Models; some keep
-    # it only in args/config dicts.
-    cfg = getattr(args, "text_config", None) or {}
-    if isinstance(cfg, dict):
-        mt = cfg.get("model_type")
-        if isinstance(mt, str):
-            return mt
-    return None
+    """The ONE source mlx_lm guarantees: ``model.model_type``.
 
-
-def _unwrap(model: Any) -> Any:
-    """Peel wrapper Models (multimodal mistral3/gemma3) to the text Model.
-
-    mlx_lm sets a ``layers`` property even on wrappers; the text model is
-    whichever object exposes the backbone/head attributes.
+    Every installed Model sets ``self.model_type = args.model_type`` in
+    ``__init__`` (verified: 108 model classes, e.g. qwen2.py:162,
+    gemma3_text.py:219, phi.py:159). No config-dict probing, no args
+    fallback — a family that somehow lacks the attribute is registered
+    explicitly by adding a registry entry, not discovered by guessing.
     """
-    return model
+    mt = getattr(model, "model_type", None)
+    return mt if isinstance(mt, str) else None
 
 
 def adapter_for(model: Any) -> LMHeadAdapter:
     """Return the LMHeadAdapter for a loaded mlx_lm model.
 
-    Dispatch on ``model_type`` (the config.json key); a structural fallback
-    accepts the standard layout under a novel type ONLY if it truly has
-    ``.model`` + (``.lm_head`` or a tied ``embed_tokens``) — anything else
-    raises :class:`UnsupportedModelError` rather than guessing.
+    Dispatch on ``model.model_type`` ONLY (the attribute every mlx_lm
+    Model.__init__ sets). An unknown type raises
+    :class:`UnsupportedModelError` — full stop. There is deliberately NO
+    structural fallback: guessing a layout from attribute shapes is the
+    dual path the review forbids. Adding a family = adding a registry
+    entry + a test.
     """
     mt = _model_type_of(model)
     adapter_cls = _REGISTRY.get(mt) if mt else None
     if adapter_cls is not None:
         return adapter_cls(model)
-
-    # Structural fallback for unregistered types with the standard layout.
-    backbone = getattr(model, "model", None)
-    if backbone is not None:
-        if getattr(model, "lm_head", None) is not None:
-            return _StandardAdapter(model)
-        if getattr(getattr(backbone, "embed_tokens", None), "as_linear", None):
-            return _StandardAdapter(model)
-
     raise UnsupportedModelError(mt, list_supported_model_types())
 
 
