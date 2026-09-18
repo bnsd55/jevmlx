@@ -350,6 +350,17 @@ def _build_field_results(
             margin = probability_margin if log_scores else threshold_distance
             if margin is not None and margin < abstain_below_margin:
                 reason = "abstain"
+        # W5-C finding 23: calibrated reflects the APPLIED calibrator for
+        # THIS field (multi fields carry a,b + the bundle identity; scalar
+        # fields carry the bundle's temperature when one was applied).
+        calibration_id = telemetry.get("calibration_id")
+        if calibration_id is not None:
+            calibrated_flag = True
+            confidence_model = f"{confidence_model}+calib:{calibration_id}"
+        elif telemetry.get("calibrated") is not None:
+            calibrated_flag = True
+        else:
+            calibrated_flag = False
         fields[name] = FieldResult(
             value=telemetry["value"],
             score=score,
@@ -357,7 +368,7 @@ def _build_field_results(
             probability_margin=probability_margin,
             threshold_distance=threshold_distance,
             probability=probability,
-            calibrated=False,
+            calibrated=calibrated_flag,
             model=confidence_model,
             alternatives=alternatives,
             reason=reason,
@@ -445,6 +456,29 @@ def _check_abstain_margin(abstain_below_margin: float | None) -> None:
     """Validate the abstention cut: None (disabled) or a float in [0, 1)."""
     if abstain_below_margin is not None and not 0.0 <= abstain_below_margin < 1.0:
         raise TypeError("abstain_below_margin must be in [0, 1) or None")
+
+
+def _check_abstention_schema[T: BaseModel](model_cls: type[T]) -> None:
+    """W5-C finding 25: abstention maps a withheld field to None — that is
+    only representable when the field's annotation is Optional. A
+    non-Optional field with abstain_below_margin set would fail Pydantic
+    validation AFTER inference (the worst possible time). The contract is
+    enforced at decide() start: every field of the model must be Optional
+    (any spelling) or the request is a usage error naming the first
+    offending field."""
+    for name, info in model_cls.model_fields.items():
+        ann = info.annotation
+        origin = typing.get_origin(ann)
+        is_optional = origin in (typing.Union, types.UnionType) and type(None) in typing.get_args(
+            ann
+        )
+        if not is_optional:
+            raise TypeError(
+                f"Field '{name}': abstain_below_margin requires every field to be "
+                f"Optional (e.g. {name}: ... | None) so a withheld field can map "
+                "to None; abstention would otherwise fail validation after "
+                "inference"
+            )
 
 
 def _prepare_schema(model_cls: type[BaseModel], allow_none_of_above: bool) -> StructuredSchema:
