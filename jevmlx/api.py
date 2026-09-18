@@ -368,8 +368,7 @@ def _build_field_results(
 def _decide_once[T: BaseModel](
     model_cls: type[T],
     context: str,
-    engine_model,
-    tokenizer,
+    engine,
     schema: StructuredSchema,
     temperature: float,
     scoring: str = "slots",
@@ -379,10 +378,10 @@ def _decide_once[T: BaseModel](
     prior_correction: bool = False,
     constraints: list[dict] | None = None,
 ) -> Decision[T]:
-    """Decide one context with a loaded engine and a compiled schema."""
+    """Decide one context with a loaded :class:`Engine` and a compiled schema
+    The Engine is the single handle; no (model, tokenizer) pairs."""
     result = run_parallel_generation(
-        engine_model,
-        tokenizer,
+        engine,
         context,
         schema,
         temperature=temperature,
@@ -527,12 +526,11 @@ def decide[T: BaseModel](
     # decide_many's input validation).
     _check_abstain_margin(abstain_below_margin)
     schema = _prepare_schema(model_cls, allow_none_of_above)
-    engine_model, tokenizer = load_engine(model)
+    engine = load_engine(model)
     return _decide_once(
         model_cls,
         context,
-        engine_model,
-        tokenizer,
+        engine,
         schema,
         temperature,
         scoring=scoring,
@@ -585,14 +583,13 @@ def decide_many[T: BaseModel](
 
     _check_abstain_margin(abstain_below_margin)
     schema = _prepare_schema(model_cls, allow_none_of_above)
-    engine_model, tokenizer = load_engine(model)
+    engine = load_engine(model)
     # W3-F: batch the contexts (one merged scoring pass per context group).
     # Each Decision is assembled through the same post-processing as
     # decide() (_assemble_decision), so validation / abstain / NONE_OF_ABOVE
     # behave identically; only the forward passes are shared.
     raws = run_parallel_generation_batched(
-        engine_model,
-        tokenizer,
+        engine,
         contexts,
         schema,
         temperature=temperature,

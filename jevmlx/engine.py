@@ -81,17 +81,6 @@ def _tokenizer_model_id(tokenizer) -> str:
     return getattr(tokenizer, "name_or_path", "") or ""
 
 
-def _resolve_profile(tokenizer) -> PromptProfile:
-    """Self-contained profile resolution: probe this tokenizer's system-role
-    support and derive template kwargs from its name. Deliberately NOT
-    cached: run_parallel_generation / run_naive_generation receive
-    (model, tokenizer) directly — from eval, serve and tests, often without
-    load_engine — and a registry would silently hand those callers the
-    default profile (Qwen3 with thinking ON). The probe renders two tiny
-    messages, microseconds next to a model pass."""
-    return _probe_system_role(tokenizer, _profile_for(_tokenizer_model_id(tokenizer)))
-
-
 def _profile_for(model_id: str) -> PromptProfile:
     """PromptProfile from the model id. The Qwen3 family ships a thinking
     chat template that is ON by default and would put the answer in the
@@ -118,6 +107,44 @@ def _probe_system_role(tokenizer, profile: PromptProfile) -> PromptProfile:
     except TemplateError:
         return PromptProfile(template_kwargs=profile.template_kwargs, supports_system=False)
     return profile
+
+
+@dataclass(frozen=True)
+class Engine:
+    """The loaded engine The model, tokenizer, and
+    every per-model property resolved ONCE at load, carried together.
+
+    Frozen dataclass — the engine is shared across threads and calls;
+    nothing on it mutates after load.
+
+    Attributes:
+        model: the loaded mlx-lm model (callable: tokens -> logits).
+        tokenizer: the loaded tokenizer (encode/decode/apply_chat_template).
+        model_id: the RESOLVED model id (load_engine("quality") and the full
+            id produce equal Engine objects; the lru cache keys on this).
+        revision: the HF snapshot sha from the local cache (None when not
+            resolvable; same source as :func:`engine_metadata`).
+        profile: the :class:`PromptProfile` probed at load — chat-template
+            kwargs and system-role support. Hot paths read
+            ``engine.profile`` instead of re-probing per call — the old
+            _prefill probed a chat-template render every call.
+        vocab_size: the model's output vocabulary (logits slab sizing).
+        weight_bytes: total parameter bytes (memory budget input).
+        cache_capabilities: sorted names of the cache classes the model's
+            layers produce (the ``merge`` broadcast gate reads this).
+        width_slope: the measured width-bin tiling slope (W5-D) — carried
+            per engine instead of process-global state.
+    """
+
+    model: Any
+    tokenizer: Any
+    model_id: str
+    revision: str | None
+    profile: PromptProfile
+    vocab_size: int
+    weight_bytes: int
+    cache_capabilities: tuple[str, ...]
+    width_slope: float
 
 
 # mlx imports are deferred so this module imports cleanly on a machine
@@ -162,6 +189,12 @@ def load_engine(model_id: str):
     same id and therefore share one entry instead of loading the same model
     twice (and evicting it — the cache holds one model).
 
+    Returns an :class:`Engine` object — model, tokenizer, and
+    every per-model property (profile, vocab size, weight bytes, cache
+    capabilities, measured width slope, revision) resolved ONCE at load.
+    The alias and the full id share ONE cached Engine object (the required
+    identity test).
+
     Raises RuntimeError on a non-Apple-Silicon machine (mlx unavailable) —
     the only place the platform check lives, so `import jevmlx.engine`
     succeeds on Linux for schema/plan/metrics tooling.
@@ -192,13 +225,14 @@ def _load_engine_resolved(model_id: str):
     model, tokenizer = load(model_id)
     logger.info("Engine loaded in %.2fs.", time.perf_counter() - t0)
 
-    # Resolve the chat-template profile once for logging visibility: the
-    # same resolution runs self-contained inside _resolve_profile on every
-    # generation call (tiny render, no registry — see its docstring).
+    # The prompt profile is resolved ONCE here and carried on the Engine —
+    # from the RESOLVED model id (alias -> canonical id), not the tokenizer
+    # object; hot paths read engine.profile.
+    profile = _probe_system_role(tokenizer, _profile_for(model_id))
     logger.info(
         "Prompt profile: template_kwargs=%s supports_system=%s",
-        _profile_for(model_id).template_kwargs,
-        _probe_system_role(tokenizer, _profile_for(model_id)).supports_system,
+        profile.template_kwargs,
+        profile.supports_system,
     )
 
     # Warmup: compile prefill and broadcast decode shaders ahead of time.
@@ -218,11 +252,57 @@ def _load_engine_resolved(model_id: str):
     # W5-D review round 2: the width-bin budget's tiling slope is MEASURED
     # here (B=1 vs B=2 peak-activation ratio) — not assumed. Failure falls
     # back to the floor and logs; no comment claims a measurement that did
-    # not happen.
-    global _WIDTH_SLOPE
-    _WIDTH_SLOPE = _measure_width_slope(model)
-    logger.info("Width-bin tiling slope measured: %.3f", _WIDTH_SLOPE)
-    return model, tokenizer
+    # not happen. The slope is carried on the Engine — one source, read by
+    # the chunking budget through engine.width_slope.
+    width_slope = _measure_width_slope(model)
+    logger.info("Width-bin tiling slope measured: %.3f", width_slope)
+
+    # every per-model property resolved ONCE, here.
+    vocab_size = _vocab_size_of(model)
+    weight_bytes = _model_weight_bytes(model)
+    cache_capabilities = tuple(sorted({type(c).__name__ for c in make_prompt_cache(model)}))
+    engine = Engine(
+        model=model,
+        tokenizer=tokenizer,
+        model_id=model_id,
+        revision=_revision_of(model_id),
+        profile=profile,
+        vocab_size=vocab_size,
+        weight_bytes=weight_bytes,
+        cache_capabilities=cache_capabilities,
+        width_slope=width_slope,
+    )
+    logger.info(
+        "Engine ready: %s rev=%s vocab=%d weights=%.1fMB caches=%s",
+        model_id,
+        engine.revision,
+        vocab_size,
+        weight_bytes / 1e9,
+        ",".join(cache_capabilities) or "none",
+    )
+    return engine
+
+
+def _revision_of(model_id: str) -> str | None:
+    """The HF snapshot sha for ``model_id`` from the local cache (None when
+    not resolvable). Shared by :func:`engine_metadata` and the Engine build
+    — one lookup, no duplicate path walking."""
+    try:
+        from huggingface_hub import constants
+
+        cache_dir = Path(constants.HF_HUB_CACHE)
+    except Exception:  # noqa: BLE001 — provenance is best-effort
+        return None
+    repo_dir = cache_dir / f"models--{model_id.replace('/', '--')}"
+    main_ref = repo_dir / "refs" / "main"
+    snapshot_dir = repo_dir / "snapshots"
+    if main_ref.exists():
+        return main_ref.read_text(encoding="utf-8").strip()
+    if snapshot_dir.is_dir():
+        snapshots = [p for p in snapshot_dir.iterdir() if p.is_dir()]
+        if len(snapshots) == 1:
+            return snapshots[0].name
+    return None
 
 
 def engine_metadata(model_id: str) -> dict[str, Any]:
@@ -238,44 +318,30 @@ def engine_metadata(model_id: str) -> dict[str, Any]:
         mlx_lm_version = importlib.metadata.version("mlx-lm")
     except importlib.metadata.PackageNotFoundError:
         mlx_lm_version = None
-    revision = None
+    revision = _revision_of(model_id)
     quantization = None
-    try:
-        from huggingface_hub import constants
+    # config.json sits next to the snapshot: models--<repo>/snapshots/<sha>.
+    config_path = None
+    if revision is not None:
+        try:
+            from huggingface_hub import constants
 
-        cache_dir = Path(constants.HF_HUB_CACHE)
-    except Exception:  # noqa: BLE001 — provenance is best-effort
-        cache_dir = None
-
-    if cache_dir is not None:
-        # models--org--name/snapshots/<sha>; resolve through refs/main first,
-        # fall back to the only snapshot present.
-        repo_dir = cache_dir / f"models--{model_id.replace('/', '--')}"
-        main_ref = repo_dir / "refs" / "main"
-        snapshot_dir = repo_dir / "snapshots"
-        if main_ref.exists():
-            revision = main_ref.read_text(encoding="utf-8").strip()
-        elif snapshot_dir.is_dir():
-            snapshots = [p for p in snapshot_dir.iterdir() if p.is_dir()]
-            if len(snapshots) == 1:
-                revision = snapshots[0].name
-        config_path = None
-        if revision:
-            candidate = snapshot_dir / revision / "config.json"
+            snapshot_root = (
+                Path(constants.HF_HUB_CACHE)
+                / f"models--{model_id.replace('/', '--')}"
+                / "snapshots"
+            )
+            candidate = snapshot_root / revision / "config.json"
             if candidate.exists():
                 config_path = candidate
-        elif snapshot_dir.is_dir():
-            for snap in snapshot_dir.iterdir():
-                candidate = snap / "config.json"
-                if candidate.exists():
-                    config_path = candidate
-                    break
-        if config_path is not None:
-            try:
-                config = json.loads(config_path.read_text(encoding="utf-8"))
-                quantization = config.get("quantization")
-            except (OSError, json.JSONDecodeError):
-                quantization = None
+        except Exception:  # noqa: BLE001 — provenance is best-effort
+            config_path = None
+    if config_path is not None:
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            quantization = config.get("quantization")
+        except (OSError, json.JSONDecodeError):
+            quantization = None
 
     try:
         mlx_version = importlib.metadata.version("mlx")
@@ -438,6 +504,15 @@ def _validate_json(current_text: str, schema: StructuredSchema):
     return parsed_json, is_valid_json, parse_error, missing_keys, invalid_enums, schema_match
 
 
+def _vocab_size_of(model) -> int:
+    """The model's output vocabulary: args.vocab_size when present, else the
+    embedding row count (= vocab). The single static source, shared by the
+    load-time Engine fields and the per-call budgets."""
+    if hasattr(model, "args") and hasattr(model.args, "vocab_size"):
+        return int(model.args.vocab_size)
+    return int(model.model.embed_tokens.weight.shape[0])
+
+
 def _model_weight_bytes(model) -> int:
     """Total bytes of all model parameters (quantized weights included)."""
     return sum(int(p.nbytes) for _, p in tree_flatten(model.parameters()))
@@ -454,14 +529,14 @@ def _max_recommended_working_set() -> int:
 
 
 def run_naive_generation(
-    model,
-    tokenizer,
+    engine: Engine,
     context: str,
     schema: StructuredSchema,
     max_tokens: int = 700,
 ) -> dict[str, Any]:
     """
     Standard autoregressive generation baseline:
+    Takes the loaded :class:`Engine`; model/tokenizer/profile read from it.
     prompts the LLM to generate the entire JSON object token-by-token.
 
     Greedy by definition: every step is argmax. The old ``temperature``
@@ -477,7 +552,9 @@ def run_naive_generation(
         "instructions:\n\n"
         f"{_context_block(context)}"
     )
-    prompt_ids = _chat_ids(tokenizer, user_content, PROMPT_V2_SYSTEM, _resolve_profile(tokenizer))
+    model = engine.model
+    tokenizer = engine.tokenizer
+    prompt_ids = _chat_ids(tokenizer, user_content, PROMPT_V2_SYSTEM, engine.profile)
     # Naive generation writes the JSON itself, so its assistant prefix stays
     # part of the prompt (it does not use candidate-aligned rows).
     prompt_ids = prompt_ids + tokenizer.encode("{\n  ", add_special_tokens=False)
@@ -841,11 +918,6 @@ _BYTES_PER_LOGIT_ELEMENT = 4.0
 # next engine load; a probe failure logs and keeps the floor.
 _ASSUMED_BYTES_PER_ROW_SLOPE = 1.0
 
-# The LIVE slope: starts at the floor, replaced by the measured ratio when
-# _measure_width_slope succeeds at engine load (1f9f453-era code had no
-# probe at all — the review's point was the comment, not the constant).
-_WIDTH_SLOPE: float | None = None
-
 
 def _measure_width_slope(model) -> float:
     """Measure the B=1 vs B=2 peak-activation slope on the loaded engine.
@@ -902,17 +974,12 @@ def _width_bin(width: int) -> int:
     return _WIDTH_BINS[-1]
 
 
-def _width_slope() -> float:
-    """The live tiling slope: measured at engine load when the probe ran,
-    else the assumed floor (SHORTCUT — see the constants block)."""
-    return _WIDTH_SLOPE if _WIDTH_SLOPE is not None else _ASSUMED_BYTES_PER_ROW_SLOPE
-
-
 def _width_bin_max_rows(
     rows: list[list[int]],
     cache_example: list,
     vocab_size: int,
     weight_bytes: int,
+    slope: float,
     max_rows: int | None,
 ) -> int:
     """Cap on rows per chunk from the ACTIVE-memory budget (finding 31).
@@ -920,10 +987,9 @@ def _width_bin_max_rows(
     Per width bin: budget = _memory_budget_bytes(_CHUNK_TARGET_FRACTION);
     bytes_per_row = ONE row's cache bytes + bin_width * vocab * 4 * slope
     (the logits slab at that bin's width — narrow rows are no longer
-    charged the bucket's max width). The slope is MEASURED at engine load
-    (B=1/B=2 peak-activation ratio); before the first load it is the
-    assumed floor (SHORTCUT, see the constants block). The overall cap is
-    the min across the bins actually present in ``rows``; max_rows only
+    charged the bucket's max width). ``slope`` is the measured value the
+    engine carries (resolved at load; one source). The overall cap is the
+    min across the bins actually present in ``rows``; max_rows only
     tightens.
     """
     cache_bytes = _cache_nbytes(cache_example)
@@ -933,7 +999,6 @@ def _width_bin_max_rows(
     # the available budget for chunk state is the fraction budget itself.
     cap: int | None = None
     present_widths = {len(r) for r in rows} if rows else set()
-    slope = _width_slope()
     for width in present_widths:
         bin_width = _width_bin(width)
         logits_bytes = bin_width * vocab_size * _BYTES_PER_LOGIT_ELEMENT * slope
@@ -954,7 +1019,7 @@ def _is_metal_allocation_error(exc: Exception) -> bool:
     RuntimeError/ValueError from the Metal allocator mention 'buffer' or
     'memory'; anything else propagates.
     """
-    if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+    if isinstance(exc, KeyboardInterrupt | SystemExit):
         return False
     if isinstance(exc, MemoryError):
         return True
@@ -1042,10 +1107,10 @@ def _prior_cache_key(
     """
     try:
         # Weak-referenceability gate only: the refs used at hit time are
-        # created at store time (see _get_or_compute_prior). W5-C fix: the
-        # refs must NOT go into the KEY — hash(ref) delegates to the
-        # referent and mlx models are unhashable, which crashed every
-        # prior-corrected run with TypeError.
+        # created at store time (see _get_or_compute_prior). The refs must
+        # NOT go into the KEY — hash(ref) delegates to the referent and mlx
+        # models are unhashable, which would crash every prior-corrected
+        # run with TypeError.
         weakref.ref(model)
         weakref.ref(tokenizer)
     except TypeError:
@@ -1066,8 +1131,7 @@ def _prior_cache_key(
 
 
 def _get_or_compute_prior(
-    model,
-    tokenizer,
+    engine: Engine,
     schema: StructuredSchema,
     scoring: str,
     max_rows: int | None,
@@ -1094,6 +1158,7 @@ def _get_or_compute_prior(
     identical choices but different descriptions produce different prompt
     hashes and never share a prior.
     """
+    tokenizer = engine.tokenizer
     plan_hash = schema.plan_hash(tokenizer, scoring)
     if neutral_prompt_sha256 is None:
         # W5-D finding 33: hash the EXACT neutral prompt token ids (the same
@@ -1105,17 +1170,19 @@ def _get_or_compute_prior(
                 tokenizer,
                 _user_content(neutral_context, schema, tokenizer, scoring),
                 PROMPT_V2_SYSTEM,
-                _resolve_profile(tokenizer),
+                engine.profile,
             )
         )
     else:
         neutral_prompt_sha = neutral_prompt_sha256
-    key = _prior_cache_key(model, tokenizer, PROMPT_VERSION, scoring, plan_hash, neutral_prompt_sha)
+    key = _prior_cache_key(
+        engine.model, tokenizer, PROMPT_VERSION, scoring, plan_hash, neutral_prompt_sha
+    )
     hit = _PRIOR_CACHE.get(key) if key else None
     if hit is not None:
         # W5-D finding 34: live-ref check — id() reuse or a dead referent
         # must not serve a stale entry. W5-D finding 35: refresh recency.
-        if hit["model_ref"]() is not model or hit["tokenizer_ref"]() is not tokenizer:
+        if hit["model_ref"]() is not engine.model or hit["tokenizer_ref"]() is not tokenizer:
             _PRIOR_CACHE.pop(key, None)
         else:
             _PRIOR_CACHE.move_to_end(key)
@@ -1129,9 +1196,10 @@ def _get_or_compute_prior(
     # dependency-conditioned neutral score must never enter the prior cache
     # (the evidence pass may take a different first/second-pass path, which
     # would make the subtraction between different factorizations).
+    # The same Engine object flows through: no second construction path,
+    # no fake per-model properties.
     result = run_parallel_generation(
-        model,
-        tokenizer,
+        engine,
         neutral_context,
         schema,
         temperature=1.0,
@@ -1140,7 +1208,7 @@ def _get_or_compute_prior(
         prior_correction=False,
         _prior_mode=True,
     )
-    model_ref = weakref.ref(model)
+    model_ref = weakref.ref(engine.model)
     tok_ref = weakref.ref(tokenizer)
 
     prior: dict[str, Any] = {}
@@ -1178,7 +1246,7 @@ def _get_or_compute_prior(
         # The weakrefs live INSIDE the cached entry and are liveness-checked
         # on every hit; entry eviction fires when either object dies.
         entry = {"model_ref": model_ref, "tokenizer_ref": tok_ref, "prior": prior}
-        weakref.finalize(model, _PRIOR_CACHE.pop, key, None)
+        weakref.finalize(engine.model, _PRIOR_CACHE.pop, key, None)
         weakref.finalize(tokenizer, _PRIOR_CACHE.pop, key, None)
         _PRIOR_CACHE[key] = entry
         return prior
@@ -2058,18 +2126,21 @@ def _prefill(
     context: str,
     schema: StructuredSchema,
     ledger: "Ledger",
-    scoring: str = "slots",
+    scoring: str,
+    profile: PromptProfile,
 ) -> PrefillResult:
     """Prefill ONE context's prompt into a fresh unbatched KV cache (W3-F).
 
     W5b-14: the wall time is measured as the ``prefill`` span on the
-    request's ledger — the measurement of record.
-    """
+    request's ledger — the measurement of record. ``profile`` is REQUIRED:
+    the engine's load-time PromptProfile, passed by the entry points from
+    engine.profile. One resolution at load; no per-call probe."""
+
     base_ids = _chat_ids(
         tokenizer,
         _user_content(context, schema, tokenizer, scoring),
         PROMPT_V2_SYSTEM,
-        _resolve_profile(tokenizer),
+        profile,
     )
     # Bug 16 explored and REJECTED here: moving the schema-wide lead-in from
     # the rows into the prefill passes the W1-A parity suite only when the
@@ -2093,8 +2164,7 @@ def _prefill(
 
 
 def run_parallel_generation(
-    model,
-    tokenizer,
+    engine: Engine,
     context: str,
     schema: StructuredSchema,
     temperature: float = 1.0,
@@ -2108,6 +2178,10 @@ def run_parallel_generation(
     _prior_mode: bool = False,
 ) -> dict[str, Any]:
     """Decide every schema field in one batched forward pass.
+
+    Takes the loaded :class:`Engine` () — the load-time properties
+    (profile, vocab size, weight bytes) are read from it, not re-derived
+    per call.
 
     Scoring modes:
 
@@ -2168,21 +2242,24 @@ def run_parallel_generation(
     # once, non-overlapping; the flat *_ms keys are derivations of it.
     ledger = Ledger()
 
-    # Neutral-context prior: what the model would emit with no evidence. The
+    # Neutral-context prior: what the model would emit with no evidence — the
+
     # same prompt v2 with the literal string "(no context provided)" inside
     # the delimiters; the resulting per-choice log-scores are the prior that
     # prior_correction subtracts from the evidence pass. Bug 9: this pass is
     # a real model invocation — its wall time is measured separately
     # (prior phase) and included in total_ms.
+    model = engine.model
+    tokenizer = engine.tokenizer
+
     NEUTRAL_CONTEXT = "(no context provided)"
     prior: dict[str, Any] | None = None
     prior_ms: float = 0.0
     if prior_correction:
         with ledger.span("prior_pass", phase="prior"):
-            prior = _get_or_compute_prior(
-                model, tokenizer, schema, scoring, max_rows, NEUTRAL_CONTEXT
-            )
+            prior = _get_or_compute_prior(engine, schema, scoring, max_rows, NEUTRAL_CONTEXT)
         prior_ms = ledger.derived_flat()["prior_ms"]
+
 
     # W5b-14 review F10: ONE top-level request span — elapsed_ms is true
     # wall time (plan/prefill/scoring/assembly are its children). The
@@ -2210,17 +2287,13 @@ def run_parallel_generation(
         # 3. Memory guard: rows are broadcast copies of the prefill cache. The
         #    estimate includes the [rows, width, vocab] output logits for one chunk
         #    (float32 logits are the dominant activation). This is a chunking
-        #    heuristic, not a hard bound on peak Metal memory.
-        vocab_size = (
-            model.args.vocab_size
-            if hasattr(model, "args") and hasattr(model.args, "vocab_size")
-            else model.model.embed_tokens.weight.shape[0]
-        )  # simplest correct static source; falls back to the embedding row count (= vocab)
-        # W5-D finding 31: active-memory budget with a per-width-bin cap (the
-        # logits slab is charged at the row's OWN width bin, not a global
-        # width_max), replacing working_set//2 - weights.
-        weight_bytes = _model_weight_bytes(model)
-        auto_max_rows = _width_bin_max_rows(rows, cache, vocab_size, weight_bytes, max_rows)
+        #    heuristic, not a hard bound on peak Metal memory. W5-D finding 31:
+        #    active-memory budget with a per-width-bin cap (the logits slab is
+        #    charged at the row's OWN width bin, not a global width_max) — the
+        #    slope is the value the ENGINE carries (resolved at load).
+        auto_max_rows = _width_bin_max_rows(
+            rows, cache, engine.vocab_size, engine.weight_bytes, engine.width_slope, max_rows
+        )
         num_passes = max(1, math.ceil(len(rows) / auto_max_rows))
         if num_passes > 1:
             logger.warning(
@@ -2239,7 +2312,7 @@ def run_parallel_generation(
             cache,
             rows,
             built["row_decision"],
-            vocab_size,
+            engine.vocab_size,
             built["pad_id"],
             auto_max_rows,
             ledger,
@@ -2271,16 +2344,12 @@ def run_parallel_generation(
     #    estimate includes the [rows, width, vocab] output logits for one chunk
     #    (float32 logits are the dominant activation). This is a chunking
     #    heuristic, not a hard bound on peak Metal memory.
-    vocab_size = (
-        model.args.vocab_size
-        if hasattr(model, "args") and hasattr(model.args, "vocab_size")
-        else model.model.embed_tokens.weight.shape[0]
-    )  # simplest correct static source; falls back to the embedding row count (= vocab)
     # W5-D finding 31: active-memory budget with a per-width-bin cap (the
     # logits slab is charged at the row's OWN width bin, not a global
-    # width_max), replacing working_set//2 - weights.
-    weight_bytes = _model_weight_bytes(model)
-    auto_max_rows = _width_bin_max_rows(rows, cache, vocab_size, weight_bytes, max_rows)
+    # width_max), replacing working-set//2 - weights.
+    auto_max_rows = _width_bin_max_rows(
+        rows, cache, engine.vocab_size, engine.weight_bytes, engine.width_slope, max_rows
+    )
     num_passes = max(1, math.ceil(len(rows) / auto_max_rows))
     if num_passes > 1:
         logger.warning(
@@ -2299,7 +2368,7 @@ def run_parallel_generation(
         cache,
         rows,
         built["row_decision"],
-        vocab_size,
+        engine.vocab_size,
         built["pad_id"],
         auto_max_rows,
         ledger,
@@ -3471,8 +3540,7 @@ def _contexts_per_pass(per_context_cache_nbytes: int) -> int:
 
 
 def run_parallel_generation_batched(
-    model,
-    tokenizer,
+    engine: Engine,
     contexts: list[str],
     schema: StructuredSchema,
     temperature: float = 1.0,
@@ -3485,6 +3553,10 @@ def run_parallel_generation_batched(
     oracle_overrides: dict[str, object] | None = None,
 ) -> list[dict[str, Any]]:
     """Decide N contexts with ONE merged suffix pass per context group (W3-F).
+
+    Takes the loaded :class:`Engine` (): the load-time properties
+    (profile, vocab size, weight bytes) are read from it, not re-derived
+    per call.
 
     Stages (W3-F review F1 — explicit, no sentinel dict):
 
@@ -3530,6 +3602,10 @@ def run_parallel_generation_batched(
     if not contexts:
         return []
 
+    # one engine object in; model/tokenizer read from it.
+    model = engine.model
+    tokenizer = engine.tokenizer
+
     # 0. Prior ONCE (finding 26): the neutral pass is shared by every
     #    context; each result reports prior_ms as the shared value and
     #    prior_correction=True with an ACTUAL prior object.
@@ -3542,10 +3618,9 @@ def run_parallel_generation_batched(
     if prior_correction:
         with request_ledger.span("prior_pass", phase="prior"):
             NEUTRAL_CONTEXT = "(no context provided)"
-            prior = _get_or_compute_prior(
-                model, tokenizer, schema, scoring, max_rows, NEUTRAL_CONTEXT
-            )
+            prior = _get_or_compute_prior(engine, schema, scoring, max_rows, NEUTRAL_CONTEXT)
         prior_ms = request_ledger.derived_flat()["prior_ms"]
+
 
     # 1. Shared row set (context-independent).
     with request_ledger.span("plan"):
@@ -3553,13 +3628,9 @@ def run_parallel_generation_batched(
     rows = built["rows"]
     row_decision = built["row_decision"]
     R = len(rows)
-    vocab_size = (
-        model.args.vocab_size
-        if hasattr(model, "args") and hasattr(model.args, "vocab_size")
-        else model.model.embed_tokens.weight.shape[0]
-    )
+    vocab_size = engine.vocab_size
     pad_id = built["pad_id"]
-    weight_bytes = _model_weight_bytes(model)
+    weight_bytes = engine.weight_bytes
 
     # 2. Bucket contexts by prompt-token length (finding 28): group members
     #    should have similar cache sizes so the incremental budget check
@@ -3570,23 +3641,24 @@ def run_parallel_generation_batched(
     # spans land there, so every result's flat keys are that context's own
     # (the shared-ledger design gave every context the batch-wide sums).
     # Group-level spans (group_wall, the ONE merged scoring pass) live on
-    # the group ledger. ctx_ledger holds the prior pass too (it is shared,
-    # but prior_ms is a request-level derivation each result reports).
+    # the group ledger. The prefill uses the ENGINE's load-time profile —
+    # no per-call probe.
+    profile = engine.profile
     ctx_ledger_by_idx: dict[int, Ledger] = {}
     prefill_iv_by_idx: dict[int, Interval] = {}
 
     def _prefill_cached(idx: int, ctx: str) -> PrefillResult:
         if idx not in pf_cache:
             ctx_ledger = Ledger()
-            pf_cache[idx] = _prefill(model, tokenizer, ctx, schema, ctx_ledger, scoring)
+            pf_cache[idx] = _prefill(
+                model, tokenizer, ctx, schema, ctx_ledger, scoring, profile=profile
+            )
             ctx_ledger_by_idx[idx] = ctx_ledger
             for iv in ctx_ledger.intervals:
                 if iv.name == "prefill":
                     prefill_iv_by_idx[idx] = iv
                     break
         return pf_cache[idx]
-
-    profile = _resolve_profile(tokenizer)
 
     def _prompt_len(i: int) -> int:
         ids = _chat_ids(
@@ -3698,7 +3770,7 @@ def run_parallel_generation_batched(
         # (see _width_bin_max_rows), not working_set//2 - weights with one
         # global width_max.
         auto_max_rows = _width_bin_max_rows(
-            all_rows, cache_slots[0], vocab_size, weight_bytes, max_rows
+            all_rows, cache_slots[0], vocab_size, weight_bytes, engine.width_slope, max_rows
         )
         scored = _score_rows(
             model,

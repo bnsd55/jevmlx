@@ -45,7 +45,7 @@ def probe_row(model_id: str) -> dict:
     """Probe one model; returns the table row (never raises)."""
     row = {"model": model_id, **EMPTY_ROW}
     try:
-        model, tokenizer = load_engine(model_id)
+        engine = load_engine(model_id)
         row["loads"] = "y"
         presets_ok = []
         latencies = []
@@ -53,8 +53,8 @@ def probe_row(model_id: str) -> dict:
         for name in PRESETS:
             preset = load_preset(name)
             schema = StructuredSchema(preset["schema"])
-            run_parallel_generation(model, tokenizer, preset["context"], schema)  # warmup
-            result = run_parallel_generation(model, tokenizer, preset["context"], schema)
+            run_parallel_generation(engine, preset["context"], schema)  # warmup
+            result = run_parallel_generation(engine, preset["context"], schema)
             latencies.append(result["elapsed_ms"])
             valid = all(
                 str(entry["value"]).lower() in [c.lower() for c in schema.fields[f].choices]
@@ -63,7 +63,7 @@ def probe_row(model_id: str) -> dict:
                 for f, entry in result["parsed_json"].items()
             )
             presets_ok.append("ok" if valid else "INVALID")
-            prompt_tokens += len(tokenizer.encode(preset["context"]))
+            prompt_tokens += len(engine.tokenizer.encode(preset["context"]))
         row["presets"] = ", ".join(presets_ok)
         row["latency_ms"] = f"{sum(latencies) / len(latencies):.0f}"
         row["prompt_tokens"] = str(prompt_tokens)

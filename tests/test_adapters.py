@@ -234,7 +234,7 @@ def test_real_0_5b_adapter_split_equals_call(engine):
     """The adapter split reproduces the model's own __call__ bit-for-bit
     within 1e-4 on the real 0.5B model (Qwen2.5-0.5B, TIED embeddings —
     exercises the as_linear path end to end)."""
-    model, tokenizer = engine
+    model, tokenizer = engine.model, engine.tokenizer
     adapter = adapter_for(model)
     tokens = mx.array([tokenizer.encode("Decide now")])
 

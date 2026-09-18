@@ -12,6 +12,7 @@ reconciled_by on the field entry, plus a '<field>#count' scalar entry.
 import pytest
 from conftest import CountCodeModel as _BiasedModel
 from conftest import _Mod97Tokenizer as _CountTokenizer
+from conftest import make_engine
 
 from jevmlx.engine import COUNT_MARGIN_MIN, run_parallel_generation
 from jevmlx.schema import StructuredSchema
@@ -28,7 +29,7 @@ def test_count_row_always_runs_and_lands_in_telemetry():
     result carries count_choice/count_margin/reconciled_by plus a separate
     '<field>#count' scalar entry; the parsed value is unchanged."""
     model = _BiasedModel(count_bias={}, yes_logit=1.0, no_logit=-1.0)
-    result = run_parallel_generation(model, _CountTokenizer(), "ctx", _multi_schema())
+    result = run_parallel_generation(make_engine(model, _CountTokenizer()), "ctx", _multi_schema())
     telemetry = result["field_telemetry"]["flags"]
     assert telemetry["count_choice"] in ("0", "1", "2", "3", "4")
     assert isinstance(telemetry["count_margin"], float)
@@ -48,14 +49,14 @@ def test_count_gate_below_margin_keeps_per_option_rule():
     # All count codes tied (no bias): margin 0, gate closed. Y strongly
     # biased: per-option rule selects everything.
     model = _BiasedModel(count_bias={}, yes_logit=2.0, no_logit=-2.0)
-    result = run_parallel_generation(model, _CountTokenizer(), "ctx", _multi_schema())
+    result = run_parallel_generation(make_engine(model, _CountTokenizer()), "ctx", _multi_schema())
     telemetry = result["field_telemetry"]["flags"]
     assert telemetry["count_margin"] <= COUNT_MARGIN_MIN
     assert telemetry["reconciled_by"] == "per_option"
     assert result["parsed_json"]["flags"]["value"] == ["x", "y", "z"]
     # And a bias that would pick exactly '1': still ignored below the gate.
     model = _BiasedModel(count_bias={"0": 0.3, "1": 0.31}, yes_logit=2.0, no_logit=-2.0)
-    result = run_parallel_generation(model, _CountTokenizer(), "ctx", _multi_schema())
+    result = run_parallel_generation(make_engine(model, _CountTokenizer()), "ctx", _multi_schema())
     telemetry = result["field_telemetry"]["flags"]
     assert telemetry["count_choice"] == "1"
     assert telemetry["count_margin"] <= COUNT_MARGIN_MIN
@@ -70,7 +71,7 @@ def test_count_gate_above_margin_reconciles_top_k():
     # Strong confident '1': margin is large (0.31 - (-1.69) >> 0.7 given the
     # zero baseline for 2..4; keep 2..4 far below).
     model = _BiasedModel(count_bias={"0": -1.0, "1": 3.0}, yes_logit=1.0, no_logit=-1.0)
-    result = run_parallel_generation(model, _CountTokenizer(), "ctx", _multi_schema())
+    result = run_parallel_generation(make_engine(model, _CountTokenizer()), "ctx", _multi_schema())
     telemetry = result["field_telemetry"]["flags"]
     assert telemetry["count_margin"] > COUNT_MARGIN_MIN
     assert telemetry["count_choice"] == "1"
@@ -89,8 +90,7 @@ def test_count_reconciliation_respects_k_with_calibrated_log_odds():
     # calibration only: a=-1 (flip), b=0 -> log-odds ordering flips.
     model = _BiasedModel(count_bias={"0": -1.0, "2": 3.0}, yes_logit=1.0, no_logit=-1.0)
     result = run_parallel_generation(
-        model,
-        _CountTokenizer(),
+        make_engine(model, _CountTokenizer()),
         "ctx",
         _multi_schema(),
         calibration={"multi": {"a": 1.0, "b": 0.0}},
@@ -112,7 +112,7 @@ def test_count_bucket_capped_at_option_count():
         yes_logit=1.0,
         no_logit=-1.0,
     )
-    result = run_parallel_generation(model, _CountTokenizer(), "ctx", _multi_schema())
+    result = run_parallel_generation(make_engine(model, _CountTokenizer()), "ctx", _multi_schema())
     telemetry = result["field_telemetry"]["flags"]
     assert telemetry["count_margin"] > COUNT_MARGIN_MIN
     assert telemetry["count_choice"] == "4"
@@ -138,7 +138,7 @@ def test_scalar_fields_unaffected_by_count_rows():
         flags: list[Literal["x", "y"]] = Field(..., description="m")
 
     schema = StructuredSchema(schema_from_model(M))
-    result = run_parallel_generation(FakeModel(), FakeTokenizer(), "ctx", schema)
+    result = run_parallel_generation(make_engine(FakeModel(), FakeTokenizer()), "ctx", schema)
     assert result["field_telemetry"]["topic"]["rows"] == 1  # single branch, unchanged
     assert "count_choice" not in result["field_telemetry"]["topic"]
     assert result["field_telemetry"]["flags"]["count_choice"] in ("0", "1", "2", "3", "4")

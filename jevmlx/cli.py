@@ -472,12 +472,11 @@ def _dispatch(argv) -> None:
             if not args.as_json:
                 print(f"Loading {args.model} ...", flush=True)
             load_engine, run_parallel_generation = _engine()
-            model, tokenizer = load_engine(args.model)
+            engine = load_engine(args.model)
 
             schema = StructuredSchema(schema_dict)
             result = run_parallel_generation(
-                model,
-                tokenizer,
+                engine,
                 context,
                 schema,
                 temperature=args.temperature,
@@ -498,10 +497,10 @@ def _dispatch(argv) -> None:
 
         load_engine, _ = _engine()
         print(f"Loading {args.model} ...", flush=True)
-        model, tokenizer = load_engine(args.model)
+        engine = load_engine(args.model)
         cases = calibrate.load_cases(args.data)
         print(f"collecting scores from {len(cases)} labeled cases ...", flush=True)
-        samples = calibrate.collect(model, tokenizer, cases)
+        samples = calibrate.collect(engine, cases)
 
         calibrators: dict = {}
         if samples:
@@ -520,7 +519,7 @@ def _dispatch(argv) -> None:
 
         # Pooled multi logistic: one (a, b) across every multi option's raw
         # log-odds (W2-E step 2). Skipped when no multi labels exist.
-        multi_samples = calibrate.collect_multi(model, tokenizer, cases)
+        multi_samples = calibrate.collect_multi(engine, cases)
         if multi_samples:
             a_fit, b_fit = calibrate.fit_logistic(multi_samples)
             calibrators["multi"] = {"a": a_fit, "b": b_fit}
@@ -642,18 +641,18 @@ def _run_eval_command(args) -> None:
     if args.track == "parallel":
         load_engine, _ = _engine()
         print(f"Loading {args.model} ...", flush=True)
-        model, tokenizer = load_engine(args.model)
+        engine = load_engine(args.model)
         decide_fn = evalrun.parallel_decide_fn(
-            model, tokenizer, scoring=args.scoring, prior_correction=args.prior_correction
+            engine, scoring=args.scoring, prior_correction=args.prior_correction
         )
-        chat_template = getattr(tokenizer, "chat_template", None)
-        plan_provider = lambda schema: schema.compile_labels_plan(tokenizer)  # noqa: E731
+        chat_template = getattr(engine.tokenizer, "chat_template", None)
+        plan_provider = lambda schema: schema.compile_labels_plan(engine.tokenizer)  # noqa: E731
     elif args.track == "naive_local":
         load_engine, _ = _engine()
         print(f"Loading {args.model} ...", flush=True)
-        model, tokenizer = load_engine(args.model)
-        decide_fn = evalrun.naive_local_decide_fn(model, tokenizer)
-        chat_template = getattr(tokenizer, "chat_template", None)
+        engine = load_engine(args.model)
+        decide_fn = evalrun.naive_local_decide_fn(engine)
+        chat_template = getattr(engine.tokenizer, "chat_template", None)
         plan_provider = None
     elif args.track == "openai_slots":
         if not (args.api_base and args.api_model):

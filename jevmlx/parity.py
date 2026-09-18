@@ -83,12 +83,13 @@ def bundled_preset_specs() -> list[tuple[str, dict]]:
 
 
 def check_scoring_parity(
-    model_obj: Any,
-    tokenizer: Any,
+    engine: Any,
     cases: list[tuple[str, dict]] | None = None,
     max_rows_options: tuple[int, ...] = (1, 2),
 ) -> dict[str, Any]:
     """Run batch=1 vs batched vs chunked scoring parity on a loaded engine.
+
+    Takes the loaded :class:`jevmlx.engine.Engine` .
 
     ``cases``: (case_id, schema_dict) pairs; default is every bundled
     preset. For each case, ONE context is scored three ways through
@@ -120,12 +121,10 @@ def check_scoring_parity(
     for case_id, preset in cases:
         schema = _make_schema(case_id, preset["schema"])
         context = _case_context(case_id, preset)
-        full = run_parallel_generation(model_obj, tokenizer, context, schema)
+        full = run_parallel_generation(engine, context, schema)
         case_drift = 0.0
         for max_rows in max_rows_options:
-            again = run_parallel_generation(
-                model_obj, tokenizer, context, schema, max_rows=max_rows
-            )
+            again = run_parallel_generation(engine, context, schema, max_rows=max_rows)
             # Winners must be identical — a different decision is a real bug.
             for fname, entry in full["parsed_json"].items():
                 if again["parsed_json"].get(fname, {}).get("value") != entry["value"]:
@@ -153,16 +152,18 @@ def check_scoring_parity(
 
 
 def parity_report(
-    model_obj: Any,
-    tokenizer: Any,
+    engine: Any,
     model_id: str,
     cases: list[tuple[str, dict]] | None = None,
     max_rows_options: tuple[int, ...] = (1, 2),
 ) -> dict[str, Any]:
-    """The ``parity.json`` payload for a model folder (schema above)."""
+    """The ``parity.json`` payload for a model folder (schema above).
+
+    Takes the loaded :class:`jevmlx.engine.Engine` ."""
+
     from jevmlx.engine import INSTABILITY_BAND, PROMPT_VERSION
 
-    result = check_scoring_parity(model_obj, tokenizer, cases, max_rows_options)
+    result = check_scoring_parity(engine, cases, max_rows_options)
     return {
         "model": model_id,
         "prompt_version": PROMPT_VERSION,
@@ -181,8 +182,7 @@ def parity_report(
 
 
 def write_parity_json(
-    model_obj: Any,
-    tokenizer: Any,
+    engine: Any,
     model_id: str,
     out_dir: Any,
     cases: list[tuple[str, dict]] | None = None,
@@ -192,7 +192,7 @@ def write_parity_json(
     ``check_parity`` (PR #29) reads the file back."""
     from pathlib import Path
 
-    payload = parity_report(model_obj, tokenizer, model_id, cases)
+    payload = parity_report(engine, model_id, cases)
     out = Path(out_dir) / "parity.json"
     out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return payload
@@ -232,8 +232,7 @@ def _case_context(case_id: str, preset: dict) -> str:
 
 
 def check_batched_parity(
-    model_obj: Any,
-    tokenizer: Any,
+    engine: Any,
     cases: list[tuple[str, dict]] | None = None,
     context_counts: tuple[int, ...] = (1, 2, 4),
     prior_correction: bool = False,
@@ -276,7 +275,7 @@ def check_batched_parity(
     for case_id, preset in cases:
         schema = _make_schema(case_id, preset["schema"])
         context = _case_context(case_id, preset)
-        built = _build_schema_rows(schema, tokenizer, "slots")
+        built = _build_schema_rows(schema, engine.tokenizer, "slots")
         built_cache[case_id] = built
 
         # --- RAW row logits (finding 42): score the SAME rows for one
@@ -284,14 +283,12 @@ def check_batched_parity(
         # rows 2..n of a batched group — before any near-tie rescore.
         raw_drift = 0.0
         if built["rows"]:
-            vocab_size = (
-                model_obj.args.vocab_size
-                if hasattr(model_obj, "args") and hasattr(model_obj.args, "vocab_size")
-                else model_obj.model.embed_tokens.weight.shape[0]
-            )
+            vocab_size = engine.vocab_size
             from jevmlx.timing import Ledger
 
-            pf = _prefill(model_obj, tokenizer, context, schema, Ledger(), "slots")
+            pf = _prefill(
+                engine.model, engine.tokenizer, context, schema, Ledger(), "slots", engine.profile
+            )
             # The reference is the CANONICAL batch=1 shape (one row per
             # forward) — the same shape the near-tie rescore trusts. The
             # batched side runs 4 context-copies of the rows in merged
@@ -302,7 +299,7 @@ def check_batched_parity(
             # merged chunks (the decide_many row shape — one merged pass
             # per group), so raw batch drift shows.
             ref = _score_rows(
-                model_obj,
+                engine.model,
                 pf.cache,
                 built["rows"],
                 built["row_decision"],
@@ -319,7 +316,7 @@ def check_batched_parity(
             all_rows = built["rows"] * 4
             all_decisions = built["row_decision"] * 4
             batched = _score_rows(
-                model_obj,
+                engine.model,
                 pf.cache,
                 all_rows,
                 all_decisions,
@@ -347,14 +344,11 @@ def check_batched_parity(
         mixed = [context + f" Additional evidence block {i}." for i in range(n_ctx)]
         for ctx_list in (contexts, mixed):
             independent = [
-                run_parallel_generation(
-                    model_obj, tokenizer, c, schema, prior_correction=prior_correction
-                )
+                run_parallel_generation(engine, c, schema, prior_correction=prior_correction)
                 for c in ctx_list
             ]
             batched_results = run_parallel_generation_batched(
-                model_obj,
-                tokenizer,
+                engine,
                 ctx_list,
                 schema,
                 prior_correction=prior_correction,

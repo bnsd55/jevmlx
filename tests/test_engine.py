@@ -18,7 +18,6 @@ def test_collision_field_scores_mechanically(engine):
     asserted against fakes in test_engine_fake.py, not against a live
     model's opinion.
     """
-    model, tokenizer = engine
     schema_dict = {
         "action": {
             "type": "enum",
@@ -33,7 +32,7 @@ def test_collision_field_scores_mechanically(engine):
     )
 
     schema = StructuredSchema(schema_dict)
-    result = run_parallel_generation(model, tokenizer, ctx, schema)
+    result = run_parallel_generation(engine, ctx, schema)
 
     telemetry = result["field_telemetry"]["action"]
     # The collision forces per-choice rows in LABELS mode: BLOCK_* choices
@@ -41,7 +40,7 @@ def test_collision_field_scores_mechanically(engine):
     # prefix (one row per branch point, > 1 row). Slots mode resolves the
     # collision by construction (aliases never collide: 1 row) — the labels
     # plan is the one that exercises the collision, so score labels here.
-    result_labels = run_parallel_generation(model, tokenizer, ctx, schema, scoring="labels")
+    result_labels = run_parallel_generation(engine, ctx, schema, scoring="labels")
     assert result_labels["field_telemetry"]["action"]["rows"] > 1
     # Same mechanics contract in slots mode.
     assert telemetry["rows"] >= 1
@@ -59,12 +58,12 @@ def test_collision_field_scores_mechanically(engine):
 
 @pytest.mark.slow
 def test_chunking_matches_full_batch_and_counts_passes(engine):
-    model, tokenizer = engine
     preset = load_preset("fintech_fraud")
     schema = StructuredSchema(preset["schema"])
 
-    full = run_parallel_generation(model, tokenizer, preset["context"], schema)
-    chunked = run_parallel_generation(model, tokenizer, preset["context"], schema, max_rows=5)
+    tokenizer = engine.tokenizer
+    full = run_parallel_generation(engine, preset["context"], schema)
+    chunked = run_parallel_generation(engine, preset["context"], schema, max_rows=5)
 
     assert full["parsed_json"].keys() == chunked["parsed_json"].keys()
     for fname in full["parsed_json"]:
@@ -93,13 +92,12 @@ def test_scores_stable_under_chunking(engine):
     Fields below that margin are reported, not asserted — the model is
     genuinely undecided on them and chunk shape may flip the argmax.
     """
-    model, tokenizer = engine
     reported = []
     for preset_name in ("fintech_fraud", "support_triage"):
         preset = load_preset(preset_name)
         schema = StructuredSchema(preset["schema"])
-        full = run_parallel_generation(model, tokenizer, preset["context"], schema)
-        chunked = run_parallel_generation(model, tokenizer, preset["context"], schema, max_rows=3)
+        full = run_parallel_generation(engine, preset["context"], schema)
+        chunked = run_parallel_generation(engine, preset["context"], schema, max_rows=3)
         for fname in full["parsed_json"]:
             ls_full = full["field_telemetry"][fname].get("log_scores")
             ls_chunk = chunked["field_telemetry"][fname].get("log_scores")
@@ -137,7 +135,6 @@ def test_multi_field_returns_subset(engine):
     """A multi field returns a valid subset with mechanics asserted, not the
     model's opinion: values valid, per_option in [0, 1], no log_scores.
     """
-    model, tokenizer = engine
     schema_dict = {
         "flags": {
             "type": "multi",
@@ -150,7 +147,7 @@ def test_multi_field_returns_subset(engine):
         "usage dashboard is opened. Reinstalling did not help, other pages load fine."
     )
     schema = StructuredSchema(schema_dict)
-    result = run_parallel_generation(model, tokenizer, ctx, schema)
+    result = run_parallel_generation(engine, ctx, schema)
 
     parsed = result["parsed_json"]
     assert list(parsed) == ["flags"]
@@ -191,7 +188,6 @@ def test_mixed_schema_multi_not_collapsed(engine):
     position) and the multi value must be a valid subset. The winner
     assertion lives in the fake-model fast test in test_engine_fake.py.
     """
-    model, tokenizer = engine
     preset = load_preset("support_triage")
     schema_dict = dict(preset["schema"])
     schema_dict["extra_flags"] = {
@@ -200,7 +196,7 @@ def test_mixed_schema_multi_not_collapsed(engine):
         "choices": ["technical_issue", "billing_issue", "account_issue"],
     }
     schema = StructuredSchema(schema_dict)
-    result = run_parallel_generation(model, tokenizer, preset["context"], schema)
+    result = run_parallel_generation(engine, preset["context"], schema)
 
     telemetry = result["field_telemetry"]["extra_flags"]
     per_option = telemetry["per_option"]
@@ -218,10 +214,9 @@ def test_naive_generation_returns_parseable_text(engine):
     """R3: run_naive_generation must stay callable after the boundary change."""
     import json as _json
 
-    model, tokenizer = engine
     preset = load_preset("fintech_fraud")
     schema = StructuredSchema(preset["schema"])
-    result = run_naive_generation(model, tokenizer, preset["context"], schema, max_tokens=200)
+    result = run_naive_generation(engine, preset["context"], schema, max_tokens=200)
 
     assert result["mode"] == "naive_autoregressive"
     assert isinstance(result["raw_text"], str) and result["raw_text"].startswith("{")
@@ -241,10 +236,9 @@ def test_slots_scoring_fintech_fraud(engine):
     rows. The slots run completes in a single suffix pass (one row per
     field) and the confidence model is 'slots'.
     """
-    model, tokenizer = engine
     preset = load_preset("fintech_fraud")
     schema = StructuredSchema(preset["schema"])
-    result = run_parallel_generation(model, tokenizer, preset["context"], schema, scoring="slots")
+    result = run_parallel_generation(engine, preset["context"], schema, scoring="slots")
 
     assert result["confidence_model"] == "slots"
     assert result["sequential_forward_passes"] == 1
@@ -273,10 +267,9 @@ def test_slots_scoring_fintech_fraud(engine):
 def test_labels_scoring_fintech_fraud_valid(engine):
     """Labels mode on the 0.5B model: every value valid, log_scores keyed by
     the real choice strings (same contract as slots, no alias hop)."""
-    model, tokenizer = engine
     preset = load_preset("fintech_fraud")
     schema = StructuredSchema(preset["schema"])
-    result = run_parallel_generation(model, tokenizer, preset["context"], schema, scoring="labels")
+    result = run_parallel_generation(engine, preset["context"], schema, scoring="labels")
 
     assert result["confidence_model"] == "labels"
     assert result["sequential_forward_passes"] == 1
@@ -303,14 +296,11 @@ def test_prior_correction_neutral_pass_runs_and_corrects(engine):
     telemetry carries prior keys, and the corrected log_scores differ from
     raw ones somewhere (exact equality would mean the prior is uniform-zero,
     which the 0.5B model never produces)."""
-    model, tokenizer = engine
     preset = load_preset("support_triage")
     schema = StructuredSchema(preset["schema"])
 
-    run_parallel_generation(model, tokenizer, preset["context"], schema)  # raw baseline
-    corrected = run_parallel_generation(
-        model, tokenizer, preset["context"], schema, prior_correction=True
-    )
+    run_parallel_generation(engine, preset["context"], schema)  # raw baseline
+    corrected = run_parallel_generation(engine, preset["context"], schema, prior_correction=True)
 
     assert corrected["prior_correction"] is True
     for fname, fdef in schema.fields.items():
@@ -351,7 +341,6 @@ def test_prior_pass_temperature_and_raw_logit_pairs(engine):
     logits — not log(P)/log(1-P) reconstructed from scaled probabilities."""
     import jevmlx.engine as eng
 
-    model, tokenizer = engine
     schema = StructuredSchema(
         {
             "tier": {"type": "enum", "description": "Severity tier", "choices": ["LOW", "HIGH"]},
@@ -360,9 +349,7 @@ def test_prior_pass_temperature_and_raw_logit_pairs(engine):
     )
     eng._PRIOR_CACHE.clear()
     try:
-        prior = eng._get_or_compute_prior(
-            model, tokenizer, schema, "slots", None, "(no context provided)"
-        )
+        prior = eng._get_or_compute_prior(engine, schema, "slots", None, "(no context provided)")
         # Enum prior is a log-score vector at T=1...
         assert set(prior["tier"]["log_scores"]) == {"LOW", "HIGH"}
         # Multi prior pairs are raw logits: NOT the reconstruction of
@@ -376,7 +363,7 @@ def test_prior_pass_temperature_and_raw_logit_pairs(engine):
         # (exp-form) to 1; raw logit pairs have no such constraint. Verify
         # they differ from the reconstruction for at least one option
         # unless the model happens to be calibrated (tolerate equality).
-        result = run_parallel_generation(model, tokenizer, "ctx", schema)
+        result = run_parallel_generation(engine, "ctx", schema)
         per_option = result["field_telemetry"]["flags"]["per_option"]
         recon = {
             o: [math.log(max(p, 1e-12)), math.log(max(1 - p, 1e-12))] for o, p in per_option.items()
@@ -395,19 +382,18 @@ def test_timing_split_on_real_model(engine):
     timing keys keep their meaning."""
     import jevmlx.engine as eng
 
-    model, tokenizer = engine
     schema = StructuredSchema(
         {"tier": {"type": "enum", "description": "d", "choices": ["LOW", "HIGH"]}}
     )
     eng._PRIOR_CACHE.clear()
     try:
-        cold = run_parallel_generation(model, tokenizer, "ctx", schema, prior_correction=True)
+        cold = run_parallel_generation(engine, "ctx", schema, prior_correction=True)
         assert cold["prior_ms"] > 0.0
         assert cold["total_ms"] >= cold["prior_ms"]
         assert cold["total_ms"] >= cold["elapsed_ms"]
-        warm = run_parallel_generation(model, tokenizer, "ctx", schema, prior_correction=True)
+        warm = run_parallel_generation(engine, "ctx", schema, prior_correction=True)
         assert warm["total_ms"] == pytest.approx(warm["elapsed_ms"] + warm["prior_ms"], abs=0.1)
-        plain = run_parallel_generation(model, tokenizer, "ctx", schema)
+        plain = run_parallel_generation(engine, "ctx", schema)
         assert plain["prior_ms"] == 0.0
         assert plain["total_ms"] == pytest.approx(plain["elapsed_ms"], abs=0.1)
         assert plain["prefill_ms"] > 0.0 and plain["suffix_eval_ms"] > 0.0
@@ -419,15 +405,14 @@ def test_timing_split_on_real_model(engine):
 def test_probability_status_temperature_on_real_model(engine):
     """Bug 12 on a real model: T=1 keeps the classic status; T!=1 states the
     post-hoc scaling and the temperature value."""
-    model, tokenizer = engine
     schema = StructuredSchema(
         {"tier": {"type": "enum", "description": "d", "choices": ["LOW", "HIGH"]}}
     )
-    at_one = run_parallel_generation(model, tokenizer, "ctx", schema, temperature=1.0)
+    at_one = run_parallel_generation(engine, "ctx", schema, temperature=1.0)
     assert at_one["probability_status"] == (
         "constrained-path probability at T=1; uncalibrated as decision confidence"
     )
-    at_half = run_parallel_generation(model, tokenizer, "ctx", schema, temperature=0.5)
+    at_half = run_parallel_generation(engine, "ctx", schema, temperature=0.5)
     assert "temperature=0.5" in at_half["probability_status"]
     assert "temperature-scaled" in at_half["probability_status"]
 
@@ -476,7 +461,6 @@ def test_w1a_scoring_parity_batch_vs_chunked_real_model(engine):
     log_scores that agree to within FP tolerance. Exact equality is still
     asserted on the FakeModel path (test_engine_fake.py) where the model is
     deterministic."""
-    model, tokenizer = engine
     schema = StructuredSchema(
         {
             "action": {
@@ -492,9 +476,9 @@ def test_w1a_scoring_parity_batch_vs_chunked_real_model(engine):
         "All fraud checks passed, the device is recognized, and the amount matches "
         "previous orders. Approve it and release the funds."
     )
-    full = run_parallel_generation(model, tokenizer, ctx, schema)
+    full = run_parallel_generation(engine, ctx, schema)
     for max_rows in (1, 2):
-        again = run_parallel_generation(model, tokenizer, ctx, schema, max_rows=max_rows)
+        again = run_parallel_generation(engine, ctx, schema, max_rows=max_rows)
         # Winners must be identical: a different decision is a real bug.
         # (Compare values, not probs: probs carry ~0.002 Metal FP drift.)
         full_vals = {f: v["value"] for f, v in full["parsed_json"].items()}
@@ -534,7 +518,6 @@ def test_bug16_lead_in_prefill_breaks_parity(engine):
     max 0.004 nats, winner stable). If the tolerance fails, row widths
     changed again — re-run the bug-16 probe before trusting bit-parity
     claims anywhere."""
-    model, tokenizer = engine
     schema = StructuredSchema(
         {
             "action": {
@@ -550,8 +533,8 @@ def test_bug16_lead_in_prefill_breaks_parity(engine):
         "All fraud checks passed, the device is recognized, and the amount matches "
         "previous orders. Approve it and release the funds."
     )
-    full = run_parallel_generation(model, tokenizer, ctx, schema)
-    one = run_parallel_generation(model, tokenizer, ctx, schema, max_rows=1)
+    full = run_parallel_generation(engine, ctx, schema)
+    one = run_parallel_generation(engine, ctx, schema, max_rows=1)
     for fname in ("action", "flag"):
         ls_full = full["field_telemetry"][fname]["log_scores"]
         ls_one = one["field_telemetry"][fname]["log_scores"]

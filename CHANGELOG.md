@@ -2,17 +2,27 @@
 
 ## Unreleased
 
-- W5b-14 engine timing ledger adoption: one `jevmlx.timing.Ledger` per
-  request measures every interval ONCE (plan, prefill, cache_merge,
-  transformer, gather, rescore, reconciliation, dependency spans; the
-  neutral prior pass in the `prior` phase). The result dict's `*_ms` keys
-  are pure `Ledger.derived_flat()` derivations — same keys, no overlapping
-  accumulators (`ScoreRowsResult.gather_ms`/`broadcast_ms` deleted;
-  `suffix_eval_ms` stays the documented cache_merge+transformer+gather
-  composite). Batched `decide_many` derives `group_wall_ms` /
-  `per_item_amortized_ms` / `per_item_end_to_end_ms` from the same ledger;
-  per-item end-to-end is the context's own prefill-span start to its
-  assembly-span end.
+- The engine is an object: `load_engine` returns a frozen `Engine`
+  dataclass carrying `model`, `tokenizer`, `model_id` (resolved),
+  `revision`, `profile`, `vocab_size`, `weight_bytes`,
+  `cache_capabilities`, and the measured `width_slope` — every per-model
+  property resolved ONCE at load (the prompt profile is probed there from
+  the resolved id; the hot paths read `engine.profile`). The generation
+  entry points take an Engine only — `run_parallel_generation(engine,
+  context, schema, ...)`, `run_parallel_generation_batched(engine,
+  contexts, ...)`, `run_naive_generation(engine, ...)` — and all callers
+  (`api`, `calibrate`, `cli`, `evalrun`, `parity`, `serve`, `bench`, the
+  benchmark scripts) pass the object through; `_prefill` /
+  `_get_or_compute_prior` take the load-time `profile` (the prior helper
+  takes the engine itself). `width_slope` lives on the Engine (the
+  process-global and its accessor are gone); the chunking budget
+  (`_width_bin_max_rows`) takes the slope as a parameter. Tests build
+  engines through the `conftest.make_engine` factory. `load_engine(alias)`
+  and `load_engine(full id)` return the ONE cached object.
+- W5b-14 engine timing ledger adoption (in #58, on main): one
+  `jevmlx.timing.Ledger` per request measures every interval ONCE; the
+  result dict's `*_ms` keys are pure `Ledger.derived_flat()` derivations.
+  This branch's engine-object work is rebased on top of it.
 - W5b-9 CLI error contract: user-input failures (missing file, bad JSON,
   schema/constraint rejection, engine environment errors) exit 1 with the
   full error message on stderr — no traceback (`-v` re-raises for debug);

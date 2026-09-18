@@ -13,6 +13,7 @@ import random
 import pytest
 from conftest import YNLogitModel as _BiasedMultiModel
 from conftest import _Mod97Tokenizer as FakeTokenizer
+from conftest import make_engine
 
 from jevmlx.calibrate import calibrated_log_odds, fit_logistic
 from jevmlx.engine import run_parallel_generation
@@ -102,7 +103,7 @@ def test_engine_without_calibration_fixed_half_rule():
     selection at P(yes) >= 0.5; telemetry calibrated is None and there is
     NO threshold key anywhere."""
     model = _BiasedMultiModel(yes_logit=1.0, no_logit=-1.0)
-    result = run_parallel_generation(model, FakeTokenizer(), "ctx", _multi_schema())
+    result = run_parallel_generation(make_engine(model, FakeTokenizer()), "ctx", _multi_schema())
     telemetry = result["field_telemetry"]["flags"]
     assert result["parsed_json"]["flags"]["value"] == ["x", "y", "z"]  # P(yes)~0.88
     assert telemetry["calibrated"] is None
@@ -116,12 +117,15 @@ def test_engine_with_calibration_dict_selects_by_sign():
     model = _BiasedMultiModel(yes_logit=1.0, no_logit=-1.0)
     tok = FakeTokenizer()
     keep = run_parallel_generation(
-        model, tok, "ctx", _multi_schema(), calibration={"multi": {"a": 1.0, "b": 0.0}}
+        make_engine(model, tok), "ctx", _multi_schema(), calibration={"multi": {"a": 1.0, "b": 0.0}}
     )
     assert keep["parsed_json"]["flags"]["value"] == ["x", "y", "z"]
     assert keep["field_telemetry"]["flags"]["calibrated"] == {"a": 1.0, "b": 0.0}
     drop = run_parallel_generation(
-        model, tok, "ctx", _multi_schema(), calibration={"multi": {"a": 1.0, "b": -3.0}}
+        make_engine(model, tok),
+        "ctx",
+        _multi_schema(),
+        calibration={"multi": {"a": 1.0, "b": -3.0}},
     )
     assert drop["parsed_json"]["flags"]["value"] == []
     assert drop["field_telemetry"]["flags"]["calibrated"] == {"a": 1.0, "b": -3.0}
@@ -142,7 +146,7 @@ def test_engine_calibration_from_file(tmp_path):
     path = tmp_path / "calib.json"
     path.write_text(json.dumps({"temperature": 1.0, "multi": {"a": 2.0, "b": -5.0}}))
     result = run_parallel_generation(
-        model, FakeTokenizer(), "ctx", _multi_schema(), calibration=str(path)
+        make_engine(model, FakeTokenizer()), "ctx", _multi_schema(), calibration=str(path)
     )
     # calibrated = 2*2 - 5 = -1 < 0 -> nothing selected
     assert result["parsed_json"]["flags"]["value"] == []
@@ -154,12 +158,16 @@ def test_engine_calibration_payload_validation():
     tok = FakeTokenizer()
     schema = _multi_schema()
     with pytest.raises(ValueError, match="calibration file not found"):
-        run_parallel_generation(model, tok, "ctx", schema, calibration="/nope/missing.json")
+        run_parallel_generation(
+            make_engine(model, tok), "ctx", schema, calibration="/nope/missing.json"
+        )
     with pytest.raises(ValueError, match='must carry numeric "a" and "b"'):
-        run_parallel_generation(model, tok, "ctx", schema, calibration={"multi": {"a": 1}})
+        run_parallel_generation(
+            make_engine(model, tok), "ctx", schema, calibration={"multi": {"a": 1}}
+        )
     with pytest.raises(ValueError, match="must be finite"):
         run_parallel_generation(
-            model, tok, "ctx", schema, calibration={"multi": {"a": 1e999, "b": 0}}
+            make_engine(model, tok), "ctx", schema, calibration={"multi": {"a": 1e999, "b": 0}}
         )
 
 

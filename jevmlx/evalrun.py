@@ -177,10 +177,10 @@ def _compute_tokenizer_metrics(
     }
 
 
-def parallel_decide_fn(
-    model, tokenizer, scoring: str = "slots", prior_correction: bool = False
-) -> DecideFn:
+def parallel_decide_fn(engine, scoring: str = "slots", prior_correction: bool = False) -> DecideFn:
     """Track ``parallel``: the jevmlx engine at T=1.
+
+    Takes the loaded :class:`Engine`.
 
     Log scores come from field telemetry's finalized ``log_scores`` key — a
     dict mapping choice to constrained-path log P at T=1 (prior-corrected
@@ -195,8 +195,7 @@ def parallel_decide_fn(
 
         schema = StructuredSchema(schema_dict)
         result = run_parallel_generation(
-            model,
-            tokenizer,
+            engine,
             context,
             schema,
             temperature=1.0,
@@ -250,8 +249,9 @@ def parallel_decide_fn(
     return decide
 
 
-def naive_local_decide_fn(model, tokenizer) -> DecideFn:
+def naive_local_decide_fn(engine) -> DecideFn:
     """Track ``naive_local``: the same local model free-writes the JSON object.
+    Takes the loaded :class:`Engine`.
 
     Output is parsed strictly by :func:`jevmlx.baseline.parse_baseline_output`;
     unsalvageable fields become invalid predictions (a measurement, not a
@@ -264,7 +264,7 @@ def naive_local_decide_fn(model, tokenizer) -> DecideFn:
         from jevmlx.engine import run_naive_generation
 
         schema = StructuredSchema(schema_dict)
-        result = run_naive_generation(model, tokenizer, context, schema)
+        result = run_naive_generation(engine, context, schema)
         strict_values, salvage_values, errors = parse_baseline_output(
             result.get("raw_text", ""), schema
         )

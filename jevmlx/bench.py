@@ -275,12 +275,12 @@ def _track_scorer_grid(tracks: list[str], scorers: list[str]) -> list[tuple[str,
     return grid
 
 
-def _load_engine_with_timeout(model: str, load_timeout: float) -> tuple:
+def _load_engine_with_timeout(model: str, load_timeout: float) -> Any:
     """load_engine in a thread, joined with ``load_timeout`` seconds.
 
-    Returns (model, tokenizer). On timeout the thread is abandoned (daemon;
-    the process may keep it alive but the bench moves on) and TimeoutError
-    is raised — callers treat it like any load failure.
+    Returns the loaded :class:`Engine`. On timeout the thread is
+    abandoned (daemon; the process may keep it alive but the bench moves on)
+    and TimeoutError is raised — callers treat it like any load failure.
     """
     import threading
 
@@ -320,13 +320,13 @@ def _write_failure_run(combo_dir: Path, status: str, exc: BaseException) -> Path
     return run_path
 
 
-def _run_model_parity(model: str, model_obj, tokenizer, folder: Path) -> str | None:
+def _run_model_parity(model: str, engine, folder: Path) -> str | None:
     """W4-B: run the scoring-parity check on a loaded engine and write
     ``<folder>/parity.json``. Returns None on pass, else a short failure
-    note for the summary rows."""
+    note for the summary rows. Takes the loaded :class:`Engine`."""
     from jevmlx.parity import write_parity_json
 
-    payload = write_parity_json(model_obj, tokenizer, model, folder)
+    payload = write_parity_json(engine, model, folder)
     if payload["passed"]:
         print(
             f"parity: PASS (max drift {payload['max_abs_drift_nats']} nats, "
@@ -437,8 +437,8 @@ def run_bench(
                     from jevmlx.engine import load_engine
 
                     try:
-                        model_obj, tokenizer = load_engine(model)
-                        parity_note = _run_model_parity(model, model_obj, tokenizer, folder)
+                        engine = load_engine(model)
+                        parity_note = _run_model_parity(model, engine, folder)
                     except Exception as parity_exc:  # noqa: BLE001 - failure is a result
                         parity_note = f"parity_failed: {type(parity_exc).__name__}: {parity_exc}"
                         print(f"parity check error: {parity_note}", flush=True)
@@ -611,15 +611,15 @@ def _run_one(
     cases = _load_cases(jsonl)
     from jevmlx.engine import load_engine
 
-    model_obj, tokenizer = load_engine(model)
-    chat_template = getattr(tokenizer, "chat_template", None)
+    engine = load_engine(model)
+    chat_template = getattr(engine.tokenizer, "chat_template", None)
 
     if track == "parallel":
-        decide_fn = parallel_decide_fn(model_obj, tokenizer, scoring=scorer)
+        decide_fn = parallel_decide_fn(engine, scoring=scorer)
     else:
         from jevmlx.evalrun import naive_local_decide_fn
 
-        decide_fn = naive_local_decide_fn(model_obj, tokenizer)
+        decide_fn = naive_local_decide_fn(engine)
 
     permutations = "rotations" if track == "parallel" else "none"
     run = run_eval(

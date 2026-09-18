@@ -13,6 +13,7 @@ declares no set constraints.
 import pytest
 from conftest import YNLogitModel as _YNModel
 from conftest import _Mod97Tokenizer as _CountTokenizer
+from conftest import make_engine
 
 from jevmlx.schema import SchemaCompileError, StructuredSchema
 
@@ -250,7 +251,7 @@ def test_engine_mutually_exclusive_collapses_all_yes():
     from jevmlx.engine import run_parallel_generation
 
     schema = _schema([{"type": "mutually_exclusive", "options": ["x", "y"]}])
-    result = run_parallel_generation(_YNModel(), _CountTokenizer(), "ctx", schema)
+    result = run_parallel_generation(make_engine(_YNModel(), _CountTokenizer()), "ctx", schema)
     value = result["parsed_json"]["flags"]["value"]
     assert len([o for o in value if o in ("x", "y")]) <= 1
     telemetry = result["field_telemetry"]["flags"]
@@ -264,8 +265,12 @@ def test_engine_no_constraints_no_telemetry_keys():
     from jevmlx.engine import run_parallel_generation
 
     schema = _schema(None)
-    result = run_parallel_generation(_YNModel(), _YNModel(), "ctx", schema) if False else None
-    result = run_parallel_generation(_YNModel(), _CountTokenizer(), "ctx", schema)
+    result = (
+        run_parallel_generation(make_engine(_YNModel(), _YNModel()), "ctx", schema)
+        if False
+        else None
+    )
+    result = run_parallel_generation(make_engine(_YNModel(), _CountTokenizer()), "ctx", schema)
     telemetry = result["field_telemetry"]["flags"]
     assert "set_constraints" not in telemetry
     assert "set_selection" not in telemetry
@@ -282,7 +287,7 @@ def test_engine_non_binding_constraints_keep_per_option():
     # the constraint group {y,z} with all-yes violates, so use per-option
     # biasing via a model whose N wins: selection [] satisfies at_most_one.
     model = _YNModel(yes_logit=-2.0, no_logit=2.0)
-    result = run_parallel_generation(model, _CountTokenizer(), "ctx", schema)
+    result = run_parallel_generation(make_engine(model, _CountTokenizer()), "ctx", schema)
     telemetry = result["field_telemetry"]["flags"]
     assert telemetry["set_selection"] == "per_option"
     assert result["parsed_json"]["flags"]["value"] == []

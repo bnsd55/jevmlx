@@ -47,7 +47,6 @@ def test_machine_tag_override_wins(monkeypatch):
 
 
 def test_machine_tag_single_chip_word(monkeypatch):
-
     def fake_sysctl(args):
         if args == ["machdep.cpu.brand_string"]:
             return "Apple M4"

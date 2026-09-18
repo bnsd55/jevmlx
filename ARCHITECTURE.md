@@ -11,7 +11,7 @@ trust the code over this document when they drift.
 | [`jevmlx/schema.py`](jevmlx/schema.py) | Immutable schema model (`StructuredSchema`, `FieldDefinition` — frozen dataclasses, derived via `dataclasses.replace`; compiled plans exposed as read-only mappings), slot/labels/multi plan compilation, tokenizer-specific bounded codebook search (`_search_codebook`: prefix-conflict graph + backtracking over an independent set), plan-driven prompt rendering (`to_schema_str` takes the tokenizer — the compiled plan owns the displayed aliases), count-row compilation, per-tokenizer plan cache, compile-time rejections, hard set-constraint validation (`FieldDefinition.compile_set_constraints` returns a NEW frozen field). |
 | [`jevmlx/trie.py`](jevmlx/trie.py) | Branch-point trie over candidate token remainders; `score_trie` (constrained-path log probs + legal-mass logs, callback in LOG space); softmax/logsumexp helpers. |
 | [`jevmlx/json_text.py`](jevmlx/json_text.py) | THE canonical JSON serializer (`json_text`, `ensure_ascii=False`) for every prompt and candidate path — never `json.dumps` directly (non-ASCII labels must tokenize as displayed). |
-| [`jevmlx/engine.py`](jevmlx/engine.py) | Model load (`load_engine`, lru_cached per RESOLVED model id, the only platform check), `PROMPT_VERSION`, `PromptProfile` (Qwen3 thinking-off, system-role probe), prompt rendering from the compiled plan (`_user_content`) with the nonce context delimiter (`_context_block`), prefill + broadcast KV, chunked batched passes (`_score_rows` with per-chunk halve-and-retry and `failed_attempts`), width-bin memory budget (`_width_bin_max_rows`, slope measured at load by `_measure_width_slope`), constrained-path trie scoring, multi count row + reconciliation (`COUNT_MARGIN_MIN`), constrained MAP (`_constrained_map`), constraint validation before model work (`constraints.validate_constraints_for_schema` at the top of `run_parallel_generation`), scalar finalization (`ScalarEvidence` / `ScalarDecision` / `Candidate`, `finalize_scalar_evidence` — the ONE scalar finalizer every scoring path goes through), dependency second pass rebuilt on it (`_selective_second_pass`: topological waves, `Given:` conditioning header, `InternalConstraintViolationError` on post-MAP violation), near-tie batch=1 rescore, prior cache (`_prior_cache_key`: neutral-prompt sha + id(model)/id(tokenizer), LRU), multi calibration (`_load_calibration`), result dict. |
+| [`jevmlx/engine.py`](jevmlx/engine.py) | Model load (`load_engine` returns the frozen `Engine` object — model, tokenizer, profile, vocab, weights, cache capabilities, measured width slope — lru_cached per RESOLVED model id, the only platform check), `PROMPT_VERSION`, `PromptProfile` (Qwen3 thinking-off, system-role probe), prompt rendering from the compiled plan (`_user_content`) with the nonce context delimiter (`_context_block`), prefill + broadcast KV, chunked batched passes (`_score_rows` with per-chunk halve-and-retry and `failed_attempts`), width-bin memory budget (`_width_bin_max_rows`, slope measured at load by `_measure_width_slope`), constrained-path trie scoring, multi count row + reconciliation (`COUNT_MARGIN_MIN`), constrained MAP (`_constrained_map`), constraint validation before model work (`constraints.validate_constraints_for_schema` at the top of `run_parallel_generation`), scalar finalization (`ScalarEvidence` / `ScalarDecision` / `Candidate`, `finalize_scalar_evidence` — the ONE scalar finalizer every scoring path goes through), dependency second pass rebuilt on it (`_selective_second_pass`: topological waves, `Given:` conditioning header, `InternalConstraintViolationError` on post-MAP violation), near-tie batch=1 rescore, prior cache (`_prior_cache_key`: neutral-prompt sha + id(model)/id(tokenizer), LRU), multi calibration (`_load_calibration`), result dict. |
 | [`jevmlx/setcons.py`](jevmlx/setcons.py) | Hard set-constraint selection for multi fields: exact DP over group components (mutually_exclusive, at_most_one, at_most_k, at_least_one, exact_k) plus implies propagation; score-maximizing feasible set. |
 | [`jevmlx/constraints.py`](jevmlx/constraints.py) | Case-level constraint checking (implies/requires_parent, excludes, exclusivity): single source of truth shared by the engine's MAP and `evalmetrics`' violation rate. |
 | [`jevmlx/parity.py`](jevmlx/parity.py) | Scoring parity (batch=1 vs batched vs chunked) over the bundled presets with their REAL contexts, plus `check_batched_parity` — the decide_many parity matrix (1/2/4 contexts, raw pre-rescore row logits + final decisions, prior on/off). ONE implementation shared by the slow parity test and the bench's `parity.json` producer. |
@@ -43,6 +43,30 @@ trust the code over this document when they drift.
 | [`benchmarks/naive_vs_parallel.py`](benchmarks/naive_vs_parallel.py) | Quick parallel-vs-naive side-by-side comparison. |
 | [`benchmarks/m5.py`](benchmarks/m5.py) | One-command M5 runbook: doctor gate → slow parity per model → quality bench → invariance → timing → remaining parity models → optional `--ab-branch` A/B worktree → `SUMMARY.md` comparison. Steps are subprocesses logged into `<out>/RUNBOOK.md`; idempotent via output markers (`--fresh` reruns); step planner and summary builder are pure functions. |
 | [`benchmarks/probe.py`](benchmarks/probe.py) | W6-2 prep probes, standalone (no engine wiring): `slope` fits the per-row peak-memory slope per width bin (B=1/2/4/8 at widths 4/8/16/32 under `mx.reset_peak_memory`) and `adapters` compares `adapter.lm_head(adapter.backbone(x)[:, pos])` vs `model(x)[:, pos]` on bundled preset rows. |
+
+## The Engine object
+
+`load_engine(model_id)` returns a frozen `Engine` dataclass — the ONE handle
+callers pass around:
+
+| field | resolved |
+| --- | --- |
+| `model`, `tokenizer` | the loaded pair |
+| `model_id` | the RESOLVED id (alias -> canonical); the lru cache keys on it, so `load_engine("quality")` and the full id return the same object |
+| `revision` | the HF snapshot sha from the local cache (None when not resolvable) |
+| `profile` | the `PromptProfile` probed once at load (system-role support + template kwargs from the resolved id) |
+| `vocab_size` / `weight_bytes` | the logits-slab sizing + memory-budget inputs |
+| `cache_capabilities` | the cache classes the model's layers produce (the `merge` broadcast gate reads them) |
+| `width_slope` | the MEASURED B=1/B=2 tiling slope (W5-D), read by `_width_bin_max_rows` |
+
+Every per-model property is resolved exactly once, here. The hot paths read
+`engine.profile` / `engine.vocab_size` / `engine.weight_bytes` /
+`engine.width_slope` — nothing re-introspects the model object per call. The
+generation entry points (`run_parallel_generation`,
+`run_parallel_generation_batched`, `run_naive_generation`) and every
+downstream consumer (`api`, `calibrate`, `cli`, `evalrun`, `parity`,
+`serve`, `bench`, the benchmark scripts) take an Engine. Tests construct
+engines through the `conftest.make_engine` factory.
 
 ## Data flow
 

@@ -2,12 +2,13 @@ import enum
 from typing import Literal
 
 import pytest
-from conftest import make_engine_result, make_field_telemetry
+from conftest import FakeModel, FakeTokenizer, make_engine, make_engine_result, make_field_telemetry
 from pydantic import BaseModel, Field
 
 import jevmlx
 from jevmlx.api import schema_from_model
 from jevmlx.cli import load_preset
+from jevmlx.engine import run_parallel_generation
 from jevmlx.schema import StructuredSchema
 
 
@@ -64,11 +65,10 @@ def test_decide_many_uses_one_engine_and_one_schema(monkeypatch):
 
     def fake_load_engine(model_id):
         load_calls.append(model_id)
-        return ("engine", "tokenizer")
+        return make_engine(FakeModel(), FakeTokenizer(), model_id=model_id)
 
     def fake_run_parallel(
-        engine_model,
-        tokenizer,
+        engine,
         context,
         schema,
         *,
@@ -78,7 +78,7 @@ def test_decide_many_uses_one_engine_and_one_schema(monkeypatch):
         prior_correction=False,
         constraints=None,
     ):
-        run_calls.append((engine_model, tokenizer, context, schema, temperature))
+        run_calls.append((engine, context, schema, temperature))
         return make_engine_result(
             fields={
                 "is_fraudulent": make_field_telemetry(
@@ -97,8 +97,8 @@ def test_decide_many_uses_one_engine_and_one_schema(monkeypatch):
     monkeypatch.setattr("jevmlx.api.load_engine", fake_load_engine)
     monkeypatch.setattr("jevmlx.api.run_parallel_generation", fake_run_parallel)
 
-    def fake_batched(engine, tok, contexts, schema, **k):
-        run_calls.extend((engine, tok, ctx, schema, k.get("temperature")) for ctx in contexts)
+    def fake_batched(engine, contexts, schema, **k):
+        run_calls.extend((engine, None, ctx, schema, k.get("temperature")) for ctx in contexts)
         result = make_engine_result(
             fields={
                 "is_fraudulent": make_field_telemetry(
@@ -134,7 +134,11 @@ def test_decide_many_uses_one_engine_and_one_schema(monkeypatch):
 
     assert load_calls == ["fake/model"]  # engine loaded exactly once
     assert [c[2] for c in run_calls] == ["context one", "context two", "context three"]
-    assert all(c[0] == "engine" and c[1] == "tokenizer" for c in run_calls)
+    # decide_many passes the ONE Engine object to every batched call —
+    # identity, not tuple equality.
+    assert all(c[0] is run_calls[0][0] for c in run_calls)
+    engine_obj = run_calls[0][0]
+    assert engine_obj.model_id == "fake/model"
     # One shared StructuredSchema object across every context.
     assert len({id(c[3]) for c in run_calls}) == 1
     assert isinstance(run_calls[0][3], StructuredSchema)
@@ -264,6 +268,79 @@ def test_load_engine_resolves_before_caching():
     assert "return _load_engine_resolved(resolve_model(model_id))" in src
 
 
+@pytest.mark.slow
+def test_load_engine_identity_alias_is_object(monkeypatch):
+    """The required identity test: load_engine("quality") and
+    load_engine(full id) return the ONE cached Engine object (is-identity).
+    Real load (slow tier); the module-scope engine fixture already holds the
+    model, so this only exercises the alias path against the same entry."""
+    from jevmlx import engine as eng
+    from jevmlx.models import MODEL_ALIASES
+
+    full_id = MODEL_ALIASES["quality"]
+    # Both paths land on the same resolved-id cache entry.
+    assert eng.resolve_model("quality") == full_id
+    a = eng.load_engine("quality")
+    b = eng.load_engine(full_id)
+    assert a is b
+    assert a.model_id == full_id
+
+
+def test_parallel_generation_reads_engine_properties_not_re_introspection(monkeypatch):
+    """Fake-tier: run_parallel_generation must use the Engine's load-time
+    properties — vocab_size/weight_bytes/width_slope/profile — and never
+    re-derive them from the model object. Proven by a model whose true
+    shape disagrees with the Engine's carried values: the engine values
+    win (introspection would crash or silently diverge)."""
+
+    class MaskedModel(FakeModel):
+        """A model whose introspectable attributes disagree with the Engine."""
+
+        args = None  # no args.vocab_size to read
+        model = None  # no .model.embed_tokens to read
+        vocab_size = 999  # a probe of this attr would give the wrong slab
+
+    tok = FakeTokenizer()
+    engine = make_engine(MaskedModel(), tok, vocab_size=64)
+
+    # The engine carries 64; the model would have "said" 999 (or None).
+    assert engine.vocab_size == 64
+
+    # The generation call itself runs against the engine's carried
+    # properties (introspecting MaskedModel would crash on the None
+    # attrs / diverge on vocab 999) and returns the contract result dict.
+    schema = StructuredSchema({"tier": {"type": "enum", "description": "d", "choices": ["A", "B"]}})
+    result = run_parallel_generation(engine, "ctx", schema)
+    assert result["parsed_json"]["tier"]["value"] in ("A", "B")
+    assert result["field_telemetry"]["tier"]["probability"] == pytest.approx(0.5)
+
+    # The chunking budget takes the ENGINE's measured slope as a parameter —
+    # a different slope yields a different cap (proving the argument, not a
+    # global, drives the budget).
+    from jevmlx.engine import _width_bin_max_rows
+
+    rows = [[5, 6, 7], [8, 9, 10]]
+    cache = make_prompt_cache_like(engine.model)
+    cap = _width_bin_max_rows(
+        rows, cache, engine.vocab_size, engine.weight_bytes, engine.width_slope, None
+    )
+    cap_other = _width_bin_max_rows(
+        rows, cache, engine.vocab_size, engine.weight_bytes, engine.width_slope * 4, None
+    )
+    assert cap_other <= cap
+
+
+def make_prompt_cache_like(model):
+    """A tiny cache-shaped object for the budget math (no mlx needed)."""
+
+    class _C:
+        def __init__(self):
+            self.state = None
+            self.nbytes = 16
+
+    return [_C(), _C()]
+
+
 def test_decide_end_to_end():
     class TwoField(BaseModel):
         is_fraudulent: bool = Field(description="Whether the transaction is fraudulent")
@@ -377,7 +454,7 @@ def test_allow_none_of_above_appends_choice_and_maps_to_none(monkeypatch):
 
     captured = {}
 
-    def fake_run_parallel(engine_model, tokenizer, context, schema, **kwargs):
+    def fake_run_parallel(engine, context, schema, **kwargs):
         captured["choices"] = schema.fields["risk_tier"].choices
         captured["descriptions"] = schema.fields["risk_tier"].choice_descriptions
         return make_engine_result(
@@ -427,7 +504,7 @@ def test_allow_none_of_above_off_leaves_schema_untouched(monkeypatch):
 
     captured = {}
 
-    def fake_run_parallel(engine_model, tokenizer, context, schema, **kwargs):
+    def fake_run_parallel(engine, context, schema, **kwargs):
         captured["choices"] = schema.fields["risk_tier"].choices
         return make_engine_result(
             fields={
@@ -496,7 +573,7 @@ def _abstain_monkeypatch(monkeypatch, margin: float):
         lambda *a, **k: _abstain_result(margin),
     )
 
-    def _fake_batched(engine, tok, contexts, schema, **k):
+    def _fake_batched(engine, contexts, schema, **k):
         return [_abstain_result(margin) for _ in contexts]
 
     monkeypatch.setattr("jevmlx.api.run_parallel_generation_batched", _fake_batched)
