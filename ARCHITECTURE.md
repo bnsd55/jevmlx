@@ -8,16 +8,17 @@ trust the code over this document when they drift.
 
 | Module | Role |
 |---|---|
-| [`jevmlx/schema.py`](jevmlx/schema.py) | Schema model (`StructuredSchema`, `FieldDefinition`), slot/labels/multi plan compilation, tokenizer-specific bounded codebook search (`_search_codebook`: prefix-conflict graph + backtracking over an independent set), plan-driven prompt rendering (`to_schema_str` takes the tokenizer — the compiled plan owns the displayed aliases), count-row compilation, per-tokenizer plan cache, compile-time rejections, hard set-constraint validation (`FieldDefinition.compile_set_constraints`). |
+| [`jevmlx/schema.py`](jevmlx/schema.py) | Immutable schema model (`StructuredSchema`, `FieldDefinition` — frozen dataclasses, derived via `dataclasses.replace`; compiled plans exposed as read-only mappings), slot/labels/multi plan compilation, tokenizer-specific bounded codebook search (`_search_codebook`: prefix-conflict graph + backtracking over an independent set), plan-driven prompt rendering (`to_schema_str` takes the tokenizer — the compiled plan owns the displayed aliases), count-row compilation, per-tokenizer plan cache, compile-time rejections, hard set-constraint validation (`FieldDefinition.compile_set_constraints` returns a NEW frozen field). |
 | [`jevmlx/trie.py`](jevmlx/trie.py) | Branch-point trie over candidate token remainders; `score_trie` (constrained-path log probs + legal-mass logs, callback in LOG space); softmax/logsumexp helpers. |
 | [`jevmlx/json_text.py`](jevmlx/json_text.py) | THE canonical JSON serializer (`json_text`, `ensure_ascii=False`) for every prompt and candidate path — never `json.dumps` directly (non-ASCII labels must tokenize as displayed). |
 | [`jevmlx/engine.py`](jevmlx/engine.py) | Model load (`load_engine`, lru_cached per RESOLVED model id, the only platform check), `PROMPT_VERSION`, `PromptProfile` (Qwen3 thinking-off, system-role probe), prompt rendering from the compiled plan (`_user_content`) with the nonce context delimiter (`_context_block`), prefill + broadcast KV, chunked batched passes (`_score_rows` with per-chunk halve-and-retry and `failed_attempts`), width-bin memory budget (`_width_bin_max_rows`, slope measured at load by `_measure_width_slope`), constrained-path trie scoring, multi count row + reconciliation (`COUNT_MARGIN_MIN`), constrained MAP (`_constrained_map`), selective parent-conditioned second pass (`_selective_second_pass`), near-tie batch=1 rescore, prior cache (`_prior_cache_key`: neutral-prompt sha + id(model)/id(tokenizer), LRU), multi calibration (`_load_calibration`), result dict. |
 | [`jevmlx/setcons.py`](jevmlx/setcons.py) | Hard set-constraint selection for multi fields: exact DP over group components (mutually_exclusive, at_most_one, at_most_k, at_least_one, exact_k) plus implies propagation; score-maximizing feasible set. |
 | [`jevmlx/constraints.py`](jevmlx/constraints.py) | Case-level constraint checking (implies/requires_parent, excludes, exclusivity): single source of truth shared by the engine's MAP and `evalmetrics`' violation rate. |
 | [`jevmlx/parity.py`](jevmlx/parity.py) | Scoring parity (batch=1 vs batched vs chunked) over the bundled presets with their REAL contexts, plus `check_batched_parity` — the decide_many parity matrix (1/2/4 contexts, raw pre-rescore row logits + final decisions, prior on/off). ONE implementation shared by the slow parity test and the bench's `parity.json` producer. |
-| [`jevmlx/api.py`](jevmlx/api.py) | Public API: `decide`, `decide_many`, `Decision`/`FieldResult`, Pydantic → schema, NONE_OF_ABOVE + abstention handling, unit-split margins. |
+| [`jevmlx/api.py`](jevmlx/api.py) | Public API: `decide`, `decide_many`, `Decision`/`FieldResult`, Pydantic → schema, NONE_OF_ABOVE + abstention handling, unit-split margins. No compat re-exports (model aliases live in `jevmlx.models`). |
 | [`jevmlx/cli.py`](jevmlx/cli.py) | Subcommands: decide, serve, validate, eval, report, calibrate, bench, doctor. |
 | [`jevmlx/serve.py`](jevmlx/serve.py) | HTTP server (`POST /decide`), one serial worker on the single Metal GPU. |
+| [`jevmlx/models.py`](jevmlx/models.py) | Model aliases (`MODEL_ALIASES`, `DEFAULT_MODEL`) and `resolve_model` — the leaf module every loader and CLI command resolves ids through. |
 | [`jevmlx/lint.py`](jevmlx/lint.py) | `lint_schema`: collision / duplicate / empty-choice findings from a compiled plan. |
 | [`jevmlx/calibrate.py`](jevmlx/calibrate.py) | `fit_temperature` by NLL over labeled JSONL and `fit_logistic` (pooled multi calibration); ECE before/after; one JSON output for both. |
 | [`jevmlx/evalrun.py`](jevmlx/evalrun.py) | Eval tracks (`parallel_decide_fn`, `naive_local_decide_fn`); `run_eval` writes `predictions.jsonl` + `run.json`. |
@@ -204,7 +205,11 @@ engine's MAP reconciliation and `evalmetrics.constraint_violation_rate`;
 
 Schema-dict key `set_constraints` on a multi field; validated at
 construction, so contradictory sets raise `SchemaCompileError` before any
-model load. Types: `mutually_exclusive` / `at_most_one` / `at_most_k` (k),
+model load. The field is a frozen dataclass, so "attaching" constraints
+means deriving: `compile_set_constraints` returns a NEW `FieldDefinition`
+via `dataclasses.replace` (a bare reference to the old field keeps the empty
+tuple), and the stored constraints are a tuple of read-only views.
+Types: `mutually_exclusive` / `at_most_one` / `at_most_k` (k),
 `at_least_one`, `exact_k` (k), `implies` (`if_option` → `then_option`).
 Compile-time contradictions: implies cycles, an implies pair inside an
 at-most-one group, implies into an `exact_k=0` group, k above group size,
@@ -353,8 +358,18 @@ conversion: same shape with empty `sources` plus `fetched_at`.
   parity and tested parity cannot drift apart.
 - **No dual paths.** The multi threshold knob is deleted (calibrated
   log-odds > 0 or the fixed P(yes) >= 0.5 rule); `set_constraints` is a real
-  attribute read directly (no getattr fallback); `summarize` lives in
+  frozen attribute read directly (no getattr fallback); `summarize` lives in
   `benchmarks/summarize_results.py` and bench calls it directly.
+- **Schemas and plans are immutable.** `StructuredSchema` and
+  `FieldDefinition` are frozen dataclasses; mutation raises
+  `FrozenInstanceError` (derive with `dataclasses.replace`). Compiled plans
+  and `set_constraints` are exposed as read-only mappings/tuples
+  (`_freeze_plan` / `MappingProxyType`). A schema is compiled once and
+  shared across engines, threads, and plan caches — in-place mutation would
+  silently invalidate every cached plan keyed to it. `api` no longer
+  re-exports `models.*`: aliases resolve via `jevmlx.models.resolve_model`
+  (imported by the engine) and `jevmlx.models` is the public home of
+  `MODEL_ALIASES`/`DEFAULT_MODEL`.
 - **Prompt version read, never written.** `PROMPT_VERSION` lives once in
   `jevmlx.engine`; every consumer (result dict, prior cache key, parity
   payload) reads it.
@@ -388,9 +403,14 @@ conversion: same shape with empty `sources` plus `fetched_at`.
 
 ## Testing
 
-- Fast tests (`pytest -m "not slow" -q`) never touch a model: the engine is
-  exercised through `tests/test_engine_fake.py` (`FakeModel` +
-  `FakeTokenizer`), a fake tokenizer mapping words to crc32 ids in
+- Fast tests (`pytest -m "not slow" -q`) never touch a model: the shared
+  fakes live in `tests/conftest.py` (`FakeModel`, `FakeTokenizer`, the
+  %97+1 tokenizer, `YNLogitModel`, `CountCodeModel`) — one class per
+  behaviour, re-exported by the per-file aliases — plus the engine-result
+  factories `make_engine_result` / `make_field_telemetry`, whose key sets
+  are pinned to `run_parallel_generation`'s real output by contract tests
+  in that file (a stub that drifts from the engine contract fails loudly).
+  A fake tokenizer mapping words to crc32 ids lives in
   `tests/test_lint.py`, and `decide_fn` seams in `tests/test_evalrun.py`.
 - Slow tests (marker `slow`) load
   `mlx-community/Qwen2.5-0.5B-Instruct-4bit`. Run one locally with
@@ -407,10 +427,13 @@ conversion: same shape with empty `sources` plus `fetched_at`.
 1. **Trie over first tokens.** Scoring whole choices as branch paths gives a
    proper distribution and lets shared token prefixes be paid for once.
 2. **Codebook search, not pinned letters.** The compiler searches alias
-   codes per field and tokenizer (`_search_codebook`) and picks the set whose
-   complete rows tokenize most cleanly (branch nodes, trie depth, length
-   variance); a pinned index-based mapping survives only as a documented
-   fallback for index-based callers.
+   codes per field and tokenizer (`_search_codebook`) and picks the best
+   size-n prefix-free INDEPENDENT set over the pre-tokenized pool's
+   prefix-conflict graph — bounded backtracking, scored by the lexicographic
+   objective (branch nodes, trie depth, length variance, code length) on
+   every complete set; greedy committed to a prefix-colliding code and
+   rejected valid sets. The pinned index-based mapping survives only for
+   index-based callers (the OpenAI adapter).
 3. **Slots default over labels.** Neutral aliases decouple the scored
    vocabulary from choice text — no tokenization collisions by construction;
    labels mode stays for schemas where spelling is the signal.
