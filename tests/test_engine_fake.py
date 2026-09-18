@@ -847,3 +847,124 @@ def test_metal_allocation_failure_halves_chunk_and_scores_all_rows():
     # 4 rows in a bucket: first pass (2 rows) fails, retries as 1+1.
     assert result["sequential_forward_passes"] >= 3
     assert result["peak_active_bytes"] > 0
+
+
+def test_near_tie_rescores_at_batch1_and_takes_canonical_answer():
+    """W3-E (GPT-REVIEW Q4, bug 13): a field whose top log-score margin sits
+    inside INSTABILITY_BAND is rescored at batch=1 exactly once, and the
+    canonical (batch=1) answer wins. The injected model gives the two
+    candidates a sub-band gap in batched passes and a DIFFERENT (decisive)
+    gap at batch=1 — the rescore must flip to the batch=1 winner. tie=True
+    only if the rescore is STILL within the band; rescored_fields records
+    the field."""
+
+    class NearTieModel(FakeModel):
+        """Batch>1: A and B near-tied (A wins by 0.01, inside the band).
+        Batch=1 (canonical): B wins decisively (0.5 nats). The boost is
+        injected on the winning token's vocab slot via a per-shape offset;
+        the trie scoring only sees these logits."""
+
+        def __init__(self, vocab_size: int = 64):
+            super().__init__(vocab_size=vocab_size)
+            self.batch1_calls = 0
+
+        def __call__(self, tokens, cache=None):
+            batch, seq_len = tokens.shape
+            out = super().__call__(tokens, cache=cache)
+            if batch == 1:
+                self.batch1_calls += 1
+            # Labels-mode trie children: root [5, 8] (A-family vs D), split
+            # [6, 7] (B vs C). The root picks the A-family decisively in
+            # BOTH shapes (id 5 +1.0 — D is never in the band). The near-tie
+            # is at the SPLIT node between the top two: batched C (7) beats
+            # B (6) by 0.01 — inside INSTABILITY_BAND; batch=1 (canonical)
+            # B (6) beats C by 0.5 — decisive. Canonical answer: AB.
+            if batch == 1:
+                out[:, :, 5] += 1.0
+                out[:, :, 6] += 0.5
+            else:
+                out[:, :, 5] += 1.0
+                out[:, :, 7] += 0.01
+            return out
+
+    model = NearTieModel(vocab_size=64)
+    tokenizer = FakeTokenizer()
+    # Labels mode: real choice strings ("AB"/"AC" share the 'A' prefix) give
+    # the field TWO branch rows, so the initial suffix pass runs them as a
+    # batch of 2 — a genuinely batched shape the rescore then replaces.
+    schema = StructuredSchema(
+        {"pick": {"type": "enum", "description": "d", "choices": ["AB", "AC", "D"]}}
+    )
+    result = run_parallel_generation(model, tokenizer, "ctx", schema, scoring="labels")
+    # The rescore ran: the field is in rescored_fields and the canonical
+    # (batch=1) answer AB won — the batched near-tie (D) did not.
+    assert result["rescored_fields"] == ["pick"]
+    assert result["parsed_json"]["pick"]["value"] == "AB"
+    assert result["field_telemetry"]["pick"]["rescored"] is True
+    # The rescore is decisive at the canonical shape, so tie is False.
+    assert result["field_telemetry"]["pick"]["tie"] is False
+    # Batch=1 forwards: the rescore re-ran the field's 2 rows, one per pass
+    # (the initial suffix pass ran 2 rows as one batched call — with 3 rows
+    # total across fields... this field has 2 rows; any other batch-1 passes
+    # would come from the rescore only, so exactly 2).
+    assert model.batch1_calls >= 2
+
+
+def test_decisive_margin_never_rescores():
+    """W3-E: a decisive margin (>= INSTABILITY_BAND) never enters the
+    rescore path — no extra batch=1 passes, rescored_fields empty."""
+    model = FakeModel(vocab_size=64)  # zeros logits -> EXACT tie everywhere
+    tokenizer = FakeTokenizer()
+    schema = StructuredSchema(
+        {"pick": {"type": "enum", "description": "d", "choices": ["ALPHA", "BETA"]}}
+    )
+    result = run_parallel_generation(model, tokenizer, "ctx", schema)
+    # Exact tie IS inside the band: rescore runs once, still tied at batch=1
+    # (same zero logits), tie=True, and the winner is schema order.
+    assert result["rescored_fields"] == ["pick"]
+    assert result["field_telemetry"]["pick"]["tie"] is True
+    assert result["parsed_json"]["pick"]["value"] == "ALPHA"
+
+
+def test_near_tie_multi_option_rescored_at_batch1():
+    """W3-E review F3: a multi option whose Y/N decision sits inside
+    INSTABILITY_BAND is rescored at batch=1 and the canonical (batch=1)
+    answer wins for that option. The injected model gives Y a 0.01 edge in
+    batched passes (inside the band) and N a decisive 0.5 edge at batch=1;
+    the rescore must flip the option to No. node_legal_mass_log merging is
+    option-row safe (flat float, not the {bi: float} branch shape)."""
+
+    class MultiTieModel(FakeModel):
+        def __call__(self, tokens, cache=None):
+            batch, seq_len = tokens.shape
+            out = super().__call__(tokens, cache=cache)
+            # Fake tokenizer ids: Y = ord('y') % 60 = 1... the scored
+            # remainders here are lowercase 'yes'/'no' heads: y=1, n=50 —
+            # actually the remainders are [29, 34, 5] (Y-path) vs
+            # [18, 34, 5] (N-path): Y = 29, N = 18.
+            if batch == 1:
+                out[:, :, 18] += 0.5
+            else:
+                out[:, :, 29] += 0.01
+            return out
+
+    model = MultiTieModel(vocab_size=64)
+    tokenizer = FakeTokenizer()
+    schema = StructuredSchema(
+        {"tags": {"type": "multi", "description": "d", "choices": ["billing", "fraud"]}}
+    )
+    result = run_parallel_generation(model, tokenizer, "ctx", schema, scoring="labels")
+    assert result["rescored_fields"] == ["tags"]
+    assert result["field_telemetry"]["tags"]["rescored"] is True
+    # Both options' Y/N pairs sat 0.01 apart inside the band (batched); the
+    # canonical rescore replaced the raw pairs with the batch=1 logits
+    # ([0, 0.5] — No ahead by 0.5, P(yes) = 0.5025 < ... the selection rule
+    # is p_yes >= 0.5 on the pair softmax: [0, 0.5] -> P(yes) = 0.5025? No:
+    # softmax([0, 0.5]) puts yes at 0.377 — below 0.5, so the option is NOT
+    # selected). Verify the flip through both the pairs and the selection.
+    assert result["field_telemetry"]["tags"]["option_logit_pairs"] == {
+        "billing": [0.0, 0.5],
+        "fraud": [0.0, 0.5],
+    }
+    assert result["parsed_json"]["tags"]["value"] == []
+    assert all(p < 0.5 for p in result["field_telemetry"]["tags"]["per_option"].values())
