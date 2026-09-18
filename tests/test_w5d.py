@@ -14,8 +14,6 @@ Fake-model tests — each asserts behavior that FAILS on 1f9f453:
 
 import math
 
-import pytest
-
 from jevmlx import StructuredSchema
 from jevmlx.engine import run_parallel_generation
 from jevmlx.trie import score_trie
@@ -31,9 +29,7 @@ def test_peak_incremental_present_and_consistent():
     memory at request start; both describe THIS request only."""
     model = FakeModel(vocab_size=64)
     tokenizer = FakeTokenizer()
-    schema = StructuredSchema(
-        {"pick": {"type": "enum", "description": "d", "choices": ["A", "B"]}}
-    )
+    schema = StructuredSchema({"pick": {"type": "enum", "description": "d", "choices": ["A", "B"]}})
     result = run_parallel_generation(model, tokenizer, "ctx", schema)
     assert "peak_active_bytes" in result
     # W5-D finding 32: the incremental pair exists and never goes negative.
@@ -50,9 +46,7 @@ def test_peak_reset_between_requests():
     second call's peak reflects its own cache state."""
     model = FakeModel(vocab_size=64)
     tokenizer = FakeTokenizer()
-    schema = StructuredSchema(
-        {"pick": {"type": "enum", "description": "d", "choices": ["A", "B"]}}
-    )
+    schema = StructuredSchema({"pick": {"type": "enum", "description": "d", "choices": ["A", "B"]}})
     first = run_parallel_generation(model, tokenizer, "ctx", schema)
     second = run_parallel_generation(model, tokenizer, "ctx2", schema)
     # The second request resets the peak counter: its incremental peak
@@ -64,7 +58,6 @@ def test_peak_reset_between_requests():
 def test_score_trie_extreme_log_mass_no_underflow():
     """Finding 37: a -1000-nat node mass flows through in log space —
     the old exp() -> 0.0 -> log(0) path raised ValueError."""
-    from jevmlx.trie import build_trie
 
     remainders = [[10], [30]]
     nodes = build_trie_local(remainders)

@@ -2268,9 +2268,7 @@ def _assemble(
                 # computed and discarded — now exposed. The count row's
                 # branch path is per-code, so report the winner's log mass
                 # and the min over codes (worst-case leakage on the row).
-                "legal_mass": math.exp(
-                    count_legal_mass_logs[count_display.index(count_choice)]
-                ),
+                "legal_mass": math.exp(count_legal_mass_logs[count_display.index(count_choice)]),
                 "min_option_legal_mass": math.exp(min(count_legal_mass_logs)),
             }
             continue
