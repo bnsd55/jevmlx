@@ -337,6 +337,11 @@ def run_bench(
     unless ``fresh`` forces a rerun — state is derived from files, no
     manifest. Exit code 0 unless EVERY combo failed.
     """
+    # Import here, not at module level: summarize_results imports
+    # enforce_folder_size from this module, so a top-level import would be
+    # circular. (No wrapper: callers import summarize_results directly.)
+    from benchmarks.summarize_results import summarize
+
     tag = preflight(force, machine_override)
     print(f"machine: {tag}")
 
@@ -455,6 +460,8 @@ def run_bench_models(
     in every one of its combos and the remaining models still run. This
     wrapper only escalates when EVERY model left zero successful combos.
     """
+    # Same-cycle note as run_bench: imported here, not at module level.
+    from benchmarks.summarize_results import summarize
     from jevmlx.engine import clear_engine_cache
 
     if not models:
@@ -499,8 +506,8 @@ def run_bench_models(
     if all_combos == 0 and failed_combos:
         summarize(out)  # failure rows still get a summary
         raise SystemExit("every model failed")
-    # W4-B: parity.json lives in each model folder; summarize reads it per
-    # model folder and marks parity_failed rows itself.
+    # W4-B: parity.json lives in each model folder; the summarizer reads it
+    # per model folder and marks parity_failed rows itself.
     summarize(out)
     return out
 
@@ -591,17 +598,6 @@ def _load_cases(jsonl: Path) -> list[dict]:
             if line and not line.startswith("#"):
                 cases.append(__import__("json").loads(line))
     return cases
-
-
-def summarize(out: Path, parity_note: str | None = None) -> Path:
-    """Summarize every report.json under ``out`` into ``out/SUMMARY.md``.
-
-    ``parity_note`` (W4-B): run_bench's in-process parity failure message —
-    forwarded so the summary can gate the model's rows when the check
-    failed before parity.json could be written."""
-    from benchmarks.summarize_results import summarize as _summarize
-
-    return _summarize(out, parity_note=parity_note)
 
 
 def _print_pr_instructions(folder: Path, last_run: dict) -> None:
