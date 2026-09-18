@@ -123,48 +123,40 @@ def test_decide_passes_constraints_to_engine(monkeypatch):
 
 
 def test_decide_many_passes_constraints_to_engine(monkeypatch):
-    """decide_many() forwards constraints= to run_parallel_generation."""
+    """decide_many() forwards constraints= to run_parallel_generation_batched."""
     import jevmlx.api as api
 
     captured = []
 
-    def fake_run_parallel(
-        engine_model,
-        tokenizer,
-        context,
-        schema,
-        *,
-        temperature=1.0,
-        scoring="slots",
-        calibration=None,
-        prior_correction=False,
-        constraints=None,
-    ):
-        captured.append(constraints)
-        return {
-            "parsed_json": {"risk": {"value": "LOW"}},
-            "field_telemetry": {"risk": {"value": "LOW", "probability": 0.9}},
-            "confidence_model": "slots",
-            "elapsed_ms": 5.0,
-            "prompt_sha256": "abc",
-            "prompt_version": "v6",
-            "probability_status": "test",
-            "prior_correction": False,
-            "constraints_applied": True,
-            "reconciled_fields": [],
-            "prior_ms": 0.0,
-            "prefill_ms": 1.0,
-            "suffix_eval_ms": 1.0,
-            "lm_head_gather_ms": 1.0,
-            "total_ms": 5.0,
-            "total_tokens_generated": 0,
-            "sequential_forward_passes": 1,
-            "schema_match": True,
-            "num_fields": 1,
-        }
+    def fake_run_parallel_batched(engine_model, tokenizer, contexts, schema, **kwargs):
+        captured.extend(kwargs.get("constraints") for _ in contexts)
+        return [
+            {
+                "parsed_json": {"risk": {"value": "LOW"}},
+                "field_telemetry": {"risk": {"value": "LOW", "probability": 0.9}},
+                "confidence_model": "slots",
+                "elapsed_ms": 5.0,
+                "prompt_sha256": "abc",
+                "prompt_version": "v6",
+                "probability_status": "test",
+                "prior_correction": False,
+                "constraints_applied": True,
+                "reconciled_fields": [],
+                "prior_ms": 0.0,
+                "prefill_ms": 1.0,
+                "suffix_eval_ms": 1.0,
+                "lm_head_gather_ms": 1.0,
+                "total_ms": 5.0,
+                "total_tokens_generated": 0,
+                "sequential_forward_passes": 1,
+                "schema_match": True,
+                "num_fields": 1,
+            }
+            for _ctx in contexts
+        ]
 
     monkeypatch.setattr(api, "load_engine", lambda model: (object(), object()))
-    monkeypatch.setattr(api, "run_parallel_generation", fake_run_parallel)
+    monkeypatch.setattr(api, "run_parallel_generation_batched", fake_run_parallel_batched)
 
     from typing import Literal
 

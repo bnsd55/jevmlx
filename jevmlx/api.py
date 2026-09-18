@@ -25,7 +25,7 @@ from collections.abc import Sequence
 
 from pydantic import BaseModel
 
-from jevmlx.engine import load_engine, run_parallel_generation
+from jevmlx.engine import load_engine, run_parallel_generation, run_parallel_generation_batched
 from jevmlx.schema import StructuredSchema
 
 DEFAULT_MODEL = "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
@@ -377,7 +377,25 @@ def _decide_once[T: BaseModel](
         prior_correction=prior_correction,
         constraints=constraints,
     )
+    return _assemble_decision(
+        model_cls,
+        result,
+        abstain_below_margin=abstain_below_margin,
+        allow_none_of_above=allow_none_of_above,
+    )
 
+
+def _assemble_decision[T: BaseModel](
+    model_cls: type[T],
+    result: dict,
+    *,
+    abstain_below_margin: float | None = None,
+    allow_none_of_above: bool = False,
+) -> Decision[T]:
+    """Turn a run_parallel_generation result into a validated Decision.
+
+    Shared by decide/_decide_once and the W3-F batched decide_many path.
+    """
     field_results = _build_field_results(
         result, result["confidence_model"], abstain_below_margin=abstain_below_margin
     )
@@ -554,20 +572,27 @@ def decide_many[T: BaseModel](
     _check_abstain_margin(abstain_below_margin)
     schema = _prepare_schema(model_cls, allow_none_of_above)
     engine_model, tokenizer = load_engine(model)
+    # W3-F: batch the contexts through ONE merged suffix pass. Each Decision
+    # is assembled through the same _decide_once path (fed prebuilt per-context
+    # caches + the shared scoring result), so validation/abstain/calibration
+    # behave exactly as in decide(); only the forward passes are shared.
+    raws = run_parallel_generation_batched(
+        engine_model,
+        tokenizer,
+        contexts,
+        schema,
+        temperature=temperature,
+        scoring=scoring,
+        calibration=calibration,
+        prior_correction=prior_correction,
+        constraints=constraints,
+    )
     return [
-        _decide_once(
+        _assemble_decision(
             model_cls,
-            context,
-            engine_model,
-            tokenizer,
-            schema,
-            temperature,
-            scoring=scoring,
-            allow_none_of_above=allow_none_of_above,
+            raw,
             abstain_below_margin=abstain_below_margin,
-            calibration=calibration,
-            prior_correction=prior_correction,
-            constraints=constraints,
+            allow_none_of_above=allow_none_of_above,
         )
-        for context in contexts
+        for raw in raws
     ]

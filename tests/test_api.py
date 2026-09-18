@@ -94,6 +94,28 @@ def test_decide_many_uses_one_engine_and_one_schema(monkeypatch):
     monkeypatch.setattr("jevmlx.api.load_engine", fake_load_engine)
     monkeypatch.setattr("jevmlx.api.run_parallel_generation", fake_run_parallel)
 
+    def fake_run_parallel_batched(engine_model, tokenizer, contexts, schema, **kwargs):
+        run_calls.extend(
+            (engine_model, tokenizer, ctx, schema, kwargs.get("temperature")) for ctx in contexts
+        )
+        return [
+            {
+                "parsed_json": {
+                    "is_fraudulent": {"value": True},
+                    "risk_tier": {"value": "HIGH"},
+                },
+                "field_telemetry": {
+                    "is_fraudulent": {"value": True, "probability": 0.9},
+                    "risk_tier": {"value": "HIGH", "probability": 0.8},
+                },
+                "confidence_model": "slots",
+                "elapsed_ms": 5.0,
+            }
+            for _ctx in contexts
+        ]
+
+    monkeypatch.setattr("jevmlx.api.run_parallel_generation_batched", fake_run_parallel_batched)
+
     decisions = jevmlx.decide_many(
         TwoField,
         ["context one", "context two", "context three"],
@@ -452,6 +474,12 @@ def _abstain_monkeypatch(monkeypatch, margin: float):
     monkeypatch.setattr(
         "jevmlx.api.run_parallel_generation",
         lambda *a, **k: _abstain_result(margin),
+    )
+    monkeypatch.setattr(
+        "jevmlx.api.run_parallel_generation_batched",
+        lambda *a, **k: [
+            _abstain_result(margin) for _ in k.get("contexts", a[2] if len(a) > 2 else [])
+        ],
     )
 
 
