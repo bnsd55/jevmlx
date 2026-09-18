@@ -43,6 +43,7 @@ jobs:
               | sort -u \
               | tr '\n' ' ')
             echo "dirs=$dirs" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Run check_results + README freshness
         id: check
