@@ -110,4 +110,4 @@ def test_engine_telemetry_maps_codes_to_option_names():
     assert [c for c, _ in telemetry["alternatives"]] == ["alpha", "beta", "gamma"]
     assert [e["choice"] for e in telemetry["top_choices"]] == ["alpha", "beta", "gamma"]
     assert result["parsed_json"]["tags"]["value"] == ["alpha", "beta", "gamma"]
-    assert result["prompt_version"] == "jevmlx-parallel-v5"
+    assert result["prompt_version"] == "jevmlx-parallel-v6"
