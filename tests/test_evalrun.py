@@ -316,7 +316,14 @@ def test_parallel_log_scores_reads_finalized_dict(tmp_path, monkeypatch):
     calls = {}
 
     def fake_rpg(
-        model, tokenizer, context, schema, temperature=1.0, scoring="slots", prior_correction=False
+        model,
+        tokenizer,
+        context,
+        schema,
+        temperature=1.0,
+        scoring="slots",
+        prior_correction=False,
+        constraints=None,
     ):
         calls["temperature"] = temperature
         return {

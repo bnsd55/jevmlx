@@ -746,30 +746,10 @@ def _constrained_map(
     changed: list[str] = []
 
     def _check_constraint(c: dict, assignment: dict[str, object]) -> bool:
-        """True if constraint is SATISFIED."""
-        ctype = c.get("type")
-        if ctype in ("implies", "requires_parent"):
-            parent_val = assignment.get(c["parent"])
-            child_val = assignment.get(c["child"])
-            if parent_val is None or child_val is None:
-                return True
-            return child_val in c.get("mapping", {}).get(parent_val, [])
-        if ctype == "excludes":
-            if assignment.get(c["field"]) == c["value"]:
-                other = assignment.get(c["other"])
-                if isinstance(other, list):
-                    return len(other) == 0
-                return other in (None, "", False)
-            return True
-        if ctype == "exclusivity":
-            field_val = assignment.get(c["field"])
-            if field_val is None:
-                return True
-            if not isinstance(field_val, list):
-                field_val = [field_val] if field_val else []
-            selected = set(field_val) & set(c.get("options", []))
-            return len(selected) <= 1
-        return True
+        """True if constraint is SATISFIED (delegates to jevmlx.constraints)."""
+        from jevmlx.constraints import check_constraint
+
+        return check_constraint(c, assignment)
 
     for component in components:
         # Get the candidate values for each field in this component.

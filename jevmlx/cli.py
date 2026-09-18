@@ -35,6 +35,15 @@ def load_preset(name: str) -> dict:
     )
 
 
+def _load_constraints(path: str) -> list[dict]:
+    """Load and validate a constraints JSON file (EV1 shape)."""
+    from jevmlx.constraints import validate_constraints
+
+    with open(path, encoding="utf-8") as f:
+        constraints = json.load(f)
+    return validate_constraints(constraints)
+
+
 def _fmt_confidence(value: float, decimals: int) -> str:
     """Presentation rounding for confidences: 3 decimals in the table, 4 in --json.
     The engine returns full-precision floats; rounding happens only here."""
@@ -157,6 +166,13 @@ def main(argv=None) -> None:
         help="subtract the neutral-context prior (one batched pass with "
         "'(no context provided)') from the per-choice log scores before "
         "selecting; the neutral pass is cached per schema",
+    )
+    decide.add_argument(
+        "--constraints",
+        default=None,
+        help="path to a JSON file with case-level constraints (implies / "
+        "excludes / requires_parent / exclusivity); wires through to the "
+        "constrained MAP solver",
     )
 
     calib = sub.add_parser(
@@ -389,6 +405,7 @@ def main(argv=None) -> None:
                 scoring=args.scoring,
                 calibration=args.calibration,
                 prior_correction=args.prior_correction,
+                constraints=_load_constraints(args.constraints) if args.constraints else None,
             )
             model_label = args.model
 

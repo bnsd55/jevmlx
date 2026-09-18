@@ -363,6 +363,7 @@ def _decide_once[T: BaseModel](
     abstain_below_margin: float | None = None,
     calibration: str | dict | None = None,
     prior_correction: bool = False,
+    constraints: list[dict] | None = None,
 ) -> Decision[T]:
     """Decide one context with a loaded engine and a compiled schema."""
     result = run_parallel_generation(
@@ -374,6 +375,7 @@ def _decide_once[T: BaseModel](
         scoring=scoring,
         calibration=calibration,
         prior_correction=prior_correction,
+        constraints=constraints,
     )
 
     field_results = _build_field_results(
@@ -457,6 +459,7 @@ def decide[T: BaseModel](
     abstain_below_margin: float | None = None,
     calibration: str | dict | None = None,
     prior_correction: bool = False,
+    constraints: list[dict] | None = None,
 ) -> Decision[T]:
     """Run parallel constrained decisions and return a validated model instance.
 
@@ -505,6 +508,7 @@ def decide[T: BaseModel](
         abstain_below_margin=abstain_below_margin,
         calibration=calibration,
         prior_correction=prior_correction,
+        constraints=constraints,
     )
 
 
@@ -519,6 +523,7 @@ def decide_many[T: BaseModel](
     abstain_below_margin: float | None = None,
     calibration: str | dict | None = None,
     prior_correction: bool = False,
+    constraints: list[dict] | None = None,
 ) -> list[Decision[T]]:
     """Decide many contexts against one schema and return one Decision per context.
 
@@ -562,6 +567,7 @@ def decide_many[T: BaseModel](
             abstain_below_margin=abstain_below_margin,
             calibration=calibration,
             prior_correction=prior_correction,
+            constraints=constraints,
         )
         for context in contexts
     ]
