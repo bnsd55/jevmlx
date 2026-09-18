@@ -316,18 +316,18 @@ def test_choice_glosses_unknown_choice_rejected_by_schema():
         )
 
 
-# --- V3: allow_unknown ------------------------------------------------------
+# --- W2-D: allow_none_of_above (explicit opt-out, was allow_unknown) --------
 
 
-def test_allow_unknown_requires_optional_enum():
+def test_allow_none_of_above_requires_optional_enum():
     class Strict(BaseModel):
         risk_tier: Literal["LOW", "HIGH"] = Field(description="Risk tier")
 
     with pytest.raises(TypeError, match=r"'risk_tier'.*Optional"):
-        jevmlx.decide(Strict, "ctx", model="fake/model", allow_unknown=True)
+        jevmlx.decide(Strict, "ctx", model="fake/model", allow_none_of_above=True)
 
 
-def test_allow_unknown_appends_choice_and_maps_to_none(monkeypatch):
+def test_allow_none_of_above_appends_choice_and_maps_to_none(monkeypatch):
     class Maybe(BaseModel):
         risk_tier: Literal["LOW", "HIGH"] | None = Field(description="Risk tier")
 
@@ -337,13 +337,13 @@ def test_allow_unknown_appends_choice_and_maps_to_none(monkeypatch):
         captured["choices"] = schema.fields["risk_tier"].choices
         captured["descriptions"] = schema.fields["risk_tier"].choice_descriptions
         return {
-            "parsed_json": {"risk_tier": {"value": "UNKNOWN"}},
+            "parsed_json": {"risk_tier": {"value": "NONE_OF_ABOVE"}},
             "field_telemetry": {
                 "risk_tier": {
-                    "value": "UNKNOWN",
+                    "value": "NONE_OF_ABOVE",
                     "probability": 0.4,
-                    "log_scores": {"LOW": -2.1, "HIGH": -3.0, "UNKNOWN": -1.1},
-                    "top_choices": [{"choice": "UNKNOWN", "probability": 0.4}],
+                    "log_scores": {"LOW": -2.1, "HIGH": -3.0, "NONE_OF_ABOVE": -1.1},
+                    "top_choices": [{"choice": "NONE_OF_ABOVE", "probability": 0.4}],
                 }
             },
             "confidence_model": "slots",
@@ -353,16 +353,32 @@ def test_allow_unknown_appends_choice_and_maps_to_none(monkeypatch):
     monkeypatch.setattr("jevmlx.api.load_engine", lambda model_id: ("engine", "tokenizer"))
     monkeypatch.setattr("jevmlx.api.run_parallel_generation", fake_run_parallel)
 
-    d = jevmlx.decide(Maybe, "ctx", model="fake/model", allow_unknown=True)
-    # UNKNOWN was appended to the engine's choices with the standard gloss...
-    assert captured["choices"] == ["LOW", "HIGH", "UNKNOWN"]
-    assert captured["descriptions"]["UNKNOWN"] == "insufficient evidence or none of the options"
-    # ...and mapped to None in the validated model.
+    d = jevmlx.decide(Maybe, "ctx", model="fake/model", allow_none_of_above=True)
+    # NONE_OF_ABOVE was appended to the engine's choices with the opt-out gloss...
+    assert captured["choices"] == ["LOW", "HIGH", "NONE_OF_ABOVE"]
+    assert captured["descriptions"]["NONE_OF_ABOVE"] == "none of the options apply"
+    # ...and mapped to None in the validated model, with the explicit reason.
     assert d.value.risk_tier is None
-    assert d.fields["risk_tier"].value == "UNKNOWN"
+    assert d.fields["risk_tier"].value == "NONE_OF_ABOVE"
+    assert d.fields["risk_tier"].reason == "none_of_above"
 
 
-def test_allow_unknown_off_leaves_schema_untouched(monkeypatch):
+def test_allow_unknown_gone_no_alias(monkeypatch):
+    """The old allow_unknown kwarg is gone — not deprecated, not aliased.
+
+    Also: a model answer of the old synthetic 'UNKNOWN' string is just a
+    regular choice now; with allow_none_of_above it's still a decided value
+    (no None mapping) unless the field declares it.
+    """
+
+    class Maybe(BaseModel):
+        risk_tier: Literal["LOW", "HIGH"] | None = Field(description="Risk tier")
+
+    with pytest.raises(TypeError, match="unexpected keyword argument 'allow_unknown'"):
+        jevmlx.decide(Maybe, "ctx", model="fake/model", allow_unknown=True)
+
+
+def test_allow_none_of_above_off_leaves_schema_untouched(monkeypatch):
     class Maybe(BaseModel):
         risk_tier: Literal["LOW", "HIGH"] | None = Field(description="Risk tier")
 
@@ -384,12 +400,152 @@ def test_allow_unknown_off_leaves_schema_untouched(monkeypatch):
     assert captured["choices"] == ["LOW", "HIGH"]
 
 
-def test_allow_unknown_rejects_existing_unknown_choice():
+def test_allow_none_of_above_rejects_existing_choice():
     class Collide(BaseModel):
-        risk_tier: Literal["LOW", "UNKNOWN"] | None = Field(description="Risk tier")
+        risk_tier: Literal["LOW", "NONE_OF_ABOVE"] | None = Field(description="Risk tier")
 
     with pytest.raises(TypeError, match="already exists"):
-        jevmlx.decide(Collide, "ctx", model="fake/model", allow_unknown=True)
+        jevmlx.decide(Collide, "ctx", model="fake/model", allow_none_of_above=True)
+
+
+# --- W2-D: abstention (confidence gate, not a choice) ------------------------
+
+
+def _abstain_result(margin: float):
+    """Engine result shaped so risk_tier's probability_margin == margin."""
+    p1, p2 = 0.5 + margin / 2, 0.5 - margin / 2
+    return {
+        "parsed_json": {"risk_tier": {"value": "HIGH"}, "tags": {"value": ["a"]}},
+        "field_telemetry": {
+            "risk_tier": {
+                "value": "HIGH",
+                "probability": p1,
+                "log_scores": {"LOW": -1.0, "HIGH": -0.5},
+                "top_choices": [
+                    {"choice": "HIGH", "probability": p1},
+                    {"choice": "LOW", "probability": p2},
+                ],
+            },
+            "tags": {
+                "value": ["a"],
+                "type": "multi",
+                "probability": None,
+                "margin": margin,
+                "per_option": {"a": 0.5 + margin / 2, "b": 0.5 - margin / 2},
+                "top_choices": [],
+                "rows": 2,
+            },
+        },
+        "confidence_model": "slots",
+        "elapsed_ms": 5.0,
+    }
+
+
+class AbstainModel(BaseModel):
+    risk_tier: Literal["LOW", "HIGH"] | None = Field(description="Risk tier")
+    tags: list[Literal["a", "b"]] | None = Field(default_factory=list)
+
+
+def _abstain_monkeypatch(monkeypatch, margin: float):
+    monkeypatch.setattr("jevmlx.api.load_engine", lambda model_id: ("engine", "tokenizer"))
+    monkeypatch.setattr(
+        "jevmlx.api.run_parallel_generation",
+        lambda *a, **k: _abstain_result(margin),
+    )
+
+
+def test_abstain_scalar_field_below_margin(monkeypatch):
+    # margin 0.04 < cut 0.1 -> abstain: model gets None, FieldResult keeps
+    # the engine's raw value, reason='abstain'.
+    _abstain_monkeypatch(monkeypatch, 0.04)
+    d = jevmlx.decide(AbstainModel, "ctx", model="fake/model", abstain_below_margin=0.1)
+    assert d.value.risk_tier is None
+    fr = d.fields["risk_tier"]
+    assert fr.reason == "abstain"
+    assert fr.value == "HIGH"  # provenance kept
+
+
+def test_abstain_scalar_field_above_margin(monkeypatch):
+    _abstain_monkeypatch(monkeypatch, 0.6)
+    d = jevmlx.decide(AbstainModel, "ctx", model="fake/model", abstain_below_margin=0.1)
+    assert d.value.risk_tier == "HIGH"
+    assert d.fields["risk_tier"].reason is None
+    assert d.fields["risk_tier"].reason is None
+
+
+def test_abstain_no_threshold_keeps_values(monkeypatch):
+    _abstain_monkeypatch(monkeypatch, 0.01)
+    d = jevmlx.decide(AbstainModel, "ctx", model="fake/model")
+    assert d.value.risk_tier == "HIGH"
+    assert d.fields["risk_tier"].reason is None
+
+
+def test_abstain_multi_field_uses_threshold_distance(monkeypatch):
+    # Multi field: probability_margin is None; threshold_distance drives it.
+    _abstain_monkeypatch(monkeypatch, 0.02)
+    d = jevmlx.decide(AbstainModel, "ctx", model="fake/model", abstain_below_margin=0.1)
+    assert d.value.tags is None
+    fr = d.fields["tags"]
+    assert fr.reason == "abstain"
+    assert fr.value == ["a"]  # provenance kept
+
+
+def test_abstain_and_none_of_above_are_independent(monkeypatch):
+    # NONE_OF_ABOVE is a decided answer (reason='none_of_above', not abstained);
+    # abstention is a confidence gate. A NONE_OF_ABOVE pick with a wide margin
+    # is not abstained even when the threshold is set.
+
+    def fake_run_parallel(*a, **k):
+        result = _abstain_result(0.6)  # margin 0.6 >> 0.1: no abstention
+        result["parsed_json"] = {"risk_tier": {"value": "NONE_OF_ABOVE"}, "tags": {"value": ["a"]}}
+        telemetry = result["field_telemetry"]["risk_tier"]
+        telemetry.update(
+            {
+                "value": "NONE_OF_ABOVE",
+                "probability": 0.8,
+                "log_scores": {"LOW": -2.0, "HIGH": -3.0, "NONE_OF_ABOVE": -0.2},
+            }
+        )
+        telemetry["top_choices"] = [
+            {"choice": "NONE_OF_ABOVE", "probability": 0.8},
+            {"choice": "LOW", "probability": 0.1},
+            {"choice": "HIGH", "probability": 0.1},
+        ]
+        return result
+
+    monkeypatch.setattr("jevmlx.api.load_engine", lambda model_id: ("engine", "tokenizer"))
+    monkeypatch.setattr("jevmlx.api.run_parallel_generation", fake_run_parallel)
+
+    d = jevmlx.decide(
+        AbstainModel,
+        "ctx",
+        model="fake/model",
+        allow_none_of_above=True,
+        abstain_below_margin=0.1,
+    )
+    assert d.value.risk_tier is None  # NONE_OF_ABOVE maps to None
+    fr = d.fields["risk_tier"]
+    assert fr.reason == "none_of_above"
+    assert fr.reason == "none_of_above"  # not a confidence abstention
+    assert fr.value == "NONE_OF_ABOVE"
+
+
+def test_abstain_below_margin_validation():
+    with pytest.raises(TypeError, match="abstain_below_margin must be in"):
+        jevmlx.decide(AbstainModel, "ctx", model="fake/model", abstain_below_margin=1.0)
+    with pytest.raises(TypeError, match="abstain_below_margin must be in"):
+        jevmlx.decide(AbstainModel, "ctx", model="fake/model", abstain_below_margin=-0.5)
+    with pytest.raises(TypeError, match="abstain_below_margin must be in"):
+        jevmlx.decide_many(AbstainModel, ["a"], model="fake/model", abstain_below_margin=1.5)
+
+
+def test_decide_many_abstain(monkeypatch):
+    _abstain_monkeypatch(monkeypatch, 0.04)
+    results = jevmlx.decide_many(
+        AbstainModel, ["ctx1", "ctx2"], model="fake/model", abstain_below_margin=0.1
+    )
+    assert all(r.value.risk_tier is None for r in results)
+    assert all(r.fields["risk_tier"].reason == "abstain" for r in results)
 
 
 # --- V3: Decision.fields / FieldResult --------------------------------------
