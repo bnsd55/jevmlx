@@ -1,0 +1,123 @@
+{
+  "environment": {
+    "chip": "Apple M5 Max",
+    "git_sha": "37ffdd414e1d332f0b0f21e5e5b91144bb049c26",
+    "jevmlx_version": "0.1.0",
+    "machine_model": "Mac17,7",
+    "macos_version": "26.6.2",
+    "mlx_lm_version": "0.31.3",
+    "mlx_version": "0.32.2",
+    "python_version": "3.12.14",
+    "ram_gb": 128.0,
+    "timestamp_utc": "2026-09-17T22:00:03+00:00"
+  },
+  "metrics": {
+    "accuracy": 0.30787037037037035,
+    "accuracy_cluster_bootstrap": {
+      "accuracy": 0.30787037037037035,
+      "ci_high": 0.36342592592592593,
+      "ci_low": 0.2523148148148148,
+      "draws": 1000,
+      "n_cases": 24,
+      "n_fields": 432,
+      "seed": 0
+    },
+    "any_flip_rate": {
+      "action": 0.4,
+      "category": 0.6,
+      "fraud": 0.0,
+      "needs_human": 0.5,
+      "priority": 0.4,
+      "risk": 0.4666666666666667
+    },
+    "balanced_accuracy": {
+      "action": 0.3333333333333333,
+      "category": 0.25,
+      "fraud": 0.5,
+      "needs_human": 0.44285714285714284,
+      "priority": 0.3333333333333333,
+      "risk": 0.20833333333333331
+    },
+    "brier": 0.9064171317574329,
+    "case_exact_match": 0.0,
+    "correctness_auroc": 0.48771594538184926,
+    "ece_5bin_equal_mass": 0.40725658231027495,
+    "macro_f1": {
+      "action": 0.29417989417989415,
+      "category": 0.23055555555555554,
+      "fraud": 0.2,
+      "needs_human": 0.4125874125874126,
+      "priority": 0.32962962962962966,
+      "risk": 0.1260144927536232
+    },
+    "majority_class_baseline": {
+      "action": 0.4166666666666667,
+      "category": 0.3333333333333333,
+      "fraud": 0.75,
+      "needs_human": 0.5833333333333334,
+      "priority": 0.5833333333333334,
+      "risk": 0.4166666666666667
+    },
+    "mean_tvd": {
+      "action": 0.3545643871525757,
+      "category": 0.5535409172919983,
+      "fraud": 0.050747464514412116,
+      "needs_human": 0.09530623114026796,
+      "priority": 0.3242948947851841,
+      "risk": 0.38637596021405396
+    },
+    "risk_coverage": [
+      {
+        "coverage": 0.1,
+        "n": 44,
+        "risk": 0.7727272727272727
+      },
+      {
+        "coverage": 0.2,
+        "n": 87,
+        "risk": 0.7011494252873562
+      },
+      {
+        "coverage": 0.3,
+        "n": 130,
+        "risk": 0.7384615384615385
+      },
+      {
+        "coverage": 0.4,
+        "n": 173,
+        "risk": 0.7225433526011561
+      },
+      {
+        "coverage": 0.5,
+        "n": 216,
+        "risk": 0.6990740740740741
+      },
+      {
+        "coverage": 0.6,
+        "n": 260,
+        "risk": 0.6923076923076923
+      },
+      {
+        "coverage": 0.7,
+        "n": 303,
+        "risk": 0.6897689768976898
+      },
+      {
+        "coverage": 0.8,
+        "n": 346,
+        "risk": 0.6907514450867052
+      },
+      {
+        "coverage": 0.9,
+        "n": 389,
+        "risk": 0.6915167095115682
+      },
+      {
+        "coverage": 1.0,
+        "n": 432,
+        "risk": 0.6921296296296297
+      }
+    ],
+    "tie_rate": 0.009259259259259259
+  }
+}

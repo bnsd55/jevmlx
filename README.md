@@ -84,11 +84,17 @@ Agreement with the TypeSafe public eval consensus (GPT-6 Astra + Claude Fable 5.
 | Claude Opus 5 | official (cited) | — | — | 73.1% | — | — | — | — | 37.8s | $0.1761 | — |
 | GPT-5.6 Sol | official (cited) | — | — | 74.1% | — | — | — | — | 23.3s | $0.0836 | — |
 | Claude Haiku 4.5 | official (cited) | — | — | 53.6% | — | — | — | — | 12.5s | $0.0195 | — |
+| **jevmlx, local (measured)** | | | | | | | | | | | |
+| mlx-community/Llama-3.2-1B-Instruct-4bit | local | labels | m5max-128gb | 28.9% | 18.6% | 37.5% | 36.5% | 29.7% | 1.5s | $0 (local) | 44 |
+| mlx-community/Llama-3.2-1B-Instruct-4bit | local | slots | m5max-128gb | 32.8% | 25.3% | 39.2% | 32.3% | 33.5% | 1.5s | $0 (local) | 44 |
+| mlx-community/Qwen2.5-0.5B-Instruct-4bit | local | labels | m5max-128gb | 31.8% | 17.1% | 38.3% | 37.5% | 33.1% | 0.8s | $0 (local) | 44 |
+| mlx-community/Qwen2.5-0.5B-Instruct-4bit | local | slots | m5max-128gb | 31.6% | 34.4% | 40.0% | 37.8% | 31.1% | 0.7s | $0 (local) | 44 |
+| mlx-community/Qwen2.5-1.5B-Instruct-4bit | local | labels | m5max-128gb | 36.5% | 57.4% | 42.5% | 40.6% | 34.3% | 2.3s | $0 (local) | 44 |
+| mlx-community/Qwen2.5-1.5B-Instruct-4bit | local | slots | m5max-128gb | 25.5% | 41.6% | 43.3% | 46.2% | 23.3% | 2.3s | $0 (local) | 44 |
 
 _Official accuracies are on TypeSafe's full private eval; ours are on the 20 public example cases, so the numbers are indicative, not the same test._
 _Consensus label = the agreement of GPT-6 Astra + Claude Fable 5.1 (TypeSafe's reference)._
 
-No local results yet — contribute one with `jevmlx bench`.
 <!-- leaderboard:end -->
 
 ## Run the benchmark on your Mac
