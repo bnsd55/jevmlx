@@ -175,11 +175,11 @@ def test_pep604_enum_optional_schema():
     assert schema["c"]["choices"] == ["red", "blue"]
 
 
-def test_pep604_enum_optional_allow_unknown_accepted():
+def test_pep604_enum_optional_allow_none_of_above_accepted():
     # _prepare_schema's Optional check must also accept the PEP 604 form:
-    # with allow_unknown the synthetic UNKNOWN choice is appended.
-    schema = api._prepare_schema(Pep604Enum, allow_unknown=True)
-    assert list(schema.fields["c"].choices) == ["red", "blue", "UNKNOWN"]
+    # with allow_none_of_above the explicit opt-out choice is appended.
+    schema = api._prepare_schema(Pep604Enum, allow_none_of_above=True)
+    assert list(schema.fields["c"].choices) == ["red", "blue", "NONE_OF_ABOVE"]
 
 
 def test_pep604_union_of_two_still_rejected():

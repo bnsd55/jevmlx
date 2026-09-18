@@ -35,10 +35,12 @@ _SUPPORTED = (
     "list[Literal[...]] / set[Literal[...]] (multi)"
 )
 
-# Synthetic unknown choice appended to every enum field when allow_unknown is
-# set; the engine decides it like any other choice and the API maps it to None.
-UNKNOWN = "UNKNOWN"
-UNKNOWN_DESCRIPTION = "insufficient evidence or none of the options"
+# Explicit opt-out choice appended to enum fields when allow_none_of_above
+# is set. Means exactly "none of the options apply" and maps to None; the
+# old allow_unknown conflated this with low confidence, which is now the
+# separate, thresholded ``abstain`` (see FieldResult.abstain).
+NONE_OF_ABOVE = "NONE_OF_ABOVE"
+NONE_OF_ABOVE_DESCRIPTION = "none of the options apply"
 
 
 def _choice_values(name: str, values: list) -> list[str]:
@@ -91,6 +93,17 @@ class FieldResult:
         alternatives: Top 3 (choice, probability) pairs, most probable
             first. For multi fields: all per-option (option, P(yes)) pairs
             sorted by P(yes) descending.
+        reason: Why the field carries no decided value, or None when it
+            does. "none_of_above": the caller opted in via
+            ``allow_none_of_above=True`` and the model picked the explicit
+            NONE_OF_ABOVE option ("none of the options apply" -> None).
+            "abstain": the caller set ``abstain_below_margin`` and the
+            field's confidence sat below that cut — the value is withheld
+            even though the engine produced one. The two are deliberately
+            separate: one is a schema-level answer, the other a calibrated
+            confidence gate (the calibrated correctness model is W2). The
+            only values are None, "none_of_above" and "abstain"; a
+            withheld decision is exactly ``reason == "abstain"``.
     """
 
     value: object
@@ -102,6 +115,7 @@ class FieldResult:
     calibrated: bool
     model: str
     alternatives: tuple[tuple[str, float], ...]
+    reason: str | None = None
 
 
 @dataclasses.dataclass
@@ -184,8 +198,8 @@ def schema_from_model(model_cls: type[BaseModel]) -> dict:
     optional ``choice_descriptions`` key.
 
     Optional[Literal[...]] and Optional[enum] are accepted: the schema is
-    identical to the non-Optional form — None is the UNKNOWN mapping, not a
-    decided value. Any other Optional raises.
+    identical to the non-Optional form — None is the NONE_OF_ABOVE or
+    abstention mapping, not a decided value. Any other Optional raises.
     """
     schema: dict = {}
     for name, info in model_cls.model_fields.items():
@@ -259,7 +273,12 @@ def _is_optional_enum(model_cls: type[BaseModel], name: str) -> bool:
     )
 
 
-def _build_field_results(result: dict, confidence_model: str) -> dict[str, FieldResult]:
+def _build_field_results(
+    result: dict,
+    confidence_model: str,
+    *,
+    abstain_below_margin: float | None = None,
+) -> dict[str, FieldResult]:
     """Build Decision.fields from the engine's field_telemetry.
 
     Telemetry contract per field: ``log_scores`` ({choice: log P}, enum and
@@ -273,6 +292,12 @@ def _build_field_results(result: dict, confidence_model: str) -> dict[str, Field
     (top1-top2 at T=1 log scores) and ``probability_margin`` (top1-top2
     post-temperature); multi fields get ``threshold_distance`` from the
     engine's ``margin``. No field carries more than one of the three.
+
+    Abstention (W2-D): with ``abstain_below_margin`` set, a scalar field
+    whose ``probability_margin`` is below the cut gets ``abstain=True`` and
+    ``reason="abstain"``; a multi field uses ``threshold_distance`` the
+    same way. The decided value is kept on the FieldResult (provenance),
+    but the validated model instance maps the field to None.
     """
     fields: dict[str, FieldResult] = {}
     for name, telemetry in result["field_telemetry"].items():
@@ -305,6 +330,12 @@ def _build_field_results(result: dict, confidence_model: str) -> dict[str, Field
             alternatives = tuple(
                 (choice, prob) for choice, prob in sorted(per_option.items(), key=lambda kv: -kv[1])
             )
+        reason = None
+        abstain_below_margin = abstain_below_margin
+        if abstain_below_margin is not None:
+            margin = probability_margin if log_scores else threshold_distance
+            if margin is not None and margin < abstain_below_margin:
+                reason = "abstain"
         fields[name] = FieldResult(
             value=telemetry["value"],
             score=score,
@@ -315,6 +346,7 @@ def _build_field_results(result: dict, confidence_model: str) -> dict[str, Field
             calibrated=False,
             model=confidence_model,
             alternatives=alternatives,
+            reason=reason,
         )
     return fields
 
@@ -327,7 +359,8 @@ def _decide_once[T: BaseModel](
     schema: StructuredSchema,
     temperature: float,
     scoring: str = "slots",
-    allow_unknown: bool = False,
+    allow_none_of_above: bool = False,
+    abstain_below_margin: float | None = None,
     multi_threshold: float = 0.5,
     prior_correction: bool = False,
 ) -> Decision[T]:
@@ -343,14 +376,23 @@ def _decide_once[T: BaseModel](
         prior_correction=prior_correction,
     )
 
+    field_results = _build_field_results(
+        result, result["confidence_model"], abstain_below_margin=abstain_below_margin
+    )
+
     kwargs = {}
     for name, info in model_cls.model_fields.items():
         value = result["parsed_json"][name]["value"]
         ann = info.annotation
         origin = typing.get_origin(ann)
-        if allow_unknown and value == UNKNOWN:
-            # Synthetic unknown choice maps to None (the field is Optional;
+        if allow_none_of_above and value == NONE_OF_ABOVE:
+            # Explicit opt-out choice maps to None (the field is Optional;
             # _prepare_schema already verified that).
+            value = None
+            field_results[name] = dataclasses.replace(field_results[name], reason="none_of_above")
+        elif field_results[name].reason == "abstain":
+            # Confidence-gated abstention: keep the engine's value on the
+            # FieldResult (provenance) but withhold it from the model.
             value = None
         elif isinstance(ann, type) and issubclass(ann, enum.Enum):
             value = ann(value)
@@ -360,39 +402,46 @@ def _decide_once[T: BaseModel](
 
     return Decision(
         value=model_cls(**kwargs),
-        fields=_build_field_results(result, result["confidence_model"]),
+        fields=field_results,
         latency_ms=result["elapsed_ms"],
     )
 
 
-def _prepare_schema(model_cls: type[BaseModel], allow_unknown: bool) -> StructuredSchema:
-    """Schema dict for the model, with the UNKNOWN choice folded in if asked.
+def _check_abstain_margin(abstain_below_margin: float | None) -> None:
+    """Validate the abstention cut: None (disabled) or a float in [0, 1)."""
+    if abstain_below_margin is not None and not 0.0 <= abstain_below_margin < 1.0:
+        raise TypeError("abstain_below_margin must be in [0, 1) or None")
 
-    Raises the caller-facing TypeError when allow_unknown targets a
-    non-Optional enum field: without Optional there is no None to map UNKNOWN
-    to, so the request is a usage error, not a runtime fallback.
+
+def _prepare_schema(model_cls: type[BaseModel], allow_none_of_above: bool) -> StructuredSchema:
+    """Schema dict for the model, with the NONE_OF_ABOVE choice folded in if asked.
+
+    Raises the caller-facing TypeError when allow_none_of_above targets a
+    non-Optional enum field: without Optional there is no None to map the
+    explicit opt-out to, so the request is a usage error, not a runtime
+    fallback.
     """
     schema_dict = schema_from_model(model_cls)
-    if not allow_unknown:
+    if not allow_none_of_above:
         return StructuredSchema(schema_dict)
     for name, spec in schema_dict.items():
         if spec["type"] != "enum":
             continue
         if not _is_optional_enum(model_cls, name):
             raise TypeError(
-                f"Field '{name}': allow_unknown requires the field to be "
-                f"Optional (e.g. {name}: Literal[...] | None) so UNKNOWN can "
-                "map to None"
+                f"Field '{name}': allow_none_of_above requires the field to be "
+                f"Optional (e.g. {name}: Literal[...] | None) so NONE_OF_ABOVE "
+                "can map to None"
             )
-        if UNKNOWN in spec["choices"]:
+        if NONE_OF_ABOVE in spec["choices"]:
             raise TypeError(
-                f"Field '{name}': a choice named '{UNKNOWN}' already exists; "
-                "allow_unknown cannot be used"
+                f"Field '{name}': a choice named '{NONE_OF_ABOVE}' already exists; "
+                "allow_none_of_above cannot be used"
             )
-        spec["choices"] = [*spec["choices"], UNKNOWN]
+        spec["choices"] = [*spec["choices"], NONE_OF_ABOVE]
         spec["choice_descriptions"] = {
             **spec.get("choice_descriptions", {}),
-            UNKNOWN: UNKNOWN_DESCRIPTION,
+            NONE_OF_ABOVE: NONE_OF_ABOVE_DESCRIPTION,
         }
     return StructuredSchema(schema_dict)
 
@@ -404,7 +453,8 @@ def decide[T: BaseModel](
     model: str = DEFAULT_MODEL,
     temperature: float = 1.0,
     scoring: str = "slots",
-    allow_unknown: bool = False,
+    allow_none_of_above: bool = False,
+    abstain_below_margin: float | None = None,
     multi_threshold: float = 0.5,
     prior_correction: bool = False,
 ) -> Decision[T]:
@@ -414,11 +464,22 @@ def decide[T: BaseModel](
     through neutral aliases listed in the prompt; ``"labels"`` scores the
     real choice text via the token trie.
 
-    ``allow_unknown`` adds a synthetic ``UNKNOWN`` choice (gloss: insufficient
-    evidence or none of the options) to every enum field and maps it to None
-    in the returned model; declare the field Optional to receive it. Every
-    enum field must be Optional when this is set — ``decide`` raises a
-    TypeError naming the first non-Optional enum field otherwise.
+    ``allow_none_of_above`` adds an explicit ``NONE_OF_ABOVE`` choice (gloss:
+    "none of the options apply") to every enum field and maps it to None in
+    the returned model — the field-level answer is literally "none of
+    these". Declare the field Optional to receive it; every enum field must
+    be Optional when this is set — ``decide`` raises a TypeError naming the
+    first non-Optional enum field otherwise. This is a schema-level answer,
+    distinct from:
+
+    ``abstain_below_margin`` — a confidence gate, not a choice. When set
+    (a float in [0, 1)), any scalar field whose ``probability_margin``
+    (top1-top2, post-temperature) or multi field whose
+    ``threshold_distance`` (min |P(yes) - threshold|) sits below the cut is
+    abstained: the validated model maps it to None, the FieldResult keeps
+    the engine's raw value for provenance and carries ``abstain=True`` /
+    ``reason="abstain"``. The threshold is a raw margin cut for now; the
+    calibrated correctness model arrives with W2.
 
     ``prior_correction`` subtracts the model's neutral-context prior (one
     batched pass with "(no context provided)" in the delimiters) from the
@@ -426,10 +487,11 @@ def decide[T: BaseModel](
     (model, tokenizer, prompt version, scoring mode, plan hash), so
     decide_many pays it once per schema.
     """
-    # Validate allow_unknown against the model BEFORE touching the engine: a
-    # usage error must not pay for a model load (same rule as decide_many's
-    # input validation).
-    schema = _prepare_schema(model_cls, allow_unknown)
+    # Validate allow_none_of_above against the model BEFORE touching the
+    # engine: a usage error must not pay for a model load (same rule as
+    # decide_many's input validation).
+    _check_abstain_margin(abstain_below_margin)
+    schema = _prepare_schema(model_cls, allow_none_of_above)
     engine_model, tokenizer = load_engine(model)
     return _decide_once(
         model_cls,
@@ -439,7 +501,8 @@ def decide[T: BaseModel](
         schema,
         temperature,
         scoring=scoring,
-        allow_unknown=allow_unknown,
+        allow_none_of_above=allow_none_of_above,
+        abstain_below_margin=abstain_below_margin,
         multi_threshold=multi_threshold,
         prior_correction=prior_correction,
     )
@@ -452,7 +515,8 @@ def decide_many[T: BaseModel](
     model: str = DEFAULT_MODEL,
     temperature: float = 1.0,
     scoring: str = "slots",
-    allow_unknown: bool = False,
+    allow_none_of_above: bool = False,
+    abstain_below_margin: float | None = None,
     multi_threshold: float = 0.5,
     prior_correction: bool = False,
 ) -> list[Decision[T]]:
@@ -461,8 +525,9 @@ def decide_many[T: BaseModel](
     Loads the model once and compiles the schema once (the engine's batch plan
     is cached on the StructuredSchema instance, so the compiled suffix and
     choice tokens are reused across contexts); the parallel decision pass then
-    runs once per context. Results are returned in input order. ``allow_unknown``
-    behaves exactly as in :func:`decide`.
+    runs once per context. Results are returned in input order.
+    ``allow_none_of_above`` and ``abstain_below_margin`` behave exactly as in
+    :func:`decide`.
 
     Raises:
         TypeError: If ``contexts`` is a bare str or bytes (a common mistake
@@ -481,7 +546,8 @@ def decide_many[T: BaseModel](
     if not contexts:
         return []
 
-    schema = _prepare_schema(model_cls, allow_unknown)
+    _check_abstain_margin(abstain_below_margin)
+    schema = _prepare_schema(model_cls, allow_none_of_above)
     engine_model, tokenizer = load_engine(model)
     return [
         _decide_once(
@@ -492,7 +558,8 @@ def decide_many[T: BaseModel](
             schema,
             temperature,
             scoring=scoring,
-            allow_unknown=allow_unknown,
+            allow_none_of_above=allow_none_of_above,
+            abstain_below_margin=abstain_below_margin,
             multi_threshold=multi_threshold,
             prior_correction=prior_correction,
         )

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- UNKNOWN split into two concepts (was one conflated kwarg):
+  `allow_none_of_above=True` adds an explicit `NONE_OF_ABOVE` choice
+  ("none of the options apply") mapped to `None` with
+  `FieldResult.reason="none_of_above"`; `abstain_below_margin=X` is a
+  separate confidence gate — fields whose margin falls below the cut are
+  withheld from the model (`FieldResult.reason="abstain"`; the raw value
+  stays for provenance). `allow_unknown` is removed with no alias. The
+  calibrated correctness model is W2.
 - Prompt profiles: a frozen `PromptProfile` (template kwargs + system-role
   support) is resolved once at engine load. Qwen3-family models get
   `enable_thinking=False` so answers land in the direct channel; the

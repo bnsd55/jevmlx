@@ -11,7 +11,7 @@ over this document when they drift.
 | [`jevmlx/schema.py`](jevmlx/schema.py) | Schema model (`StructuredSchema`), slot/labels plan compilation, per-tokenizer plan cache, compile-time rejections. |
 | [`jevmlx/trie.py`](jevmlx/trie.py) | Branch-point trie over candidate token remainders; softmax/logsumexp helpers; `score_trie`. |
 | [`jevmlx/engine.py`](jevmlx/engine.py) | Model load (lru_cached), prompt v2, prefill + broadcast KV, chunked batched passes, trie scoring, result dict. |
-| [`jevmlx/api.py`](jevmlx/api.py) | Public API: `decide`, `decide_many`, `Decision`/`FieldResult`, Pydantic → schema, UNKNOWN handling. |
+| [`jevmlx/api.py`](jevmlx/api.py) | Public API: `decide`, `decide_many`, `Decision`/`FieldResult`, Pydantic → schema, NONE_OF_ABOVE + abstention handling. |
 | [`jevmlx/cli.py`](jevmlx/cli.py) | Subcommands: decide, serve, validate, eval, report, calibrate, bench. |
 | [`jevmlx/serve.py`](jevmlx/serve.py) | HTTP server, one serial worker on the single Metal GPU. |
 | [`jevmlx/lint.py`](jevmlx/lint.py) | `lint_schema`: collision / duplicate / empty-choice findings from a compiled plan. |

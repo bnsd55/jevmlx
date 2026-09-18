@@ -55,7 +55,8 @@ for name, f in result.fields.items():
 ```
 
 - `decide_many(model, contexts)` decides many texts with one model load.
-- `allow_unknown=True` adds an `UNKNOWN` choice when the model is unsure (fields map to `None`).
+- `allow_none_of_above=True` adds an explicit `NONE_OF_ABOVE` choice — the answer "none of the options apply" — and maps it to `None` (`FieldResult.reason` is `"none_of_above"`). Fields must be Optional.
+- `abstain_below_margin=X` is the confidence gate, separate from the opt-out: any field whose margin (`probability_margin` for scalar, `threshold_distance` for multi) sits below `X` is withheld from the model (`FieldResult.reason="abstain"`; the raw value stays on the FieldResult). Calibrated correctness arrives with W2.
 - `alternatives` lists the other options with their probabilities.
 - `multi_threshold=0.5` sets the P(yes) cut for multi-select options.
 - Margins are unit-split and nullable: `log_score_margin` (scalar fields, top1-top2 log-score gap at T=1), `probability_margin` (scalar fields, top1-top2 probability after temperature), `threshold_distance` (multi fields, min |P(yes) - threshold|). A field carries exactly one of the three.
@@ -130,7 +131,7 @@ Code and docs: [CONTRIBUTING.md](CONTRIBUTING.md). Benchmark results: [BENCHMARK
 
 jevmlx started from [rorshopping/jev-on-a-laptop](https://github.com/rorshopping/jev-on-a-laptop), which reproduced the parallel constrained decoding technique on a laptop.
 
-The engine descends from [harshatheg/Qwen-2.5-1B-RLCD](https://huggingface.co/harshatheg/Qwen-2.5-1B-RLCD), an MLX demo of parallel constrained decoding with one 1.5B checkpoint; jevmlx is the maintained, generic version: any MLX instruct model or OpenAI-compatible server, choices in the prompt, multi-select, UNKNOWN, per-field probability, an eval harness.
+The engine descends from [harshatheg/Qwen-2.5-1B-RLCD](https://huggingface.co/harshatheg/Qwen-2.5-1B-RLCD), an MLX demo of parallel constrained decoding with one 1.5B checkpoint; jevmlx is the maintained, generic version: any MLX instruct model or OpenAI-compatible server, choices in the prompt, multi-select, explicit none-of-the-above and confidence abstention, per-field probability, an eval harness.
 
 Not affiliated with TypeSafe.
 
