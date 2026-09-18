@@ -99,3 +99,29 @@ than 5 MB total are gzipped automatically (the folder README says so).
 - [ ] Ran `python -m benchmarks.leaderboard --results benchmarks/results
       --readme README.md` so the README leaderboard block is up to date
       (the `--check-readme` freshness gate in `results-check` CI enforces this)
+
+## M5 runbook: one command for the whole gate sequence
+
+`benchmarks/m5.py` chains the full milestone-gate sequence in order, each step
+logged with wall time and exit status into `<out>/RUNBOOK.md`:
+
+```bash
+python -m benchmarks.m5 --out m5-2026-09-18 [--ab-branch w2a-field-local]
+```
+
+Steps in order: (1) `jevmlx doctor --json` (gate — any FAIL aborts); (2)
+`pytest -m slow` once per parity model (Qwen3-8B, Llama-3.1-8B, Gemma-3-12B by
+default; override with `--parity-models` or `--models-file`, the id rides the
+`MODEL_ID` env var); (3) `jevmlx bench --model quality`; (4)
+`benchmarks.invariance` on quality with `--extra 1,5,20,40` over the TypeSafe
+cases (fetched automatically when missing); (5) `benchmarks.timing --model
+quality --reps 5`; (6) `jevmlx bench --models-file` for the remaining parity
+models; (7) with `--ab-branch`: a temp worktree of that branch with its own
+venv, steps 3+4 rerun there, worktree removed afterwards; (8) `<out>/SUMMARY.md`
+comparing main vs A/B (agreement/accuracy, flip rate, log-odds drift, time per
+case, peak memory) from the produced json files.
+
+Idempotent: steps whose output markers already exist are skipped (`--fresh`
+reruns everything). Per-step logs land in `<out>/<step-id>.log`. Interrupted
+runs resume; the gate step keeps a half-finished evening from wasting GPU time
+on a broken environment.
