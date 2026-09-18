@@ -72,6 +72,16 @@ Read the result. `decide(...)` returns a `Decision`: `.value` (a validated
   P(yes)), `score`, `model` (`"slots"`/`"labels"`), `calibrated`, `legal_mass`
   (probability mass in allowed continuations at the branch points — a leakage
   signal when low despite a confident decision).
+- `semantics` (a frozen `FieldSemantics`): how THIS field's reported
+  probabilities were produced — which scoring path (`score_source`:
+  `batched` / `rescored_batch1` / `dependency` / `oracle`), the temperature
+  actually applied (`None` for count rows and calibrated multi selections,
+  whose log-odds cut ignores the caller temperature), the calibrator bundle
+  id when a fitted calibrator set the selection, the prior mode
+  (`off`/`neutral_v1`), and whether a constraint or a dependency wave
+  overrode the raw winner. The result-level `probability_status` summarizes
+  the distinct semantic groups and is not authoritative for any single
+  field.
 - Margins, one per field: `log_score_margin` / `probability_margin` (scalar,
   top1-top2 gap in log/probability units), `threshold_distance` (multi, how
   close the closest yes/no call sat to the cut). Multi fields carry
