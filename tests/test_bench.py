@@ -158,6 +158,17 @@ def test_summarize_two_report_files(tmp_path, capsys):
     root = Path(tmp_path)
     combo_a = root / "m5max-128gb--model-a" / "parallel-trie-bundled"
     combo_b = root / "m5max-128gb--model-a" / "parallel-labels-typesafe"
+    # W4-B: the model folder needs a passing parity.json for the numbers to
+    # stand (the parity gate itself is covered by
+    # test_summarize_two_report_files_parity_gate below).
+    model_dir = root / "m5max-128gb--model-a"
+    model_dir.mkdir(parents=True)
+    (model_dir / "parity.json").write_text(
+        json.dumps(
+            {"passed": True, "max_abs_drift_nats": 0.01, "atol": 0.05, "winners_identical": True}
+        ),
+        encoding="utf-8",
+    )
     _write_report(
         combo_a,
         {
@@ -193,6 +204,42 @@ def test_summarize_two_report_files(tmp_path, capsys):
     assert "0.7" in text
     printed = capsys.readouterr().out
     assert "SUMMARY" in printed or "wrote" in printed
+
+
+def test_summarize_two_report_files_parity_gate(tmp_path):
+    """W4-B: without a passing parity.json the accuracy numbers are gated
+    (parity_failed replaces the accuracy column); with one, they stand."""
+    root = Path(tmp_path)
+    model_dir = root / "m5max-128gb--model-a"
+    combo = model_dir / "parallel-trie-bundled"
+    _write_report(combo, {"accuracy": 0.83, "case_exact_match": 0.5})
+
+    # No parity.json: gated.
+    text = summarize(root).read_text(encoding="utf-8")
+    assert "parity.json missing" in text
+    assert "0.83" not in text
+
+    # Failing parity.json: gated with the drift numbers.
+    (model_dir / "parity.json").write_text(
+        json.dumps(
+            {"passed": False, "max_abs_drift_nats": 0.9, "atol": 0.05, "winners_identical": False}
+        ),
+        encoding="utf-8",
+    )
+    text = summarize(root).read_text(encoding="utf-8")
+    assert "max_abs_drift_nats=0.9" in text
+    assert "0.83" not in text
+
+    # Passing parity.json: numbers stand.
+    (model_dir / "parity.json").write_text(
+        json.dumps(
+            {"passed": True, "max_abs_drift_nats": 0.01, "atol": 0.05, "winners_identical": True}
+        ),
+        encoding="utf-8",
+    )
+    text = summarize(root).read_text(encoding="utf-8")
+    assert "0.83" in text
+    assert "parity_failed" not in text
 
 
 def test_summarize_skips_folders_without_report(tmp_path):

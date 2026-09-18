@@ -155,8 +155,39 @@ def _run_extras(folder: Path) -> tuple[float | None, int | None]:
     return latency, n_cases
 
 
-def summarize(out: Path) -> Path:
-    """Write ``out/SUMMARY.md`` from every report.json under ``out``; print it."""
+def _model_parity_note(model_dir: Path) -> str | None:
+    """W4-B: the parity-failure note for a model folder, or None when the
+    folder carries a PASSING parity.json.
+
+    A MISSING parity.json also gates: a bench-produced folder ALWAYS has
+    one (the writer runs right after the engine load), so its absence
+    means the check never ran or crashed — the model has not earned
+    accuracy numbers. (Folders with no parity.json and no report rows
+    simply produce no rows, so there is nothing to gate.)"""
+    parity_path = model_dir / "parity.json"
+    if not parity_path.is_file():
+        return "parity_failed: parity.json missing (scoring parity not recorded)"
+    try:
+        parity = json.loads(parity_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "parity_failed: parity.json unreadable"
+    if parity.get("passed"):
+        return None
+    return (
+        f"parity_failed: max_abs_drift_nats={parity.get('max_abs_drift_nats')} "
+        f"atol={parity.get('atol')} winners_identical={parity.get('winners_identical')}"
+    )
+
+
+def summarize(out: Path, parity_note: str | None = None) -> Path:
+    """Write ``out/SUMMARY.md`` from every report.json under ``out``; print it.
+
+    W4-B: a model folder whose ``parity.json`` shows a failed scoring-parity
+    check (or is missing) marks every row of that model ``parity_failed`` —
+    the model cannot enter the README compat table (PR #29's gate reads the
+    same file; the summary shows WHY). ``parity_note`` (run_bench's
+    in-process failure message) is the fallback when the check crashed
+    before writing the file."""
     out = Path(out)
     folders = sorted(p for p in out.iterdir() if p.is_dir()) if out.exists() else []
     rows = []
@@ -168,9 +199,15 @@ def summarize(out: Path) -> Path:
             else []
         )
         if combo_dirs:
+            # W4-B parity gate: a parity-failing model's rows all show it.
+            model_parity = _model_parity_note(machine_dir) or parity_note
             for combo in combo_dirs:
                 row = _row_from_folder(combo)
                 if row:
+                    if model_parity and row.get("field_accuracy") is not None:
+                        # Gate the accuracy: the note replaces the number.
+                        row["accuracy_note"] = model_parity
+                        row["field_accuracy"] = None
                     rows.append(row)
         else:
             row = _row_from_folder(machine_dir)

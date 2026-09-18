@@ -282,6 +282,29 @@ def _write_failure_run(combo_dir: Path, status: str, exc: BaseException) -> Path
     return run_path
 
 
+def _run_model_parity(model: str, model_obj, tokenizer, folder: Path) -> str | None:
+    """W4-B: run the scoring-parity check on a loaded engine and write
+    ``<folder>/parity.json``. Returns None on pass, else a short failure
+    note for the summary rows."""
+    from jevmlx.parity import write_parity_json
+
+    payload = write_parity_json(model_obj, tokenizer, model, folder)
+    if payload["passed"]:
+        print(
+            f"parity: PASS (max drift {payload['max_abs_drift_nats']} nats, "
+            f"atol {payload['atol']}, {len(payload['cases'])} cases)"
+        )
+        return None
+    print(
+        f"parity: FAIL (winners_identical={payload['winners_identical']}, "
+        f"max drift {payload['max_abs_drift_nats']} nats, atol {payload['atol']})"
+    )
+    return (
+        f"parity_failed: max_abs_drift_nats={payload['max_abs_drift_nats']} "
+        f"atol={payload['atol']} winners_identical={payload['winners_identical']}"
+    )
+
+
 def _combo_complete(combo_dir: Path) -> bool:
     """Resume rule: predictions.jsonl + run.json + report.json all exist."""
     return (
@@ -340,6 +363,7 @@ def run_bench(
         if dataset in dataset_paths
     ]
     engine_loaded = False
+    parity_note: str | None = None  # W4-B: set when the parity check fails
     try:
         for track, scorer, dataset in combos:
             combo = f"{track}-{scorer}-{dataset}"
@@ -354,6 +378,27 @@ def run_bench(
                     # Load once per model, lazily, inside the timeout guard.
                     _load_engine_with_timeout(model, load_timeout)
                     engine_loaded = True
+                    # W4-B: scoring parity (batch=1 vs batched vs chunked)
+                    # over the bundled presets, recorded as parity.json in
+                    # the model folder. A model that cannot demonstrate
+                    # scoring parity gets NO accuracy numbers: every combo
+                    # row is marked parity_failed in SUMMARY.md (the README
+                    # compat gate, PR #29's check_parity, reads the same
+                    # file). Runs BEFORE any eval combo so a parity-failing
+                    # model never produces unvetted accuracy rows. The engine
+                    # comes from _load_engine_with_timeout (already run above
+                    # — its result was discarded; recover it from the cache
+                    # via load_engine, which is a lru-cached call) and parity
+                    # failures are a RESULT, not an exception: a parity crash
+                    # marks the model parity_failed and the combos continue.
+                    from jevmlx.engine import load_engine
+
+                    try:
+                        model_obj, tokenizer = load_engine(model)
+                        parity_note = _run_model_parity(model, model_obj, tokenizer, folder)
+                    except Exception as parity_exc:  # noqa: BLE001 - failure is a result
+                        parity_note = f"parity_failed: {type(parity_exc).__name__}: {parity_exc}"
+                        print(f"parity check error: {parity_note}", flush=True)
                 result = None
                 for run_index in range(runs):
                     result = _run_one(model, track, scorer, dataset_paths[dataset], combo_dir)
@@ -373,14 +418,14 @@ def run_bench(
         clear_engine_cache()
 
     if failed_combos:
-        summarize(folder)
+        summarize(folder, parity_note=parity_note)
         for combo, err in failed_combos.items():
             print(f"combo {combo} FAILED: {err}")
         if len(failed_combos) == len(combos):
             detail = "; ".join(f"{c}: {e}" for c, e in failed_combos.items())
             raise SystemExit(f"every combo failed — {detail}")
     else:
-        summarize(folder)
+        summarize(folder, parity_note=parity_note)
     _print_pr_instructions(folder, last_run)
     return folder
 
@@ -454,6 +499,8 @@ def run_bench_models(
     if all_combos == 0 and failed_combos:
         summarize(out)  # failure rows still get a summary
         raise SystemExit("every model failed")
+    # W4-B: parity.json lives in each model folder; summarize reads it per
+    # model folder and marks parity_failed rows itself.
     summarize(out)
     return out
 
@@ -546,11 +593,15 @@ def _load_cases(jsonl: Path) -> list[dict]:
     return cases
 
 
-def summarize(out: Path) -> Path:
-    """Summarize every report.json under ``out`` into ``out/SUMMARY.md``."""
+def summarize(out: Path, parity_note: str | None = None) -> Path:
+    """Summarize every report.json under ``out`` into ``out/SUMMARY.md``.
+
+    ``parity_note`` (W4-B): run_bench's in-process parity failure message —
+    forwarded so the summary can gate the model's rows when the check
+    failed before parity.json could be written."""
     from benchmarks.summarize_results import summarize as _summarize
 
-    return _summarize(out)
+    return _summarize(out, parity_note=parity_note)
 
 
 def _print_pr_instructions(folder: Path, last_run: dict) -> None:
