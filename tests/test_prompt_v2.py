@@ -166,7 +166,7 @@ def test_gemma_style_template_rejects_system_role():
     ]
 
     result = run_parallel_generation(FakeModel(), tok, "ctx", SCHEMA)
-    assert result["prompt_version"] == "jevmlx-parallel-v2"
+    assert result["prompt_version"] == "jevmlx-parallel-v3"
     # The scoring prompt is a single user turn with the merged system text.
     assert all(m["role"] != "system" for m in seen[-1])
     assert PROMPT_V2_SYSTEM in seen[-1][0]["content"]

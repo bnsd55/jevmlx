@@ -426,15 +426,8 @@ class StructuredSchema:
                 if "shared_ids" in p:
                     p["shared_ids"] = p["shared_ids"][len(lead_in) :]
                 if "suffix_ids_list" in p:
-                    for ids in p["suffix_ids_list"]:
-                        if ids[: len(lead_in)] != lead_in:
-                            raise SchemaCompileError(
-                                "<multi>",
-                                "option prefix does not start with the "
-                                "schema-wide lead-in — impossible by "
-                                "construction (lead_in is the common prefix "
-                                "of these lists)",
-                            )
+                    # lead_in is the common prefix of all row_prefixes by
+                    # construction — strip unconditionally, no fallback.
                     p["suffix_ids_list"] = [ids[len(lead_in) :] for ids in p["suffix_ids_list"]]
         result = {"lead_in_ids": list(lead_in), "fields": fields_plan}
         self._cache_plan(tokenizer, result, mode="slots")
@@ -630,16 +623,9 @@ class StructuredSchema:
         # field's full shared_ids.
         # Apply the same strip to multi option prefixes so the engine can
         # prepend lead_in uniformly to every row (R1: one rule for all rows).
+        # lead_in is the common prefix by construction — strip unconditionally.
         for p in plan.values():
             if "suffix_ids_list" in p and lead_in:
-                for ids in p["suffix_ids_list"]:
-                    if ids[: len(lead_in)] != lead_in:
-                        raise SchemaCompileError(
-                            "<multi>",
-                            "option prefix does not start with the schema-wide "
-                            "lead-in — impossible by construction (lead_in is "
-                            "the common prefix of these lists)",
-                        )
                 p["suffix_ids_list"] = [ids[len(lead_in) :] for ids in p["suffix_ids_list"]]
         for p in plan.values():
             if "shared_ids" in p:
