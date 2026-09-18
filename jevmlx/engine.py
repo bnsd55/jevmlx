@@ -1613,6 +1613,43 @@ def run_parallel_generation(
                     ranked_by = sorted(probs_yes.items(), key=lambda kv: -kv[1])
                 selected = [option for option, _score in ranked_by[:k]]
                 reconciled_by = "count"
+            # W2-SETCONS: hard set constraints (schema-validated at compile
+            # time), applied LAST — after the threshold rule and the count
+            # reconciliation have proposed. The solver selects the
+            # score-maximizing set under the constraints, so a count- or
+            # threshold-proposed set that violates a declared constraint is
+            # corrected rather than emitted. Scores: the calibrated
+            # log-odds when a calibrator ran, else the log-odds of P(yes)
+            # (logit(p) — monotone in P(yes), same ranking as the threshold
+            # rule, so a non-binding constraint set reproduces the proposal
+            # exactly).
+            set_constraints = getattr(fdef, "set_constraints_list", []) or []
+            if set_constraints:
+                from jevmlx.setcons import select_constrained_set
+
+                if calibrated_log_odds is not None:
+                    option_scores = dict(calibrated_log_odds)
+                else:
+                    # logit(p_yes): log-odds, monotone in p_yes; p=0/1 clamp
+                    # keeps the sum finite (clamped at ±35 ≈ p 1e-16).
+                    option_scores = {
+                        o: (35.0 if p >= 1.0 else -35.0 if p <= 0.0 else math.log(p / (1.0 - p)))
+                        for o, p in probs_yes.items()
+                    }
+                selected, setcons_rule = select_constrained_set(
+                    list(p["options"]),
+                    option_scores,
+                    set_constraints,
+                    set(selected),
+                )
+                # The closest decision AFTER reconciliation: min |p_yes - 0.5|
+                # over the FINAL set's boundary options (an option forced in
+                # against its p_yes has margin 0 — the truth-telling signal).
+                final_set = set(selected)
+                margins = [abs(probs_yes[o] - 0.5) for o in p["options"] if o in final_set]
+                margin = min(margins, default=margin)
+            else:
+                setcons_rule = None
             ranked = sorted(probs_yes.items(), key=lambda kv: -kv[1])
             parsed_json[fname] = {
                 "value": selected,
@@ -1659,6 +1696,18 @@ def run_parallel_generation(
                 "count_choice": count_choice,
                 "count_margin": count_margin,
                 "reconciled_by": reconciled_by,
+                # W2-SETCONS: the hard set constraints applied (verbatim),
+                # and whether they changed the selection ("constraints") or
+                # didn't bind ("per_option"). None when the field has no set
+                # constraints — same absent-key policy as calibrated_log_odds.
+                **(
+                    {
+                        "set_constraints": [dict(c) for c in set_constraints],
+                        "set_selection": setcons_rule,
+                    }
+                    if set_constraints
+                    else {}
+                ),
                 # W2-D: legal_mass for multi = product of per-option legal
                 # masses (each option's Y/N branch has its own leakage
                 # signal). Low mass at any option's Y/N position flags that

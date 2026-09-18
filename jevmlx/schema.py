@@ -208,6 +208,9 @@ class FieldDefinition:
         # when choices exist: every key must be a declared choice. (coder1's
         # prompt v2 renders them; the engine never reads them.)
         self.choice_descriptions: dict[str, str] = dict(choice_descriptions or {})
+        # W2-SETCONS: hard set constraints for multi fields. Populated only
+        # via set_constraints() (validated there); default empty.
+        self.set_constraints_list: list[dict] = []
 
         if self.field_type == "boolean":
             self.choices = ["true", "false"]
@@ -255,6 +258,171 @@ class FieldDefinition:
     def cardinality(self) -> int:
         return len(self.choices)
 
+    def set_constraints(self, constraints: list[dict] | None) -> None:
+        """Attach W2-SETCONS hard set constraints to this multi field.
+
+        Accepted types (all validated at SET time — contradictory or
+        malformed sets raise SchemaCompileError here, at compile time, never
+        mid-run):
+
+        - ``{"type": "mutually_exclusive", "options": [...]}`` — at most
+          one option of the group may be selected. Alias of at_most_one
+          with k=1 (kept as a distinct type so the prompt can name it).
+        - ``{"type": "at_most_one", "options": [...]}`` — at most one.
+        - ``{"type": "at_most_k", "options": [...], "k": int}`` — at most
+          k options of the group.
+        - ``{"type": "at_least_one", "options": [...]}`` — at least one.
+        - ``{"type": "exact_k", "options": [...], "k": int}`` — exactly k.
+        - ``{"type": "implies", "if_option": X, "then_option": Y}`` —
+          selecting X forces Y in (between options of ONE multi field; the
+          case-level implies between FIELDS lives in jevmlx/constraints.py
+          and is untouched).
+
+        Every referenced option must be a declared choice. Contradictions
+        detected at set time (an exact_k k above the group size, k < 0,
+        implies cycles like X->Y->X, an option required by an implies chain
+        while excluded by an exact_k=0 over its group, empty option lists)
+        raise SchemaCompileError immediately.
+        """
+        if constraints is None:
+            self.set_constraints_list = []
+            return
+        if self.field_type != "multi":
+            raise SchemaCompileError(
+                self.name,
+                f"set constraints apply to multi fields only; field "
+                f"'{self.name}' is of type '{self.field_type}'",
+            )
+        if not isinstance(constraints, list) or not constraints:
+            raise SchemaCompileError(
+                self.name,
+                "set constraints must be a non-empty list of constraint dicts",
+            )
+        for i, c in enumerate(constraints):
+            if not isinstance(c, dict):
+                raise SchemaCompileError(
+                    self.name, f"set constraint [{i}] must be a dict, got {type(c).__name__}"
+                )
+            ctype = c.get("type")
+            if ctype in (
+                "mutually_exclusive",
+                "at_most_one",
+                "at_least_one",
+                "exact_k",
+                "at_most_k",
+            ):
+                options = c.get("options")
+                if not isinstance(options, list) or not options:
+                    raise SchemaCompileError(
+                        self.name,
+                        f"set constraint [{i}] ({ctype}): 'options' must be a "
+                        "non-empty list of option names",
+                    )
+                unknown = [o for o in options if o not in self.choices]
+                if unknown:
+                    raise SchemaCompileError(
+                        self.name,
+                        f"set constraint [{i}] ({ctype}): options not in field "
+                        f"choices: {', '.join(repr(o) for o in unknown)}",
+                    )
+                if len(set(options)) != len(options):
+                    raise SchemaCompileError(
+                        self.name,
+                        f"set constraint [{i}] ({ctype}): duplicate options in {options!r}",
+                    )
+                if ctype in ("exact_k", "at_most_k"):
+                    k = c.get("k")
+                    if not isinstance(k, int) or isinstance(k, bool) or k < 0:
+                        raise SchemaCompileError(
+                            self.name,
+                            f"set constraint [{i}] ({ctype}): 'k' must be a non-negative int",
+                        )
+                    if k > len(options):
+                        raise SchemaCompileError(
+                            self.name,
+                            f"set constraint [{i}] ({ctype}): k={k} exceeds the "
+                            f"group size {len(options)} — unsatisfiable",
+                        )
+            elif ctype == "implies":
+                if_opt = c.get("if_option")
+                then_opt = c.get("then_option")
+                for key, val in (("if_option", if_opt), ("then_option", then_opt)):
+                    if not isinstance(val, str) or not val:
+                        raise SchemaCompileError(
+                            self.name,
+                            f"set constraint [{i}] (implies): '{key}' must be a "
+                            "non-empty option name",
+                        )
+                    if val not in self.choices:
+                        raise SchemaCompileError(
+                            self.name,
+                            f"set constraint [{i}] (implies): '{key}' {val!r} is "
+                            "not a declared choice of this field",
+                        )
+                if if_opt == then_opt:
+                    raise SchemaCompileError(
+                        self.name,
+                        f"set constraint [{i}] (implies): if_option and "
+                        "then_option are the same option; a self-implication "
+                        "is vacuous and masks a config error",
+                    )
+            else:
+                raise SchemaCompileError(
+                    self.name,
+                    f"set constraint [{i}].type must be one of "
+                    f"['at_least_one', 'at_most_k', 'at_most_one', 'exact_k', "
+                    f"'implies', 'mutually_exclusive'], got {ctype!r}",
+                )
+        # Contradiction checks ACROSS constraints (compile-time, per the
+        # step-4 spec): an implies cycle makes the group unsatisfiable at
+        # k=... no — a cycle X->Y->X only forces X and Y to co-occur, which
+        # is satisfiable UNLESS an exclusivity group contains both. That
+        # cross-check runs here: implies-adjacent options sharing a
+        # mutually_exclusive / at_most_one group is a compile error.
+        implied_pairs: set[tuple[str, str]] = set()
+        for c in constraints:
+            if c.get("type") == "implies":
+                implied_pairs.add((c["if_option"], c["then_option"]))
+        # transitive closure of the implies relation (Floyd-Warshall over
+        # the option set; sizes are tiny — at most 64 options).
+        closure = set(implied_pairs)
+        changed = True
+        while changed:
+            changed = False
+            for a, b in list(closure):
+                for c2, d2 in list(closure):
+                    if b == c2 and (a, d2) not in closure:
+                        closure.add((a, d2))
+                        changed = True
+        for a, b in closure:
+            if a == b:
+                raise SchemaCompileError(
+                    self.name,
+                    f"set constraint contradiction: implies chain loops back "
+                    f"onto '{a}' (cycle); the constraint set is unsatisfiable",
+                )
+        for c in constraints:
+            if c.get("type") in ("mutually_exclusive", "at_most_one"):
+                group = set(c["options"])
+                for a, b in closure:
+                    if a in group and b in group:
+                        raise SchemaCompileError(
+                            self.name,
+                            f"set constraint contradiction: '{a}' implies '{b}' "
+                            f"but both are in an at-most-one group "
+                            f"{sorted(c['options'])!r}",
+                        )
+            if c.get("type") == "exact_k" and c.get("k") == 0:
+                excluded = set(c["options"])
+                for a, b in closure:
+                    if b in excluded:
+                        raise SchemaCompileError(
+                            self.name,
+                            f"set constraint contradiction: '{a}' implies '{b}' "
+                            f"but the exact_k=0 group excludes '{b}'",
+                        )
+        self.set_constraints_list = list(constraints)
+
     def to_dict(self) -> dict[str, Any]:
         d = {
             "name": self.name,
@@ -266,6 +434,8 @@ class FieldDefinition:
         }
         if self.depends_on is not None:
             d["depends_on"] = self.depends_on
+        if self.set_constraints_list:
+            d["set_constraints"] = list(self.set_constraints_list)
         return d
 
 
@@ -307,6 +477,11 @@ class StructuredSchema:
                 choice_descriptions=spec.get("choice_descriptions", None),
                 depends_on=spec.get("depends_on", None),
             )
+            if spec.get("set_constraints"):
+                # W2-SETCONS: schema-dict-declared set constraints are
+                # validated at construction (compile time) — contradictory
+                # sets raise SchemaCompileError before any engine runs.
+                self.fields[field_name].set_constraints(spec["set_constraints"])
         # Compiled plans, keyed by tokenizer OBJECT IDENTITY (P2: a
         # WeakKeyDictionary keys by __eq__/__hash__, so two equal-but-distinct
         # tokenizers would wrongly share one plan). dict[id] =
