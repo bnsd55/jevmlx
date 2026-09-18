@@ -561,6 +561,6 @@ def test_bug16_lead_in_prefill_breaks_parity(engine):
         ls_full = full["field_telemetry"][fname]["log_scores"]
         ls_one = one["field_telemetry"][fname]["log_scores"]
         for choice in ls_full:
-            assert abs(ls_full[choice] - ls_one[choice]) < 5e-2, (fname, choice)
+            assert abs(ls_full[choice] - ls_one[choice]) < PARITY_ATOL, (fname, choice)
     assert full["parsed_json"]["action"]["value"] == one["parsed_json"]["action"]["value"]
     assert full["parsed_json"]["flag"]["value"] == one["parsed_json"]["flag"]["value"]
