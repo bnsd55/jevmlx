@@ -399,6 +399,23 @@ class TestParityGate:
                 }
             )
         )
+        # Results contract v2: _local_rows reads ONLY the per-item end-to-end
+        # median — without it the leaderboard FAILS the folder.
+        (combo / "predictions.jsonl").write_text(
+            json.dumps(
+                {
+                    "case_id": "c1",
+                    "field": "f",
+                    "per_item_end_to_end_ms": 810.0,
+                    "valid": True,
+                    "correct": True,
+                    "label": "A",
+                    "prediction": "A",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         rows = _local_rows(tmp_path)
         assert len(rows) == 1
         assert rows[0]["model"] == "qwen7b"

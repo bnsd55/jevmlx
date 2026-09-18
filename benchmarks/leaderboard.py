@@ -125,45 +125,14 @@ def _load_published(path: Path | None) -> tuple[list[dict], dict]:
     return data["models"], data["subset"]
 
 
-def _p50_latency_ms(folder: Path) -> float | None:
-    """Median latency (ms) from a combo folder's predictions.jsonl (gz aware)."""
-    import gzip
-
-    pred = folder / "predictions.jsonl"
-    if not pred.exists():
-        pred = folder / "predictions.jsonl.gz"
-        if not pred.exists():
-            return None
-
-        def opener():
-            return gzip.open(pred, "rt", encoding="utf-8")
-    else:
-
-        def opener():
-            return open(pred, encoding="utf-8")
-
-    latencies: list[float] = []
-    with opener() as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            ms = json.loads(line).get("latency_ms")
-            if isinstance(ms, int | float):
-                latencies.append(float(ms))
-    if not latencies:
-        return None
-    return statistics.median(latencies)
-
-
 def _per_item_end_to_end_ms(folder: Path) -> float | None:
     """Median per-item END-TO-END latency (ms) from predictions.jsonl.
 
     Results contract v2 (W5-D finding 27): batched (decide_many) prediction
     lines carry ``per_item_end_to_end_ms`` — that context's own prefill plus
     its share of the group pass — the honest per-case number. Returns None
-    when the lines carry no such key (single-context path; the caller falls
-    back to the per-field ``latency_ms`` median).
+    when the lines carry no such key: the caller FAILS the folder (results
+    contract v2; no pre-v2 folders exist on main, so there is no fallback).
     """
     import gzip
 
@@ -197,6 +166,13 @@ def _local_rows(results_root: Path) -> list[dict]:
     W4-A: a model appears only if its folder has a passing slow parity test
     (parity.json with ``passed: true``). Without it, the model is excluded
     from the leaderboard — it hasn't proven batch/chunked log_score parity.
+
+    Time per case (review follow-up on #48): read ONLY the honest
+    per-item end-to-end median (results contract v2). There are no pre-v2
+    folders on main, so a parallel combo whose predictions lack
+    ``per_item_end_to_end_ms`` is a broken folder, not a fallback case —
+    it raises ``ValueError`` naming the folder (check_results already
+    rejects the same shape).
     """
     from benchmarks.summarize_results import _combo_parts, _machine_model
 
@@ -239,13 +215,17 @@ def _local_rows(results_root: Path) -> list[dict]:
             model = config.get("model", "")
             _, scorer, _ = _combo_parts(combo)
             machine, _ = _machine_model(combo)
-            p50_ms = _p50_latency_ms(combo)
             # Time per case in seconds: the honest per-item end-to-end
-            # median (results contract v2) when the predictions carry it,
-            # else the per-field latency_ms median — an approximation of
-            # per-case latency that predates per-item timing.
+            # median (results contract v2) — no fallback. A parallel combo
+            # without the key is a broken folder: fail loudly.
             end_to_end = _per_item_end_to_end_ms(combo)
-            time_per_case_s = ((end_to_end or p50_ms) or 0) / 1000.0
+            if end_to_end is None:
+                raise ValueError(
+                    f"{combo}: predictions carry no per_item_end_to_end_ms — "
+                    "results contract v2 requires it (rerun the bench; "
+                    "check_results rejects this folder too)"
+                )
+            time_per_case_s = end_to_end / 1000.0
             rows.append(
                 {
                     "model": model,
