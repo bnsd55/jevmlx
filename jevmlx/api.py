@@ -69,11 +69,18 @@ class FieldResult:
     Attributes:
         value: The decided value (engine-side: str for enums, bool for
             booleans, list[str] for multi).
-        score: Log P of the winning choice (constrained-path log score).
-        margin: Top-1 minus top-2 log score; 0.0 when the field has fewer
-            than two scored choices.
+        score: Log P of the winning choice (constrained-path log score);
+            0.0 for multi fields (no field-level log score exists).
+        log_score_margin: Scalar fields only: top-1 minus top-2 log score at
+            T=1 (decision units: log odds). None for multi fields.
+        probability_margin: Scalar fields only: top-1 minus top-2
+            probability (post-temperature). None for multi fields.
+        threshold_distance: Multi fields only: min |P(yes) - threshold|
+            over the field's options — how close the closest yes/no decision
+            sat to the selection cut. None for scalar fields.
         probability: P of the winner — constrained-path probability in
-            both scoring modes. In [0, 1].
+            both scoring modes. In [0, 1]; None for multi fields (no
+            field-level probability is claimed).
         calibrated: True only after a fitted calibrator has been applied to
             ``probability``. The engine never calibrates; this is False in
             every decide() result until calibration runs.
@@ -87,7 +94,9 @@ class FieldResult:
 
     value: object
     score: float
-    margin: float
+    log_score_margin: float | None
+    probability_margin: float | None
+    threshold_distance: float | None
     probability: float | None
     calibrated: bool
     model: str
@@ -241,11 +250,16 @@ def _build_field_results(result: dict, confidence_model: str) -> dict[str, Field
     """Build Decision.fields from the engine's field_telemetry.
 
     Telemetry contract per field: ``log_scores`` ({choice: log P}, enum and
-    boolean fields only), ``probability`` (P of the winner), ``top_choices``
+    boolean fields only), ``probability`` (P of the winner), ``top_choices"
     (top 5 {choice, probability}). Multi fields carry ``per_option`` (P(yes)
     per option), ``margin`` (min |P(yes) - threshold|) and no field-level
     probability (None — an exact-set probability is not claimed); their
     alternatives are the per-option pairs sorted by P(yes).
+
+    Margins are unit-split (bug 14): scalar fields get ``log_score_margin``
+    (top1-top2 at T=1 log scores) and ``probability_margin`` (top1-top2
+    post-temperature); multi fields get ``threshold_distance`` from the
+    engine's ``margin``. No field carries more than one of the three.
     """
     fields: dict[str, FieldResult] = {}
     for name, telemetry in result["field_telemetry"].items():
@@ -254,7 +268,12 @@ def _build_field_results(result: dict, confidence_model: str) -> dict[str, Field
         if log_scores:
             ranked = sorted(log_scores.items(), key=lambda kv: -kv[1])
             score = ranked[0][1]
-            margin = ranked[0][1] - ranked[1][1] if len(ranked) > 1 else 0.0
+            log_score_margin = ranked[0][1] - ranked[1][1] if len(ranked) > 1 else 0.0
+            # Probability margin: top1-top2 of the post-temperature
+            # distribution, from the same ranking as the log scores.
+            probs_sorted = [entry["probability"] for entry in telemetry.get("top_choices", [])]
+            probability_margin = probs_sorted[0] - probs_sorted[1] if len(probs_sorted) > 1 else 0.0
+            threshold_distance = None
             # Top 3 by probability, from top_choices (same ranking as log
             # scores; probabilities are monotone in the log scores).
             alternatives = tuple(
@@ -265,16 +284,20 @@ def _build_field_results(result: dict, confidence_model: str) -> dict[str, Field
             per_option = telemetry.get("per_option") or {}
             # Multi: no field-level probability is claimed; score stays 0.0
             # (log-space has no value for an unclaimed probability) and the
-            # margin comes straight from the telemetry.
+            # threshold distance comes straight from the engine telemetry.
             score = 0.0
-            margin = telemetry.get("margin", 0.0)
+            log_score_margin = None
+            probability_margin = None
+            threshold_distance = telemetry.get("margin")
             alternatives = tuple(
                 (choice, prob) for choice, prob in sorted(per_option.items(), key=lambda kv: -kv[1])
             )
         fields[name] = FieldResult(
             value=telemetry["value"],
             score=score,
-            margin=margin,
+            log_score_margin=log_score_margin,
+            probability_margin=probability_margin,
+            threshold_distance=threshold_distance,
             probability=probability,
             calibrated=False,
             model=confidence_model,

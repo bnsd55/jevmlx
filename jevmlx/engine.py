@@ -439,7 +439,6 @@ def _get_or_compute_prior(
     tokenizer,
     schema: StructuredSchema,
     scoring: str,
-    temperature: float,
     max_rows: int | None,
     neutral_context: str,
 ) -> dict[str, Any]:
@@ -447,14 +446,15 @@ def _get_or_compute_prior(
 
     The prior is the per-field ``log_scores`` vector from one normal batched
     pass with the neutral context inside the delimiters: choice -> log P at
-    T=1 with no evidence. Multi fields carry ``option_pairs`` (the raw
-    true/false logit pair per option) instead of log_scores — their binary
-    decision does not produce a choice distribution.
+    T=1 with no evidence. Multi fields carry ``option_pairs`` — the RAW Y/N
+    logit pair per option (log odds), read straight from the option row's
+    two candidate logits at T=1 (bug 8: never reconstructed from a
+    temperature-scaled probability; the neutral pass always runs at T=1).
 
-    temperature participates in the cache key only when it differs from 1.0
-    (the prior is defined at T=1; a caller temperature is applied to the
-    CORRECTED scores downstream, so the prior itself is temperature-free —
-    the key slot exists to prevent accidental sharing, not to vary).
+    The prior is defined at T=1 only. A caller temperature is applied to the
+    CORRECTED scores downstream; the prior itself is temperature-free, so
+    temperature is not part of the cache key (it must not vary between the
+    two passes anyway).
     """
     plan_hash = schema.plan_hash(tokenizer, scoring)
     key = _prior_cache_key(model, tokenizer, PROMPT_VERSION, scoring, plan_hash)
@@ -462,12 +462,14 @@ def _get_or_compute_prior(
     if hit is not None:
         return hit
 
+    # Bug 8: the neutral pass runs at temperature=1.0 ALWAYS — the prior is
+    # defined at T=1 and must not inherit the caller's temperature.
     result = run_parallel_generation(
         model,
         tokenizer,
         neutral_context,
         schema,
-        temperature=temperature,
+        temperature=1.0,
         max_rows=max_rows,
         scoring=scoring,
         prior_correction=False,
@@ -476,20 +478,13 @@ def _get_or_compute_prior(
     prior: dict[str, Any] = {}
     for fname, telemetry in result["field_telemetry"].items():
         if telemetry["type"] == "multi":
-            # Binary Y/N pairs are not exposed by telemetry (per_option holds
-            # post-softmax P(yes)). Re-derive the pair prior from per_option:
-            # log(p_yes) and log(1 - p_yes) at T=1 are exact inverses of the
-            # pair softmax — an additive prior in log space on the Y/N pair
-            # (P(yes) semantics, same as the evidence pass applies).
-            per_option = telemetry["per_option"]
+            # Raw Y/N logits at T=1, carried on the telemetry by the engine's
+            # option-row loop (option_logit_pairs). Additive prior in log
+            # space on the Y/N pair — same units as the evidence logits.
             prior[fname] = {
                 "type": "multi",
                 "option_pairs": {
-                    option: [
-                        math.log(max(pt, 1e-12)),
-                        math.log(max(1.0 - pt, 1e-12)),
-                    ]
-                    for option, pt in per_option.items()
+                    option: list(pair) for option, pair in telemetry["option_logit_pairs"].items()
                 },
             }
         else:
@@ -563,13 +558,16 @@ def run_parallel_generation(
     # Neutral-context prior: what the model would emit with no evidence. The
     # same prompt v2 with the literal string "(no context provided)" inside
     # the delimiters; the resulting per-choice log-scores are the prior that
-    # prior_correction subtracts from the evidence pass.
+    # prior_correction subtracts from the evidence pass. Bug 9: this pass is
+    # a real model invocation — its wall time is measured separately
+    # (prior_ms) and included in total_ms.
     NEUTRAL_CONTEXT = "(no context provided)"
     prior: dict[str, Any] | None = None
+    prior_ms: float = 0.0
     if prior_correction:
-        prior = _get_or_compute_prior(
-            model, tokenizer, schema, scoring, temperature, max_rows, NEUTRAL_CONTEXT
-        )
+        t_prior0 = time.perf_counter()
+        prior = _get_or_compute_prior(model, tokenizer, schema, scoring, max_rows, NEUTRAL_CONTEXT)
+        prior_ms = (time.perf_counter() - t_prior0) * 1000
 
     t0 = time.perf_counter()
 
@@ -662,7 +660,9 @@ def run_parallel_generation(
     t_suf0 = time.perf_counter()
     # Row idx -> {branch-node index: [child logits in node["children"] order]}.
     node_logits: dict[int, dict[int, list[float]]] = {}
-    # Multi option rows: [p_true logit, p_false logit] at the suffix end.
+    # Multi option rows: RAW [yes_logit, no_logit] at the suffix end (the
+    # order of the remainders pair, ["Y", "N"); used both for the P(yes)
+    # softmax and, verbatim at T=1, as the cached prior pair (bug 8).
     option_pair: dict[int, list[float]] = {}
     for chunk_start in range(0, len(rows), auto_max_rows):
         chunk = rows[chunk_start : chunk_start + auto_max_rows]
@@ -683,8 +683,11 @@ def run_parallel_generation(
         for i, ridx in enumerate(range(chunk_start, chunk_start + chunk_len)):
             p = field_plans[row_field[ridx]]
             if ridx in row_option:
-                # multi option row: Y/N logits at the option row's last
-                # position (the row ends right before the Y/N divergence).
+                # multi option row: RAW Y/N logits at the option row's last
+                # position (the row ends right before the Y/N divergence),
+                # in remainder order ["Y", "N"]. Bug 8: these raw logits are
+                # what the prior cache stores (option_logit_pairs in the
+                # telemetry) — no reconstruction from scaled probabilities.
                 lg = out[i, len(lead_in) + len(p["suffix_ids_list"][row_option[ridx]]) - 1, :]
                 option_pair[ridx] = [
                     float(lg[t[0]].astype(mx.float32)) for t in p["remainders"][row_option[ridx]]
@@ -760,6 +763,13 @@ def run_parallel_generation(
                 # per_option carries the P(yes) values; calibrate skips
                 # multi fields.
                 "per_option": dict(probs_yes),
+                # Bug 8: the RAW [yes, no] logits per option (remainder
+                # order), at the evidence pass's caller temperature-agnostic
+                # scale — logits are what the prior cache stores and what
+                # log-odds shrinkage consumes.
+                "option_logit_pairs": {
+                    p["options"][oi]: list(option_pair[ridx]) for oi, ridx in enumerate(idxs)
+                },
                 "alternatives": tuple(ranked),
                 "top_choices": [
                     {"choice": option, "probability": p_yes} for option, p_yes in ranked
@@ -908,6 +918,23 @@ def run_parallel_generation(
     total_elapsed_ms = (time.perf_counter() - t0) * 1000
     confidence_model = scoring
 
+    # Bug 12: probability_status must tell the truth about the temperature.
+    # At T=1 the reported distribution is the constrained-path probability;
+    # at any other temperature it is a post-hoc temperature-scaled
+    # distribution and the temperature is part of the statement.
+    if temperature == 1.0:
+        probability_status = (
+            "constrained-path probability at T=1; uncalibrated as decision confidence"
+        )
+    else:
+        probability_status = (
+            f"post-hoc temperature-scaled constrained distribution "
+            f"(temperature={temperature}); ranking-invariant, not a T=1 probability; "
+            f"uncalibrated as decision confidence"
+        )
+    if prior_correction:
+        probability_status += "; prior-corrected against the neutral-context pass"
+
     logger.info(
         "Decided %d fields in %.1f ms",
         len(schema),
@@ -923,8 +950,15 @@ def run_parallel_generation(
 
     return {
         "elapsed_ms": round(total_elapsed_ms, 2),
+        # Bug 9: the timing split is honest about the whole request wall time:
+        # prior_ms (the neutral pass, 0.0 when prior_correction is off),
+        # prefill_ms, suffix_eval_ms, and total_ms (everything, prior
+        # included). The pre-existing keys (elapsed_ms/prefill_ms/
+        # suffix_eval_ms) keep their meaning; total_ms == elapsed_ms.
+        "prior_ms": round(prior_ms, 2),
         "prefill_ms": round(t_prefill, 2),
         "suffix_eval_ms": round(t_suffix_eval, 2),
+        "total_ms": round(prior_ms + total_elapsed_ms, 2),
         "total_tokens_generated": 0,
         "sequential_forward_passes": num_passes,
         "schema_match": True,  # keys/enums guaranteed by construction; bench_model comparison
@@ -938,10 +972,7 @@ def run_parallel_generation(
         # confidence_model key so a future scoring-mode change rewrites it.
         "prompt_sha256": _prompt_sha256(base_ids),
         "prompt_version": PROMPT_VERSION,
-        "probability_status": (
-            "constrained-path probability at T=1; uncalibrated as decision confidence"
-            + ("; prior-corrected against the neutral-context pass" if prior_correction else "")
-        ),
+        "probability_status": probability_status,
         "prior_correction": prior_correction,
         "parsed_json": parsed_json,
         "field_telemetry": field_telemetry,

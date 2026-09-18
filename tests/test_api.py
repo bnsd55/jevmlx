@@ -411,8 +411,9 @@ def _fake_result(confidence_model="slots"):
             },
             "tags": {
                 "value": ["a"],
-                "probability": 0.8,
+                "probability": None,
                 "per_option": {"a": 0.8, "b": 0.1},
+                "margin": 0.3,
             },
         },
         "confidence_model": confidence_model,
@@ -435,16 +436,20 @@ def test_field_result_built_from_fake_engine_result(monkeypatch):
     assert isinstance(fr, api.FieldResult)
     assert fr.value == "HIGH"
     assert fr.score == -0.1  # log P of the winner
-    assert abs(fr.margin - (-0.1 - -0.5)) < 1e-9  # top1 minus top2 log score
+    assert abs(fr.log_score_margin - (-0.1 - -0.5)) < 1e-9  # top1-top2 at T=1
+    assert abs(fr.probability_margin - (0.7 - 0.2)) < 1e-9  # post-temperature top1-top2
+    assert fr.threshold_distance is None  # scalar fields carry no threshold distance
     assert fr.probability == 0.7
     assert fr.calibrated is False
     assert fr.model == "slots"
     assert fr.alternatives == (("HIGH", 0.7), ("LOW", 0.2), ("CRITICAL", 0.1))
-    # multi: no log_scores -> score from probability, margin 0, alternatives
-    # from per_option
+    # multi: no log_scores -> score 0.0, threshold_distance from telemetry,
+    # alternatives from per_option
     multi = d.fields["tags"]
     assert multi.value == ["a"]
-    assert multi.margin == 0.0
+    assert multi.log_score_margin is None
+    assert multi.probability_margin is None
+    assert multi.threshold_distance == 0.3  # min(|0.8-0.5|, |0.1-0.5|) from telemetry
     assert multi.alternatives == (("a", 0.8), ("b", 0.1))
     assert isinstance(d.value, TwoField)
 

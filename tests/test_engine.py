@@ -2,6 +2,7 @@ import math
 
 import pytest
 
+from jevmlx.api import decide
 from jevmlx.cli import load_preset
 from jevmlx.engine import load_engine, run_naive_generation, run_parallel_generation
 from jevmlx.schema import StructuredSchema
@@ -341,3 +342,121 @@ def test_prior_correction_neutral_pass_runs_and_corrects(engine):
         top = corrected["field_telemetry"][fname]["top_choices"]
         if len(top) == fdef.cardinality:
             assert abs(sum(c["probability"] for c in top) - 1.0) < 1e-6
+
+
+# --- W1-D: prior at T=1, truthful telemetry, margins (real model, slow) ------
+
+
+@pytest.mark.slow
+def test_prior_pass_temperature_and_raw_logit_pairs(engine):
+    """Bug 8 on a real model: the neutral prior pass runs at T=1 (whatever
+    the caller passes) and multi option_logit_pairs are raw [yes, no]
+    logits — not log(P)/log(1-P) reconstructed from scaled probabilities."""
+    import jevmlx.engine as eng
+
+    model, tokenizer = engine
+    schema = StructuredSchema(
+        {
+            "tier": {"type": "enum", "description": "Severity tier", "choices": ["LOW", "HIGH"]},
+            "flags": {"type": "multi", "description": "Tags", "choices": ["billing", "tech"]},
+        }
+    )
+    eng._PRIOR_CACHE.clear()
+    try:
+        prior = eng._get_or_compute_prior(
+            model, tokenizer, schema, "slots", None, "(no context provided)"
+        )
+        # Enum prior is a log-score vector at T=1...
+        assert set(prior["tier"]["log_scores"]) == {"LOW", "HIGH"}
+        # Multi prior pairs are raw logits: NOT the reconstruction of
+        # per_option probabilities (log(p), log(1-p)); they are what the
+        # option rows emitted at T=1.
+        flags_prior = prior["flags"]["option_pairs"]
+        assert set(flags_prior) == {"billing", "tech"}
+        for pair in flags_prior.values():
+            assert len(pair) == 2 and all(isinstance(v, float) for v in pair)
+        # Reconstructing from probabilities would give pairs summing
+        # (exp-form) to 1; raw logit pairs have no such constraint. Verify
+        # they differ from the reconstruction for at least one option
+        # unless the model happens to be calibrated (tolerate equality).
+        result = run_parallel_generation(model, tokenizer, "ctx", schema)
+        per_option = result["field_telemetry"]["flags"]["per_option"]
+        recon = {
+            o: [math.log(max(p, 1e-12)), math.log(max(1 - p, 1e-12))] for o, p in per_option.items()
+        }
+        assert any(abs(flags_prior[o][0] - recon[o][0]) > 1e-6 for o in flags_prior) or all(
+            abs(per_option[o] - 0.5) < 1e-9 for o in per_option
+        )
+    finally:
+        eng._PRIOR_CACHE.clear()
+
+
+@pytest.mark.slow
+def test_timing_split_on_real_model(engine):
+    """Bug 9 on a real model: prior_ms > 0 on a cold prior pass, total_ms
+    covers it, prior_ms == 0 without prior_correction, and the pre-existing
+    timing keys keep their meaning."""
+    import jevmlx.engine as eng
+
+    model, tokenizer = engine
+    schema = StructuredSchema(
+        {"tier": {"type": "enum", "description": "d", "choices": ["LOW", "HIGH"]}}
+    )
+    eng._PRIOR_CACHE.clear()
+    try:
+        cold = run_parallel_generation(model, tokenizer, "ctx", schema, prior_correction=True)
+        assert cold["prior_ms"] > 0.0
+        assert cold["total_ms"] >= cold["prior_ms"]
+        assert cold["total_ms"] >= cold["elapsed_ms"]
+        warm = run_parallel_generation(model, tokenizer, "ctx", schema, prior_correction=True)
+        assert warm["total_ms"] == pytest.approx(warm["elapsed_ms"] + warm["prior_ms"], abs=0.1)
+        plain = run_parallel_generation(model, tokenizer, "ctx", schema)
+        assert plain["prior_ms"] == 0.0
+        assert plain["total_ms"] == pytest.approx(plain["elapsed_ms"], abs=0.1)
+        assert plain["prefill_ms"] > 0.0 and plain["suffix_eval_ms"] > 0.0
+    finally:
+        eng._PRIOR_CACHE.clear()
+
+
+@pytest.mark.slow
+def test_probability_status_temperature_on_real_model(engine):
+    """Bug 12 on a real model: T=1 keeps the classic status; T!=1 states the
+    post-hoc scaling and the temperature value."""
+    model, tokenizer = engine
+    schema = StructuredSchema(
+        {"tier": {"type": "enum", "description": "d", "choices": ["LOW", "HIGH"]}}
+    )
+    at_one = run_parallel_generation(model, tokenizer, "ctx", schema, temperature=1.0)
+    assert at_one["probability_status"] == (
+        "constrained-path probability at T=1; uncalibrated as decision confidence"
+    )
+    at_half = run_parallel_generation(model, tokenizer, "ctx", schema, temperature=0.5)
+    assert "temperature=0.5" in at_half["probability_status"]
+    assert "temperature-scaled" in at_half["probability_status"]
+
+
+@pytest.mark.slow
+def test_api_field_margins_on_real_model(engine):
+    """Bug 14 on a real model through the public API: scalar fields expose
+    log_score_margin + probability_margin and threshold_distance None; multi
+    fields the reverse. Decision.value validates against the pydantic model."""
+    from typing import Literal
+
+    from pydantic import BaseModel
+
+    class Ticket(BaseModel):
+        tier: Literal["LOW", "HIGH"]
+        tags: list[Literal["billing", "tech"]]
+
+    decision = decide(
+        Ticket,
+        "Charged twice; the invoice is wrong and the app errors out.",
+        model=MODEL_ID,
+    )
+    for fr in decision.fields.values():
+        if fr.threshold_distance is None:
+            assert fr.log_score_margin is not None
+            assert fr.probability_margin is not None
+        else:
+            assert fr.log_score_margin is None and fr.probability_margin is None
+            assert fr.threshold_distance >= 0.0

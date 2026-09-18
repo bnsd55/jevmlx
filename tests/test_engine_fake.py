@@ -406,7 +406,7 @@ def test_prior_cache_entry_dies_with_tokenizer():
         {"pick": {"type": "enum", "description": "d", "choices": ["ALPHA", "BETA"]}}
     )
     _PRIOR_CACHE.clear()
-    prior = _get_or_compute_prior(model, tokenizer, schema, "slots", 1.0, None, "neutral")
+    prior = _get_or_compute_prior(model, tokenizer, schema, "slots", None, "neutral")
     assert _PRIOR_CACHE, "prior was not cached"
 
     # Find this tokenizer's entry via its live weakref.
@@ -447,13 +447,172 @@ def test_prior_cache_registers_one_finalizer_per_tokenizer():
     orig_plan_hash = schema.plan_hash
     schema.plan_hash = lambda tok, mode: "fixed-hash"
     try:
-        _get_or_compute_prior(model, tokenizer, schema, "slots", 1.0, None, "neutral")
+        _get_or_compute_prior(model, tokenizer, schema, "slots", None, "neutral")
         after_store = weakref.getweakrefcount(tokenizer)
         assert after_store >= 1  # the eviction finalizer's weakref
         # Hit path: the count must stay flat (no per-lookup finalizers).
         for _ in range(10):
-            _get_or_compute_prior(model, tokenizer, schema, "slots", 1.0, None, "neutral")
+            _get_or_compute_prior(model, tokenizer, schema, "slots", None, "neutral")
         assert weakref.getweakrefcount(tokenizer) == after_store
     finally:
         schema.plan_hash = orig_plan_hash
         _PRIOR_CACHE.clear()
+
+
+# --- W1-D: prior at T=1, truthful telemetry, timing split -------------------
+
+
+class _RecordingNeutralModel(FakeModel):
+    """FakeModel that records the temperature of every forward call."""
+
+    def __init__(self):
+        super().__init__()
+        self.temperatures: list = []  # engine does not pass T; tracked via logits identity
+
+    # The engine applies temperature post-hoc to scores, never to the model
+    # call — so the T=1 contract is enforced by _get_or_compute_prior passing
+    # temperature=1.0 to run_parallel_generation. That call is observable via
+    # monkeypatched run_parallel_generation in the dedicated test below.
+
+
+def test_prior_pass_always_runs_at_temperature_one(monkeypatch):
+    """Bug 8: the neutral prior pass runs at T=1 regardless of the caller's
+    temperature (the prior is defined at T=1)."""
+    import jevmlx.engine as eng
+
+    seen: list[float] = []
+
+    def fake_rpg(model, tokenizer, context, schema, *, temperature=1.0, **kwargs):
+        seen.append(temperature)
+        # Minimal result shape for the multi branch of the prior builder.
+        return {
+            "field_telemetry": {
+                "flags": {
+                    "type": "multi",
+                    "per_option": {"x": 0.5},
+                    "option_logit_pairs": {"x": [0.3, -0.7]},
+                    "log_scores": {},
+                }
+            }
+        }
+
+    monkeypatch.setattr(eng, "run_parallel_generation", fake_rpg)
+    eng._PRIOR_CACHE.clear()
+    try:
+        schema = StructuredSchema(
+            {"flags": {"type": "multi", "description": "d", "choices": ["x", "y"]}}
+        )
+        eng._get_or_compute_prior(FakeModel(), FakeTokenizer(), schema, "slots", None, "neutral")
+    finally:
+        eng._PRIOR_CACHE.clear()
+    assert seen == [1.0]  # never the caller temperature
+
+
+def test_prior_multi_option_pairs_are_raw_logits_not_reconstructed(monkeypatch):
+    """Bug 8: multi priors carry the RAW [yes, no] logit pairs from
+    option_logit_pairs, not log(P)/log(1-P) reconstructed from a scaled
+    probability."""
+    import jevmlx.engine as eng
+
+    captured: dict = {}
+
+    def fake_rpg(model, tokenizer, context, schema, *, temperature=1.0, **kwargs):
+        captured["temperature"] = temperature
+        return {
+            "field_telemetry": {
+                "flags": {
+                    "type": "multi",
+                    "per_option": {"x": 0.95},  # would reconstruct [-0.05, -3.0]
+                    "option_logit_pairs": {"x": [2.5, -1.5]},  # raw logits
+                    "log_scores": {},
+                }
+            }
+        }
+
+    monkeypatch.setattr(eng, "run_parallel_generation", fake_rpg)
+    eng._PRIOR_CACHE.clear()
+    try:
+        prior = eng._get_or_compute_prior(
+            FakeModel(),
+            FakeTokenizer(),
+            StructuredSchema(
+                {"flags": {"type": "multi", "description": "d", "choices": ["x", "y"]}}
+            ),
+            "slots",
+            None,
+            "neutral",
+        )
+    finally:
+        eng._PRIOR_CACHE.clear()
+    assert prior["flags"]["option_pairs"] == {"x": [2.5, -1.5]}  # verbatim raw logits
+
+
+def test_multi_telemetry_carries_option_logit_pairs():
+    """Bug 8: multi field telemetry exposes option_logit_pairs — the raw
+    [yes, no] logits per option in remainder order."""
+    model = FakeModel()
+    tokenizer = FakeTokenizer()
+    schema = StructuredSchema(
+        {"flags": {"type": "multi", "description": "d", "choices": ["x", "y"]}}
+    )
+    result = run_parallel_generation(model, tokenizer, "ctx", schema)
+    telemetry = result["field_telemetry"]["flags"]
+    assert set(telemetry["option_logit_pairs"]) == {"x", "y"}
+    assert all(len(pair) == 2 for pair in telemetry["option_logit_pairs"].values())
+
+
+def test_timing_split_prior_included_in_total(monkeypatch):
+    """Bug 9: prior_ms is reported separately and included in total_ms; the
+    prior pass happens BEFORE t0 so elapsed_ms alone would under-report."""
+    import jevmlx.engine as eng
+
+    model = FakeModel()
+    tokenizer = FakeTokenizer()
+    schema = StructuredSchema(
+        {"action": {"type": "enum", "description": "d", "choices": ["A", "B"]}}
+    )
+    # Cold prior: the neutral pass runs before t0.
+    eng._PRIOR_CACHE.clear()
+    try:
+        with_prior = eng.run_parallel_generation(
+            model, tokenizer, "ctx", schema, prior_correction=True
+        )
+        assert with_prior["prior_ms"] > 0.0
+        assert with_prior["total_ms"] >= with_prior["elapsed_ms"]
+        assert with_prior["total_ms"] >= with_prior["prior_ms"] + with_prior["prefill_ms"]
+        # Warm cache: prior_ms still reported (a cache hit is ~0 but honest),
+        # and total == elapsed + prior.
+        warm = eng.run_parallel_generation(model, tokenizer, "ctx", schema, prior_correction=True)
+        assert warm["prior_ms"] >= 0.0
+        assert warm["total_ms"] == pytest.approx(warm["elapsed_ms"] + warm["prior_ms"], abs=0.05)
+        # No prior correction: prior_ms is 0.0 and total == elapsed.
+        without = eng.run_parallel_generation(model, tokenizer, "ctx", schema)
+        assert without["prior_ms"] == 0.0
+        assert without["total_ms"] == pytest.approx(without["elapsed_ms"], abs=0.05)
+        # Existing keys keep their meaning.
+        for key in ("prefill_ms", "suffix_eval_ms", "elapsed_ms"):
+            assert key in without
+    finally:
+        eng._PRIOR_CACHE.clear()
+
+
+def test_probability_status_truthful_at_temperature_ne_one():
+    """Bug 12: at T!=1 the status says the distribution is post-hoc
+    temperature-scaled and includes the temperature value; at T=1 it stays
+    as it was."""
+    model = FakeModel()
+    tokenizer = FakeTokenizer()
+    schema = StructuredSchema(
+        {"action": {"type": "enum", "description": "d", "choices": ["A", "B"]}}
+    )
+    at_one = run_parallel_generation(model, tokenizer, "ctx", schema, temperature=1.0)
+    assert at_one["probability_status"] == (
+        "constrained-path probability at T=1; uncalibrated as decision confidence"
+    )
+    at_half = run_parallel_generation(model, tokenizer, "ctx", schema, temperature=0.5)
+    status = at_half["probability_status"]
+    assert "temperature-scaled" in status
+    assert "temperature=0.5" in status
+    assert "not a T=1 probability" in status
+    at_two = run_parallel_generation(model, tokenizer, "ctx", schema, temperature=2.0)
+    assert "temperature=2.0" in at_two["probability_status"]
