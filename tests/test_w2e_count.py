@@ -241,8 +241,6 @@ def test_count_code_4_no_token_prefix_collision():
             assert tokenize
             return self.encode("\n".join(m["content"] for m in messages))
 
-    from jevmlx.schema import SchemaCompileError
-
     schema = _multi_schema()
     # Compiles clean: codes are '"0"'..'"4"', no token-prefix pairs.
     plan = schema.compile_slot_plan(_GreedyTokenizer())
@@ -255,8 +253,14 @@ def test_count_code_4_no_token_prefix_collision():
     # review's collision shape. The guard must raise SchemaCompileError.
     # Proof the prefix detector actually fires on a quote-digit-merging
     # tokenizer; codes '0'..'4' above never trigger it.
-    import jevmlx.schema as schema_mod
-
+    #
+    # Patch through the CLASS's __globals__, not `import jevmlx.schema`:
+    # test_check_results.py::test_imports_without_mlx deletes every jevmlx.*
+    # module from sys.modules, so a module-global patch on the re-imported
+    # module never reaches THIS module's already-imported class (the compile
+    # reads its defining module's globals, which after that deletion belong to
+    # a detached copy of jevmlx.schema). Patching the class's own globals works
+    # in both worlds.
     class _TruncatingTokenizer(_GreedyTokenizer):
         def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
             # 17 tokens: the full '{"flags#count": "<code>"}' row minus the
@@ -264,10 +268,16 @@ def test_count_code_4_no_token_prefix_collision():
             # code, so '4' = ['"4'] and '4+' = ['"4', '+'] collide.
             return super().encode(text, add_special_tokens)[:17]
 
-    old = schema_mod.COUNT_CODES
-    schema_mod.COUNT_CODES = ["0", "1", "2", "3", "4", "4+"]
+    compile_globals = StructuredSchema.compile_slot_plan.__globals__
+    # Same two-copies pitfall for the EXCEPTION CLASS: the compile raises the
+    # class from ITS defining globals, which after a sys.modules purge may be a
+    # detached copy — not the one a plain `from jevmlx.schema import` binds.
+    # Bind both from the compile's own globals.
+    SchemaCompileError = compile_globals["SchemaCompileError"]
+    old = compile_globals["COUNT_CODES"]
+    compile_globals["COUNT_CODES"] = ["0", "1", "2", "3", "4", "4+"]
     try:
         with pytest.raises(SchemaCompileError):
             _multi_schema().compile_slot_plan(_TruncatingTokenizer())
     finally:
-        schema_mod.COUNT_CODES = old
+        compile_globals["COUNT_CODES"] = old

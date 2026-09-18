@@ -722,14 +722,12 @@ class StructuredSchema:
             # row's top-2 margin (COUNT_MARGIN_MIN) and falls back to the
             # per-option rule otherwise.
             count_shared_ids = []
-            count_remainders = []
             for count_code in COUNT_CODES:
                 candidate = tokenizer.encode(
                     candidate_text(count_key(fname), f'"{count_code}"'),
                     add_special_tokens=False,
                 )
                 count_shared_ids.append(candidate)
-                count_remainders.append(candidate)
             count_shared = _common_token_prefix(count_shared_ids)
             count_remainders = [full[len(count_shared) :] for full in count_shared_ids]
             for i, remainder in enumerate(count_remainders):
