@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from jevmlx.api import schema_from_model
 from jevmlx.engine import _fold_multi
 from jevmlx.schema import FieldDefinition, StructuredSchema
+from tests.conftest import make_test_renderer
 
 
 class FakeTokenizer:
@@ -29,7 +30,8 @@ def test_compile_labels_plan_expands_multi_field():
             }
         }
     )
-    plan = schema.compile_labels_plan(FakeTokenizer())
+    tok = FakeTokenizer()
+    plan = schema.compile_labels_plan(tok, make_test_renderer(tok, schema, "labels"))
     p = plan["fields"]["categories"]
 
     # One yes/no row per option, row key '<field>/<option>' (V4: the natural
@@ -40,7 +42,7 @@ def test_compile_labels_plan_expands_multi_field():
     assert p["suffix_ids_list"][0] != p["suffix_ids_list"][1]
     # The common row lead-in ('{\n  "categories/' with the slash) is lifted
     # into plan["lead_in_ids"]; each suffix continues with '<option>": "'.
-    full_row = plan["lead_in_ids"] + p["suffix_ids_list"][0]
+    full_row = p["suffix_ids_list"][0]
     slash_id = ord("/") % 97 + 1
     assert slash_id in full_row  # the row key really is '<field>/<option>'
     # Per-option Y/N remainder pairs (2 options x 2), each starting where

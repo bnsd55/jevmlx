@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- W2-A field-local prompts (HOLD for M5 A/B): the global schema block is
+  replaced by per-field prompt blocks. The engine renders one complete chat
+  prompt per field (system + nonce-delimited context + that field's block +
+  lead-in), the plan compiler takes the exact token-ID LCP across all
+  per-field prompts as the prefill, and each row carries its field's
+  post-LCP prompt tail + candidate remainder. Context moves ABOVE the field
+  block (GPT Q2: final contract nearest generation). Every displayed string
+  is json.dumps-escaped. Multi fields render one block per option. New
+  telemetry: prefill_tokens, suffix_tokens_total. PROMPT_VERSION v8. No
+  fallback path — render_field_prompt is mandatory on compile_*_plan; the
+  old lead_in_ids / global-schema prompt path is deleted. Plan cache key
+  includes a context hash (prompt tails are context-dependent). PARITY_ATOL
+  bumped to 5e-2 (W2-A's longer rows increase Metal batch-shape drift to
+  ~0.027 nats). This PR is marked HOLD — it merges only after Ben runs EV2
+  + TypeSafe on the M5 against pre-W2-A main and the gates pass (EV2 drift
+  decreases, TypeSafe accuracy non-worse).
+
 - W2-D legal_mass telemetry: per-branch leakage signal added to engine
   field telemetry. legal_mass = sum(exp(z_allowed)) / sum(exp(z_vocab)) —
   the probability the model assigned to the union of allowed continuations
@@ -83,3 +100,4 @@ First release.
 - Schema validation (`jevmlx validate`) for structural problems before a run.
 - `jevmlx serve`: a local HTTP server exposing `POST /decide` (`{"schema": {...}, "context": "..."}`) so one Metal GPU can back several clients, serially.
 - Typesafe fetcher (`benchmarks.typesafe.fetch`) for the published eval examples, plus synthetic labeled cases covering known failure modes.
+# v8

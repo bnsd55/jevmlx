@@ -107,7 +107,7 @@ def test_prompt_sha256_stable_and_input_sensitive():
     assert r1["prompt_sha256"] != r3["prompt_sha256"]
     assert len(r1["prompt_sha256"]) == 64
     # Independent of the schema contents swap? No: same schema, so identical.
-    assert r1["prompt_version"] == "jevmlx-parallel-v6"
+    assert r1["prompt_version"] == "jevmlx-parallel-v8"
     assert (
         r1["probability_status"]
         == "constrained-path probability at T=1; uncalibrated as decision confidence"
@@ -448,7 +448,7 @@ def test_prior_cache_registers_one_finalizer_per_tokenizer():
     )
     _PRIOR_CACHE.clear()
     orig_plan_hash = schema.plan_hash
-    schema.plan_hash = lambda tok, mode: "fixed-hash"
+    schema.plan_hash = lambda tok, mode, render_field_prompt=None, cache_key="": "fixed-hash"
     try:
         _get_or_compute_prior(model, tokenizer, schema, "slots", None, "neutral")
         after_store = weakref.getweakrefcount(tokenizer)

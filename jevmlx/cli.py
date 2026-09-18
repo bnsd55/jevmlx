@@ -17,7 +17,7 @@ from importlib import resources
 
 from jevmlx import __version__
 from jevmlx.api import DEFAULT_MODEL
-from jevmlx.engine import load_engine, run_parallel_generation
+from jevmlx.engine import load_engine, make_field_prompt_renderer, run_parallel_generation
 from jevmlx.lint import lint_schema
 from jevmlx.log import configure
 from jevmlx.schema import StructuredSchema
@@ -566,7 +566,11 @@ def _run_eval_command(args) -> None:
             model, tokenizer, scoring=args.scoring, prior_correction=args.prior_correction
         )
         chat_template = getattr(tokenizer, "chat_template", None)
-        plan_provider = lambda schema: schema.compile_labels_plan(tokenizer)  # noqa: E731
+
+        def plan_provider(schema):
+            return schema.compile_labels_plan(
+                tokenizer, make_field_prompt_renderer(tokenizer, "", schema, "labels")
+            )
     elif args.track == "naive_local":
         print(f"Loading {args.model} ...", flush=True)
         model, tokenizer = load_engine(args.model)

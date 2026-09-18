@@ -1,4 +1,4 @@
-"""Prompt v2 (jevmlx-parallel-v6) contract tests: system + user messages,
+"""Prompt v2 (jevmlx-parallel-v8) contract tests: system + user messages,
 hard-delimited context, and the neutral alias schema block."""
 
 import mlx.core as mx
@@ -7,6 +7,7 @@ from jinja2.exceptions import TemplateError
 
 from jevmlx.engine import PROMPT_V2_SYSTEM, PROMPT_VERSION, run_parallel_generation
 from jevmlx.schema import StructuredSchema, _alias_code
+from tests.conftest import make_test_renderer
 
 
 class FakeModel:
@@ -108,19 +109,19 @@ def test_prompt_v2_sends_system_and_user():
     assert roles == ["system", "user"]
     assert tok.messages[0]["content"] == PROMPT_V2_SYSTEM
     user = tok.messages[1]["content"]
-    assert "<<<CONTEXT" in user and "ctx text" in user and "CONTEXT>>>" in user
-    assert "Classify" in user
+    assert "<<<CONTEXT_" in user and "ctx text" in user and "CONTEXT_" in user and ">>>" in user
+    assert "Return the answer" in user
 
 
 def test_prompt_version_is_v2():
     tok = FakeTokenizer()
     result = run_parallel_generation(FakeModel(), tok, "ctx", SCHEMA)
-    assert result["prompt_version"] == PROMPT_VERSION == "jevmlx-parallel-v6"
+    assert result["prompt_version"] == PROMPT_VERSION == "jevmlx-parallel-v8"
 
 
 def test_slot_plan_maps_aliases_to_values():
     tok = FakeTokenizer()
-    plan = SCHEMA.compile_slot_plan(tok)
+    plan = SCHEMA.compile_slot_plan(tok, make_test_renderer(tok, SCHEMA, "slots"))
     p = plan["fields"]["risk_tier"]
     assert p["alias_map"] == {"A": "LOW", "B": "MEDIUM", "C": "HIGH"}
     bool_p = plan["fields"]["flag"]
@@ -166,11 +167,11 @@ def test_gemma_style_template_rejects_system_role():
     ]
 
     result = run_parallel_generation(FakeModel(), tok, "ctx", SCHEMA)
-    assert result["prompt_version"] == "jevmlx-parallel-v6"
+    assert result["prompt_version"] == "jevmlx-parallel-v8"
     # The scoring prompt is a single user turn with the merged system text.
     assert all(m["role"] != "system" for m in seen[-1])
     assert PROMPT_V2_SYSTEM in seen[-1][0]["content"]
-    assert len(seen) == 3  # probe (test) + probe (generation) + one merged render
+    assert len(seen) == 4  # probe (test) + probe (renderer) + one render per field
     # No system-role message ever reached a scoring render: only the two
     # probes (seen[0], seen[1]) contain a system role, and both raised.
     assert not any(m["role"] == "system" for m in seen[2])

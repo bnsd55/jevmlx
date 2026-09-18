@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 # Bumped whenever the parallel path's prompt text changes (it feeds
 # prompt_sha256, so result sets from different prompt versions are not
 # comparable).
-PROMPT_VERSION = "jevmlx-parallel-v6"
+PROMPT_VERSION = "jevmlx-parallel-v8"
 
 
 @dataclass(frozen=True)
@@ -88,6 +88,9 @@ def _probe_system_role(tokenizer, profile: PromptProfile) -> PromptProfile:
         {"role": "system", "content": "probe"},
         {"role": "user", "content": "probe"},
     ]
+    # Fake/test tokenizers may not implement apply_chat_template.
+    if not hasattr(tokenizer, "apply_chat_template"):
+        return profile
     try:
         tokenizer.apply_chat_template(
             probe, add_generation_prompt=True, tokenize=True, **profile.template_kwargs
@@ -313,6 +316,11 @@ def _chat_ids(
     if system_content and not profile.supports_system:
         merged = f"{system_content}\n\n{user_content}"
         messages = [{"role": "user", "content": merged}]
+    # Fake/test tokenizers may not implement apply_chat_template; fall back
+    # to plain encode of the concatenated message contents (W2-A tests).
+    if not hasattr(tokenizer, "apply_chat_template"):
+        text = "\n".join(m["content"] for m in messages)
+        return tokenizer.encode(text, add_special_tokens=False)
     return tokenizer.apply_chat_template(
         messages, add_generation_prompt=True, tokenize=True, **profile.template_kwargs
     )
@@ -321,6 +329,50 @@ def _chat_ids(
 def _prompt_sha256(prompt_ids: list[int]) -> str:
     """sha256 of the full prompt token ids, JSON-serialized as a list."""
     return hashlib.sha256(json.dumps(list(prompt_ids)).encode("utf-8")).hexdigest()
+
+
+def make_field_prompt_renderer(tokenizer, context: str, schema, scoring: str = "slots"):
+    """Build a render_field_prompt callback for the plan compilers (W2-A).
+
+    Returns a callable ``(fname, option_idx=None) -> list[int]`` that renders
+    the complete chat prompt for one field (or one multi option): system +
+    nonce-delimited context + the field's prompt block + lead-in. Used by
+    run_parallel_generation (the engine) and by utility callers (lint, cli,
+    evalrun) that need a plan but have no context of their own — they pass
+    an empty context.
+    """
+    profile = _resolve_profile(tokenizer)
+    nonce = hashlib.sha256(context.encode("utf-8")).hexdigest()[:12]
+    while f"</CONTEXT_{nonce}>" in context:
+        nonce += hashlib.sha256(nonce.encode("utf-8")).hexdigest()[:4]
+    context_open = f"<<<CONTEXT_{nonce}"
+    context_close = f"CONTEXT_{nonce}>>>"
+
+    # For slots mode, the W2-C searched codebook is fetched lazily on first
+    # render (avoids re-running the codebook search when the plan is already
+    # cached and the renderer is never invoked).
+    _field_aliases: dict[str, list[str]] | None = None
+
+    def _get_aliases():
+        nonlocal _field_aliases
+        if _field_aliases is None:
+            _field_aliases = schema._searched_aliases(tokenizer) if scoring == "slots" else {}
+        return _field_aliases
+
+    def render_field_prompt(fname: str, option_idx: int | None = None) -> list[int]:
+        fdef = schema.fields[fname]
+        aliases = _get_aliases().get(fname) if scoring == "slots" else None
+        if fdef.field_type == "multi" and option_idx is not None:
+            block = schema.render_multi_option_block(fname, fdef, option_idx)
+        else:
+            block = schema.render_field_block(fname, fdef, aliases, scoring)
+        user_content = (
+            f"{context_open}\n{context}\n{context_close}\n\n{block}\n\n"
+            "Return the answer as a JSON object."
+        )
+        return _chat_ids(tokenizer, user_content, PROMPT_V2_SYSTEM, profile)
+
+    return render_field_prompt
 
 
 def _stop_token_ids(tokenizer) -> set:
@@ -653,7 +705,9 @@ def _get_or_compute_prior(
     temperature is not part of the cache key (it must not vary between the
     two passes anyway).
     """
-    plan_hash = schema.plan_hash(tokenizer, scoring)
+    render_field_prompt = make_field_prompt_renderer(tokenizer, neutral_context, schema, scoring)
+    _ctx_hash = hashlib.sha256(neutral_context.encode("utf-8")).hexdigest()[:16]
+    plan_hash = schema.plan_hash(tokenizer, scoring, render_field_prompt, cache_key=_ctx_hash)
     key = _prior_cache_key(model, tokenizer, PROMPT_VERSION, scoring, plan_hash)
     hit = _PRIOR_CACHE.get(key) if key else None
     if hit is not None:
@@ -912,57 +966,70 @@ def run_parallel_generation(
     # 1. Batch plan, then rows per field: one row per branch point of the
     #    candidate remainders (fields with distinct first tokens: exactly one
     #    row). Slots mode scores quoted aliases and maps them back after.
+    #
+    #    W2-A: field-local prompts. The global schema block is replaced by
+    #    per-field prompt blocks. The engine renders one complete chat prompt
+    #    per field (system + context + that field's block + lead-in), passes
+    #    a render_field_prompt callback to the plan compiler, and the compiler
+    #    takes the exact token-ID LCP across all per-field prompts as the
+    #    prefill. Each row carries its field's post-LCP prompt tail + its
+    #    candidate remainder. Context is placed ABOVE the field block (GPT Q2:
+    #    final contract nearest generation), with a sha256-nonce delimiter.
+    render_field_prompt = make_field_prompt_renderer(tokenizer, context, schema, scoring)
+    # Cache key includes the context hash: W2-A plans carry prompt_tail_ids
+    # that depend on the context, so the same schema+tokenizer with different
+    # contexts must not share a cached plan.
+    _ctx_hash = hashlib.sha256(context.encode("utf-8")).hexdigest()[:16]
+    t_plan0 = time.perf_counter()
     plan = (
-        schema.compile_slot_plan(tokenizer)
+        schema.compile_slot_plan(tokenizer, render_field_prompt, cache_key=_ctx_hash)
         if scoring == "slots"
-        else schema.compile_labels_plan(tokenizer)
+        else schema.compile_labels_plan(tokenizer, render_field_prompt, cache_key=_ctx_hash)
     )
+    plan_compile_ms = (time.perf_counter() - t_plan0) * 1000
 
-    rows: list[list[int]] = []  # token ids per row (WITHOUT the lead-in —
-    # the lead-in lives in the prefill cache, bug 16)
+    rows: list[list[int]] = []  # token ids per row
     row_field: list[str] = []  # field each row belongs to
     row_branch: dict[int, int] = {}  # row idx -> branch-node index within its field
     row_option: dict[int, int] = {}  # row idx -> option index (multi fields only)
     tries: dict[str, list[dict]] = {}
-    lead_in = plan["lead_in_ids"]
     field_plans = plan["fields"]
     pad_id = tokenizer.pad_token_id or 0
+    # W2-A: each row carries its field's post-LCP prompt tail + candidate
+    # remainder. No lead_in — the prefill IS the LCP.
     for fname in schema.fields:
         p = field_plans[fname]
+        tail = p["prompt_tail_ids"]
         if "options" in p:
-            # multi: one boolean row per option. suffix_ids_list entries are
-            # stored WITHOUT the schema-wide lead-in (one rule for every row
-            # type), so the lead-in is prepended exactly once here.
+            # multi: one boolean row per option. prompt_tail_ids is a list
+            # of tails (one per option); suffix_ids_list entries are stored
+            # WITHOUT the schema-wide lead-in, so the tail is prepended once.
             for oi, suffix_ids in enumerate(p["suffix_ids_list"]):
-                rows.append(lead_in + list(suffix_ids))
+                opt_tail = (
+                    tail[oi]
+                    if isinstance(tail, list) and tail and isinstance(tail[0], list)
+                    else tail
+                )
+                rows.append(list(opt_tail) + list(suffix_ids))
                 row_field.append(fname)
                 row_option[len(rows) - 1] = oi
             continue
         field_trie = build_trie(p["remainders"])
         tries[fname] = field_trie
         for bi, node in enumerate(field_trie):
-            rows.append(lead_in + list(p["shared_ids"]) + list(node["path"]))
+            rows.append(list(tail) + list(p["shared_ids"]) + list(node["path"]))
             row_field.append(fname)
             row_branch[len(rows) - 1] = bi
 
-    # 2. Prefill once (prompt v2: system paragraph + user schema block and
-    #    delimited context). The prompt ends at
-    #    the chat template's generation marker; '{\n' and everything after is
-    #    part of the candidate rows (T3 boundary alignment).
-    schema_str = (
-        schema.to_alias_schema_str() if scoring == "slots" else schema.to_labels_schema_str()
-    )
-    user_content = (
-        f"Classify the following fields.\n\n{schema_str}\n\n<<<CONTEXT\n{context}\nCONTEXT>>>"
-    )
-    base_ids = _chat_ids(tokenizer, user_content, PROMPT_V2_SYSTEM, _resolve_profile(tokenizer))
-    # Bug 16 explored and REJECTED here: moving the schema-wide lead-in from
-    # the rows into the prefill passes the W1-A parity suite only when the
-    # decision read happens at the same kernel shape — the shortened rows
-    # (3-wide instead of lead_in+shared) change Metal matmul tiling and break
-    # BIT-identical batch=1 vs batch=N parity (measured: 0.005-nat drift on
-    # the action row). Keep the lead-in in the rows; the gather change below
-    # is the memory win this PR ships.
+    # 2. Prefill once. W2-A: the prefill is the exact token-ID LCP of all
+    #    per-field chat prompts (system + context + field block + lead-in)
+    #    computed by the plan compiler via the render_field_prompt callback.
+    #    This is shorter than the old global schema prompt: each row carries
+    #    its own field's prompt tail instead of copying the full schema block.
+    #    The prompt ends at the chat template's generation marker; the
+    #    candidate JSON tail belongs to the row tokenization (T3 boundary).
+    # W2-A: prefill = exact token-ID LCP of all per-field chat prompts.
+    base_ids = list(plan["lcp_ids"])
     base_arr = mx.array(base_ids)[None]
 
     t_pre0 = time.perf_counter()
@@ -1029,15 +1096,23 @@ def run_parallel_generation(
     row_decision: list[tuple[int, list[int]]] = []
     for ridx in range(len(rows)):
         p = field_plans[row_field[ridx]]
+        tail = p["prompt_tail_ids"]
         if ridx in row_option:
+            # multi: tail is per-option (list of lists); pick this option's.
+            oi = row_option[ridx]
+            if isinstance(tail, list) and tail and isinstance(tail[0], list):
+                tail_len = len(tail[oi])
+            else:
+                tail_len = len(tail)
             # multi option row: RAW Y/N logits at the option row's last
             # position (the row ends right before the Y/N divergence),
             # in remainder order ["Y", "N"].
-            position = len(lead_in) + len(p["suffix_ids_list"][row_option[ridx]]) - 1
-            allowed = [t[0] for t in p["remainders"][row_option[ridx]]]
+            position = tail_len + len(p["suffix_ids_list"][oi]) - 1
+            allowed = [t[0] for t in p["remainders"][oi]]
         else:
+            tail_len = len(tail)
             node = tries[row_field[ridx]][row_branch[ridx]]
-            position = len(lead_in) + len(p["shared_ids"]) + len(node["path"]) - 1
+            position = tail_len + len(p["shared_ids"]) + len(node["path"]) - 1
             allowed = list(node["children"])
         row_decision.append((position, allowed))
     # Row idx -> {branch-node index: [child logits in node["children"] order]}.
@@ -1566,6 +1641,16 @@ def run_parallel_generation(
         # confidence_model key so a future scoring-mode change rewrites it.
         "prompt_sha256": _prompt_sha256(base_ids),
         "prompt_version": PROMPT_VERSION,
+        # W2-A telemetry: prefill length (LCP of per-field prompts) and
+        # total suffix tokens (sum of row lengths). Together they measure
+        # the field-local prompt's memory/latency tradeoff vs the old global
+        # schema block (prefill drops by ~S, suffix grows by ~S_r per row).
+        "prefill_tokens": len(base_ids),
+        "suffix_tokens_total": sum(len(r) for r in rows),
+        # W2-A: time to compile the plan (tokenize R field prompts, LCP,
+        # codebook search). With per-context cache key, a new context
+        # recompiles; a repeated context hits the cache (~0 ms).
+        "plan_compile_ms": plan_compile_ms,
         "probability_status": probability_status,
         "prior_correction": prior_correction,
         "constraints_applied": bool(constraints),
