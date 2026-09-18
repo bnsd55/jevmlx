@@ -237,8 +237,28 @@ def test_clear_engine_cache_is_public_and_idempotent():
 
 
 def test_load_engine_cache_is_single_slot():
-    """Y9: one model in unified memory at a time — maxsize=1."""
-    assert jevmlx.load_engine.cache_info().maxsize == 1
+    """Y9 (W5-D finding 36): one model in unified memory at a time — the
+    lru_cache sits on the RESOLVED id, maxsize=1. Aliases and raw Hub ids
+    resolve to the same entry."""
+    from jevmlx.engine import _load_engine_resolved
+
+    assert _load_engine_resolved.cache_info().maxsize == 1
+
+
+def test_load_engine_resolves_before_caching():
+    """W5-D finding 36: the cache key is the RESOLVED model id —
+    load_engine("quality") and load_engine(full-id) must hit one entry."""
+
+    from jevmlx import engine
+    from jevmlx.models import MODEL_ALIASES
+
+    full_id = MODEL_ALIASES["quality"]
+    assert engine.resolve_model("quality") == full_id
+    # Source-level: the public wrapper resolves BEFORE the cached loader.
+    import inspect
+
+    src = inspect.getsource(engine.load_engine)
+    assert "return _load_engine_resolved(resolve_model(model_id))" in src
 
 
 def test_decide_end_to_end():

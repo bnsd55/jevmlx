@@ -844,8 +844,12 @@ def test_metal_allocation_failure_halves_chunk_and_scores_all_rows():
             result["field_telemetry"][fname]["log_scores"]
             == (expected["field_telemetry"][fname]["log_scores"])
         ), fname
-    # 4 rows in a bucket: first pass (2 rows) fails, retries as 1+1.
-    assert result["sequential_forward_passes"] >= 3
+    # 4 rows in a bucket: the first chunk (4 rows, batch > 1) fails at the
+    # model call; W5-D finding 30 semantics: the failed attempt is NOT a
+    # pass, the chunk retries at half (2), and the two halves succeed —
+    # 2 successful passes + 1 failed_attempt, every row scored.
+    assert result["sequential_forward_passes"] == 2
+    assert result["failed_attempts"] == 1
     assert result["peak_active_bytes"] > 0
 
 
