@@ -201,8 +201,8 @@ class StructuredSchema:
         parts = []
         for choice in field.choices:
             gloss = field.choice_descriptions.get(choice)
-            gloss_part = f" — {gloss}" if gloss else ""
-            parts.append(f"{choice}{gloss_part}")
+            gloss_part = f" — {json.dumps(gloss)}" if gloss else ""
+            parts.append(f"{json.dumps(choice)}{gloss_part}")
         return "; ".join(parts)
 
     def to_schema_str(self, mode: str = "slots") -> str:
@@ -227,8 +227,8 @@ class StructuredSchema:
             if field.field_type == "multi":
                 menu = self._multi_field_header(field)
                 lines.append(
-                    f'  "{name}": {menu}  // {desc} (select all that apply; '
-                    "each option is answered yes or no)"
+                    f'  {json.dumps(name)}: {menu}  // {json.dumps(desc)} '
+                    '(select all that apply; "Y" = applies, "N" = does not apply)'
                 )
                 continue
             choices_list = (
@@ -239,13 +239,21 @@ class StructuredSchema:
                 for i, choice in enumerate(choices_list):
                     alias = _alias_code(i)
                     gloss = field.choice_descriptions.get(choice)
-                    parts.append(f"{alias}) {choice} — {gloss}" if gloss else f"{alias}) {choice}")
+                    parts.append(
+                        f"{alias}) {json.dumps(choice)} — {json.dumps(gloss)}"
+                        if gloss
+                        else f"{alias}) {json.dumps(choice)}"
+                    )
             else:
                 parts = []
                 for choice in choices_list:
                     gloss = field.choice_descriptions.get(choice)
-                    parts.append(f"{choice} — {gloss}" if gloss else choice)
-            lines.append(f'  "{name}": {"  ".join(parts)}  // {desc}')
+                    parts.append(
+                        f"{json.dumps(choice)} — {json.dumps(gloss)}"
+                        if gloss
+                        else json.dumps(choice)
+                    )
+            lines.append(f'  {json.dumps(name)}: {"  ".join(parts)}  // {json.dumps(desc)}')
         return "\n".join(lines)
 
     def to_alias_schema_str(self) -> str:
@@ -318,16 +326,134 @@ class StructuredSchema:
             weakref.finalize(tokenizer, self._plans.pop, cache_key, None)
         self._plans[cache_key] = (ref, plan)
 
+    def _compile_multi_plans(self, tokenizer) -> dict[str, dict[str, Any]]:
+        """Per-multi-field plans with UNSTRIPPED full option prefixes.
+
+        One yes/no row per option. The row is the natural question
+        ('"<field>/<option>": '), and the scored candidates are the QUOTED
+        aliases "Y"/"N". The plan is built PER OPTION from that option's own
+        candidate pair: prefix = everything up to the Y/N divergence (the
+        option's full row lead-in plus any common token start of 'Y'/'N'),
+        remainders = the two continuations. A single cross-option prefix
+        would put branch nodes at the option-name position and read the Y/N
+        logits at the wrong spot.
+
+        Returns ``{fname: {options, prefix_ids_list, remainders}}`` —
+        prefixes are FULL row prefixes (nothing stripped yet); the
+        schema-wide lead-in is factored exactly once, later, by the caller
+        that owns the final plan (bug 1: stripping here and re-factoring in
+        a different mode corrupted multi-only slot rows).
+        """
+        plans: dict[str, dict[str, Any]] = {}
+        for fname, fdef in self.fields.items():
+            if fdef.field_type != "multi":
+                continue
+            prefix_ids_list = []
+            remainders_per_option = []
+            for option in fdef.choices:
+                pair = [
+                    tokenizer.encode(
+                        self._candidate_text(f"{fname}/{option}", f'"{alias}"'),
+                        add_special_tokens=False,
+                    )
+                    for alias in ("Y", "N")
+                ]
+                option_shared = _common_token_prefix(pair)
+                option_remainders = [full[len(option_shared) :] for full in pair]
+                if not option_shared:
+                    # Zero-length row: the Y/N decision would sit
+                    # directly at the generation boundary (C2, same rule
+                    # as the scalar guard).
+                    raise SchemaCompileError(
+                        fname,
+                        f"field '{fname}': option '{option}' Y/N "
+                        f"candidates share no token prefix (tokenizer "
+                        f"{type(tokenizer).__name__}); cannot place the "
+                        "decision row",
+                    )
+                if option_remainders[0] == option_remainders[1]:
+                    raise SchemaCompileError(
+                        fname,
+                        f"field '{fname}': option '{option}' tokenizes to "
+                        "identical Y/N candidates; the engine cannot "
+                        "distinguish them",
+                    )
+                # Same rule as enums (R5): a strict-prefix continuation can
+                # never be distinguished by branch scoring.
+                if len(option_remainders[0]) < len(option_remainders[1]):
+                    shorter, longer = option_remainders
+                    short_name, long_name = "Y", "N"
+                else:
+                    shorter, longer = option_remainders[1], option_remainders[0]
+                    short_name, long_name = "N", "Y"
+                if longer[: len(shorter)] == shorter:
+                    raise SchemaCompileError(
+                        fname,
+                        f"field '{fname}': option '{option}' has a strict "
+                        f"token-prefix continuation ({short_name} is a prefix of "
+                        f"{long_name} in token space); the engine would never "
+                        "distinguish them",
+                    )
+                prefix_ids_list.append(option_shared)
+                remainders_per_option.append(option_remainders)
+            plans[fname] = {
+                "options": list(fdef.choices),
+                "prefix_ids_list": prefix_ids_list,
+                "remainders": remainders_per_option,
+            }
+        return plans
+
+    @staticmethod
+    def _candidate_text(name: str, value_text: str) -> str:
+        """The complete assistant tail for one row: '{\n' + row + ',\n'.
+
+        The row key is always json.dumps(name) (C3: no raw interpolation;
+        field names are dot- and slash-free, so '<field>/<option>' option
+        keys and scalar field keys are injective across (field, option)
+        pairs and field names).
+        """
+        return "{\n" + f"  {json.dumps(name)}: {value_text}" + ",\n"
+
+    def _factor_lead_in(
+        self,
+        plan: dict[str, dict[str, Any]],
+        key_scalar: str,
+        key_multi: str,
+    ) -> dict[str, Any]:
+        """Factor the schema-wide lead-in over every row prefix, once.
+
+        Row prefixes are the scalar fields' shared_ids (under
+        ``key_scalar``) AND the multi option prefixes (under ``key_multi``).
+        The common prefix of ALL of them becomes ``lead_in_ids`` and is
+        stripped from every row prefix — exactly once, after the complete
+        final plan for the mode exists (bug 1: stripping inside a
+        sub-builder and re-factoring later loses the strip in one mode).
+        """
+        row_prefixes = [p[key_scalar] for p in plan.values() if key_scalar in p] + [
+            ids for p in plan.values() if key_multi in p for ids in p[key_multi]
+        ]
+        lead_in = _common_token_prefix(row_prefixes) if row_prefixes else []
+        if lead_in:
+            for p in plan.values():
+                if key_multi in p:
+                    p[key_multi] = [
+                        ids[len(lead_in) :] if ids[: len(lead_in)] == lead_in else ids
+                        for ids in p[key_multi]
+                    ]
+                if key_scalar in p:
+                    p[key_scalar] = p[key_scalar][len(lead_in) :]
+        return {"lead_in_ids": list(lead_in), "fields": plan}
+
     def compile_slot_plan(self, tokenizer) -> dict[str, dict[str, Any]]:
         """Slot-trie plan (the default scoring mode): the decision row stays
         JSON — ``'{\n  "<field>": '`` — and the scored candidates are the
         QUOTED neutral aliases ``'"A"'``, `'"B"'``, ... (base-26 codes beyond
         26 choices), mapped back to the real choice strings on assembly.
 
-        Multi fields share the same per-option yes/no rows in both modes
-        (see compile_labels_plan): the row text is the natural question and
-        the scored candidates are the quoted "Y"/"N" aliases. Booleans get
-        aliases too (A -> true, B -> false).
+        Multi fields use one yes/no row per option, built by the shared
+        private multi-plan builder (see _compile_multi_plans): the row text
+        is the natural question and the scored candidates are the quoted
+        "Y"/"N" aliases. Booleans get aliases too (A -> true, B -> false).
 
         Returns the same shape as the labels plan
         (``{"lead_in_ids": ..., "fields": {fname: plan}}``) with per-field
@@ -394,18 +520,17 @@ class StructuredSchema:
                 "choices": values,
             }
 
-        if any(f.field_type == "multi" for f in self.fields.values()):
-            labels_plan = self.compile_labels_plan(tokenizer)
-            for fname, fdef in self.fields.items():
-                if fdef.field_type == "multi":
-                    fields_plan[fname] = labels_plan["fields"][fname]
-        row_prefixes = [p["shared_ids"] for p in fields_plan.values() if "shared_ids" in p]
-        lead_in = _common_token_prefix(row_prefixes) if row_prefixes else []
-        if lead_in:
-            for p in fields_plan.values():
-                if "shared_ids" in p:
-                    p["shared_ids"] = p["shared_ids"][len(lead_in) :]
-        result = {"lead_in_ids": list(lead_in), "fields": fields_plan}
+        # Multi fields: the shared private multi-plan builder returns
+        # UNSTRIPPED full option prefixes (bug 2: no labels-plan compile, so
+        # a scalar real-label collision cannot fail slot mode). The lead-in
+        # is factored exactly once below, over scalar shared_ids AND multi
+        # prefixes (bug 1).
+        fields_plan.update(self._compile_multi_plans(tokenizer))
+        result = self._factor_lead_in(fields_plan, key_scalar="shared_ids", key_multi="prefix_ids_list")
+        # Multi rows keep the engine-facing name suffix_ids_list.
+        for p in result["fields"].values():
+            if "prefix_ids_list" in p:
+                p["suffix_ids_list"] = p.pop("prefix_ids_list")
         self._cache_plan(tokenizer, result, mode="slots")
         return result
 
@@ -446,85 +571,12 @@ class StructuredSchema:
             return cached
         plan: dict[str, dict[str, Any]] = {}
 
-        def candidate_text(name: str, value_text: str) -> str:
-            """The complete assistant tail for one row: '{\n' + row + ',\n'.
-
-            The row key is always json.dumps(name) (C3: no raw interpolation;
-            field names are dot- and slash-free, so '<field>.<option>' scalar
-            keys and '<field>/<option>' option keys are injective across
-            (field, option) pairs and field names).
-            """
-            return "{\n" + f"  {json.dumps(name)}: {value_text}" + ",\n"
-
         for fname, fdef in self.fields.items():
             if fdef.field_type == "multi":
-                # One yes/no row per option. The row is the natural question
-                # ('"<field>/<option>": '), and the scored candidates are the
-                # QUOTED aliases "Y"/"N" — the same slot machinery enums use
-                # (V4: the model never sees a synthetic 'field.option' JSON
-                # key; the schema block describes each option and states that
-                # every option is answered yes or no).
-                # The plan is built PER OPTION from that option's own candidate
-                # pair: shared = everything up to the Y/N divergence (the
-                # option's full row lead-in plus any common token start of
-                # 'Y'/'N'), remainders = the two continuations. A single
-                # cross-option prefix would put branch nodes at the option-name
-                # position and read the Y/N logits at the wrong spot.
-                suffix_ids_list = []
-                remainders_per_option = []
-                for option in fdef.choices:
-                    pair = [
-                        tokenizer.encode(
-                            candidate_text(f"{fname}/{option}", f'"{alias}"'),
-                            add_special_tokens=False,
-                        )
-                        for alias in ("Y", "N")
-                    ]
-                    option_shared = _common_token_prefix(pair)
-                    option_remainders = [full[len(option_shared) :] for full in pair]
-                    if not option_shared:
-                        # Zero-length row: the Y/N decision would sit
-                        # directly at the generation boundary (C2, same rule
-                        # as the scalar guard).
-                        raise SchemaCompileError(
-                            fname,
-                            f"field '{fname}': option '{option}' Y/N "
-                            f"candidates share no token prefix (tokenizer "
-                            f"{type(tokenizer).__name__}); cannot place the "
-                            "decision row",
-                        )
-                    if option_remainders[0] == option_remainders[1]:
-                        raise SchemaCompileError(
-                            fname,
-                            f"field '{fname}': option '{option}' tokenizes to "
-                            "identical Y/N candidates; the engine cannot "
-                            "distinguish them",
-                        )
-                    # Same rule as enums (R5): a strict-prefix continuation can
-                    # never be distinguished by branch scoring.
-                    if len(option_remainders[0]) < len(option_remainders[1]):
-                        shorter, longer = option_remainders
-                        short_name, long_name = "Y", "N"
-                    else:
-                        shorter, longer = option_remainders[1], option_remainders[0]
-                        short_name, long_name = "N", "Y"
-                    if longer[: len(shorter)] == shorter:
-                        raise SchemaCompileError(
-                            fname,
-                            f"field '{fname}': option '{option}' has a strict "
-                            f"token-prefix continuation ({short_name} is a prefix of "
-                            f"{long_name} in token space); the engine would never "
-                            "distinguish them",
-                        )
-                    suffix_ids_list.append(option_shared)
-                    remainders_per_option.append(option_remainders)
-                plan[fname] = {
-                    "options": list(fdef.choices),
-                    # Stored WITHOUT the schema-wide lead-in; the engine
-                    # prepends it to every row (one rule for all row types).
-                    "suffix_ids_list": suffix_ids_list,
-                    "remainders": remainders_per_option,
-                }
+                # Multi rows come from the shared private builder
+                # (unstripped full option prefixes); the lead-in is factored
+                # exactly once below, over scalar shared_ids AND multi
+                # prefixes (bug 1).
                 continue
 
             if fdef.field_type == "boolean":
@@ -532,7 +584,7 @@ class StructuredSchema:
             else:
                 value_texts = [json.dumps(choice) for choice in fdef.choices]
             candidates = [
-                tokenizer.encode(candidate_text(fname, value_text), add_special_tokens=False)
+                tokenizer.encode(self._candidate_text(fname, value_text), add_special_tokens=False)
                 for value_text in value_texts
             ]
 
@@ -570,39 +622,18 @@ class StructuredSchema:
                 "remainders": remainders,
             }
 
+        # Multi fields: shared private builder, unstripped full prefixes.
+        plan.update(self._compile_multi_plans(tokenizer))
         # Schema-wide lead-in (typically '{\n  "') shared by every field's
         # candidates: lifted out of shared_ids so the engine can keep it in
         # the prefill broadcast cache. Remainders stay relative to the full
         # per-field shared prefix; rows are lead_in + shared_ids + path.
-        # Lead-in candidates: every row prefix — scalar fields' shared_ids
-        # AND multi option prefixes (B1: with only a multi field, the lead-in
-        # must still be the common prefix of the option rows, never their
-        # longer per-option text).
-        field_shared_prefixes = [p["shared_ids"] for p in plan.values() if "shared_ids" in p] + [
-            ids for p in plan.values() if "suffix_ids_list" in p for ids in p["suffix_ids_list"]
-        ]
-        if not field_shared_prefixes:
-            wrapped: dict[str, Any] = {"lead_in_ids": [], "fields": plan}
-            self._cache_plan(tokenizer, wrapped, mode="labels")
-            return wrapped
-        lead_in = _common_token_prefix(field_shared_prefixes)
-        # An empty schema-wide lead-in is legal (e.g. char-level tokenizers
-        # where '{\n' fuses with the field name): the engine then runs one row
-        # per field with no broadcast prefix — each row still carries that
-        # field's full shared_ids.
-        # Apply the same strip to multi option prefixes so the engine can
-        # prepend lead_in uniformly to every row (R1: one rule for all rows).
-        for p in plan.values():
-            if "suffix_ids_list" in p and lead_in:
-                p["suffix_ids_list"] = [
-                    ids[len(lead_in) :] if ids[: len(lead_in)] == lead_in else ids
-                    for ids in p["suffix_ids_list"]
-                ]
-        for p in plan.values():
-            if "shared_ids" in p:
-                p["shared_ids"] = p["shared_ids"][len(lead_in) :]
-        # Metadata lives beside the field plans, never mixed into them (D1:
-        # a field could legally be named "_lead_in_ids").
-        result = {"lead_in_ids": list(lead_in), "fields": plan}
+        # Factored exactly once over every row prefix — scalar shared_ids AND
+        # multi option prefixes (B1/bug 1).
+        result = self._factor_lead_in(plan, key_scalar="shared_ids", key_multi="prefix_ids_list")
+        # Multi rows keep the engine-facing name suffix_ids_list.
+        for p in result["fields"].values():
+            if "prefix_ids_list" in p:
+                p["suffix_ids_list"] = p.pop("prefix_ids_list")
         self._cache_plan(tokenizer, result, mode="labels")
         return result

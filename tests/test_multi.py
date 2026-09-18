@@ -148,8 +148,8 @@ def test_multi_prompt_describes_options_and_yes_no_contract():
     )
     for mode in ("slots", "labels"):
         block = schema.to_schema_str(mode)
-        assert "billing — money issues; tech — software faults" in block
-        assert "each option is answered yes or no" in block
+        assert '"billing" — "money issues"; "tech" — "software faults"' in block
+        assert '"Y" = applies, "N" = does not apply' in block
         assert "select all that apply" in block
         assert '"topics.billing"' not in block and '"topics.billing"' not in block
         assert "topics/billing" not in block  # rows are engine-side, not prompt text

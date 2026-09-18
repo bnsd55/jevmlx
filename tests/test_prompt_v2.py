@@ -85,18 +85,18 @@ def test_alias_codes_base26():
 
 def test_alias_schema_block_lists_aliases_with_gloss():
     block = SCHEMA.to_alias_schema_str()
-    assert "A) LOW — stable income" in block  # gloss present
-    assert "C) HIGH — many missed payments" in block  # gloss present
-    assert "B) MEDIUM\n" in block or "B) MEDIUM " in block  # MEDIUM: no gloss part
+    assert 'A) "LOW" — "stable income"' in block  # gloss present
+    assert 'C) "HIGH" — "many missed payments"' in block  # gloss present
+    assert 'B) "MEDIUM"' in block  # MEDIUM: no gloss part
     assert "B) MEDIUM —" not in block
-    assert "A) true" in block and "B) false" in block  # boolean uses aliases too
+    assert 'A) "true"' in block and 'B) "false"' in block  # boolean uses aliases too
 
 
 def test_labels_schema_block_lists_real_choices():
     block = SCHEMA.to_labels_schema_str()
-    assert "LOW — stable income" in block  # gloss present
+    assert '"LOW" — "stable income"' in block  # gloss present, json.dumps-escaped (bug 6)
     assert "A)" not in block  # labels mode shows no aliases
-    assert "true | false" in block or "true  false" in block  # boolean as real values
+    assert '"true"  "false"' in block  # boolean as real values, json.dumps-escaped
 
 
 def test_prompt_v2_sends_system_and_user():
@@ -113,7 +113,7 @@ def test_prompt_v2_sends_system_and_user():
 def test_prompt_version_is_v2():
     tok = FakeTokenizer()
     result = run_parallel_generation(FakeModel(), tok, "ctx", SCHEMA)
-    assert result["prompt_version"] == PROMPT_VERSION == "jevmlx-parallel-v2"
+    assert result["prompt_version"] == PROMPT_VERSION == "jevmlx-parallel-v3"
 
 
 def test_slot_plan_maps_aliases_to_values():
@@ -164,7 +164,7 @@ def test_gemma_style_template_rejects_system_role():
     ]
 
     result = run_parallel_generation(FakeModel(), tok, "ctx", SCHEMA)
-    assert result["prompt_version"] == "jevmlx-parallel-v2"
+    assert result["prompt_version"] == "jevmlx-parallel-v3"
     # The scoring prompt is a single user turn with the merged system text.
     assert all(m["role"] != "system" for m in seen[-1])
     assert PROMPT_V2_SYSTEM in seen[-1][0]["content"]
