@@ -18,6 +18,7 @@ from jevmlx import StructuredSchema
 from jevmlx.engine import run_parallel_generation
 from jevmlx.trie import score_trie
 from tests.test_engine_fake import FakeModel, FakeTokenizer
+from tests.test_w4b_parity import _cases, _CountTokenizer, _StableModel
 
 
 class _HugeVocabModel(FakeModel):
@@ -108,3 +109,68 @@ def test_count_row_legal_mass_exposed():
     assert count_tel is not None
     assert "legal_mass" in count_tel
     assert 0.0 < count_tel["legal_mass"] <= 1.0
+
+
+# --- W5-D findings 40/41/42: batched parity matrix, real preset contexts, raw logits first ---
+
+
+def test_batched_parity_matrix_stable_fake():
+    """Finding 40: the batched matrix runs 1/2/4 contexts (equal + mixed
+    lengths), compares batched vs independent finals AND raw pre-rescore
+    row logits. On a batch-shape-stable fake, everything agrees exactly."""
+    from jevmlx.parity import check_batched_parity
+
+    model = _StableModel()
+    tokenizer = _CountTokenizer()
+    result = check_batched_parity(model, tokenizer, _cases())
+    assert result["winners_identical"] is True
+    assert result["max_abs_drift_nats"] == 0.0
+    assert result["max_raw_row_drift_nats"] == 0.0
+    assert set(result["per_case"]) == {"mini", "mini2"}
+
+
+def test_batched_parity_matrix_catches_row_drift():
+    """Finding 42: a model whose batched ROW logits drift (but whose
+    near-tie rescore hides it at the decision level) must fail the RAW
+    check — the final-decision comparison alone would pass."""
+    from jevmlx.parity import check_batched_parity
+
+    class _RowDriftModel(_StableModel):
+        """Boosts alias "B" only in batched suffix calls (>1-row chunks)."""
+
+        def __call__(self, tokens, cache=None):
+
+            out = super().__call__(tokens, cache=cache)
+            if tokens.shape[0] > 1 and tokens.shape[1] > 1:
+                out = out.at[:, :, 67].add(5.0)
+            return out
+
+    result = check_batched_parity(_RowDriftModel(), _CountTokenizer(), _cases())
+    # The raw row-logit comparison catches what the final decision gate
+    # (with batch=1 rescoring) would mask.
+    assert result["max_raw_row_drift_nats"] > 0.0
+
+
+def test_parity_uses_real_preset_context():
+    """Finding 41: _case_context reads the preset's REAL context —
+    bundled_preset_specs returns the whole preset dict."""
+    from jevmlx.parity import _case_context, bundled_preset_specs
+
+    cases = bundled_preset_specs()
+    for case_id, preset in cases:
+        ctx = _case_context(case_id, preset)
+        # The bundled presets all carry real contexts; the filler must not
+        # be used for them.
+        assert ctx == preset["context"], case_id
+
+
+def test_batched_parity_prior_on_matches_independent():
+    """Finding 40 matrix includes prior on/off: with prior_correction=True
+    the batched results still equal per-context decide (the shared prior
+    object — W5-D finding 26 — flows into every assemble)."""
+    from jevmlx.parity import check_batched_parity
+
+    result = check_batched_parity(
+        _StableModel(), _CountTokenizer(), _cases(), prior_correction=True
+    )
+    assert result["winners_identical"] is True
