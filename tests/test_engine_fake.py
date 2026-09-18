@@ -351,9 +351,16 @@ def test_prior_cache_keyed_by_live_tokenizer_not_id():
 
 
 def test_prior_cache_entry_dies_with_tokenizer():
-    """C1: the prior cache is keyed by the LIVE tokenizer (weakref), not its
-    id() — an entry cannot outlive its tokenizer, so a new tokenizer whose
-    id() was recycled can never be served a dead tokenizer's prior."""
+    """C1: the prior cache entry dies with its tokenizer (weakref), so a new
+    tokenizer whose id() was recycled can never be served a dead
+    tokenizer's prior.
+
+    W5-C fix detail: the KEY carries id(model)/id(tokenizer) — weakref.ref
+    objects are NOT key material because hash(ref) delegates to the
+    referent and mlx models are unhashable (every prior-corrected run
+    crashed). The entry carries the live refs; eviction runs through
+    weakref.finalize, and hit-time verification compares ref() against the
+    calling objects."""
     import gc
     import weakref
 
@@ -368,13 +375,18 @@ def test_prior_cache_entry_dies_with_tokenizer():
     prior = _get_or_compute_prior(model, tokenizer, schema, "slots", None, "neutral")
     assert _PRIOR_CACHE, "prior was not cached"
 
-    # Find this tokenizer's entry via its live weakref.
+    # Find this tokenizer's entry via the weakrefs stored ALONGSIDE the
+    # value (finding 34's discipline: key by id, verify by ref).
     live = weakref.ref(tokenizer)
 
     def entry_keys():
-        return [k for k in _PRIOR_CACHE if any(r is live for r in k if isinstance(r, weakref.ref))]
+        return [
+            k
+            for k, v in _PRIOR_CACHE.items()
+            if v.get("tokenizer_ref") is not None and v["tokenizer_ref"] is live
+        ]
 
-    assert entry_keys(), "entry not keyed by a weakref to the live tokenizer"
+    assert entry_keys(), "entry does not carry a live weakref to the tokenizer"
 
     # The tokenizer dies -> its entry is evicted (weakref.finalize) and can
     # never be served again, no matter which id() CPython hands out next.
