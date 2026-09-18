@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 # Bumped whenever the parallel path's prompt text changes (it feeds
 # prompt_sha256, so result sets from different prompt versions are not
 # comparable).
-PROMPT_VERSION = "jevmlx-parallel-v3"
+PROMPT_VERSION = "jevmlx-parallel-v4"
 
 
 @dataclass(frozen=True)
@@ -842,6 +842,9 @@ def run_parallel_generation(
             probs_yes = {}
             prior_entry = prior.get(fname) if prior is not None else None
             prior_pairs = prior_entry["option_pairs"] if prior_entry else None
+            # W2-E row codes: rows are keyed '<field>/<code>', but codes are
+            # positional (choices order), so row oi IS options[oi] — no map
+            # needed; results and telemetry stay option-keyed directly.
             for oi, ridx in enumerate(idxs):
                 pair = list(option_pair[ridx])
                 option_name = p["options"][oi]

@@ -132,10 +132,10 @@ def test_fold_multi():
 
 
 def test_multi_prompt_describes_options_and_yes_no_contract():
-    """V4: the schema block describes the multi field once with its options
-    and glosses, and states the yes-or-no contract; per-option rows appear
-    as '<field>/<option>' decision rows are the engine's business, but the
-    block must never show a synthetic 'field.option' key."""
+    """W2-E (v4): the schema block describes the multi field once, mapping
+    code = option in choices order (the engine's decision rows are keyed
+    '<field>/<code>'), with glosses and the Y/N contract; the block must
+    never show a synthetic 'field.option' key."""
     schema = StructuredSchema(
         {
             "topics": {
@@ -148,12 +148,14 @@ def test_multi_prompt_describes_options_and_yes_no_contract():
     )
     for mode in ("slots", "labels"):
         block = schema.to_schema_str(mode)
-        assert '"billing" (Y = applies, N = does not apply) — "money issues"' in block
-        assert '"tech" (Y = applies, N = does not apply) — "software faults"' in block
-        assert "each option is answered Y or N" in block
+        # W2-E row codes: the block maps code = option in choices order.
+        assert '00 = "billing" — "money issues"' in block
+        assert '01 = "tech" — "software faults"' in block
+        assert '"Y" = applies or "N" = does not apply' in block
         assert "select all that apply" in block
         assert '"topics.billing"' not in block and '"topics.billing"' not in block
-        assert "topics/billing" not in block  # rows are engine-side, not prompt text
+        assert "topics/billing" not in block  # raw option never a row key in prompt
+        assert "topics/00" not in block  # row keys stay engine-side
 
 
 def test_multi_engine_result_semantics():

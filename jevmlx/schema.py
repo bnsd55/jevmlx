@@ -142,12 +142,13 @@ class StructuredSchema:
                     "names keep multi row keys injective"
                 )
             if "/" in field_name:
-                # Multi option rows are keyed '<field>/<option>'; a slash
-                # inside a field name would collide across fields (C3: row
-                # keys must be injective).
+                # Multi option rows are keyed '<field>/<code>' where code is
+                # the option's zero-padded 2-digit index in choices order
+                # (W2-E row codes); a slash inside a field name would collide
+                # across fields (C3: row keys must be injective).
                 raise ValueError(
                     f"Field name '{field_name}' contains '/'; slash-free field "
-                    "names keep multi option row keys '<field>/<option>' injective"
+                    "names keep multi option row keys '<field>/<code>' injective"
                 )
             self.fields[field_name] = FieldDefinition(
                 name=field_name,
@@ -197,18 +198,26 @@ class StructuredSchema:
 
     def _multi_field_header(self, field: FieldDefinition) -> str:
         """Schema-block text for one multi field: options as a described
-        yes/no menu with explicit Y/N codes (Q6-6: the scorer expects quoted
-        Y/N; the model must see the exact codes and meanings). Every
-        displayed name, label, option and gloss is json.dumps-escaped so
-        quotes/newlines cannot break the schema block (Q2 'System text' /
-        'Schema block format')."""
+        yes/no menu mapping code = option (W2-E row codes: the engine's
+        decision rows are keyed '<field>/<code>', so the model must see the
+        exact code for every option) with explicit Y/N meanings (Q6-6: the
+        scorer expects quoted Y/N). Every displayed name, label, option and
+        gloss is json.dumps-escaped so quotes/newlines cannot break the
+        schema block (Q2 'System text' / 'Schema block format')."""
         parts = []
-        for choice in field.choices:
+        for i, choice in enumerate(field.choices):
             safe_choice = json.dumps(choice, ensure_ascii=False)
             gloss = field.choice_descriptions.get(choice)
             gloss_part = f" — {json.dumps(gloss, ensure_ascii=False)}" if gloss else ""
-            parts.append(f"{safe_choice} (Y = applies, N = does not apply){gloss_part}")
+            parts.append(f"{self.code_for_index(i)} = {safe_choice}{gloss_part}")
         return "; ".join(parts)
+
+    @staticmethod
+    def code_for_index(index: int) -> str:
+        """The 2-digit zero-padded row code for the option at ``index``
+        (choices order: 00, 01, ...; FieldDefinition caps multi at 64
+        choices, so two digits always suffice)."""
+        return f"{index:02d}"
 
     def to_schema_str(self, mode: str = "slots") -> str:
         """Schema block for prompt v2, rendered per scoring mode.
@@ -235,7 +244,7 @@ class StructuredSchema:
                 menu = self._multi_field_header(field)
                 lines.append(
                     f"  {safe_name}: {menu}  // {safe_desc} (select all that apply; "
-                    "each option is answered Y or N)"
+                    'each coded option is answered "Y" = applies or "N" = does not apply)'
                 )
                 continue
             choices_list = (
@@ -461,10 +470,20 @@ class StructuredSchema:
                 continue
             suffix_ids_list = []
             remainders_per_option = []
-            for option in fdef.choices:
+            codes = []
+            for oi, option in enumerate(fdef.choices):
+                # W2-E row codes: the decision row key is '<field>/<code>'
+                # (code = zero-padded 2-digit choices-order index), not
+                # '<field>/<option>' — the raw option text never reaches the
+                # scored token stream, so hostile/garbage option strings can
+                # no longer fragment or collide the rows (bug 18). The
+                # prompt's schema block maps code = option (same choices
+                # order), and telemetry maps codes back to option names.
+                code = self.code_for_index(oi)
+                codes.append(code)
                 pair = [
                     tokenizer.encode(
-                        candidate_text(f"{fname}/{option}", f'"{alias}"'),
+                        candidate_text(f"{fname}/{code}", f'"{alias}"'),
                         add_special_tokens=False,
                     )
                     for alias in ("Y", "N")
@@ -474,7 +493,7 @@ class StructuredSchema:
                 if not option_shared:
                     raise SchemaCompileError(
                         fname,
-                        f"field '{fname}': option '{option}' Y/N "
+                        f"field '{fname}': option '{code}' ({option!r}) Y/N "
                         f"candidates share no token prefix (tokenizer "
                         f"{type(tokenizer).__name__}); cannot place the "
                         "decision row",
@@ -482,7 +501,7 @@ class StructuredSchema:
                 if option_remainders[0] == option_remainders[1]:
                     raise SchemaCompileError(
                         fname,
-                        f"field '{fname}': option '{option}' tokenizes to "
+                        f"field '{fname}': option '{code}' ({option!r}) tokenizes to "
                         "identical Y/N candidates; the engine cannot "
                         "distinguish them",
                     )
@@ -495,7 +514,7 @@ class StructuredSchema:
                 if longer[: len(shorter)] == shorter:
                     raise SchemaCompileError(
                         fname,
-                        f"field '{fname}': option '{option}' has a strict "
+                        f"field '{fname}': option '{code}' ({option!r}) has a strict "
                         f"token-prefix continuation ({short_name} is a prefix of "
                         f"{long_name} in token space); the engine would never "
                         "distinguish them",
@@ -504,6 +523,9 @@ class StructuredSchema:
                 remainders_per_option.append(option_remainders)
             plan[fname] = {
                 "options": list(fdef.choices),
+                # W2-E row codes, choices order — telemetry maps code ->
+                # option via this list.
+                "codes": codes,
                 "suffix_ids_list": suffix_ids_list,
                 "remainders": remainders_per_option,
             }

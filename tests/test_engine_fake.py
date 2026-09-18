@@ -107,7 +107,7 @@ def test_prompt_sha256_stable_and_input_sensitive():
     assert r1["prompt_sha256"] != r3["prompt_sha256"]
     assert len(r1["prompt_sha256"]) == 64
     # Independent of the schema contents swap? No: same schema, so identical.
-    assert r1["prompt_version"] == "jevmlx-parallel-v3"
+    assert r1["prompt_version"] == "jevmlx-parallel-v4"
     assert (
         r1["probability_status"]
         == "constrained-path probability at T=1; uncalibrated as decision confidence"
