@@ -17,15 +17,14 @@ explicit: aliases missing from the returned top-k get a floor probability of
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import math
 import time
 from typing import Any
 
 from jevmlx.engine import PROMPT_V2_SYSTEM, _context_block
-from jevmlx.json_text import json_text
 from jevmlx.http import ChatCompletionsError, chat_completions_raw
+from jevmlx.json_text import json_text
 from jevmlx.schema import StructuredSchema
 
 __all__ = [

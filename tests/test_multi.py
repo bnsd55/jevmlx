@@ -144,7 +144,6 @@ def test_multi_prompt_describes_options_and_yes_no_contract():
             }
         }
     )
-    tok = CharTokenizerFake() if "CharTokenizerFake" in dir() else None
     from tests.test_w1b_slot_multi import CharTokenizer
 
     tok = CharTokenizer()

@@ -24,6 +24,7 @@ from typing import Any, NamedTuple
 
 from jinja2.exceptions import TemplateError
 
+from jevmlx.json_text import json_text
 from jevmlx.models import resolve_model
 from jevmlx.schema import StructuredSchema, _common_token_prefix, count_key, is_count_key
 from jevmlx.setcons import select_constrained_set
@@ -40,10 +41,6 @@ logger = logging.getLogger(__name__)
 # 39), and the nonce context delimiter (finding 44).
 PROMPT_VERSION = "jevmlx-parallel-v8"
 
-
-# W5-A finding 39: ONE canonical JSON serializer (jevmlx/json_text.py);
-# re-exported here for the prompt/candidate call sites in engine.
-from jevmlx.json_text import json_text
 
 # W2-E step 3: the count row's answer is trusted over the per-option rule
 # only when the row's top-2 log-score margin clears this many NATS. Below
