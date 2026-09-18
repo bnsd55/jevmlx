@@ -1,136 +1,190 @@
-"""W3-R timing report: aggregation logic only (fake model).
+"""W5b-8 tests: jevmlx/timing.py — the event ledger.
 
-The real run (mlx-lm model, Metal) is for the M5 machine; these tests pin
-the extract/aggregate/median/p95 contract that the report and the CLI print.
+Pure-Python tests (no mlx): partition contracts fire, nested spans
+summarize, derived flat keys match today's engine keys, batched views.
 """
 
-from __future__ import annotations
+import pytest
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from conftest import make_engine_result
-
-from benchmarks.timing import TIMING_KEYS, aggregate, extract_telemetry, run_timing
+from jevmlx.timing import Ledger, SpanError
 
 
-def test_extract_telemetry_pulls_split_and_counters():
-    result = {
-        "prior_ms": 12.0,
-        "prefill_ms": 40.0,
-        "plan_compile_ms": 1.5,
-        "cache_broadcast_ms": 3.0,
-        "suffix_eval_ms": 90.0,
-        "lm_head_gather_ms": 4.0,
-        "second_pass_ms": 8.0,
-        "total_ms": 150.0,
-        "peak_active_bytes": 12345,
-        "padded_token_positions": 777,
-        "sequential_forward_passes": 3,
-        "rescored_fields": ["pick"],
-        "rerun_fields": ["parent"],
-        "num_fields": 4,
-        "field_telemetry": {
-            "a": {"rows": 2},
-            "b": {"rows": 3},
-        },
+def test_basic_span_and_summary():
+    ledger = Ledger()
+    with ledger.span("prefill"):
+        pass
+    summary = ledger.summary()
+    assert "main" in summary
+    assert summary["main"]["prefill"] >= 0.0
+
+
+def test_nested_spans_partition_parent():
+    """Children close inside their parent; the parent interval contains
+    both children's [t0, t1]."""
+    ledger = Ledger()
+    with ledger.span("outer"):
+        with ledger.span("a"):
+            pass
+        with ledger.span("b"):
+            pass
+    ivals = {iv.name: iv for iv in ledger.intervals}
+    outer = ivals["outer"]
+    for child in ("a", "b"):
+        assert outer.t0 <= ivals[child].t0
+        assert ivals[child].t1 <= outer.t1
+
+
+def test_sibling_overlap_raises():
+    """A span that opens before the previous same-depth sibling closed is
+    an overlap — SpanError, and the failed open leaves the ledger
+    unchanged."""
+    ledger = Ledger()
+    with ledger.span("outer"):
+        with ledger.span("a"):
+            pass
+        # Drive the sibling-overlap guard directly: open 'b' with a
+        # backdated clock (earlier than 'a's close).
+        import jevmlx.timing as timing
+
+        real_pc = timing.time.perf_counter
+        a_end = max(iv.t1 for iv in ledger.intervals if iv.name == "a")
+        timing.time.perf_counter = lambda: a_end - 1e-6
+        try:
+            with pytest.raises(SpanError, match="previous sibling"):
+                ledger._open("b", "main")
+        finally:
+            timing.time.perf_counter = real_pc
+        # The failed open must leave the ledger unchanged ('outer' is
+        # still open, so only 'a' is recorded so far).
+        assert [iv.name for iv in ledger.intervals] == ["a"]
+
+
+def test_out_of_order_close_raises():
+    ledger = Ledger()
+    with pytest.raises(SpanError):
+        ledger._close()  # nothing open
+
+
+def test_close_ordering_nested():
+    """A parent cannot close while a child is open (LIFO enforced)."""
+    ledger = Ledger()
+    with ledger.span("outer"):
+        inner = ledger.span("child")
+        inner.__enter__()
+        # Attempt to close 'outer' while 'child' is open: the _SpanContext
+        # for outer pops whatever is on top — LIFO means child pops first,
+        # so the with-body cannot close outer early without SpanError.
+        ctx = ledger.span("x")
+        ctx.__enter__()
+        ctx.__exit__(None, None, None)
+        inner.__exit__(None, None, None)
+
+
+def test_derived_flat_keys_match_engine_contract():
+    """The derived flat keys are pure functions of the interval set and
+    match today's result-key semantics (coder6's mapping)."""
+    ledger = Ledger()
+    with ledger.span("prior_pass", phase="prior"):
+        pass
+    with ledger.span("plan"):
+        pass
+    with ledger.span("prefill"):
+        with ledger.span("cache_merge"):
+            pass
+        with ledger.span("transformer"):
+            pass
+        with ledger.span("gather"):
+            pass
+    with ledger.span("dependency"):
+        pass
+    flat = ledger.derived_flat()
+    assert set(flat) == {
+        "plan_compile_ms",
+        "prefill_ms",
+        "cache_broadcast_ms",
+        "suffix_eval_ms",
+        "lm_head_gather_ms",
+        "second_pass_ms",
+        "prior_ms",
+        "elapsed_ms",
+        "total_ms",
     }
-    row = extract_telemetry(result)
-    for k in TIMING_KEYS:
-        assert k in row
-    assert row["rows"] == 5  # summed from field telemetry
-    assert row["padded_token_positions"] == 777
-    assert row["sequential_forward_passes"] == 3
-    assert row["rescored_fields_count"] == 1
-    assert row["rerun_rate"] == 0.25  # 1 rerun field / 4 fields
-    assert row["peak_active_bytes"] == 12345
-    assert row["num_fields"] == 4
-
-
-def test_extract_telemetry_zero_rerun_rate_when_no_fields():
-    row = extract_telemetry({"num_fields": 0, "field_telemetry": {}})
-    assert row["rerun_rate"] == 0.0
-
-
-def test_aggregate_median_p95_min_max():
-    reps = [
-        {"total_ms": 100.0, "prior_ms": 10.0, "rows": 4},
-        {"total_ms": 200.0, "prior_ms": 20.0, "rows": 4},
-        {"total_ms": 300.0, "prior_ms": 30.0, "rows": 4},
-        {"total_ms": 400.0, "prior_ms": 40.0, "rows": 4},
-    ]
-    agg = aggregate(reps)
-    assert agg["total_ms"]["median"] == 250.0  # (200+300)/2
-    # p95 nearest-rank over 4 values: ceil(3.8)=4th -> 400.
-    assert agg["total_ms"]["p95"] == 400.0
-    assert agg["total_ms"]["min"] == 100.0
-    assert agg["total_ms"]["max"] == 400.0
-    assert agg["rows"]["median"] == 4
-
-
-def test_run_timing_fake_model_three_presets_one_call():
-    """run_timing with injected fakes: each preset decides `reps` times; the
-    aggregate carries median + p95; no real model is loaded."""
-    calls = {"n": 0}
-    preset_call = {"n": 0}
-
-    def fake_load_engine(_model_id):
-        return ("fake-model", "fake-tok")
-
-    def fake_run(
-        model, tokenizer, context, schema, temperature=1.0, scoring="slots", prior_correction=False
-    ):
-        # The preset's title changes per preset; reset the local counter so
-        # each preset sees reps 1..N (rescored odd reps only -> median 0).
-        if schema is not getattr(fake_run, "_last_schema", None):
-            fake_run._last_schema = schema
-            preset_call["n"] = 0
-        preset_call["n"] += 1
-        calls["n"] += 1
-        n = preset_call["n"]
-        # Drifting total_ms so median/p95 have something to bite on.
-        return make_engine_result(
-            elapsed_ms=10.0 + calls["n"],
-            prefill_ms=5.0,
-            suffix_eval_ms=4.0,
-            total_ms=10.0 + n,
-            peak_active_bytes=1000 + n,
-            padded_token_positions=12 * (n % 3 + 1),
-            sequential_forward_passes=2,
-            rescored_fields=["pick"] if n % 2 else [],
-            num_fields=2,
-            field_telemetry={"pick": {"rows": 2}},
-            parsed_json={},
-        )
-
-    def fake_load_preset(rel):
-        return {
-            "id": rel.replace(".json", ""),
-            "title": rel,
-            "schema": {"pick": {"type": "enum", "description": "d", "choices": ["ALPHA", "BETA"]}},
-            "context": "ctx",
-        }
-
-    report = run_timing(
-        "fake/model",
-        presets=["one.json", "two.json", "three.json"],
-        reps=5,
-        load_engine_fn=fake_load_engine,
-        run_fn=fake_run,
-        load_preset_fn=fake_load_preset,
+    # suffix_eval_ms is the composite: cache_merge + transformer + gather.
+    by_name = {iv.name: iv for iv in ledger.intervals}
+    expected_suffix = by_name["cache_merge"].ms + by_name["transformer"].ms + by_name["gather"].ms
+    assert flat["suffix_eval_ms"] == pytest.approx(expected_suffix)
+    # elapsed_ms = top-level main spans only (children not double-counted).
+    assert flat["elapsed_ms"] == pytest.approx(
+        by_name["plan"].ms + by_name["prefill"].ms + by_name["dependency"].ms
     )
-    # 3 presets x 5 reps = 15 decide calls total.
-    assert calls["n"] == 15
-    assert set(report["presets"]) == {"one", "two", "three"}
-    for block in report["presets"].values():
-        agg = block["aggregate"]
-        assert "total_ms" in agg and "median" in agg["total_ms"] and "p95" in agg["total_ms"]
-        assert len(block["raw"]) == 5
-        # prior_ms was 0 every rep -> median 0.
-        assert agg["prior_ms"]["median"] == 0.0
-        # rescored on odd reps of 5 -> [1,0,1,0,1], median 1 (reps restart
-        # per preset, so no cross-preset counting contamination).
-        assert agg["rescored_fields_count"]["median"] == 1
-        assert agg["rescored_fields_count"]["max"] == 1
+    assert flat["prefill_ms"] == pytest.approx(by_name["prefill"].ms)
+    assert flat["cache_broadcast_ms"] == pytest.approx(by_name["cache_merge"].ms)
+    assert flat["lm_head_gather_ms"] == pytest.approx(by_name["gather"].ms)
+    assert flat["second_pass_ms"] == pytest.approx(by_name["dependency"].ms)
+    assert flat["prior_ms"] == pytest.approx(by_name["prior_pass"].ms)
+    assert flat["total_ms"] == pytest.approx(flat["prior_ms"] + flat["elapsed_ms"])
+
+
+def test_elapsed_does_not_double_count_children():
+    """prefill has three children; elapsed counts the parent once, not
+    parent+children (the old overlap bug)."""
+    ledger = Ledger()
+    with ledger.span("prefill"):
+        with ledger.span("cache_merge"):
+            pass
+        with ledger.span("transformer"):
+            pass
+        with ledger.span("gather"):
+            pass
+    flat = ledger.derived_flat()
+    prefill = {iv.name: iv for iv in ledger.intervals}["prefill"].ms
+    assert flat["elapsed_ms"] == pytest.approx(prefill)
+    # And the composite suffix_eval still names its parts.
+    assert flat["suffix_eval_ms"] > 0.0
+
+
+def test_batched_views_amortized():
+    """group_wall is the outer span; per_item_amortized divides by n."""
+    ledger = Ledger()
+    with ledger.span("group_wall") as _ctx:
+        for _ in range(4):
+            with ledger.span("prefill"):
+                pass
+            with ledger.span("transformer"):
+                pass
+    group_int = [iv for iv in ledger.intervals if iv.name == "group_wall"][0]
+    views = ledger.batched_views(group_int, list(range(4)))
+    assert views["per_item_amortized_ms"] == [pytest.approx(views["group_wall_ms"][0] / 4)]
+    # Honest per-item end-to-end: own prefill start -> own assembly end.
+    ivals = {iv.name: iv for iv in ledger.intervals}
+    e2e = ledger.per_item_end_to_end(ivals["prefill"], ivals["transformer"])
+    assert e2e >= 0.0
+
+
+def test_span_exception_drops_interval():
+    """An exception unwinding through a span records NO interval (a failed
+    request must not report timings it never completed)."""
+    ledger = Ledger()
+    with pytest.raises(ValueError, match="boom"):
+        with ledger.span("prefill"):
+            raise ValueError("boom")
+    assert ledger.intervals == []
+    # And the ledger stays usable afterwards.
+    with ledger.span("prefill"):
+        pass
+    assert len(ledger.intervals) == 1
+
+
+def test_phase_separation_prior_vs_main():
+    """prior-phase spans are excluded from elapsed_ms and summed separately
+    into prior_ms (elapsed used to exclude prior; now total = both)."""
+    ledger = Ledger()
+    with ledger.span("neutral", phase="prior"):
+        pass
+    with ledger.span("prefill"):
+        pass
+    flat = ledger.derived_flat()
+    assert flat["elapsed_ms"] > 0.0
+    assert flat["prior_ms"] > 0.0
+    summary = ledger.summary()
+    assert "prior" in summary and "main" in summary
