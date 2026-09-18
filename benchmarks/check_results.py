@@ -18,7 +18,15 @@ report.json + dataset.lock.json) or a parent containing combo folders (the
 3. Recomputes report.json's metrics from predictions.jsonl via
    :func:`jevmlx.evalmetrics.compute_metrics` and diffs against the
    committed report.json (numeric tolerance 1e-9).
-4. Prints a SUMMARY table (one row per combo) and exits 1 on any failure
+4. Checks the W5 timing contract (results contract v2): a parallel-track
+   run.json must carry the honest timing keys in ``config``-adjacent
+   ``timing.json``/predictions — ``group_wall_ms`` / ``per_item_amortized_ms``
+   / ``per_item_end_to_end_ms`` / ``contexts_per_pass`` on batched paths,
+   ``failed_attempts`` and ``peak_incremental_bytes`` in the result
+   telemetry. A parallel track.json whose ``median`` block misses the split
+   keys (or a combo whose predictions carry a parallel ``_meta`` without
+   ``peak_incremental_bytes`` / ``failed_attempts``) is a FAIL.
+5. Prints a SUMMARY table (one row per combo) and exits 1 on any failure
    with a clear, per-folder list.
 
 No MLX dependency: imports jevmlx.evalmetrics/evalreport only (mlx lives
@@ -38,9 +46,30 @@ from jevmlx.bench import MAX_FOLDER_BYTES
 from jevmlx.evalmetrics import compute_metrics
 from jevmlx.evalrun import PREDICTION_LINE_KEYS, RUN_REQUIRED_KEYS
 
-__all__ = ["check_folder", "check_root", "main"]
+__all__ = ["check_folder", "check_root", "check_parity", "main"]
 
 _NUMERIC_TOLERANCE = 1e-9
+
+# Results contract v2 (W5): the timing split keys every parallel-track combo
+# must carry in timing.json's ``median`` block (ride the parallel _meta).
+# Batched decide_many keys land there only when the run used the batched
+# path; the single-context split below is required either way.
+TIMING_SPLIT_KEYS = (
+    "prior_ms",
+    "prefill_ms",
+    "plan_compile_ms",
+    "cache_broadcast_ms",
+    "suffix_eval_ms",
+    "lm_head_gather_ms",
+    "second_pass_ms",
+    "total_ms",
+)
+
+# W5-D finding 27/30/32: batched-path per-item timing (present when
+# decide_many produced the records) and the request-scoped memory + retry
+# counters every parallel result reports.
+BATCHED_TIMING_KEYS = ("group_wall_ms", "per_item_amortized_ms", "per_item_end_to_end_ms")
+RUN_TIMING_KEYS = ("peak_active_bytes", "peak_incremental_bytes", "failed_attempts")
 
 
 def _read_predictions_lines(path: Path) -> list[dict]:
@@ -126,8 +155,10 @@ def check_folder(folder: Path) -> tuple[bool, list[str]]:
     for index, record in enumerate(records):
         missing = sorted(set(PREDICTION_LINE_KEYS) - set(record))
         extra = sorted(set(record) - set(PREDICTION_LINE_KEYS))
-        # perturbation / consensus are optional add-ons, not contract violations.
-        extra = [k for k in extra if k not in ("perturbation", "consensus")]
+        # perturbation / consensus / oracle_prediction are optional add-ons,
+        # not contract violations (oracle_prediction rides under
+        # oracle_overrides evaluation; W3-D).
+        extra = [k for k in extra if k not in ("perturbation", "consensus", "oracle_prediction")]
         if missing:
             problems.append(f"{name}: line {index} missing keys {missing}")
         if extra:
@@ -150,6 +181,50 @@ def check_folder(folder: Path) -> tuple[bool, list[str]]:
     for key in RUN_REQUIRED_KEYS:
         if key not in run:
             problems.append(f"{name}: run.json missing top-level key {key!r}")
+
+    # Results contract v2 (W5): a parallel-track combo must carry the
+    # honest timing split. predictions lines ride per-field latency_ms;
+    # the _meta-split keys land in timing.json (same calls, medians).
+    is_parallel = bool(records) and all(r.get("track") in (None, "parallel") for r in records)
+    if is_parallel:
+        timing_path = folder / "timing.json"
+        if not timing_path.exists():
+            problems.append(
+                f"{name}: missing timing.json (parallel track must record the "
+                "timing split; naive/openai tracks legitimately have none)"
+            )
+        else:
+            timing = _load_json(timing_path)
+            median = (timing or {}).get("median")
+            if not isinstance(median, dict):
+                problems.append(f"{name}: timing.json has no median object")
+            else:
+                for key in TIMING_SPLIT_KEYS:
+                    if key not in median:
+                        problems.append(f"{name}: timing.json median missing key {key!r}")
+                for key in ("peak_active_bytes", "failed_attempts"):
+                    if key not in median:
+                        problems.append(
+                            f"{name}: timing.json median missing key {key!r} "
+                            "(results contract v2: failed_attempts + peak memory "
+                            "ride the split)"
+                        )
+                peak_incremental = median.get("peak_incremental_bytes")
+                if peak_incremental is not None and not _is_number(peak_incremental):
+                    problems.append(
+                        f"{name}: timing.json median peak_incremental_bytes is "
+                        f"{peak_incremental!r}, expected a number"
+                    )
+        # Batched-path per-item timing: when the predictions carry
+        # per-item keys (decide_many), ALL of them must be present.
+        per_item_keys = {key for key in BATCHED_TIMING_KEYS if any(key in r for r in records)}
+        if per_item_keys and per_item_keys != set(BATCHED_TIMING_KEYS):
+            missing = sorted(set(BATCHED_TIMING_KEYS) - per_item_keys)
+            problems.append(
+                f"{name}: batched per-item timing incomplete — missing {missing} "
+                "(group_wall_ms / per_item_amortized_ms / per_item_end_to_end_ms "
+                "land together)"
+            )
 
     # Report reproducibility: recompute metrics and diff against committed.
     try:
@@ -239,23 +314,41 @@ def _find_combo_folders(root: Path) -> list[Path]:
     return combos
 
 
+def _load_json(path: Path) -> dict | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 def check_parity(model_dir: Path) -> tuple[bool, list[str]]:
     """Check that a model's results folder has a passing slow parity test.
 
     A model enters the README compatibility table only with a passing slow
-    parity test (W1-A: batch vs chunked log_score agreement within
-    PARITY_ATOL) recorded in its results folder as ``parity.json``.
+    parity test recorded in its results folder as ``parity.json``. Results
+    contract v2 (W5): the file is produced by the parity producer over
+    BOTH the batch=1/chunked scoring comparison AND the batched matrix's
+    RAW pre-rescore row-logit gate (finding 42: a batch-1 rescore can mask
+    raw batch drift, so the raw gate is its own pass/fail stage).
 
-    The ``parity.json`` schema::
+    The ``parity.json`` schema (v2 — the raw gate keys are required)::
 
         {
           "model": "mlx-community/Qwen2.5-7B-Instruct-4bit",
-          "test": "test_w1a_scoring_parity_batch_vs_chunked_real_model",
-          "passed": true,
-          "max_drift_nats": 0.027,
+          "prompt_version": "jevmlx-parallel-v8",
+          "max_abs_drift_nats": 0.027,
+          "max_raw_row_drift_nats": 0.031,
+          "winners_identical": true,
           "atol": 0.05,
+          "passed": true,
+          "cases": ["code_security", "fintech_fraud", ...],
+          "test": "test_w1a_scoring_parity_batch_vs_chunked_real_model",
           "run_at": "2026-09-18T12:00:00Z"
         }
+
+    ``passed`` covers three stages: winners identical, final log-score
+    drift within atol, and raw pre-rescore row drift within atol. The
+    failure message names the stage that failed.
     """
     problems: list[str] = []
     name = str(model_dir)
@@ -269,13 +362,45 @@ def check_parity(model_dir: Path) -> tuple[bool, list[str]]:
         problems.append(f"{name}: parity.json unreadable: {e}")
         return False, problems
     if not parity.get("passed"):
+        stages = _parity_failed_stages(parity)
         problems.append(
-            f"{name}: parity.json shows test did not pass "
-            f"(max_drift={parity.get('max_drift_nats')}, "
+            f"{name}: parity.json shows test did not pass — "
+            f"{'; '.join(stages)} "
+            f"(max_drift={parity.get('max_abs_drift_nats', parity.get('max_drift_nats'))}, "
+            f"raw_row_drift={parity.get('max_raw_row_drift_nats')}, "
             f"atol={parity.get('atol')})"
         )
         return False, problems
+    # A v1 file (no raw-gate keys) predates the batched matrix; a folder
+    # regenerated by the current bench always carries them.
+    if "max_raw_row_drift_nats" not in parity:
+        problems.append(
+            f"{name}: parity.json is pre-v2 (no max_raw_row_drift_nats) — "
+            "rerun the bench to regenerate with the raw pre-rescore gate"
+        )
+        return False, problems
     return True, []
+
+
+def _parity_failed_stages(parity: dict) -> list[str]:
+    """Which parity stages failed, from the recorded payload.
+
+    Stages: winners (final decisions flipped), log_score drift over atol,
+    raw pre-rescore row drift over atol.
+    """
+    atol = parity.get("atol")
+    stages: list[str] = []
+    if not parity.get("winners_identical", True):
+        stages.append("winners flipped (final decisions disagree)")
+    drift = parity.get("max_abs_drift_nats", parity.get("max_drift_nats"))
+    if isinstance(drift, int | float) and isinstance(atol, int | float) and drift >= atol:
+        stages.append("final log-score drift >= atol")
+    raw = parity.get("max_raw_row_drift_nats")
+    if isinstance(raw, int | float) and isinstance(atol, int | float) and raw >= atol:
+        stages.append("raw pre-rescore row-logit drift >= atol")
+    elif raw is None and not stages:
+        stages.append("unspecified stage (payload carries no stage keys)")
+    return stages or ["passed=false with no recognizable stage keys"]
 
 
 def check_root(root: Path) -> list[tuple[Path, bool, list[str]]]:

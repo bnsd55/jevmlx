@@ -1,10 +1,11 @@
 {
   "config": {
+    "dataset_lock_sha256": null,
     "dataset_path": "fix",
     "model": "fake",
     "model_revision": null,
     "permutations": "none",
-    "prompt_version": null,
+    "prompt_version": "jevmlx-parallel-v8",
     "quantization": null,
     "split": "all",
     "temperature": 1.0,

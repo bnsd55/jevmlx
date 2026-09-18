@@ -70,6 +70,37 @@ def _write_valid(folder: Path, records=None):
     }
     (folder / "run.json").write_text(json.dumps(run, indent=2, sort_keys=True) + "\n")
     (folder / "dataset.lock.json").write_text(json.dumps({"source": "fix"}) + "\n")
+    # Results contract v2: the parallel track's honest timing split medians
+    # (the same keys the engine's _meta carries, incl. failed_attempts and
+    # peak memory).
+    (folder / "timing.json").write_text(
+        json.dumps(
+            {
+                "calls": 2,
+                "median": {
+                    "latency_ms": 5.5,
+                    "prior_ms": 0.0,
+                    "prefill_ms": 2.0,
+                    "plan_compile_ms": 0.1,
+                    "cache_broadcast_ms": 0.2,
+                    "suffix_eval_ms": 2.5,
+                    "lm_head_gather_ms": 0.3,
+                    "second_pass_ms": 0.0,
+                    "total_ms": 5.5,
+                    "peak_active_bytes": 1024,
+                    "peak_incremental_bytes": 512,
+                    "failed_attempts": 0,
+                    "padded_token_positions": 6,
+                    "rescored_fields_count": 0,
+                    "rerun_fields_count": 0,
+                    "num_fields": 1,
+                },
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
     write_report(
         folder / "report.json",
         {"environment": environment(), "metrics": compute_metrics(records)},
@@ -186,6 +217,30 @@ def test_imports_without_mlx(monkeypatch):
     assert isinstance(metrics, dict)
 
 
+def test_bench_machine_tag_patches_live_module(monkeypatch):
+    """Guard for the module-eviction above: machine_tag must read the _sysctl
+    binding in ITS OWN live module (whatever instance sys.modules holds now).
+
+    When test_imports_without_mlx evicts jevmlx.* and a later file's
+    module-level `from jevmlx.bench import machine_tag` still points at the
+    evicted instance, monkeypatching the re-imported module's _sysctl would
+    patch a dict machine_tag never reads — the tag silently falls back to
+    real sysctl. Pinning through machine_tag.__globals__ catches that rot
+    regardless of import order."""
+    from jevmlx.bench import machine_tag
+
+    monkeypatch.setitem(
+        machine_tag.__globals__,
+        "_sysctl",
+        lambda args: (
+            "Apple M5 Max"
+            if args == ["machdep.cpu.brand_string"]
+            else (str(128 * 2**30) if args == ["hw.memsize"] else None)
+        ),
+    )
+    assert machine_tag() == "m5max-128gb"
+
+
 class TestParityGate:
     """W4-A: a model enters the README compat table only with a passing
     slow parity test (parity.json in the model folder)."""
@@ -197,9 +252,11 @@ class TestParityGate:
             json.dumps(
                 {
                     "model": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+                    "prompt_version": "jevmlx-parallel-v8",
                     "test": "test_w1a_scoring_parity_batch_vs_chunked_real_model",
                     "passed": True,
-                    "max_drift_nats": 0.027,
+                    "max_abs_drift_nats": 0.027,
+                    "max_raw_row_drift_nats": 0.031,
                     "atol": 0.05,
                     "run_at": "2026-09-18T12:00:00Z",
                 }
@@ -225,7 +282,51 @@ class TestParityGate:
                     "model": "mlx-community/Qwen2.5-7B-Instruct-4bit",
                     "test": "test_w1a_scoring_parity_batch_vs_chunked_real_model",
                     "passed": False,
-                    "max_drift_nats": 0.15,
+                    "max_abs_drift_nats": 0.15,
+                    "max_raw_row_drift_nats": 0.02,
+                    "atol": 0.05,
+                    "winners_identical": True,
+                    "run_at": "2026-09-18T12:00:00Z",
+                }
+            )
+        )
+        ok, problems = check_parity(tmp_path)
+        assert not ok
+        assert any("did not pass" in p and "log-score drift" in p for p in problems)
+
+    def test_raw_row_drift_stage_named(self, tmp_path):
+        """A raw pre-rescore gate failure names THAT stage (v2, finding 42):
+        the final-decision drift can stay inside the band while the raw row
+        logits drift past it."""
+        from benchmarks.check_results import check_parity
+
+        (tmp_path / "parity.json").write_text(
+            json.dumps(
+                {
+                    "passed": False,
+                    "max_abs_drift_nats": 0.01,
+                    "max_raw_row_drift_nats": 0.2,
+                    "atol": 0.05,
+                    "winners_identical": True,
+                }
+            )
+        )
+        ok, problems = check_parity(tmp_path)
+        assert not ok
+        assert any("raw pre-rescore row-logit drift" in p for p in problems)
+
+    def test_pre_v2_parity_payload_fails(self, tmp_path):
+        """A v1 parity.json (no raw-gate key) fails: the bench regenerates
+        it with the batched raw gate before the model enters the table."""
+        from benchmarks.check_results import check_parity
+
+        (tmp_path / "parity.json").write_text(
+            json.dumps(
+                {
+                    "model": "m",
+                    "test": "w1a",
+                    "passed": True,
+                    "max_drift_nats": 0.02,
                     "atol": 0.05,
                     "run_at": "2026-09-18T12:00:00Z",
                 }
@@ -233,7 +334,7 @@ class TestParityGate:
         )
         ok, problems = check_parity(tmp_path)
         assert not ok
-        assert any("did not pass" in p for p in problems)
+        assert any("pre-v2" in p for p in problems)
 
     def test_corrupt_parity_fails(self, tmp_path):
         from benchmarks.check_results import check_parity

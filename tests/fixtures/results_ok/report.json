@@ -1,7 +1,7 @@
 {
   "environment": {
     "chip": "Apple M2 Pro",
-    "git_sha": "408331c45d60a8c892f5ae8094e5e39349a59110",
+    "git_sha": "ead13cbb067abee22f0af1f8e53cec7f175d0857",
     "jevmlx_version": "0.1.0",
     "machine_model": "Mac14,9",
     "macos_version": "26.5.1",
@@ -9,7 +9,7 @@
     "mlx_version": "0.32.2",
     "python_version": "3.12.2",
     "ram_gb": 32.0,
-    "timestamp_utc": "2026-09-18T07:27:22+00:00"
+    "timestamp_utc": "2026-09-17T19:37:07+00:00"
   },
   "metrics": {
     "accuracy": 0.5,
@@ -25,12 +25,12 @@
     "balanced_accuracy": {
       "risk": 0.5
     },
-    "brier": 0.11304403745316,
+    "brier": 0.773639481476138,
     "case_exact_match": 0.5,
     "correctness_auroc": 1.0,
     "ece_5bin_equal_mass": 0.30000000000000004,
     "exact_record_accuracy": 0.5,
-    "log_loss": 0.2552437121153691,
+    "log_loss": 1.0893867582829604,
     "macro_f1": {
       "risk": 0.3333333333333333
     },
