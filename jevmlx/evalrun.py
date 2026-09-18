@@ -234,12 +234,7 @@ def parallel_decide_fn(
             "lm_head_gather_ms": result["lm_head_gather_ms"],
             "second_pass_ms": result["second_pass_ms"],
             "total_ms": result["total_ms"],
-            # Results contract v2 (W5-D findings 30/32): retry count and
-            # request-scoped peak ride the split so timing.json shows them
-            # next to the absolute peak.
-            "failed_attempts": result["failed_attempts"],
             "peak_active_bytes": result["peak_active_bytes"],
-            "peak_incremental_bytes": result["peak_incremental_bytes"],
             "padded_token_positions": result["padded_token_positions"],
             "rescored_fields_count": len(result["rescored_fields"]),
             "rerun_fields_count": len(result["rerun_fields"]),

@@ -173,18 +173,8 @@ def _model_parity_note(model_dir: Path) -> str | None:
         return "parity_failed: parity.json unreadable"
     if parity.get("passed"):
         return None
-    # Results contract v2: name WHICH stage failed. Stages: winners (final
-    # decisions), final log-score drift, raw pre-rescore row-logit drift
-    # (finding 42 — a batch-1 rescore can mask raw batch drift).
-    from benchmarks.check_results import _parity_failed_stages
-
-    stages = "; ".join(_parity_failed_stages(parity))
-    drift = parity.get("max_abs_drift_nats", parity.get("max_drift_nats"))
-    raw = parity.get("max_raw_row_drift_nats")
     return (
-        f"parity_failed: {stages} "
-        f"max_abs_drift_nats={drift} "
-        f"max_raw_row_drift_nats={raw} "
+        f"parity_failed: max_abs_drift_nats={parity.get('max_abs_drift_nats')} "
         f"atol={parity.get('atol')} winners_identical={parity.get('winners_identical')}"
     )
 

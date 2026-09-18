@@ -19,7 +19,7 @@ import re
 import time
 import weakref
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -588,6 +588,69 @@ def _fold_multi(probs_true: dict[str, float]) -> tuple[list[str], float | None, 
     selected = [option for option, p_yes in probs_true.items() if p_yes >= 0.5]
     margin = min((abs(p_yes - 0.5) for p_yes in probs_true.values()), default=0.0)
     return selected, None, margin
+
+
+@dataclass(frozen=True)
+class DispatchResult:
+    """Per-row logits dispatched into their row shapes (W5b-10 C1).
+
+    One row kind per candidate family — the single copy of the dispatch
+    rules that used to be inline in _assemble:
+
+    - node_logits[row] = {branch_idx: [child logits]} for scalar branch rows
+    - option_pair[row] = [yes_logit, no_logit] for multi option rows (RAW
+      Y/N logits in remainder order; bug 8: the prior cache stores these)
+    - count_node_logits[row] = {count_branch_idx: [child logits]} for count
+      rows (W2-E step 3; a separate dict — never mixed with branch keys)
+    - node_legal_mass_log mirrors the same keying with per-node log mass
+    """
+
+    node_logits: Mapping[int, Mapping[int, list[float]]]
+    option_pair: Mapping[int, list[float]]
+    count_node_logits: Mapping[int, Mapping[int, list[float]]]
+    node_legal_mass_log: Mapping[int, Any]
+
+
+@dataclass(frozen=True)
+class FieldRows:
+    """The typed row layout for ONE field (W5b-10 C1: no presence-of-key).
+
+    ``option_idxs`` are the field's multi option rows (empty for scalars);
+    ``count_idxs`` its count rows (multi only, always present); ``idxs``
+    the scalar branch rows (empty for multi).
+    """
+
+    fname: str
+    idxs: tuple[int, ...]
+    option_idxs: tuple[int, ...]
+    count_idxs: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class FieldOutcome:
+    """One field's finished first-pass decision (W5b-10 C1).
+
+    ``parsed`` and ``telemetry`` are the exact dicts the result carries;
+    ``rescored`` flags a batch=1 canonical rescore; ``count_telemetry``
+    carries the optional '<field>#count' entry (multi fields only).
+    """
+
+    fname: str
+    parsed: Mapping[str, Any]
+    telemetry: Mapping[str, Any]
+    rescored: bool = False
+    count_telemetry: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class AssembledState:
+    """The typed state flowing from field scoring through reconciliation to
+    the public result (W5b-10 C1)."""
+
+    parsed_json: Mapping[str, Any]
+    field_telemetry: Mapping[str, Any]
+    rescored_fields: tuple[str, ...]
+    reconciled_fields: tuple[str, ...] = ()
 
 
 class InternalConstraintViolationError(RuntimeError):
@@ -2168,6 +2231,960 @@ def run_parallel_generation(
     )
 
 
+def dispatch_rows(built: dict, scored: ScoreRowsResult) -> DispatchResult:
+    """Stage 1 (W5b-10 C1): dispatch per-row logits into their shapes.
+
+    The ONE copy of the row-kind dispatch: scalar branch rows -> node_logits
+    keyed by branch index; multi option rows -> option_pair ([yes, no] RAW
+    logits, remainder order — bug 8: the prior cache stores these); count
+    rows -> count_node_logits keyed by count-branch idx (W2-E step 3, a
+    separate dict — never mixed with branch/option keys). Legal mass mirrors
+    the same keying.
+    """
+    rows = built["rows"]
+    row_branch = built["row_branch"]
+    row_option = built["row_option"]
+    row_count = built["row_count"]
+    node_logits: dict[int, dict[int, list[float]]] = {}
+    option_pair: dict[int, list[float]] = {}
+    count_node_logits: dict[int, dict[int, list[float]]] = {}
+    node_legal_mass_log: dict[int, Any] = {}
+    for ridx in range(len(rows)):
+        values = scored.row_logits[ridx]
+        mass_log = scored.row_legal_mass_log[ridx]
+        if ridx in row_option:
+            option_pair[ridx] = values
+            node_legal_mass_log[ridx] = mass_log
+        elif ridx in row_count:
+            count_node_logits[ridx] = {row_count[ridx]: values}
+            node_legal_mass_log[ridx] = {row_count[ridx]: mass_log}
+        else:
+            node_logits[ridx] = {row_branch[ridx]: values}
+            node_legal_mass_log[ridx] = {row_branch[ridx]: mass_log}
+    return DispatchResult(node_logits, option_pair, count_node_logits, node_legal_mass_log)
+
+
+def field_rows_of(built: dict) -> dict[str, FieldRows]:
+    """Stage 1b (W5b-10 C1): the typed per-field row layout.
+
+    The count rows ride in the same row_field bucket as the option rows
+    (both carry row_field=fname); this splits them once — the option loop
+    walks ONLY option rows, the count reconciliation walks ONLY count rows.
+    """
+    row_field = built["row_field"]
+    row_option = built["row_option"]
+    row_count = built["row_count"]
+    all_rows: dict[str, list[int]] = {}
+    for idx, fname in enumerate(row_field):
+        all_rows.setdefault(fname, []).append(idx)
+    layout: dict[str, FieldRows] = {}
+    for fname, idxs in all_rows.items():
+        option_idxs = tuple(ridx for ridx in idxs if ridx in row_option)
+        count_idxs = tuple(ridx for ridx in idxs if ridx in row_count)
+        scalar_idxs = tuple(
+            ridx for ridx in idxs if ridx not in row_option and ridx not in row_count
+        )
+        layout[fname] = FieldRows(fname, scalar_idxs, option_idxs, count_idxs)
+    return layout
+
+
+def _make_rescore_evidence_fn(
+    model,
+    cache,
+    built: dict,
+    field_trie: list[dict],
+    n_choices: int,
+    real_choices: list[str],
+    vocab_size: int,
+    pad_id: int,
+) -> "Callable[[list[int]], ScalarEvidence]":
+    """The batch=1 canonical re-measure for ONE scalar field (W3-E).
+
+    Returned fn: (rescore_idxs) -> ScalarEvidence at source_shape="batch1" —
+    _rescore_rows_batch1 at auto_max_rows=1, the same score_trie path as the
+    batched pass, legal mass passed through in LOG space (W5-D finding 37).
+    """
+    rows = built["rows"]
+    row_decision = built["row_decision"]
+    row_branch = built["row_branch"]
+    row_option = built["row_option"]
+
+    def _rescore_evidence(rescore_idxs: list[int]) -> ScalarEvidence:
+        rescored_raw = _rescore_rows_batch1(
+            model,
+            cache,
+            rows,
+            rescore_idxs,
+            row_decision,
+            row_branch,
+            row_option,
+            vocab_size,
+            pad_id,
+        )
+        rs_logits: dict[int, list[float]] = {}
+        rs_mass: dict[int, float] = {}
+        for ridx in rescore_idxs:
+            rs_logits.update(rescored_raw["node_logits"][ridx])
+            rs_mass.update(rescored_raw["node_legal_mass_log"].get(ridx, {}))
+        rs_branch_index = {id(node): bi for bi, node in enumerate(field_trie)}
+
+        def _rs_logits_at(node: dict) -> list[float]:
+            return rs_logits[rs_branch_index[id(node)]]
+
+        def _rs_mass_at(node: dict) -> float:
+            # W5-D finding 37: the callback returns LOG mass; pass it
+            # straight through (no exp/log round-trip).
+            return rs_mass[rs_branch_index[id(node)]]
+
+        rs_scores, rs_mass_logs = score_trie(field_trie, n_choices, _rs_logits_at, _rs_mass_at)
+        return ScalarEvidence(
+            choices=tuple(real_choices),
+            log_scores_raw=tuple(rs_scores),
+            legal_mass_logs=tuple(rs_mass_logs),
+            source_shape="batch1",
+        )
+
+    return _rescore_evidence
+
+
+def _trie_scores_for_field(
+    field_trie: list[dict],
+    n_choices: int,
+    dispatch: DispatchResult,
+    idxs: tuple[int, ...],
+) -> tuple[list[float], list[float]]:
+    """Trie-score one scalar field from its dispatched branch rows.
+
+    Builds the logits_at_node / legal_mass_at_node callbacks over the
+    field's rows (bound per field so score_trie cannot see a later
+    iteration's dictionaries) and returns (raw_scores, legal_mass_logs) at
+    T=1 — legal mass in LOG space (W5-D finding 37).
+    """
+    logits_by_branch: dict[int, list[float]] = {}
+    legal_mass_log_by_branch: dict[int, float] = {}
+    for ridx in idxs:
+        logits_by_branch.update(dispatch.node_logits[ridx])
+        legal_mass_log_by_branch.update(dispatch.node_legal_mass_log.get(ridx, {}))
+    branch_index = {id(node): bi for bi, node in enumerate(field_trie)}
+
+    def logits_at_node(node: dict, _lookup=logits_by_branch, _index=branch_index) -> list[float]:
+        return _lookup[_index[id(node)]]
+
+    def legal_mass_at_node(
+        node: dict, _lookup=legal_mass_log_by_branch, _index=branch_index
+    ) -> float:
+        return _lookup[_index[id(node)]]
+
+    return score_trie(field_trie, n_choices, logits_at_node, legal_mass_at_node)
+
+
+def _cardinality_one_outcome(
+    fname: str, fdef, p: dict, choices_list: list[str], scoring: str
+) -> FieldOutcome:
+    """A cardinality-1 scalar field's outcome: no branch points, no rows.
+
+    The value is fully determined by the schema (R2/R7: P = 1.0,
+    log_score = 0.0, legal_mass = 1.0 — nothing branched, nowhere to leak).
+    """
+    val = p["alias_map"][choices_list[0]] if scoring == "slots" else choices_list[0]
+    if fdef.field_type == "boolean":
+        val = val == "true" if isinstance(val, str) else val
+    key = val if isinstance(val, str) else str(val)
+    return FieldOutcome(
+        fname,
+        {"value": val, "prob": 1.0},
+        {
+            "value": val,
+            "type": fdef.field_type,
+            "probability": 1.0,
+            "cardinality": fdef.cardinality,
+            "log_scores": {key: 0.0},
+            "top_choices": [{"choice": key, "probability": 1.0}],
+            "rows": 0,
+            "legal_mass": 1.0,
+        },
+    )
+
+
+def score_scalar_field(
+    model,
+    cache,
+    built: dict,
+    dispatch: DispatchResult,
+    fr: FieldRows,
+    fdef,
+    p: dict,
+    *,
+    prior: dict | None,
+    scoring: str,
+    temperature: float,
+    vocab_size: int,
+    pad_id: int,
+) -> FieldOutcome:
+    """Stage 2 (W5b-10 C1): finalize ONE scalar (enum/boolean) field.
+
+    Trie scoring over the field's branch rows, then THE shared finalizer
+    (finalize_scalar_evidence): band rescore via _rescore_rows_batch1,
+    prior correction, caller temperature, tie flag, legal mass, top_choices,
+    margins. Cardinality-1 fields (no rows) short-circuit to P = 1.0.
+    """
+    fname = fr.fname
+    tries = built["tries"]
+    idxs = fr.idxs
+
+    if scoring == "slots":
+        choices_list = list(p["aliases"])
+    else:
+        choices_list = ["true", "false"] if fdef.field_type == "boolean" else list(fdef.choices)
+
+    if not idxs:
+        return _cardinality_one_outcome(fname, fdef, p, choices_list, scoring)
+
+    field_trie = tries[fname]
+    n_choices = fdef.cardinality
+    raw_scores, raw_legal_mass_logs = _trie_scores_for_field(field_trie, n_choices, dispatch, idxs)
+    prior_entry = prior.get(fname) if prior is not None else None
+    real_choices = (
+        [p["alias_map"][raw] for raw in choices_list] if scoring == "slots" else list(choices_list)
+    )
+
+    rescore_fn = _make_rescore_evidence_fn(
+        model,
+        cache,
+        built,
+        field_trie,
+        n_choices,
+        real_choices,
+        vocab_size,
+        pad_id,
+    )
+
+    evidence = ScalarEvidence(
+        choices=tuple(real_choices),
+        log_scores_raw=tuple(raw_scores),
+        legal_mass_logs=tuple(raw_legal_mass_logs),
+        source_shape="batch",
+    )
+    decision, rescored = finalize_scalar_evidence(
+        evidence,
+        prior_entry=prior_entry,
+        temperature=temperature,
+        rescore=rescore_fn,
+        rescore_idxs=idxs,
+    )
+    w_prob = decision.probability
+
+    # The finalizer's evidence is already in the REAL choice representation
+    # (alias hop applied when building the evidence) — decision.value is the
+    # typed winner (boolean fields carry a Python bool). No second alias hop.
+    val = decision.value
+    if fdef.field_type == "boolean" and isinstance(val, str):
+        val = val.lower() == "true"
+
+    telemetry = {
+        "value": val,
+        "type": fdef.field_type,
+        "probability": w_prob,
+        "cardinality": fdef.cardinality,
+        # Constrained-path log-probabilities at T=1, keyed by the real
+        # choice string (the contract calibrate.collect reads). Temperature
+        # is applied once, to the final distribution. With prior_correction
+        # these are the CORRECTED scores.
+        "log_scores": dict(decision.log_scores),
+        "top_choices": list(decision.top_choices)[:5],
+        "rows": len(field_trie),
+        # W3-E: True only when the top candidates are STILL within
+        # INSTABILITY_BAND after the batch=1 rescore.
+        "tie": decision.tie,
+        "rescored": rescored,
+        # W2-D: legal_mass — probability the model assigned to the union of
+        # allowed continuations at the winner's branch point(s), against the
+        # FULL vocabulary (raw, pre-prior-correction).
+        "legal_mass": decision.legal_mass,
+        "legal_mass_logs": dict(decision.legal_mass_logs),
+    }
+    if decision.prior_corrected:
+        telemetry["prior_log_scores"] = dict(decision.prior_log_scores)
+        telemetry["prior_corrected"] = True
+    return FieldOutcome(fname, {"value": val, "prob": w_prob}, telemetry, rescored)
+
+
+def _count_telemetry(
+    count_codes: list[str],
+    count_scores: list[float],
+    count_legal_mass_logs: list[float],
+    count_choice: str,
+    count_margin: float,
+) -> dict[str, Any]:
+    """The '<field>#count' scalar-type telemetry entry (W2-E step 3).
+
+    The prior pass reads it; parsed_json stays multi-field only. W5-D
+    finding 38: the count row's own legal mass is exposed (winner's mass +
+    min over codes — worst-case leakage on the row).
+    """
+    count_log_probs = _log_softmax(count_scores)
+    count_probs = [math.exp(lp) for lp in count_log_probs]
+    count_display = list(count_codes)
+    return {
+        "value": count_choice,
+        "type": "enum",
+        "probability": max(count_probs),
+        "cardinality": len(count_display),
+        "log_scores": {code: lp for code, lp in zip(count_display, count_log_probs, strict=True)},
+        "top_choices": sorted(
+            (
+                {"choice": c, "probability": pr}
+                for c, pr in zip(count_display, count_probs, strict=True)
+            ),
+            key=lambda x: x["probability"],
+            reverse=True,
+        ),
+        "margin_nats": count_margin,
+        "legal_mass": math.exp(count_legal_mass_logs[count_display.index(count_choice)]),
+        "min_option_legal_mass": math.exp(min(count_legal_mass_logs)),
+    }
+
+
+def solve_multi_set(
+    *,
+    probs_yes: dict[str, float],
+    raw_pairs: dict[str, list[float]],
+    options: list[str],
+    count_codes: list[str],
+    count_scores: list[float],
+    count_legal_mass_logs: list[float],
+    multi_ab: dict | None,
+    set_constraints: tuple[Mapping[str, Any], ...] = (),
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Stage 3b (W5b-10 C1): ONE multi field's selection + reconciliation.
+
+    Threshold rule (calibrated log-odds when a calibrator ran, else the
+    fixed P(yes) >= 0.5), W2-E step 3 count reconciliation through
+    COUNT_MARGIN_MIN, then W2-SETCONS hard set constraints LAST (the solver
+    corrects a violating proposal). Mutates nothing: every output is fresh.
+
+    Returns (telemetry_update, count_telemetry, selection) where
+    selection is the final list of chosen options.
+    """
+    # W2-E step 2 selection: with calibration, calibrated log-odds
+    # (a * (yes - no) + b) > 0 picks the option. The margin stays in
+    # PROBABILITY units on both paths (F1: the abstention gate compares it
+    # to a [0, 1) cut) — min |sigmoid(c) - 0.5|; the raw calibrated
+    # log-odds ride telemetry as calibrated_log_odds. Without calibration
+    # the fixed P(yes) >= 0.5 rule stands.
+    if multi_ab is not None:
+        a_coef, b_coef = multi_ab["a"], multi_ab["b"]
+        calibrated = {
+            option: a_coef * (pair[0] - pair[1]) + b_coef for option, pair in raw_pairs.items()
+        }
+        probs_yes = {option: 1.0 / (1.0 + math.exp(-c)) for option, c in calibrated.items()}
+        selected = [option for option, c in calibrated.items() if c > 0]
+        margin = min((abs(p - 0.5) for p in probs_yes.values()), default=0.0)
+        calibrated_log_odds: dict[str, float] | None = calibrated
+    else:
+        selected, _prob, margin = _fold_multi(probs_yes)
+        calibrated_log_odds = None
+
+    # W2-E step 3 reconciliation: the count row ALWAYS ran (no flag), scored
+    # through score_trie like a scalar enum (the count trie may have
+    # multiple branch nodes). Its use is gated on the row's top-2 margin in
+    # NATS — a different question from the per-option P(yes) cut.
+    count_order = sorted(range(len(count_scores)), key=count_scores.__getitem__, reverse=True)
+    count_choice = count_codes[count_order[0]]
+    count_margin = (
+        count_scores[count_order[0]] - count_scores[count_order[1]]
+        if len(count_scores) > 1
+        else float("inf")
+    )
+    reconciled_by = "per_option"
+    if count_margin > COUNT_MARGIN_MIN:
+        # Confident count: pick top-k by calibrated log-odds when a
+        # calibrator ran, else by P(yes) (monotone in log-odds — same
+        # ordering). k comes from the count bucket, capped at the field's
+        # option count ('4' = four or more).
+        k = min(4 if count_choice == "4" else int(count_choice), len(options))
+        if calibrated_log_odds is not None:
+            ranked_by = sorted(calibrated_log_odds.items(), key=lambda kv: -kv[1])
+        else:
+            ranked_by = sorted(probs_yes.items(), key=lambda kv: -kv[1])
+        selected = [option for option, _score in ranked_by[:k]]
+        reconciled_by = "count"
+    else:
+        reconciled_by = "per_option"
+
+    # W2-SETCONS: hard set constraints applied LAST — after the threshold
+    # rule and the count reconciliation have proposed. The solver selects
+    # the score-maximizing set under the constraints (calibrated log-odds
+    # when a calibrator ran, else RAW yes/no log-odds — monotone in P(yes)
+    # either way, so a non-binding constraint set reproduces the proposal).
+    if set_constraints:
+        if calibrated_log_odds is not None:
+            option_scores = dict(calibrated_log_odds)
+        else:
+            option_scores = {option: float(pair[0] - pair[1]) for option, pair in raw_pairs.items()}
+        selected, setcons_rule = select_constrained_set(
+            list(options), option_scores, set_constraints, set(selected)
+        )
+        # The closest decision AFTER reconciliation: min |p_yes - 0.5| over
+        # the FINAL set's boundary options (an option forced in against its
+        # p_yes has margin 0 — the truth-telling signal).
+        final_set = set(selected)
+        margins = [abs(probs_yes[o] - 0.5) for o in options if o in final_set]
+        margin = min(margins, default=margin)
+    else:
+        setcons_rule = None
+
+    count_telemetry = _count_telemetry(
+        count_codes, count_scores, count_legal_mass_logs, count_choice, count_margin
+    )
+    telemetry = {
+        "margin": margin,
+        "reconciled_by": reconciled_by,
+        # W2-E step 3: the count row's answer and confidence.
+        "count_choice": count_choice,
+        "count_margin": count_margin,
+        **(
+            {"calibrated_log_odds": dict(calibrated_log_odds)}
+            if calibrated_log_odds is not None
+            else {}
+        ),
+        **(
+            {
+                "set_constraints": [dict(c) for c in set_constraints],
+                "set_selection": setcons_rule,
+            }
+            if set_constraints
+            else {}
+        ),
+    }
+    return telemetry, count_telemetry, selected
+
+
+def _log_softmax(scores: list[float]) -> list[float]:
+    """Log-softmax renormalisation at T=1 (the ONE copy)."""
+    m = max(scores)
+    total = sum(math.exp(v - m) for v in scores)
+    return [v - (m + math.log(total)) for v in scores]
+
+
+def _rescore_multi_options(
+    model,
+    cache,
+    built: dict,
+    dispatch: DispatchResult,
+    idxs: tuple[int, ...],
+    vocab_size: int,
+    pad_id: int,
+) -> tuple[list[int], bool]:
+    """W3-E band rescore for a multi field's near-threshold options.
+
+    A Y/N decision near p=0.5 is the same near-tie as a scalar enum — a
+    |yes - no| inside INSTABILITY_BAND is batch-shape noise. Rescore those
+    options' rows at batch=1 and replace their raw pairs (and legal-mass
+    entries, in the row's own shape) IN the dispatch object so prior +
+    softmax + selection all see the canonical result. Returns (rescored
+    option indexes, whether any rescore ran).
+    """
+    rescored_oids = [
+        oi
+        for oi, ridx in enumerate(idxs)
+        if abs(dispatch.option_pair[ridx][0] - dispatch.option_pair[ridx][1]) < INSTABILITY_BAND
+    ]
+    if not rescored_oids:
+        return [], False
+    rescore_ridxs = [ridx for oi, ridx in enumerate(idxs) if oi in rescored_oids]
+    rescored_raw = _rescore_rows_batch1(
+        model,
+        cache,
+        built["rows"],
+        rescore_ridxs,
+        built["row_decision"],
+        built["row_branch"],
+        built["row_option"],
+        vocab_size,
+        pad_id,
+    )
+    for _oi, ridx in zip(rescored_oids, rescore_ridxs, strict=True):
+        # Replace the option's raw Y/N pair with the canonical (batch=1)
+        # logits.
+        dispatch.option_pair[ridx] = list(rescored_raw["option_pair"][ridx])
+        # Branch rows carry {bi: log_mass}; option rows carry the flat
+        # float — store the rescored mass in the row's own shape.
+        mass_log = rescored_raw["node_legal_mass_log"][ridx]
+        dispatch.node_legal_mass_log[ridx] = (
+            {built["row_branch"][ridx]: mass_log} if ridx in built["row_branch"] else mass_log
+        )
+    return rescored_oids, True
+
+
+def _score_count_row(
+    built: dict,
+    dispatch: DispatchResult,
+    fr: FieldRows,
+    p: dict,
+    prior: dict | None,
+) -> tuple[list[float], list[float]]:
+    """Score a multi field's count row (W2-E step 3) — the scalar-enum path.
+
+    score_trie over the count trie (it may have multiple branch nodes), then
+    prior correction in the enum shape: the neutral pass caches count rows
+    under '<field>#count' as a scalar-type prior. Returns (count_scores,
+    count_legal_mass_logs) at T=1, log space.
+    """
+    fname = fr.fname
+    count_trie = built["tries"][count_key(fname)]
+    count_logits_by_branch: dict[int, list[float]] = {}
+    for ridx in fr.count_idxs:
+        count_logits_by_branch.update(dispatch.count_node_logits[ridx])
+    count_branch_index = {id(node): bi for bi, node in enumerate(count_trie)}
+
+    def count_logits_at_node(
+        node: dict, _lookup=count_logits_by_branch, _index=count_branch_index
+    ) -> list[float]:
+        return _lookup[_index[id(node)]]
+
+    count_scores_raw, count_legal_mass_logs = score_trie(
+        count_trie, len(p["count"]["codes"]), count_logits_at_node
+    )
+    prior_count_entry = prior.get(count_key(fname)) if prior is not None else None
+    count_scores = [
+        s - prior_count_entry["log_scores"][code]
+        if prior_count_entry is not None and code in prior_count_entry["log_scores"]
+        else s
+        for s, code in zip(count_scores_raw, p["count"]["codes"], strict=True)
+    ]
+    return count_scores, list(count_legal_mass_logs)
+
+
+def _multi_telemetry(
+    dispatch: DispatchResult,
+    idxs: tuple[int, ...],
+    ranked: list[tuple[str, float]],
+    probs_yes: dict[str, float],
+    calib: dict | str | None,
+    p: dict,
+    solved_telemetry: dict[str, Any],
+    multi_rescored: bool,
+    prior_entry: dict | None,
+    prior_pairs: dict | None,
+) -> dict[str, Any]:
+    """A multi field's telemetry entry (W2-E/W2-SETCONS/W5-D keys)."""
+    telemetry = {
+        "type": "multi",
+        "probability": None,
+        # No 'scores'/'log_scores' key for multi: log P(choice) does not
+        # exist here. per_option carries the P(yes) values; calibrate skips
+        # multi fields.
+        "per_option": dict(probs_yes),
+        # Bug 8: the RAW [yes, no] logits per option (remainder order) —
+        # what the prior cache stores and what log-odds shrinkage consumes.
+        "option_logit_pairs": {
+            p["options"][oi]: list(dispatch.option_pair[ridx]) for oi, ridx in enumerate(idxs)
+        },
+        "alternatives": tuple(ranked),
+        "top_choices": [{"choice": option, "probability": p_yes} for option, p_yes in ranked],
+        "rows": len(idxs),
+        "calibrated": {"a": calib["multi"]["a"], "b": calib["multi"]["b"]}
+        if calib is not None
+        else None,
+        # W5-D finding 38: cardinality-free field-level stats + the
+        # per-option logs (raw, T=1), keyed by the option string.
+        "min_option_legal_mass": (
+            math.exp(min(dispatch.node_legal_mass_log.get(ridx, 0.0) for ridx in idxs))
+            if idxs
+            else 1.0
+        ),
+        "mean_log_legal_mass": (
+            sum(dispatch.node_legal_mass_log.get(ridx, 0.0) for ridx in idxs) / len(idxs)
+            if idxs
+            else 0.0
+        ),
+        "legal_mass_logs": {
+            p["options"][oi]: dispatch.node_legal_mass_log.get(ridx, 0.0)
+            for oi, ridx in enumerate(idxs)
+        },
+        # W3-E: set when any option's Y/N decision sat inside the band and
+        # was rescored at batch=1.
+        "rescored": multi_rescored,
+    }
+    telemetry.update(solved_telemetry)
+    if prior_entry is not None:
+        telemetry["prior_option_pairs"] = {k: list(v) for k, v in prior_pairs.items()}
+        telemetry["prior_corrected"] = True
+    return telemetry
+
+
+def score_multi_field(
+    model,
+    cache,
+    built: dict,
+    dispatch: DispatchResult,
+    fr: FieldRows,
+    fdef,
+    p: dict,
+    *,
+    prior: dict | None,
+    calib: dict | str | None,
+    scoring: str,
+    temperature: float,
+    vocab_size: int,
+    pad_id: int,
+) -> FieldOutcome:
+    """Stage 3 (W5b-10 C1): finalize ONE multi field.
+
+    Per-option Y/N rows scored independently (one-vs-rest), the W3-E band
+    rescore for near-threshold options, per-option prior correction, the
+    selection + count + set-constraint reconciliation (solve_multi_set),
+    and the count row's own scalar-type telemetry entry ('<field>#count').
+    """
+    fname = fr.fname
+    idxs = fr.option_idxs
+
+    probs_yes: dict[str, float] = {}
+    raw_pairs: dict[str, list[float]] = {}
+    prior_entry = prior.get(fname) if prior is not None else None
+    prior_pairs = prior_entry["option_pairs"] if prior_entry else None
+    # W2-E row codes: rows are keyed '<field>/<code>', but codes are
+    # positional (choices order), so row oi IS options[oi] — no map needed;
+    # results and telemetry stay option-keyed directly.
+    #
+    # W3-E near-tie rescore for multi (review F3): a Y/N decision near
+    # p=0.5 is the same near-tie as a scalar enum — a |yes - no| inside
+    # INSTABILITY_BAND is batch-shape noise. Rescore those options' rows at
+    # batch=1 and replace their raw pairs BEFORE the scoring loop, so prior
+    # + softmax + selection all see the canonical result.
+    rescored_oids, multi_rescored = _rescore_multi_options(
+        model, cache, built, dispatch, idxs, vocab_size, pad_id
+    )
+    for oi, ridx in enumerate(idxs):
+        pair = list(dispatch.option_pair[ridx])
+        option_name = p["options"][oi]
+        raw_pairs[option_name] = pair
+        if prior_pairs is not None and option_name in prior_pairs:
+            # Per-option additive prior in log space on the Y/N pair
+            # (P(yes) semantics), then renormalise (log-softmax shape).
+            pp = prior_pairs[option_name]
+            pair = [pv - qv for pv, qv in zip(pair, pp, strict=True)]
+            m = max(pair)
+            total = sum(math.exp(v - m) for v in pair)
+            pair = [v - (m + math.log(total)) for v in pair]
+        (p_yes, _p_no) = softmax(pair, temperature=temperature)
+        probs_yes[option_name] = p_yes
+
+    count_scores, count_legal_mass_logs = _score_count_row(built, dispatch, fr, p, prior)
+
+    solved_telemetry, count_telemetry, selected = solve_multi_set(
+        probs_yes=probs_yes,
+        raw_pairs=raw_pairs,
+        options=list(p["options"]),
+        count_codes=list(p["count"]["codes"]),
+        count_scores=count_scores,
+        count_legal_mass_logs=list(count_legal_mass_logs),
+        multi_ab=calib["multi"] if calib is not None else None,
+        set_constraints=fdef.set_constraints,
+    )
+
+    ranked = sorted(probs_yes.items(), key=lambda kv: -kv[1])
+    telemetry = _multi_telemetry(
+        dispatch,
+        idxs,
+        ranked,
+        probs_yes,
+        calib,
+        p,
+        solved_telemetry,
+        multi_rescored,
+        prior_entry,
+        prior_pairs,
+    )
+    return FieldOutcome(
+        fname,
+        {"value": selected, "prob": None},
+        telemetry,
+        multi_rescored,
+        count_telemetry=count_telemetry,
+    )
+
+
+def reconcile_case_constraints(
+    state: AssembledState,
+    constraints,
+    schema: StructuredSchema,
+) -> AssembledState:
+    """Stage 4 (W5b-10 C1): constrained MAP over the first-pass decisions.
+
+    Consumes CompiledConstraints (W5b-11, coder4 — compiled by
+    validate_constraints_for_schema/compile_constraints) and re-picks the
+    joint assignment maximizing summed per-field log scores subject to the
+    case-level constraints. Telemetry is updated in place for changed
+    fields (value + probability from the winning score key).
+
+    Returns the updated AssembledState carrying the SAME rescored_fields
+    plus the reconciled names (parsed_json / field_telemetry are the SAME
+    dict objects mutated in place — the stage boundary is the return type,
+    not a copy).
+    """
+    if not constraints:
+        return AssembledState(
+            state.parsed_json, state.field_telemetry, state.rescored_fields, tuple()
+        )
+    parsed_json = state.parsed_json
+    field_telemetry = state.field_telemetry
+    field_log_scores = {
+        fname: ft["log_scores"] for fname, ft in field_telemetry.items() if "log_scores" in ft
+    }
+    field_values = {fname: {"value": pj["value"]} for fname, pj in parsed_json.items()}
+    reconciled, reconciled_fields = _constrained_map(
+        field_log_scores, field_values, list(constraints), schema
+    )
+    for fname, val in reconciled.items():
+        if fname in parsed_json:
+            old_val = parsed_json[fname]["value"]
+            if val != old_val:
+                parsed_json[fname]["value"] = val
+                # Update the field telemetry to reflect the reconciled value.
+                field_telemetry[fname]["value"] = val
+                if fname in field_log_scores and str(val) in field_log_scores[fname]:
+                    field_telemetry[fname]["probability"] = math.exp(
+                        field_log_scores[fname][str(val)]
+                    )
+    return AssembledState(
+        parsed_json,
+        field_telemetry,
+        state.rescored_fields,
+        tuple(reconciled_fields),
+    )
+
+
+def run_dependency_waves(
+    model,
+    tokenizer,
+    cache,
+    schema: StructuredSchema,
+    state: AssembledState,
+    field_plans: dict,
+    lead_in: list[int],
+    *,
+    scoring: str,
+    temperature: float,
+    prior: dict | None,
+    constraints,
+    oracle_overrides: dict[str, object] | None,
+) -> tuple[AssembledState, dict[str, Any]]:
+    """Stage 5 (W5b-10 C1): the selective parent-conditioned second pass.
+
+    A NAMED boundary over _selective_second_pass (the wave loop stays there):
+    takes the post-MAP AssembledState, returns the updated state (parsed /
+    telemetry mutated in place by the waves) plus the second-pass telemetry
+    dict. coder4 wires jevmlx.timing.Ledger's 'dependency' span around this
+    call — it is the only dependency-stage boundary.
+    """
+    if not any(f.depends_on is not None for f in schema.fields.values()):
+        return state, {"rerun_fields": [], "rerun_rows": 0, "second_pass_ms": 0.0}
+    telemetry = _selective_second_pass(
+        model,
+        tokenizer,
+        cache,
+        schema,
+        field_plans,
+        lead_in,
+        state.field_telemetry,
+        state.parsed_json,
+        list(state.reconciled_fields),
+        scoring,
+        temperature=temperature,
+        prior=prior,
+        constraints=list(constraints) if constraints is not None else None,
+        oracle_overrides=oracle_overrides,
+    )
+    return state, telemetry
+
+
+def finalize_public_result(
+    *,
+    schema: StructuredSchema,
+    state: AssembledState,
+    scored: ScoreRowsResult,
+    built: dict,
+    second_pass_telemetry: Mapping[str, Any],
+    timings: Mapping[str, Any],
+    temperature: float,
+    prior_correction: bool,
+    prior_ms: float,
+    constraints: list[dict] | None,
+    base_ids: list[int],
+    active_start: int,
+    t0: float,
+) -> dict[str, Any]:
+    """Stage 6 (W5b-10 C1): the public result dict.
+
+    Probability-status statement (bug 12), the timing split (bug 9), memory
+    telemetry (W5-D finding 32), provenance (prompt sha + version) — one
+    place, from the typed state. No scoring semantics here.
+    """
+    total_elapsed_ms = (time.perf_counter() - t0) * 1000
+    # Bug 12: probability_status must tell the truth about the temperature.
+    # At T=1 the reported distribution is the constrained-path probability;
+    # at any other temperature it is a post-hoc temperature-scaled
+    # distribution and the temperature is part of the statement.
+    if temperature == 1.0:
+        probability_status = (
+            "constrained-path probability at T=1; uncalibrated as decision confidence"
+        )
+    else:
+        probability_status = (
+            f"post-hoc temperature-scaled constrained distribution "
+            f"(temperature={temperature}); ranking-invariant, not a T=1 probability; "
+            f"uncalibrated as decision confidence"
+        )
+    if prior_correction:
+        probability_status += "; prior-corrected against the neutral-context pass"
+
+    chunk_shapes = scored.chunk_shapes
+    passes = scored.passes
+    peak_active_bytes = timings["peak_active_bytes"]
+    logger.info(
+        "Decided %d fields in %.1f ms",
+        len(schema),
+        total_elapsed_ms,
+        extra={
+            "prefill_ms": round(timings["t_prefill"], 2),
+            "plan_compile_ms": round(built["plan_compile_ms"], 2),
+            "cache_broadcast_ms": round(scored.broadcast_ms, 2),
+            "suffix_eval_ms": round(timings["t_suffix_eval"], 2),
+            "lm_head_gather_ms": round(scored.gather_ms, 2),
+            "rows": len(built["rows"]),
+            "passes": passes,
+            "padded_token_positions": sum(width * c for width, c in chunk_shapes),
+            "num_fields": len(schema),
+        },
+    )
+    return {
+        "elapsed_ms": round(total_elapsed_ms, 2),
+        # Bug 9: the timing split is honest about the whole request wall
+        # time: prior_ms (0.0 when prior_correction is off), prefill_ms,
+        # suffix_eval_ms, lm_head_gather_ms, and total_ms (everything, prior
+        # included). total_ms == elapsed_ms when prior_correction is off.
+        "prior_ms": round(prior_ms, 2),
+        "prefill_ms": round(timings["t_prefill"], 2),
+        "plan_compile_ms": round(built["plan_compile_ms"], 2),
+        "cache_broadcast_ms": round(scored.broadcast_ms, 2),
+        "suffix_eval_ms": round(timings["t_suffix_eval"], 2),
+        "lm_head_gather_ms": round(scored.gather_ms, 2),
+        "total_ms": round(prior_ms + total_elapsed_ms, 2),
+        # W3-R: total suffix token positions including right padding — the
+        # tiling shape the forwards actually ran at.
+        "padded_token_positions": sum(width * c for width, c in chunk_shapes),
+        "total_tokens_generated": 0,
+        "peak_active_bytes": peak_active_bytes,
+        # W5-D finding 32: peak memory ATTRIBUTABLE to this request. Never
+        # negative.
+        "peak_incremental_bytes": timings["peak_incremental_bytes"],
+        "sequential_forward_passes": passes,
+        # W5-D finding 30: Metal allocation failures that halved their chunk
+        # and retried — recorded separately, never counted as passes.
+        "failed_attempts": scored.failed_attempts,
+        # W3-E: fields whose batched result was replaced by the batch=1
+        # canonical rescore (top candidates inside INSTABILITY_BAND).
+        "rescored_fields": list(state.rescored_fields),
+        "schema_match": True,  # keys/enums guaranteed by construction
+        # The per-choice probabilities are the constrained path probability
+        # (product of masked branch softmaxes), not a normalized
+        # full-sequence likelihood and not automatically calibrated.
+        "confidence_model": built["scoring"],
+        # Provenance: what exactly was asked (sha over the full prompt token
+        # ids as JSON), which prompt text produced it, and how the reported
+        # probabilities should be read.
+        "prompt_sha256": _prompt_sha256(base_ids),
+        "prompt_version": PROMPT_VERSION,
+        "probability_status": probability_status,
+        "prior_correction": prior_correction,
+        "constraints_applied": bool(constraints),
+        "reconciled_fields": list(state.reconciled_fields),
+        "rerun_fields": second_pass_telemetry["rerun_fields"],
+        "rerun_rows": second_pass_telemetry["rerun_rows"],
+        "second_pass_ms": second_pass_telemetry["second_pass_ms"],
+        "parsed_json": dict(state.parsed_json),
+        "field_telemetry": dict(state.field_telemetry),
+        "num_fields": len(schema),
+    }
+
+
+def _score_all_fields(
+    model,
+    cache,
+    schema: StructuredSchema,
+    built: dict,
+    dispatch: DispatchResult,
+    *,
+    prior: dict | None,
+    calib: dict | str | None,
+    scoring: str,
+    temperature: float,
+    vocab_size: int,
+    pad_id: int,
+) -> tuple[AssembledState, list[str]]:
+    """Stage 2 (W5b-10 C1): first-pass scoring of EVERY field.
+
+    Routes each field to score_scalar_field or score_multi_field by its
+    plan shape and collects the outcomes into the AssembledState. The
+    batched path reuses this unchanged.
+    """
+    layout = field_rows_of(built)
+    field_plans = built["field_plans"]
+    parsed_json: dict[str, Any] = {}
+    field_telemetry: dict[str, Any] = {}
+    rescored_fields: list[str] = []
+    for fname, fdef in schema.fields.items():
+        p = field_plans[fname]
+        fr = layout.get(fname, FieldRows(fname, tuple(), tuple(), tuple()))
+        if "options" in p:
+            outcome = score_multi_field(
+                model,
+                cache,
+                built,
+                dispatch,
+                fr,
+                fdef,
+                p,
+                prior=prior,
+                calib=calib,
+                scoring=scoring,
+                temperature=temperature,
+                vocab_size=vocab_size,
+                pad_id=pad_id,
+            )
+            if outcome.rescored:
+                rescored_fields.append(fname)
+            parsed_json[fname] = dict(outcome.parsed)
+            field_telemetry[fname] = dict(outcome.telemetry)
+            if outcome.count_telemetry is not None:
+                # W2-E step 3: the count row surfaces as its own scalar-type
+                # telemetry entry keyed '<field>#count' (the prior pass reads
+                # it; parsed_json stays multi-field only).
+                field_telemetry[count_key(fname)] = dict(outcome.count_telemetry)
+        else:
+            outcome = score_scalar_field(
+                model,
+                cache,
+                built,
+                dispatch,
+                fr,
+                fdef,
+                p,
+                prior=prior,
+                scoring=scoring,
+                temperature=temperature,
+                vocab_size=vocab_size,
+                pad_id=pad_id,
+            )
+            if outcome.rescored:
+                rescored_fields.append(fname)
+            parsed_json[fname] = dict(outcome.parsed)
+            field_telemetry[fname] = dict(outcome.telemetry)
+    return AssembledState(parsed_json, field_telemetry, tuple(rescored_fields)), rescored_fields
+
+
 def _assemble(
     model,
     tokenizer,
@@ -2195,738 +3212,93 @@ def _assemble(
 ) -> dict[str, Any]:
     """Assemble per-field decisions from the scored rows (W3-F stage 3).
 
-    Dispatches per-row logits into node_logits (branch rows), option_pair
-    (multi option rows) and count_node_logits (count rows), then runs trie
-    scoring, W3-E near-tie rescore, MAP reconciliation (W3-D) and the
-    selective parent-conditioned second pass (W3-D part 2), and returns the
-    result dict. Everything AFTER the forward passes lives here — the
-    batched path reuses it unchanged.
+    W5b-10 (review C1): an ORCHESTRATOR over the typed stages —
+    dispatch_rows (row-kind dispatch) -> per-field score_scalar_field /
+    score_multi_field (each ending in the shared scalar finalizer) ->
+    reconcile_case_constraints (W3-D MAP over CompiledConstraints) ->
+    run_dependency_waves (W3-D part 2, the named boundary coder4 wraps in
+    timing.Ledger's 'dependency' span) -> finalize_public_result (the
+    result dict). Everything AFTER the forward passes lives in the stages;
+    the batched path reuses this unchanged.
     """
-    rows = built["rows"]
-    row_decision = built["row_decision"]
-    row_field = built["row_field"]
-    row_branch = built["row_branch"]
-    row_option = built["row_option"]
-    row_count = built["row_count"]
-    tries = built["tries"]
+    built = dict(built)
+    built["scoring"] = scoring
+    dispatch = dispatch_rows(built, scored)
     lead_in = built["lead_in"]
     field_plans = built["field_plans"]
-    plan_compile_ms = built["plan_compile_ms"]
-    pad_id = built["pad_id"]
-
-    # Dispatch the per-row logits into node_logits (branch-node rows),
-    # option_pair (multi option rows, RAW Y/N logits in remainder order
-    # ["Y", "N"]; bug 8: these raw logits are what the prior cache stores —
-    # no reconstruction from scaled probabilities) and count_node_logits
-    # (W2-E step 3 count rows, keyed by count-branch idx). Legal mass
-    # mirrors the same keying.
-    node_logits: dict[int, dict[int, list[float]]] = {}
-    option_pair: dict[int, list[float]] = {}
-    count_node_logits: dict[int, dict[int, list[float]]] = {}
-    node_legal_mass_log: dict[int, Any] = {}
-    for ridx in range(len(rows)):
-        values = scored.row_logits[ridx]
-        mass_log = scored.row_legal_mass_log[ridx]
-        if ridx in row_option:
-            option_pair[ridx] = values
-            node_legal_mass_log[ridx] = mass_log
-        elif ridx in row_count:
-            # W2-E step 3 count row: branch logits under the count trie's
-            # branch-node index (a separate dict — never mixed with
-            # option/branch keys); legal mass mirrors the scalar shape.
-            count_node_logits[ridx] = {row_count[ridx]: values}
-            node_legal_mass_log[ridx] = {row_count[ridx]: mass_log}
-        else:
-            node_logits[ridx] = {row_branch[ridx]: values}
-            node_legal_mass_log[ridx] = {row_branch[ridx]: mass_log}
-
-    t_gather_ms = scored.gather_ms
-    t_broadcast_ms = scored.broadcast_ms
-    chunk_shapes = scored.chunk_shapes
-    passes = scored.passes
-    # W5-D finding 32: absolute peak since the request's reset, plus the
-    # INCREMENTAL peak over the request's starting active memory — the old
-    # single number could describe an earlier request or the warmup.
-    peak_active_bytes = int(mx.get_peak_memory())
-    peak_incremental_bytes = max(0, peak_active_bytes - active_start)
     vocab_size = (
         model.args.vocab_size
         if hasattr(model, "args") and hasattr(model.args, "vocab_size")
         else model.model.embed_tokens.weight.shape[0]
     )
+    pad_id = built["pad_id"]
 
-    # 5. Trie scoring: P(choice) = product of branch factors along its path;
-    #    proper distribution, so confidence = P(choice). Full precision: no
-    #    rounding anywhere in the engine's results (presentation rounds in cli).
-    parsed_json: dict[str, Any] = {}
-    field_telemetry: dict[str, Any] = {}
-    # W3-E: fields whose batched result was replaced by the batch=1 rescore.
-    rescored_fields: list[str] = []
+    state, rescored_fields = _score_all_fields(
+        model,
+        cache,
+        schema,
+        built,
+        dispatch,
+        prior=prior,
+        calib=calib,
+        scoring=scoring,
+        temperature=temperature,
+        vocab_size=vocab_size,
+        pad_id=pad_id,
+    )
 
-    field_rows: dict[str, list[int]] = {}
-    for idx, fname in enumerate(row_field):
-        field_rows.setdefault(fname, []).append(idx)
-
-    for fname, fdef in schema.fields.items():
-        p = field_plans[fname]
-        idxs = field_rows.get(fname, [])
-        # W2-E step 3: the count rows ride in the same field_rows bucket as
-        # the option rows (both carry row_field=fname). Split them here: the
-        # option loop walks ONLY option rows, the count reconciliation walks
-        # ONLY count rows.
-        if "options" in p:
-            idxs = [ridx for ridx in idxs if ridx in row_option]
-            count_idxs_all = [ridx for ridx in field_rows.get(fname, []) if ridx in row_count]
-        else:
-            count_idxs_all = []
-
-        if "options" in p:
-            # multi: one-vs-rest classification — each option is an independent
-            # binary decision ("does this option apply?"), scored at the
-            # option's own Y/N divergence. per_option holds independent P(yes)
-            # values (NOT a subset distribution); no field-level probability
-            # is claimed (calibrate skips multi fields). The margin is how
-            # close the closest option's decision sat to the threshold.
-            probs_yes = {}
-            raw_pairs: dict[str, list[float]] = {}
-            prior_entry = prior.get(fname) if prior is not None else None
-            prior_pairs = prior_entry["option_pairs"] if prior_entry else None
-            # W2-E row codes: rows are keyed '<field>/<code>', but codes are
-            # positional (choices order), so row oi IS options[oi] — no map
-            # needed; results and telemetry stay option-keyed directly.
-            #
-            # W3-E near-tie rescore for multi (review F3): a Y/N decision
-            # near p=0.5 is the same near-tie as a scalar enum — a
-            # |logit_yes - logit_no| inside INSTABILITY_BAND is batch-shape
-            # noise. Rescore those options' rows at batch=1 (the helper
-            # stores option rows' [yes, no] values under option_pair keyed
-            # by row index) and replace their raw pairs BEFORE the scoring
-            # loop below, so prior + softmax + selection all see the
-            # canonical result. The merge into node_legal_mass_log is
-            # option-row safe here: option rows carry a flat float (the
-            # branch-row {bi: float} shape would crash .update — option rows
-            # are exactly the rescored ones).
-            rescored_oids = [
-                oi
-                for oi, ridx in enumerate(idxs)
-                if abs(option_pair[ridx][0] - option_pair[ridx][1]) < INSTABILITY_BAND
-            ]
-            multi_rescored = False
-            if rescored_oids:
-                rescore_ridxs = [ridx for oi, ridx in enumerate(idxs) if oi in rescored_oids]
-                rescored_raw = _rescore_rows_batch1(
-                    model,
-                    cache,
-                    rows,
-                    rescore_ridxs,
-                    row_decision,
-                    row_branch,
-                    row_option,
-                    vocab_size,
-                    pad_id,
-                )
-                multi_rescored = True
-                rescored_fields.append(fname)
-                for _oi, ridx in zip(rescored_oids, rescore_ridxs, strict=True):
-                    # Replace the option's raw Y/N pair with the canonical
-                    # (batch=1) logits; the scoring loop below consumes them.
-                    option_pair[ridx] = list(rescored_raw["option_pair"][ridx])
-                    # Branch rows carry {bi: log_mass} (the batched dispatch
-                    # shape); storing the flat float here made the lookup
-                    # .update() a bare float — telemetry read garbage (and
-                    # >1.0 "masses").
-                    mass_log = rescored_raw["node_legal_mass_log"][ridx]
-                    node_legal_mass_log[ridx] = (
-                        {row_branch[ridx]: mass_log} if ridx in row_branch else mass_log
-                    )
-            for oi, ridx in enumerate(idxs):
-                pair = list(option_pair[ridx])
-                option_name = p["options"][oi]
-                raw_pairs[option_name] = pair
-                if prior_pairs is not None and option_name in prior_pairs:
-                    # Per-option additive prior in log space on the Y/N pair
-                    # (P(yes) semantics: prior_pairs[option] =
-                    # [log P_prior(yes), log P_prior(no)]), then renormalise
-                    # (same log-softmax shape as the enum path).
-                    pp = prior_pairs[option_name]
-                    pair = [p - q for p, q in zip(pair, pp, strict=True)]
-                    m = max(pair)
-                    total = sum(math.exp(v - m) for v in pair)
-                    pair = [v - (m + math.log(total)) for v in pair]
-                (p_yes, _p_no) = softmax(pair, temperature=temperature)
-                probs_yes[option_name] = p_yes
-            # W2-E step 2 selection: with calibration, calibrated log-odds
-            # (a * (yes - no) + b) > 0 picks the option. The margin stays in
-            # PROBABILITY units on both paths (F1: the abstention gate
-            # compares it to a [0, 1) cut) — min |sigmoid(c) - 0.5|; the raw
-            # calibrated log-odds ride telemetry as calibrated_log_odds.
-            # Without calibration the fixed P(yes) >= 0.5 rule stands.
-            multi_ab = calib["multi"] if calib is not None else None
-            if multi_ab is not None:
-                a_coef, b_coef = multi_ab["a"], multi_ab["b"]
-                calibrated = {
-                    option: a_coef * (pair[0] - pair[1]) + b_coef
-                    for option, pair in raw_pairs.items()
-                }
-                probs_yes = {option: 1.0 / (1.0 + math.exp(-c)) for option, c in calibrated.items()}
-                selected = [option for option, c in calibrated.items() if c > 0]
-                margin = min((abs(p - 0.5) for p in probs_yes.values()), default=0.0)
-                calibrated_log_odds = calibrated
-            else:
-                selected, _prob, margin = _fold_multi(probs_yes)
-                calibrated_log_odds = None
-            # W2-E step 3 reconciliation: the count row ALWAYS ran (no
-            # flag). F1 (PR #24 review): score it through score_trie exactly
-            # like a scalar enum — the count trie may have multiple branch
-            # nodes (codes diverging over several tokens), so hand-rolling a
-            # softmax over node 0's children is only accidentally right when
-            # every code diverges at one token. score_trie multiplies the
-            # per-branch factors along each code's path.
-            # Its use is gated on the row's top-2 margin in NATS (nats, not
-            # probabilities — this gate measures how confidently the model
-            # named a bucket, a different question from the per-option
-            # P(yes) cut).
-            count_idxs = count_idxs_all
-            count_trie = tries[count_key(fname)]
-            count_logits_by_branch: dict[int, list[float]] = {}
-            for ridx in count_idxs:
-                count_logits_by_branch.update(count_node_logits[ridx])
-            count_branch_index = {id(node): bi for bi, node in enumerate(count_trie)}
-
-            def count_logits_at_node(
-                node: dict, _lookup=count_logits_by_branch, _index=count_branch_index
-            ) -> list[float]:
-                return _lookup[_index[id(node)]]
-
-            count_scores_raw, count_legal_mass_logs = score_trie(
-                count_trie, len(p["count"]["codes"]), count_logits_at_node
-            )
-            # Prior correction on the count row, same shape as the enum
-            # path (subtract the neutral-context log-score per code, then
-            # log-softmax renormalise) — the neutral pass caches count rows
-            # under '<field>#count' as a scalar-type prior.
-            prior_count_entry = prior.get(count_key(fname)) if prior is not None else None
-            count_scores = [
-                s - prior_count_entry["log_scores"][code]
-                if prior_count_entry is not None and code in prior_count_entry["log_scores"]
-                else s
-                for s, code in zip(count_scores_raw, p["count"]["codes"], strict=True)
-            ]
-            m = max(count_scores)
-            total = sum(math.exp(v - m) for v in count_scores)
-            count_log_probs = [v - (m + math.log(total)) for v in count_scores]
-            count_order = sorted(
-                range(len(count_scores)), key=count_scores.__getitem__, reverse=True
-            )
-            count_choice = p["count"]["codes"][count_order[0]]
-            count_margin = (
-                count_scores[count_order[0]] - count_scores[count_order[1]]
-                if len(count_scores) > 1
-                else float("inf")
-            )
-            reconciled_by = "per_option"
-            if count_margin > COUNT_MARGIN_MIN:
-                # Confident count: pick top-k by calibrated log-odds when a
-                # calibrator ran, else by P(yes) (monotone in log-odds —
-                # same ordering). k comes from the count bucket, capped at
-                # the field's option count ('4' = four or more).
-                k = min(4 if count_choice == "4" else int(count_choice), len(p["options"]))
-                if multi_ab is not None:
-                    ranked_by = sorted(calibrated_log_odds.items(), key=lambda kv: -kv[1])
-                else:
-                    ranked_by = sorted(probs_yes.items(), key=lambda kv: -kv[1])
-                selected = [option for option, _score in ranked_by[:k]]
-                reconciled_by = "count"
-            # W2-SETCONS: hard set constraints (schema-validated at compile
-            # time), applied LAST — after the threshold rule and the count
-            # reconciliation have proposed. The solver selects the
-            # score-maximizing set under the constraints, so a count- or
-            # threshold-proposed set that violates a declared constraint is
-            # corrected rather than emitted. Scores: the calibrated
-            # log-odds when a calibrator ran, else the RAW yes/no log-odds
-            # (the same per-option quantity calibration rescales — F3: no
-            # clamped logit(p), no magic constants; monotone in P(yes)
-            # either way, so a non-binding constraint set reproduces the
-            # proposal exactly).
-            set_constraints = fdef.set_constraints
-            if set_constraints:
-                if calibrated_log_odds is not None:
-                    option_scores = dict(calibrated_log_odds)
-                else:
-                    option_scores = {
-                        option: float(pair[0] - pair[1]) for option, pair in raw_pairs.items()
-                    }
-                selected, setcons_rule = select_constrained_set(
-                    list(p["options"]),
-                    option_scores,
-                    set_constraints,
-                    set(selected),
-                )
-                # The closest decision AFTER reconciliation: min |p_yes - 0.5|
-                # over the FINAL set's boundary options (an option forced in
-                # against its p_yes has margin 0 — the truth-telling signal).
-                final_set = set(selected)
-                margins = [abs(probs_yes[o] - 0.5) for o in p["options"] if o in final_set]
-                margin = min(margins, default=margin)
-            else:
-                setcons_rule = None
-            ranked = sorted(probs_yes.items(), key=lambda kv: -kv[1])
-            parsed_json[fname] = {
-                "value": selected,
-                "prob": None,
-            }
-            field_telemetry[fname] = {
-                "value": selected,
-                "type": "multi",
-                "probability": None,
-                "margin": margin,
-                "cardinality": fdef.cardinality,
-                # No 'scores'/'log_scores' key for multi: for every other
-                # type they hold log P(choice), which does not exist here.
-                # per_option carries the P(yes) values; calibrate skips
-                # multi fields.
-                "per_option": dict(probs_yes),
-                # Bug 8: the RAW [yes, no] logits per option (remainder
-                # order), at the evidence pass's caller temperature-agnostic
-                # scale — logits are what the prior cache stores and what
-                # log-odds shrinkage consumes.
-                "option_logit_pairs": {
-                    p["options"][oi]: list(option_pair[ridx]) for oi, ridx in enumerate(idxs)
-                },
-                "alternatives": tuple(ranked),
-                "top_choices": [
-                    {"choice": option, "probability": p_yes} for option, p_yes in ranked
-                ],
-                "rows": len(idxs),
-                # W2-E step 2: calibrated (a, b) when a calibrator ran, else
-                # None — the threshold key is gone (no dual path).
-                # calibrated_log_odds: raw a*x+b per option (log-odds units)
-                # when calibrated, else absent; selection used c > 0 while
-                # margin stays in probability units (F1).
-                "calibrated": {"a": multi_ab["a"], "b": multi_ab["b"]}
-                if multi_ab is not None
-                else None,
-                **(
-                    {"calibrated_log_odds": {k: v for k, v in calibrated_log_odds.items()}}
-                    if calibrated_log_odds is not None
-                    else {}
-                ),
-                # W2-E step 3: the count row's answer and confidence, plus
-                # which rule produced the selected set.
-                "count_choice": count_choice,
-                "count_margin": count_margin,
-                "reconciled_by": reconciled_by,
-                # W2-SETCONS: the hard set constraints applied (verbatim),
-                # and whether they changed the selection ("constraints") or
-                # didn't bind ("per_option"). None when the field has no set
-                # constraints — same absent-key policy as calibrated_log_odds.
-                **(
-                    {
-                        "set_constraints": [dict(c) for c in set_constraints],
-                        "set_selection": setcons_rule,
-                    }
-                    if set_constraints
-                    else {}
-                ),
-                # W5-D finding 38: the old field-level product underflowed
-                # and was cardinality-confounded (per-option 0.9 -> 40
-                # options = 0.015). Field-level stats are cardinality-free:
-                # min_option_legal_mass (worst option's leakage, probability
-                # space) + mean_log_legal_mass (additive, stable). The
-                # per-option logs stay on legal_mass_logs.
-                "min_option_legal_mass": (
-                    math.exp(min(node_legal_mass_log.get(ridx, 0.0) for ridx in idxs))
-                    if idxs
-                    else 1.0
-                ),
-                "mean_log_legal_mass": (
-                    sum(node_legal_mass_log.get(ridx, 0.0) for ridx in idxs) / len(idxs)
-                    if idxs
-                    else 0.0
-                ),
-                # Per-option legal-mass logs (raw, T=1), keyed by the option
-                # string — the same keying as option_logit_pairs.
-                "legal_mass_logs": {
-                    p["options"][oi]: node_legal_mass_log.get(ridx, 0.0)
-                    for oi, ridx in enumerate(idxs)
-                },
-                # W3-E: set when any option's Y/N decision sat inside the
-                # instability band and was rescored at batch=1.
-                "rescored": multi_rescored,
-            }
-            if prior_entry is not None:
-                field_telemetry[fname]["prior_option_pairs"] = {
-                    k: list(v) for k, v in prior_pairs.items()
-                }
-                field_telemetry[fname]["prior_corrected"] = True
-
-            # W2-E step 3: the count row surfaces as its own scalar-type
-            # telemetry entry keyed '<field>#count' (the prior pass reads
-            # it; parsed_json stays multi-field only).
-            count_display = list(p["count"]["codes"])
-            count_probs = [math.exp(lp) for lp in count_log_probs]
-            field_telemetry[count_key(fname)] = {
-                "value": count_choice,
-                "type": "enum",
-                "probability": max(count_probs),
-                "cardinality": len(count_display),
-                "log_scores": {
-                    code: lp for code, lp in zip(count_display, count_log_probs, strict=True)
-                },
-                "top_choices": sorted(
-                    (
-                        {"choice": c, "probability": pr}
-                        for c, pr in zip(count_display, count_probs, strict=True)
-                    ),
-                    key=lambda x: x["probability"],
-                    reverse=True,
-                ),
-                "rows": len(count_idxs),
-                "margin_nats": count_margin,
-                # W5-D finding 38: the count row's own legal mass was
-                # computed and discarded — now exposed. The count row's
-                # branch path is per-code, so report the winner's log mass
-                # and the min over codes (worst-case leakage on the row).
-                "legal_mass": math.exp(count_legal_mass_logs[count_display.index(count_choice)]),
-                "min_option_legal_mass": math.exp(min(count_legal_mass_logs)),
-            }
-            continue
-
-        if scoring == "slots":
-            # Slots mode scores the neutral aliases (quoted) for enums AND
-            # booleans; winners map back through the plan's alias_map.
-            choices_list = list(p["aliases"])
-        else:
-            choices_list = ["true", "false"] if fdef.field_type == "boolean" else fdef.choices
-
-        if not idxs:
-            # Cardinality-1 enum: no branch points, no rows — the value is
-            # fully determined by the schema (R2/R7: P = 1.0, log_score = 0).
-            val = p["alias_map"][choices_list[0]] if scoring == "slots" else choices_list[0]
-            if fdef.field_type == "boolean":
-                val = val == "true" if isinstance(val, str) else val
-            parsed_json[fname] = {"value": val, "prob": 1.0}
-            field_telemetry[fname] = {
-                "value": val,
-                "type": fdef.field_type,
-                "probability": 1.0,
-                "cardinality": fdef.cardinality,
-                "log_scores": {val if isinstance(val, str) else str(val): 0.0},
-                "top_choices": [
-                    {"choice": val if isinstance(val, str) else str(val), "probability": 1.0}
-                ],
-                "rows": 0,
-                # No branch points: legal_mass is 1.0 by definition (nothing
-                # branched, nowhere to leak). W2-D.
-                "legal_mass": 1.0,
-            }
-            continue
-
-        field_trie = tries[fname]
-        n_choices = fdef.cardinality
-
-        # logits_at_node for score_trie: branch-node rows carry their child
-        # logits under the branch-node index (row_branch of that row). Bound
-        # per field so the score_trie callback cannot see a later iteration's
-        # dictionaries.
-        logits_by_branch: dict[int, list[float]] = {}
-        # legal_mass_log per branch-node index (W2-D): the per-branch leakage
-        # signal captured during the suffix pass.
-        legal_mass_log_by_branch: dict[int, float] = {}
-        for ridx in idxs:
-            logits_by_branch.update(node_logits[ridx])
-            legal_mass_log_by_branch.update(node_legal_mass_log.get(ridx, {}))
-        branch_index = {id(node): bi for bi, node in enumerate(field_trie)}
-
-        def logits_at_node(
-            node: dict, _lookup=logits_by_branch, _index=branch_index
-        ) -> list[float]:
-            return _lookup[_index[id(node)]]
-
-        def legal_mass_at_node(
-            node: dict, _lookup=legal_mass_log_by_branch, _index=branch_index
-        ) -> float:
-            # W5-D finding 37: log mass straight through — no exp/log
-            # round-trip (underflows to log(0) below ~-745 nats).
-            return _lookup[_index[id(node)]]
-
-        raw_scores, raw_legal_mass_logs = score_trie(
-            field_trie, n_choices, logits_at_node, legal_mass_at_node
-        )
-        # W5-B (review C.2/7): the evidence goes through THE one scalar
-        # finalizer — rescore-when-band, prior correction, temperature, tie
-        # flag, legal mass, top_choices, margins in one place.
-        prior_entry = prior.get(fname) if prior is not None else None
-        real_choices = (
-            [p["alias_map"][raw] for raw in choices_list]
-            if scoring == "slots"
-            else list(choices_list)
-        )
-
-        def _rescore_evidence(
-            rescore_idxs: list[int],
-            _field_trie: list[dict] = field_trie,
-            _n_choices: int = n_choices,
-            _real_choices: list[str] = real_choices,
-        ) -> ScalarEvidence:
-            """Batch=1 canonical re-measure of this field's rows (W3-E)."""
-            rescored_raw = _rescore_rows_batch1(
-                model,
-                cache,
-                rows,
-                rescore_idxs,
-                row_decision,
-                row_branch,
-                row_option,
-                vocab_size,
-                pad_id,
-            )
-            rs_logits: dict[int, list[float]] = {}
-            rs_mass: dict[int, float] = {}
-            for ridx in rescore_idxs:
-                rs_logits.update(rescored_raw["node_logits"][ridx])
-                rs_mass.update(rescored_raw["node_legal_mass_log"].get(ridx, {}))
-            rs_branch_index = {id(node): bi for bi, node in enumerate(_field_trie)}
-
-            def _rs_logits_at(node: dict) -> list[float]:
-                return rs_logits[rs_branch_index[id(node)]]
-
-            def _rs_mass_at(node: dict) -> float:
-                # W5-D finding 37: the callback returns LOG mass; pass it
-                # straight through (no exp/log round-trip).
-                return rs_mass[rs_branch_index[id(node)]]
-
-            rs_scores, rs_mass_logs = score_trie(
-                _field_trie, _n_choices, _rs_logits_at, _rs_mass_at
-            )
-            return ScalarEvidence(
-                choices=tuple(_real_choices),
-                log_scores_raw=tuple(rs_scores),
-                legal_mass_logs=tuple(rs_mass_logs),
-                source_shape="batch1",
-            )
-
-        evidence = ScalarEvidence(
-            choices=tuple(real_choices),
-            log_scores_raw=tuple(raw_scores),
-            legal_mass_logs=tuple(raw_legal_mass_logs),
-            source_shape="batch",
-        )
-        decision, rescored = finalize_scalar_evidence(
-            evidence,
-            prior_entry=prior_entry,
-            temperature=temperature,
-            rescore=_rescore_evidence,
-            rescore_idxs=idxs,
-        )
-        if rescored:
-            rescored_fields.append(fname)
-        w_prob = decision.probability
-        is_tie = decision.tie
-
-        # The finalizer's evidence is already in the REAL choice
-        # representation (alias hop applied when building the evidence) —
-        # decision.value is the typed winner (boolean fields carry a Python
-        # bool). No second alias hop here (W5-B: the old code mapped the
-        # alias twice).
-        val = decision.value
-        if fdef.field_type == "boolean" and isinstance(val, str):
-            val = val.lower() == "true"
-
-        parsed_json[fname] = {
-            "value": val,
-            "prob": w_prob,
-        }
-
-        # Telemetry/log_scores are keyed by the REAL choice string in both
-        # modes (the contract calibrate.collect reads) — the finalizer
-        # already keys them by real_choices.
-        scored_choices = list(decision.top_choices)
-
-        field_telemetry[fname] = {
-            "value": val,
-            "type": fdef.field_type,
-            "probability": w_prob,
-            "cardinality": fdef.cardinality,
-            # Constrained-path log-probabilities at T=1, keyed by the real
-            # choice string. Temperature is applied once downstream, to the
-            # final distribution. With prior_correction these are the
-            # CORRECTED (prior-subtracted, renormalised) scores.
-            "log_scores": dict(decision.log_scores),
-            "top_choices": scored_choices[:5],
-            "rows": len(field_trie),
-            # W3-E: True only when the top candidates are STILL within
-            # INSTABILITY_BAND after the batch=1 rescore — the model genuinely
-            # cannot separate them at the canonical shape. Without the rescore
-            # (single band candidate), False: the batched margin was already
-            # decisive. The old 1e-6 semantics (exact-equality tie) is
-            # subsumed: exact equality is inside the band.
-            "tie": is_tie,
-            # W3-E: set when this field's batched result was replaced by the
-            # batch=1 canonical rescore (top candidates inside the band).
-            "rescored": rescored,
-            # W2-D: legal_mass — probability the model assigned to the union
-            # of allowed continuations at the winner's branch point(s),
-            # against the FULL vocabulary. A per-branch leakage signal:
-            # the constrained distribution can confidently pick A over B
-            # even when almost all unconstrained mass is on a reasoning
-            # token, newline, or label text. Low legal_mass flags that.
-            # Product over the winner's branch path (raw, pre-prior-
-            # correction logits: legal mass is a property of the model's
-            # branch output, not of the corrected distribution).
-            "legal_mass": decision.legal_mass,
-            # Per-choice legal-mass logs (raw, T=1) for calibration feature
-            # extraction; keyed by the real choice string like log_scores.
-            "legal_mass_logs": dict(decision.legal_mass_logs),
-        }
-        if decision.prior_corrected:
-            field_telemetry[fname]["prior_log_scores"] = dict(decision.prior_log_scores)
-            field_telemetry[fname]["prior_corrected"] = True
-
-    # W3-D: constrained MAP. After every field has log_scores and before
-    # assembly, choose the joint assignment maximizing the sum of per-field
-    # log scores subject to the case-level constraints (EV1 shape).
-    # W5-B (review 43): PRIOR MODE STOPS HERE — the neutral prior pass must
-    # not run constraints, the dependency second pass, or any
-    # decision-dependent postprocessing. Its field finalization (the scalar
-    # finalizer above) is the last step the prior cache consumes.
-    reconciled_fields: list[str] = []
+    # W3-D: constrained MAP. W5-B (review 43): PRIOR MODE STOPS HERE — the
+    # neutral prior pass must not run constraints or the dependency second
+    # pass; its field finalization is the last step the prior cache consumes.
     if constraints and not _prior_mode:
-        field_log_scores = {
-            fname: ft["log_scores"] for fname, ft in field_telemetry.items() if "log_scores" in ft
-        }
-        field_values = {fname: {"value": pj["value"]} for fname, pj in parsed_json.items()}
-        reconciled, reconciled_fields = _constrained_map(
-            field_log_scores, field_values, compiled_constraints, schema
-        )
-        for fname, val in reconciled.items():
-            if fname in parsed_json:
-                old_val = parsed_json[fname]["value"]
-                if val != old_val:
-                    parsed_json[fname]["value"] = val
-                    # Update the field telemetry to reflect the reconciled value.
-                    field_telemetry[fname]["value"] = val
-                    if fname in field_log_scores and str(val) in field_log_scores[fname]:
-                        field_telemetry[fname]["probability"] = math.exp(
-                            field_log_scores[fname][str(val)]
-                        )
+        state = reconcile_case_constraints(state, constraints, schema, compiled_constraints)
 
-    # W3-D part 2: selective parent-conditioned second pass. After the
-    # parallel pass + MAP, for each child whose parent is confident AND
-    # whose own margin is low or which MAP changed, build a conditioned
-    # row and batch all such children in ONE extra suffix pass over the
-    # same prefill cache. No depends_on = bit-identical (no second pass).
-    # Review 43: never in prior mode (the prior cache must hold only
-    # first-pass finalization scores).
-    second_pass_telemetry = {"rerun_fields": [], "rerun_rows": 0, "second_pass_ms": 0.0}
-    if not _prior_mode and any(f.depends_on is not None for f in schema.fields.values()):
-        second_pass_telemetry = _selective_second_pass(
+    # W3-D part 2: the selective parent-conditioned second pass. Review 43:
+    # never in prior mode (the prior cache must hold only first-pass
+    # finalization scores).
+    if not _prior_mode:
+        state, second_pass_telemetry = run_dependency_waves(
             model,
             tokenizer,
             cache,
             schema,
+            state,
             field_plans,
             lead_in,
-            field_telemetry,
-            parsed_json,
-            reconciled_fields,
-            scoring,
+            scoring=scoring,
             temperature=temperature,
             prior=prior,
             constraints=constraints,
             compiled_constraints=compiled_constraints,
             oracle_overrides=oracle_overrides,
         )
-
-    total_elapsed_ms = (time.perf_counter() - t0) * 1000
-    confidence_model = scoring
-
-    # Bug 12: probability_status must tell the truth about the temperature.
-    # At T=1 the reported distribution is the constrained-path probability;
-    # at any other temperature it is a post-hoc temperature-scaled
-    # distribution and the temperature is part of the statement.
-    if temperature == 1.0:
-        probability_status = (
-            "constrained-path probability at T=1; uncalibrated as decision confidence"
-        )
     else:
-        probability_status = (
-            f"post-hoc temperature-scaled constrained distribution "
-            f"(temperature={temperature}); ranking-invariant, not a T=1 probability; "
-            f"uncalibrated as decision confidence"
-        )
-    if prior_correction:
-        probability_status += "; prior-corrected against the neutral-context pass"
+        second_pass_telemetry = {"rerun_fields": [], "rerun_rows": 0, "second_pass_ms": 0.0}
 
-    logger.info(
-        "Decided %d fields in %.1f ms",
-        len(schema),
-        total_elapsed_ms,
-        extra={
-            "prefill_ms": round(t_prefill, 2),
-            "plan_compile_ms": round(plan_compile_ms, 2),
-            "cache_broadcast_ms": round(t_broadcast_ms, 2),
-            "suffix_eval_ms": round(t_suffix_eval, 2),
-            "lm_head_gather_ms": round(t_gather_ms, 2),
-            "rows": len(rows),
-            "passes": passes,
-            "padded_token_positions": sum(width * c for width, c in chunk_shapes),
-            "num_fields": len(schema),
-        },
-    )
-
-    return {
-        "elapsed_ms": round(total_elapsed_ms, 2),
-        # Bug 9: the timing split is honest about the whole request wall time:
-        # prior_ms (the neutral pass, 0.0 when prior_correction is off),
-        # prefill_ms, suffix_eval_ms, lm_head_gather_ms (the decision-gather
-        # + eval inside the suffix window), and total_ms (everything, prior
-        # included). The pre-existing keys (elapsed_ms/prefill_ms/
-        # suffix_eval_ms) keep their meaning; total_ms == elapsed_ms.
-        "prior_ms": round(prior_ms, 2),
-        "prefill_ms": round(t_prefill, 2),
-        "plan_compile_ms": round(plan_compile_ms, 2),
-        "cache_broadcast_ms": round(t_broadcast_ms, 2),
-        "suffix_eval_ms": round(t_suffix_eval, 2),
-        "lm_head_gather_ms": round(t_gather_ms, 2),
-        "total_ms": round(prior_ms + total_elapsed_ms, 2),
-        # W3-R: total suffix token positions including right padding — the
-        # tiling shape the forwards actually ran at.
-        "padded_token_positions": sum(width * c for width, c in chunk_shapes),
-        "total_tokens_generated": 0,
+    # W5-D finding 32: absolute peak since the request's reset, plus the
+    # INCREMENTAL peak over the request's starting active memory.
+    peak_active_bytes = int(mx.get_peak_memory())
+    timings = {
         "peak_active_bytes": peak_active_bytes,
-        # W5-D finding 32: peak memory ATTRIBUTABLE to this request (peak
-        # minus the active memory at request start). Never negative.
-        "peak_incremental_bytes": peak_incremental_bytes,
-        "sequential_forward_passes": passes,
-        # W5-D finding 30: Metal allocation failures that halved their chunk
-        # and retried — recorded separately, never counted as passes.
-        "failed_attempts": scored.failed_attempts,
-        # W3-E: fields whose batched result was replaced by the batch=1
-        # canonical rescore (top candidates inside INSTABILITY_BAND).
-        "rescored_fields": rescored_fields,
-        "schema_match": True,  # keys/enums guaranteed by construction; bench_model comparison
-        # The per-choice probabilities are the constrained path probability
-        # (product of masked branch softmaxes), not a normalized full-sequence
-        # likelihood and not automatically calibrated.
-        "confidence_model": confidence_model,
-        # Provenance: what exactly was asked (sha over the full prompt token
-        # ids as JSON), which prompt text produced it, and how the reported
-        # probabilities should be read. The status string follows the
-        # confidence_model key so a future scoring-mode change rewrites it.
-        "prompt_sha256": _prompt_sha256(base_ids),
-        "prompt_version": PROMPT_VERSION,
-        "probability_status": probability_status,
-        "prior_correction": prior_correction,
-        "constraints_applied": bool(constraints),
-        "reconciled_fields": reconciled_fields,
-        "rerun_fields": second_pass_telemetry["rerun_fields"],
-        "rerun_rows": second_pass_telemetry["rerun_rows"],
-        "second_pass_ms": second_pass_telemetry["second_pass_ms"],
-        "parsed_json": parsed_json,
-        "field_telemetry": field_telemetry,
-        "num_fields": len(schema),
+        "peak_incremental_bytes": max(0, peak_active_bytes - active_start),
+        "t_prefill": t_prefill,
+        "t_suffix_eval": t_suffix_eval,
     }
+    return finalize_public_result(
+        schema=schema,
+        state=state,
+        scored=scored,
+        built=built,
+        second_pass_telemetry=second_pass_telemetry,
+        timings=timings,
+        temperature=temperature,
+        prior_correction=prior_correction,
+        prior_ms=prior_ms,
+        constraints=constraints,
+        base_ids=base_ids,
+        active_start=active_start,
+        t0=t0,
+    )
 
 
 def _contexts_per_pass(per_context_cache_nbytes: int) -> int:

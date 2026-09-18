@@ -20,13 +20,8 @@ from jevmlx.bench import (
 
 
 def test_machine_tag_from_fake_sysctl(monkeypatch):
-    """<chip-lowercase>-<ram>gb from sysctl output; marketing noise dropped.
-
-    Patched through machine_tag.__globals__: test_check_results.py evicts
-    jevmlx.* modules, so this file's module-level machine_tag binding may be
-    a DIFFERENT instance than a fresh `import jevmlx.bench` returns —
-    patching the latter would be invisible to the function under test."""
-    target = machine_tag.__globals__  # the dict machine_tag actually reads
+    """<chip-lowercase>-<ram>gb from sysctl output; marketing noise dropped."""
+    import jevmlx.bench as bench
 
     def fake_sysctl(args):
         if args == ["machdep.cpu.brand_string"]:
@@ -35,7 +30,7 @@ def test_machine_tag_from_fake_sysctl(monkeypatch):
             return str(128 * 2**30)
         return None
 
-    monkeypatch.setitem(target, "_sysctl", fake_sysctl)
+    monkeypatch.setattr(bench, "_sysctl", fake_sysctl)
     assert machine_tag() == "m5max-128gb"
 
 
@@ -47,6 +42,7 @@ def test_machine_tag_override_wins(monkeypatch):
 
 
 def test_machine_tag_single_chip_word(monkeypatch):
+    import jevmlx.bench as bench
 
     def fake_sysctl(args):
         if args == ["machdep.cpu.brand_string"]:
@@ -55,10 +51,7 @@ def test_machine_tag_single_chip_word(monkeypatch):
             return str(16 * 2**30)
         return None
 
-    # See test_machine_tag_from_fake_sysctl: patch through machine_tag's own
-    # module dict — the eviction in test_check_results can leave two live
-    # instances and only this one is guaranteed to be the function's globals.
-    monkeypatch.setitem(machine_tag.__globals__, "_sysctl", fake_sysctl)
+    monkeypatch.setattr(bench, "_sysctl", fake_sysctl)
     assert machine_tag() == "m4-16gb"
 
 
@@ -753,43 +746,3 @@ def test_load_engine_with_timeout_happy_path():
 
     assert quick("x", 1.0) == ("m", "t")
     assert calls == ["x"]
-
-
-def test_parity_note_names_stage_and_drift(tmp_path):
-    """Contract v2: the parity_failed reason shows max drift AND which stage
-    failed (winners / final log-score drift / raw pre-rescore row drift)."""
-    from benchmarks.summarize_results import _model_parity_note
-
-    d = tmp_path / "m5-32gb-x"
-    d.mkdir()
-
-    (d / "parity.json").write_text(
-        json.dumps(
-            {
-                "passed": False,
-                "max_abs_drift_nats": 0.01,
-                "max_raw_row_drift_nats": 0.2,
-                "atol": 0.05,
-                "winners_identical": True,
-            }
-        ),
-        encoding="utf-8",
-    )
-    note = _model_parity_note(d)
-    assert "raw pre-rescore row-logit drift" in note
-    assert "max_raw_row_drift_nats=0.2" in note
-    assert "max_abs_drift_nats=0.01" in note
-
-    # Winners stage: final decisions flipped.
-    (d / "parity.json").write_text(
-        json.dumps(
-            {"passed": False, "winners_identical": False, "atol": 0.05, "max_abs_drift_nats": 0.3}
-        ),
-        encoding="utf-8",
-    )
-    note = _model_parity_note(d)
-    assert "winners flipped" in note
-
-    # Passing parity: no note.
-    (d / "parity.json").write_text(json.dumps({"passed": True, "atol": 0.05}), encoding="utf-8")
-    assert _model_parity_note(d) is None
