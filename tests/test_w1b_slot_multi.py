@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 
 from jevmlx.schema import StructuredSchema
+from tests.conftest import make_test_renderer
 
 # A fake char tokenizer: each character maps to one token id. BPE merges are
 # not an issue because every character is its own token — the compositional
@@ -95,11 +96,10 @@ def _reconstruct_row(lead_in: list[int], shared: list[int], remainder: list[int]
 def _check_scalar_reconstruction(schema, tokenizer, mode: str):
     """Every scalar candidate row = lead_in + shared + remainder == full text."""
     plan = (
-        schema.compile_slot_plan(tokenizer)
+        schema.compile_slot_plan(tokenizer, make_test_renderer(tokenizer, schema, "slots"))
         if mode == "slots"
-        else schema.compile_labels_plan(tokenizer)
+        else schema.compile_labels_plan(tokenizer, make_test_renderer(tokenizer, schema, "labels"))
     )
-    lead_in = plan["lead_in_ids"]
     for fname, fplan in plan["fields"].items():
         if "suffix_ids_list" in fplan:
             continue  # multi, handled separately
@@ -122,7 +122,7 @@ def _check_scalar_reconstruction(schema, tokenizer, mode: str):
                 )
             full_text = _candidate_text_scalar(fname, value_text)
             full_ids = tokenizer.encode(full_text, add_special_tokens=False)
-            recon = _reconstruct_row(lead_in, shared, remainder)
+            recon = _reconstruct_row([], shared, remainder)
             assert recon == full_ids, (
                 f"{mode} scalar {fname}={value}: reconstructed {recon} != "
                 f"full {full_ids} (text={full_text!r})"
@@ -132,11 +132,10 @@ def _check_scalar_reconstruction(schema, tokenizer, mode: str):
 def _check_multi_reconstruction(schema, tokenizer, mode: str):
     """Every multi Y/N candidate row = lead_in + suffix + remainder == full text."""
     plan = (
-        schema.compile_slot_plan(tokenizer)
+        schema.compile_slot_plan(tokenizer, make_test_renderer(tokenizer, schema, "slots"))
         if mode == "slots"
-        else schema.compile_labels_plan(tokenizer)
+        else schema.compile_labels_plan(tokenizer, make_test_renderer(tokenizer, schema, "labels"))
     )
-    lead_in = plan["lead_in_ids"]
     for fname, fplan in plan["fields"].items():
         if "suffix_ids_list" not in fplan:
             continue
@@ -152,7 +151,7 @@ def _check_multi_reconstruction(schema, tokenizer, mode: str):
                 remainder = remainders[yn_idx]
                 full_text = _candidate_text_multi(fname, code, alias)
                 full_ids = tokenizer.encode(full_text, add_special_tokens=False)
-                recon = _reconstruct_row(lead_in, suffix, remainder)
+                recon = _reconstruct_row([], suffix, remainder)
                 assert recon == full_ids, (
                     f"{mode} multi {fname}/{option}={alias}: reconstructed {recon} != "
                     f"full {full_ids} (text={full_text!r})"
@@ -176,11 +175,11 @@ def test_multi_only_slots_reconstruction():
     option rows (not empty), and every Y/N row must reconstruct exactly."""
     tok = CharTokenizer()
     schema = _multi_only_schema()
-    plan = schema.compile_slot_plan(tok)
-    # The lead-in must NOT be empty for a multi-only schema (the bug: it was
-    # empty because compile_slot_plan computed lead_in from scalar shared_ids
-    # only, and there were no scalars).
-    assert plan["lead_in_ids"] != [], "multi-only slot schema has empty lead_in (Q6-1 bug)"
+    plan = schema.compile_slot_plan(tok, make_test_renderer(tok, schema, "slots"))
+    # W2-A: the LCP of per-option prompts must be non-empty for a multi-only
+    # schema (the Q6-1 bug was that the lead-in was empty because it was
+    # computed from scalar shared_ids only; now it's the LCP of all prompts).
+    assert plan["lcp_ids"] != [], "multi-only slot schema has empty LCP (Q6-1 bug)"
     _check_multi_reconstruction(schema, tok, "slots")
 
 
@@ -225,7 +224,7 @@ def test_slot_plan_does_not_call_labels_plan():
     # the labels cache. After compile_slot_plan, the labels cache should be
     # empty (compile_labels_plan was never called).
     schema = _mixed_schema()
-    schema.compile_slot_plan(tok)
+    schema.compile_slot_plan(tok, make_test_renderer(tok, schema, "slots"))
     # The labels plan cache should be empty — compile_slot_plan used
     # _compile_multi_plan, not compile_labels_plan.
     cached_labels = schema._cached_plan(tok, "labels")
@@ -263,4 +262,4 @@ def test_prompt_version_bumped():
     """PROMPT_VERSION is now v3 (W1-B)."""
     from jevmlx.engine import PROMPT_VERSION
 
-    assert PROMPT_VERSION == "jevmlx-parallel-v6"
+    assert PROMPT_VERSION == "jevmlx-parallel-v8"

@@ -9,6 +9,7 @@ names; PROMPT_VERSION bumps to v4.
 import json
 
 from jevmlx.schema import StructuredSchema
+from tests.conftest import make_test_renderer
 
 
 class CharTokenizer:
@@ -47,12 +48,16 @@ def test_row_key_uses_zero_padded_codes():
     tok = CharTokenizer()
     for mode in ("slots", "labels"):
         schema = _multi_schema()
-        plan = schema.compile_slot_plan(tok) if mode == "slots" else schema.compile_labels_plan(tok)
+        plan = (
+            schema.compile_slot_plan(tok, make_test_renderer(tok, schema, "slots"))
+            if mode == "slots"
+            else schema.compile_labels_plan(tok, make_test_renderer(tok, schema, "labels"))
+        )
         p = plan["fields"]["tags"]
         assert p["codes"] == ["00", "01", "02"]
         assert p["options"] == ["alpha", "beta", "gamma"]
         for i, suffix in enumerate(p["suffix_ids_list"]):
-            row = _decode(plan["lead_in_ids"] + list(suffix))
+            row = _decode(list(suffix))
             assert f'"tags/{i:02d}"' in row, (mode, i, row)
             assert "alpha" not in row and "beta" not in row and "gamma" not in row
 
@@ -65,7 +70,11 @@ def test_exact_token_reconstruction_with_codes():
     tok = CharTokenizer()
     for mode in ("slots", "labels"):
         schema = _multi_schema()
-        plan = schema.compile_slot_plan(tok) if mode == "slots" else schema.compile_labels_plan(tok)
+        plan = (
+            schema.compile_slot_plan(tok, make_test_renderer(tok, schema, "slots"))
+            if mode == "slots"
+            else schema.compile_labels_plan(tok, make_test_renderer(tok, schema, "labels"))
+        )
         p = plan["fields"]["tags"]
         for i, (suffix, remainders) in enumerate(
             zip(p["suffix_ids_list"], p["remainders"], strict=True)
@@ -74,7 +83,7 @@ def test_exact_token_reconstruction_with_codes():
             for alias, remainder in zip(("Y", "N"), remainders, strict=True):
                 full_text = "{" + f'{json.dumps(f"tags/{code}")}: "{alias}"' + "}"
                 full_ids = tok.encode(full_text, add_special_tokens=False)
-                recon = list(plan["lead_in_ids"]) + list(suffix) + list(remainder)
+                recon = list(suffix) + list(remainder)
                 assert recon == full_ids, (mode, code, alias)
 
 
@@ -91,7 +100,7 @@ def test_codes_injective_across_options_and_schema_order():
             }
         }
     )
-    plan = schema.compile_labels_plan(tok)
+    plan = schema.compile_labels_plan(tok, make_test_renderer(tok, schema, "labels"))
     assert plan["fields"]["m"]["codes"] == [f"{i:02d}" for i in range(12)]
 
 
@@ -110,4 +119,4 @@ def test_engine_telemetry_maps_codes_to_option_names():
     assert [c for c, _ in telemetry["alternatives"]] == ["alpha", "beta", "gamma"]
     assert [e["choice"] for e in telemetry["top_choices"]] == ["alpha", "beta", "gamma"]
     assert result["parsed_json"]["tags"]["value"] == ["alpha", "beta", "gamma"]
-    assert result["prompt_version"] == "jevmlx-parallel-v6"
+    assert result["prompt_version"] == "jevmlx-parallel-v8"

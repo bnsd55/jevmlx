@@ -388,12 +388,111 @@ class StructuredSchema:
         """Schema block in labels mode (real choice strings)."""
         return self.to_schema_str("labels")
 
+    def render_field_block(
+        self, name: str, field: FieldDefinition, aliases: list[str] | None, mode: str
+    ) -> str:
+        """W2-A: one field's prompt block (field-local prompts).
+
+        Replaces the global schema-block line for this field. The block lists
+        the field name, its question (description), the valid outputs (codes
+        from W2-C's codebook search in slots mode, or real choice strings in
+        labels mode), and the exact output rule. Every displayed string is
+        json.dumps-escaped so quotes/newlines/semicolons cannot break the
+        format (GPT Q2 'Schema block format').
+
+        For a multi field, this renders the full field header (all options);
+        the per-option row prompt is built separately by
+        :meth:`render_multi_option_block`.
+        """
+        safe_name = json.dumps(name, ensure_ascii=False)
+        desc = field.description.split("\n")[0].strip()
+        safe_desc = json.dumps(desc, ensure_ascii=False)
+        if field.field_type == "multi":
+            lines = [f"MULTI FIELD: {safe_name}", f"QUESTION: {safe_desc}", "VALID OUTPUTS:"]
+            for oi, choice in enumerate(field.choices):
+                code = self.code_for_index(oi)
+                safe_choice = json.dumps(choice, ensure_ascii=False)
+                gloss = field.choice_descriptions.get(choice)
+                gloss_part = f" — {json.dumps(gloss, ensure_ascii=False)}" if gloss else ""
+                lines.append(f"  OPTION {code} = {safe_choice}{gloss_part}")
+            lines.append('OUTPUT RULE: each option coded "Y" (applies) or "N" (does not apply).')
+            return "\n".join(lines)
+        choices_list = ["true", "false"] if field.field_type == "boolean" else list(field.choices)
+        lines = [f"FIELD: {safe_name}", f"QUESTION: {safe_desc}", "VALID OUTPUTS:"]
+        for i, choice in enumerate(choices_list):
+            if mode == "slots" and aliases is not None:
+                code = aliases[i]
+            else:
+                code = self.code_for_index(i)
+            safe_choice = json.dumps(choice, ensure_ascii=False)
+            gloss = field.choice_descriptions.get(choice)
+            gloss_part = f" — {json.dumps(gloss, ensure_ascii=False)}" if gloss else ""
+            lines.append(f"  {json.dumps(code, ensure_ascii=False)} = {safe_choice}{gloss_part}")
+        rule_codes = [
+            aliases[i] if (mode == "slots" and aliases) else self.code_for_index(i)
+            for i in range(len(choices_list))
+        ]
+        rule_str = ", ".join(json.dumps(c, ensure_ascii=False) for c in rule_codes)
+        lines.append(f"OUTPUT RULE: return exactly one of {rule_str}.")
+        return "\n".join(lines)
+
+    def render_multi_option_block(self, name: str, field: FieldDefinition, option_idx: int) -> str:
+        """W2-A: one multi option's prompt block (field-local prompts).
+
+        Each multi option gets its own row with its code, the option text,
+        and the Y/N output rule — so the per-option decision row sees only
+        its own option, not the full multi field header.
+        """
+        code = self.code_for_index(option_idx)
+        option = field.choices[option_idx]
+        safe_name = json.dumps(name, ensure_ascii=False)
+        safe_code = json.dumps(code, ensure_ascii=False)
+        safe_option = json.dumps(option, ensure_ascii=False)
+        gloss = field.choice_descriptions.get(option)
+        gloss_part = f" — {json.dumps(gloss, ensure_ascii=False)}" if gloss else ""
+        lines = [
+            f"MULTI OPTION: {safe_name} / {safe_code}",
+            f"OPTION: {safe_option}{gloss_part}",
+            'OUTPUT RULE: return exactly one of "Y" (applies) or "N" (does not apply).',
+        ]
+        return "\n".join(lines)
+
     @staticmethod
     def alias_for_index(index: int) -> str:
         """The neutral alias for the choice at ``index`` (A, B, ..., AA, AB...)."""
         return _alias_code(index)
 
-    def plan_hash(self, tokenizer, mode: str) -> str:
+    def _searched_aliases(self, tokenizer) -> dict[str, list[str]]:
+        """W2-C codebook aliases per scalar field (tokenizer-only, no prompts).
+
+        Used by make_field_prompt_renderer to get the searched codes before
+        rendering the per-field prompt block. This is NOT a plan compile —
+        it only runs the codebook search, not the trie/remainders/LCP logic.
+        """
+        from functools import partial
+
+        result: dict[str, list[str]] = {}
+        for fname, fdef in self.fields.items():
+            if fdef.field_type == "multi":
+                continue
+            if fdef.field_type == "boolean":
+                values = ["true", "false"]
+            else:
+                values = list(fdef.choices)
+
+            def slot_candidate_text(name: str, alias: str) -> str:
+                return json.dumps({name: alias}, ensure_ascii=False)
+
+            aliases, _single_branch = _search_codebook(
+                tokenizer,
+                partial(slot_candidate_text, fname),
+                len(values),
+                field_name=fname,
+            )
+            result[fname] = aliases
+        return result
+
+    def plan_hash(self, tokenizer, mode: str, render_field_prompt=None, cache_key: str = "") -> str:
         """sha256 of the compiled plan for ``mode`` (stable within a process).
 
         The plan captures the schema block, choice order, and token
@@ -401,17 +500,24 @@ class StructuredSchema:
         prior must match. Compiled on demand; the result equals the hash of
         ``json.dumps(plan, sort_keys=True)`` with token ids as ints.
         """
+        if render_field_prompt is None:
+            # Utility callers (lint, CLI preview) without context: use an
+            # empty-context renderer so the plan compiles. The hash is
+            # context-dependent by design (the prompt tails are in the plan).
+            from jevmlx.engine import make_field_prompt_renderer
+
+            render_field_prompt = make_field_prompt_renderer(tokenizer, "", self, mode)
         if mode == "slots":
-            plan = self.compile_slot_plan(tokenizer)
+            plan = self.compile_slot_plan(tokenizer, render_field_prompt, cache_key=cache_key)
         elif mode == "labels":
-            plan = self.compile_labels_plan(tokenizer)
+            plan = self.compile_labels_plan(tokenizer, render_field_prompt, cache_key=cache_key)
         else:
             raise ValueError(f"mode must be 'slots' or 'labels', got {mode!r}")
         return hashlib.sha256(
             json.dumps(plan, sort_keys=True, default=list).encode("utf-8")
         ).hexdigest()
 
-    def _cached_plan(self, tokenizer, mode: str) -> dict[str, Any] | None:
+    def _cached_plan(self, tokenizer, mode: str, cache_key: str = "") -> dict[str, Any] | None:
         """Return the live cached plan for (tokenizer, mode), or None.
 
         Identity check: the stored ref() must resolve to THIS tokenizer, not
@@ -419,12 +525,12 @@ class StructuredSchema:
         share a plan; token ids are tokenizer-specific). Callers compile and
         call _cache_plan when this returns None.
         """
-        entry = self._plans.get((id(tokenizer), mode))
+        entry = self._plans.get((id(tokenizer), mode, cache_key))
         if entry is not None and entry[0]() is tokenizer:
             return entry[1]
         return None
 
-    def _cache_plan(self, tokenizer, plan: dict[str, Any], mode: str) -> None:
+    def _cache_plan(self, tokenizer, plan: dict[str, Any], mode: str, cache_key: str = "") -> None:
         """Store a plan keyed by tokenizer identity, evicted on tokenizer death.
 
         Non-weak-referenceable tokenizers are not cached at all (N3): an
@@ -445,12 +551,14 @@ class StructuredSchema:
                 self._logged_non_weakref = True
             return
         key = id(tokenizer)
-        cache_key = (key, mode)
-        if cache_key not in self._plans:
-            weakref.finalize(tokenizer, self._plans.pop, cache_key, None)
-        self._plans[cache_key] = (ref, plan)
+        ck = (key, mode, cache_key)
+        if ck not in self._plans:
+            weakref.finalize(tokenizer, self._plans.pop, ck, None)
+        self._plans[ck] = (ref, plan)
 
-    def compile_slot_plan(self, tokenizer) -> dict[str, dict[str, Any]]:
+    def compile_slot_plan(
+        self, tokenizer, render_field_prompt, cache_key: str = ""
+    ) -> dict[str, dict[str, Any]]:
         """Slot-trie plan (the default scoring mode): the decision row stays
         JSON — ``'{\n  "<field>": '`` — and the scored candidates are the
         QUOTED neutral aliases ``'"A"'``, `'"B"'``, ... (base-26 codes beyond
@@ -467,7 +575,7 @@ class StructuredSchema:
         ``shared_ids``/``remainders`` through the token trie unchanged and
         maps winners back via ``alias_map``.
         """
-        cached = self._cached_plan(tokenizer, "slots")
+        cached = self._cached_plan(tokenizer, "slots", cache_key)
         if cached is not None:
             return cached
         fields_plan: dict[str, dict[str, Any]] = {}
@@ -544,35 +652,47 @@ class StructuredSchema:
             for fname, fdef in self.fields.items():
                 if fdef.field_type == "multi":
                     fields_plan[fname] = multi_plan[fname]
-        # Factor the global lead-in once over scalar shared_ids AND multi
-        # suffix_ids_list (B1/Q6-1: the lead-in must be the common prefix of
-        # ALL row prefixes, never computed from scalars alone). Strip exactly
-        # once, after the complete final mode plan exists.
-        row_prefixes = [p["shared_ids"] for p in fields_plan.values() if "shared_ids" in p] + [
-            ids
-            for p in fields_plan.values()
-            if "suffix_ids_list" in p
-            for ids in p["suffix_ids_list"]
-        ]
-        lead_in = _common_token_prefix(row_prefixes) if row_prefixes else []
-        if lead_in:
-            for p in fields_plan.values():
-                if "shared_ids" in p:
-                    p["shared_ids"] = p["shared_ids"][len(lead_in) :]
-                if "suffix_ids_list" in p:
-                    # lead_in is the common prefix of all row_prefixes by
-                    # construction — strip unconditionally, no fallback.
-                    p["suffix_ids_list"] = [ids[len(lead_in) :] for ids in p["suffix_ids_list"]]
-        result = {"lead_in_ids": list(lead_in), "fields": fields_plan}
-        self._cache_plan(tokenizer, result, mode="slots")
+        # W2-A field-local prompts: compute the per-field chat-prompt token
+        # ids, take their exact token-ID LCP as the prefill, and store the
+        # post-LCP tail per field. Each row carries its own field's prompt
+        # tail + candidate remainder. No fallback path — this branch IS the
+        # field-local engine (if the M5 A/B loses, we close the PR).
+        field_prompt_ids: dict[str, list[int]] = {}
+        for fname, p in fields_plan.items():
+            if "options" in p:
+                # Multi: render one prompt per option (each option sees only
+                # its own block). Store as a list matching suffix_ids_list.
+                opt_ids = []
+                for oi in range(len(p["options"])):
+                    opt_ids.append(render_field_prompt(fname, oi))
+                field_prompt_ids[fname] = opt_ids  # type: ignore[assignment]
+            else:
+                field_prompt_ids[fname] = render_field_prompt(fname)
+        all_field_prompts = []
+        for v in field_prompt_ids.values():
+            if isinstance(v, list) and v and isinstance(v[0], list):
+                all_field_prompts.extend(v)
+            else:
+                all_field_prompts.append(v)
+        lcp = _common_token_prefix(all_field_prompts) if all_field_prompts else []
+        for fname, p in fields_plan.items():
+            v = field_prompt_ids[fname]
+            if isinstance(v, list) and v and isinstance(v[0], list):
+                p["prompt_tail_ids"] = [ids[len(lcp) :] for ids in v]
+            else:
+                p["prompt_tail_ids"] = v[len(lcp) :]
+        result = {"lcp_ids": list(lcp), "fields": fields_plan}
+        self._cache_plan(tokenizer, result, mode="slots", cache_key=cache_key)
         return result
 
-    def compile_labels_plan(self, tokenizer) -> dict[str, dict[str, Any]]:
+    def compile_labels_plan(
+        self, tokenizer, render_field_prompt, cache_key: str = ""
+    ) -> dict[str, dict[str, Any]]:
         """Labels scoring plan (choice-text trie): candidates are the real
         choice strings; the decision row is the full JSON row text. The
         engine maps winners straight to the choice strings (no alias hop).
         """
-        return self._compile_labels(tokenizer)
+        return self._compile_labels(tokenizer, render_field_prompt, cache_key)
 
     def _compile_multi_plan(self, tokenizer) -> dict[str, dict[str, Any]]:
         """Build ONLY the multi-field plans, returning UNSTRIPPED full option
@@ -661,7 +781,9 @@ class StructuredSchema:
             }
         return plan
 
-    def _compile_labels(self, tokenizer) -> dict[str, dict[str, Any]]:  # noqa: D401
+    def _compile_labels(
+        self, tokenizer, render_field_prompt, cache_key: str = ""
+    ) -> dict[str, dict[str, Any]]:  # noqa: D401
         """Pre-index everything the engine needs for the batched suffix pass.
 
         Token-aligned at both boundaries: every choice is encoded as ONE
@@ -686,7 +808,7 @@ class StructuredSchema:
         legally be named "_lead_in_ids"). Plans are cached per tokenizer
         identity (name_or_path + vocab size).
         """
-        cached = self._cached_plan(tokenizer, "labels")
+        cached = self._cached_plan(tokenizer, "labels", cache_key)
         if cached is not None:
             return cached
         plan: dict[str, dict[str, Any]] = {}
@@ -757,37 +879,32 @@ class StructuredSchema:
                 "remainders": remainders,
             }
 
-        # Schema-wide lead-in (typically '{\n  "') shared by every field's
-        # candidates: lifted out of shared_ids so the engine can keep it in
-        # the prefill broadcast cache. Remainders stay relative to the full
-        # per-field shared prefix; rows are lead_in + shared_ids + path.
-        # Lead-in candidates: every row prefix — scalar fields' shared_ids
-        # AND multi option prefixes (B1: with only a multi field, the lead-in
-        # must still be the common prefix of the option rows, never their
-        # longer per-option text).
-        field_shared_prefixes = [p["shared_ids"] for p in plan.values() if "shared_ids" in p] + [
-            ids for p in plan.values() if "suffix_ids_list" in p for ids in p["suffix_ids_list"]
-        ]
-        if not field_shared_prefixes:
-            wrapped: dict[str, Any] = {"lead_in_ids": [], "fields": plan}
-            self._cache_plan(tokenizer, wrapped, mode="labels")
-            return wrapped
-        lead_in = _common_token_prefix(field_shared_prefixes)
-        # An empty schema-wide lead-in is legal (e.g. char-level tokenizers
-        # where '{\n' fuses with the field name): the engine then runs one row
-        # per field with no broadcast prefix — each row still carries that
-        # field's full shared_ids.
-        # Apply the same strip to multi option prefixes so the engine can
-        # prepend lead_in uniformly to every row (R1: one rule for all rows).
-        # lead_in is the common prefix by construction — strip unconditionally.
-        for p in plan.values():
-            if "suffix_ids_list" in p and lead_in:
-                p["suffix_ids_list"] = [ids[len(lead_in) :] for ids in p["suffix_ids_list"]]
-        for p in plan.values():
-            if "shared_ids" in p:
-                p["shared_ids"] = p["shared_ids"][len(lead_in) :]
-        # Metadata lives beside the field plans, never mixed into them (D1:
-        # a field could legally be named "_lead_in_ids").
-        result = {"lead_in_ids": list(lead_in), "fields": plan}
-        self._cache_plan(tokenizer, result, mode="labels")
+        # W2-A field-local prompts: compute the per-field chat-prompt token
+        # ids, take their exact token-ID LCP as the prefill, and store the
+        # post-LCP tail per field. No fallback path — this branch IS the
+        # field-local engine.
+        field_prompt_ids: dict[str, list[int]] = {}
+        for fname, p in plan.items():
+            if "options" in p:
+                opt_ids = []
+                for oi in range(len(p["options"])):
+                    opt_ids.append(render_field_prompt(fname, oi))
+                field_prompt_ids[fname] = opt_ids  # type: ignore[assignment]
+            else:
+                field_prompt_ids[fname] = render_field_prompt(fname)
+        all_field_prompts = []
+        for v in field_prompt_ids.values():
+            if isinstance(v, list) and v and isinstance(v[0], list):
+                all_field_prompts.extend(v)
+            else:
+                all_field_prompts.append(v)
+        lcp = _common_token_prefix(all_field_prompts) if all_field_prompts else []
+        for fname, p in plan.items():
+            v = field_prompt_ids[fname]
+            if isinstance(v, list) and v and isinstance(v[0], list):
+                p["prompt_tail_ids"] = [ids[len(lcp) :] for ids in v]
+            else:
+                p["prompt_tail_ids"] = v[len(lcp) :]
+        result = {"lcp_ids": list(lcp), "fields": plan}
+        self._cache_plan(tokenizer, result, mode="labels", cache_key=cache_key)
         return result
