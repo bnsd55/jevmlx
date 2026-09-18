@@ -400,6 +400,12 @@ def run_eval(
                     consensus = (case.get("meta") or {}).get("consensus")
                     if isinstance(consensus, dict) and consensus:
                         line["consensus"] = consensus
+                # Constraints always carried when present (case-level, not
+                # schema-level — F1: StructuredSchema would parse a 'constraints'
+                # key as a field).
+                constraints = case.get("constraints")
+                if isinstance(constraints, list) and constraints:
+                    line["constraints"] = constraints
                 lines.append(line)
 
     config: dict[str, Any] = {
