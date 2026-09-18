@@ -280,6 +280,31 @@ def test_multi_model_two_folders_one_summary(tmp_path, monkeypatch, capsys):
     assert "org--model-a" in text and "org--model-b" in text
 
 
+def test_dataset_lock_copied_into_each_combo(tmp_path, monkeypatch):
+    """run_bench places the dataset's lock inside every combo folder as
+    dataset.lock.json (the name/location check_results requires)."""
+    from jevmlx import bench
+
+    _patch_bench_core(monkeypatch, tmp_path)
+    cache = tmp_path / "cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    (cache / "bundled.dataset.lock.json").write_text('{"builder": "bundled"}\n', encoding="utf-8")
+    out = tmp_path / "results"
+
+    bench.run_bench(
+        model="org/model-a",
+        datasets=["bundled"],
+        scorers=["slots"],
+        tracks=["parallel"],
+        out=out,
+        runs=1,
+    )
+
+    combo_lock = out / "fake-8gb-org--model-a" / "parallel-slots-bundled" / "dataset.lock.json"
+    assert combo_lock.is_file()
+    assert '"builder": "bundled"' in combo_lock.read_text(encoding="utf-8")
+
+
 def test_failing_model_does_not_stop_the_next(tmp_path, monkeypatch, capsys):
     """A failing first model is logged and skipped; the second still runs."""
     from jevmlx import bench

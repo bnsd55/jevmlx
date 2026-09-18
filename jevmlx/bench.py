@@ -182,12 +182,42 @@ def _rebuild_if_needed(jsonl: Path, lock: Path, build) -> None:
     build()
 
 
+def _promote_lock(name: str) -> None:
+    """Move the builder's generic ``dataset.lock.json`` to ``<name>.dataset.lock.json``.
+
+    The bundled/typesafe builders each write a generic ``dataset.lock.json``
+    next to their output, so successive builds would overwrite one another.
+    Promote it to a per-dataset name right after the build so every dataset's
+    lock is preserved (and can travel into its combo folders).
+    """
+    generic = BENCH_CACHE / "dataset.lock.json"
+    if generic.exists():
+        generic.replace(BENCH_CACHE / f"{name}.dataset.lock.json")
+
+
+def _write_derived_lock(name: str, jsonl: Path, source: str) -> None:
+    """Write a per-dataset lock for a builder that emits none (e.g. perturb)."""
+    import hashlib
+    from datetime import UTC, datetime
+
+    lock = {
+        "builder": name,
+        "derived_from": source,
+        "cases_sha256": hashlib.sha256(jsonl.read_bytes()).hexdigest(),
+        "built_at": datetime.now(UTC).isoformat(timespec="seconds"),
+    }
+    (BENCH_CACHE / f"{name}.dataset.lock.json").write_text(
+        json.dumps(lock, indent=1) + "\n", encoding="utf-8"
+    )
+
+
 def _build_bundled() -> None:
     from benchmarks.to_jsonl import main as to_jsonl_main
 
     out = str(BENCH_CACHE / "bundled.jsonl")
     print("building bundled dataset...")
     to_jsonl_main(["--out", out])
+    _promote_lock("bundled")
 
 
 def _build_typesafe() -> None:
@@ -198,6 +228,7 @@ def _build_typesafe() -> None:
     rc = fetch_main(["--out", out])
     if rc != 0:
         raise OSError("typesafe fetch failed")
+    _promote_lock("typesafe")
 
 
 def _build_perturbed(bundled: Path) -> None:
@@ -216,6 +247,7 @@ def _build_perturbed(bundled: Path) -> None:
             "0",
         ]
     )
+    _write_derived_lock("perturbed", BENCH_CACHE / "perturbed.jsonl", source="bundled")
 
 
 def _build_synthetic(set_name: str) -> None:
@@ -325,12 +357,6 @@ def run_bench(
     folder = out / f"{tag}-{slug}"
     folder.mkdir(parents=True, exist_ok=True)
 
-    # Dataset locks travel with the results.
-    for name in dataset_paths:
-        lock_src = BENCH_CACHE / f"{name}.dataset.lock.json"
-        if lock_src.exists():
-            shutil.copy(lock_src, folder / f"{name}.dataset.lock.json")
-
     last_run: dict[str, dict[str, Any]] = {}
     failed_combos: dict[str, str] = {}
     combos = [
@@ -345,6 +371,12 @@ def run_bench(
             combo = f"{track}-{scorer}-{dataset}"
             combo_dir = folder / combo
             combo_dir.mkdir(parents=True, exist_ok=True)
+            # The dataset lock travels inside each combo folder (check_results
+            # requires dataset.lock.json per combo). Done before the skip check
+            # so re-invocation also heals combos written before this fix.
+            lock_src = BENCH_CACHE / f"{dataset}.dataset.lock.json"
+            if lock_src.exists():
+                shutil.copy(lock_src, combo_dir / "dataset.lock.json")
             if not fresh and _combo_complete(combo_dir):
                 print(f"=== {combo}: complete, skipping (--fresh to rerun) ===")
                 continue
