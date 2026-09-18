@@ -128,7 +128,11 @@ def _compute_tokenizer_metrics(
     from jevmlx.trie import build_trie
 
     plan = plan_provider(schema)
-    fields_plan = plan["fields"]
+    fields_plan = plan.get("fields")
+    if not isinstance(fields_plan, dict):
+        # Synthetic plan (e.g. tests pass {"compiled": True}); no token-level
+        # structure to measure. Telemetry (legal_mass) may still be present.
+        fields_plan = {}
 
     code_lengths: list[int] = []
     single_branch_count = 0
