@@ -14,7 +14,7 @@ import pytest
 
 sys.path.insert(0, "tests")
 
-from conftest import PARITY_ATOL  # noqa: E402
+from conftest import PARITY_ATOL  # noqa: E402 (engine fixture now shared too)
 
 
 class _CountTokenizer:
