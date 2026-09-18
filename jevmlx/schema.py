@@ -361,9 +361,10 @@ class StructuredSchema:
         fields_plan: dict[str, dict[str, Any]] = {}
 
         def slot_candidate_text(name: str, alias: str) -> str:
-            """The assistant tail for one alias row: '{\n' + row + ',\n' with
-            the quoted alias as the value."""
-            return "{\n" + f'  {json.dumps(name)}: "{alias}"' + ",\n"
+            """The complete one-field JSON object for one alias row (W2-B:
+            the candidate row protocol is the complete object, not a
+            dangling '{\n  "field": "A",\n')."""
+            return json.dumps({name: alias}, ensure_ascii=False)
 
         # Lead-in candidates: scalar fields' shared prefixes. Computed after
         # the per-field plans exist (same two-pass shape as labels mode).
@@ -463,7 +464,12 @@ class StructuredSchema:
         plan: dict[str, dict[str, Any]] = {}
 
         def candidate_text(name: str, value_text: str) -> str:
-            return "{\n" + f"  {json.dumps(name)}: {value_text}" + ",\n"
+            """The complete one-field JSON object for one row (W2-B: the
+            candidate row protocol is the complete object, not a dangling
+            '{\n  "field": value,\n'). value_text is a pre-serialized JSON
+            value (e.g. '"LOW"', 'true'), so we build the object string
+            directly rather than double-encoding through json.dumps."""
+            return "{" + f"{json.dumps(name, ensure_ascii=False)}: {value_text}" + "}"
 
         for fname, fdef in self.fields.items():
             if fdef.field_type != "multi":
@@ -562,14 +568,18 @@ class StructuredSchema:
         plan: dict[str, dict[str, Any]] = {}
 
         def candidate_text(name: str, value_text: str) -> str:
-            """The complete assistant tail for one row: '{\n' + row + ',\n'.
+            """The complete one-field JSON object for one row (W2-B: the
+            candidate row protocol is the complete object, not a dangling
+            '{\n  "field": value,\n'). value_text is a pre-serialized JSON
+            value (e.g. '"Y"', '"N"'), so we build the object string
+            directly rather than double-encoding through json.dumps.
 
             The row key is always json.dumps(name) (C3: no raw interpolation;
             field names are dot- and slash-free, so '<field>.<option>' scalar
             keys and '<field>/<option>' option keys are injective across
             (field, option) pairs and field names).
             """
-            return "{\n" + f"  {json.dumps(name)}: {value_text}" + ",\n"
+            return "{" + f"{json.dumps(name, ensure_ascii=False)}: {value_text}" + "}"
 
         multi_plan = self._compile_multi_plan(tokenizer)
         for fname, fdef in self.fields.items():
