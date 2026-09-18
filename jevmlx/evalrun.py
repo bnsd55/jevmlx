@@ -152,25 +152,25 @@ def parallel_decide_fn(
                     entry["log_scores"] = raw
             out[fname] = entry
         out["_meta"] = {
-            "latency_ms": result.get("elapsed_ms"),
-            "rows": result.get("rows"),
-            "passes": result.get("passes"),
+            "latency_ms": result["elapsed_ms"],
             # W3-R: the engine's full timing split rides _meta so bench
             # writes the timing JSON per combo from the SAME decide calls
-            # (no second run). Missing keys default to 0.0 for mocks.
-            "prior_ms": result.get("prior_ms", 0.0),
-            "prefill_ms": result.get("prefill_ms", 0.0),
-            "plan_compile_ms": result.get("plan_compile_ms", 0.0),
-            "cache_broadcast_ms": result.get("cache_broadcast_ms", 0.0),
-            "suffix_eval_ms": result.get("suffix_eval_ms", 0.0),
-            "lm_head_gather_ms": result.get("lm_head_gather_ms", 0.0),
-            "second_pass_ms": result.get("second_pass_ms", 0.0),
-            "total_ms": result.get("total_ms", 0.0),
-            "peak_active_bytes": result.get("peak_active_bytes", 0),
-            "padded_token_positions": result.get("padded_token_positions", 0),
-            "rescored_fields_count": len(result.get("rescored_fields", []) or []),
-            "rerun_fields_count": len(result.get("rerun_fields", []) or []),
-            "num_fields": result.get("num_fields", 0),
+            # (no second run). Strict keys: the engine always sets these —
+            # a missing key must be a visible bug (KeyError), not a silent
+            # zero in timing.json (review F2).
+            "prior_ms": result["prior_ms"],
+            "prefill_ms": result["prefill_ms"],
+            "plan_compile_ms": result["plan_compile_ms"],
+            "cache_broadcast_ms": result["cache_broadcast_ms"],
+            "suffix_eval_ms": result["suffix_eval_ms"],
+            "lm_head_gather_ms": result["lm_head_gather_ms"],
+            "second_pass_ms": result["second_pass_ms"],
+            "total_ms": result["total_ms"],
+            "peak_active_bytes": result["peak_active_bytes"],
+            "padded_token_positions": result["padded_token_positions"],
+            "rescored_fields_count": len(result["rescored_fields"]),
+            "rerun_fields_count": len(result["rerun_fields"]),
+            "num_fields": result["num_fields"],
         }
         return out
 
