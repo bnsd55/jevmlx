@@ -50,7 +50,7 @@ def test_valid_constraints_compile_and_roundtrip():
             }
         }
     )
-    assert schema["flags"].set_constraints == constraints
+    assert [dict(c) for c in schema["flags"].set_constraints] == constraints
     assert schema["flags"].to_dict()["set_constraints"] == constraints
 
 

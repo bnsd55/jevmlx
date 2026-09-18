@@ -398,7 +398,7 @@ def test_allow_none_of_above_appends_choice_and_maps_to_none(monkeypatch):
 
     d = jevmlx.decide(Maybe, "ctx", model="fake/model", allow_none_of_above=True)
     # NONE_OF_ABOVE was appended to the engine's choices with the opt-out gloss...
-    assert captured["choices"] == ["LOW", "HIGH", "NONE_OF_ABOVE"]
+    assert captured["choices"] == ("LOW", "HIGH", "NONE_OF_ABOVE")
     assert captured["descriptions"]["NONE_OF_ABOVE"] == "none of the options apply"
     # ...and mapped to None in the validated model, with the explicit reason.
     assert d.value.risk_tier is None
@@ -442,7 +442,7 @@ def test_allow_none_of_above_off_leaves_schema_untouched(monkeypatch):
     monkeypatch.setattr("jevmlx.api.run_parallel_generation", fake_run_parallel)
 
     jevmlx.decide(Maybe, "ctx", model="fake/model")
-    assert captured["choices"] == ["LOW", "HIGH"]
+    assert captured["choices"] == ("LOW", "HIGH")
 
 
 def test_allow_none_of_above_rejects_existing_choice():

@@ -4,14 +4,56 @@ Supports booleans, categorical enums (cardinality up to 255), and multi fields
 (subset of choices, 2-64 options, decided as one boolean decision per option).
 """
 
+import dataclasses
 import hashlib
 import json
 import logging
 import weakref
+from collections.abc import Mapping, Sequence
+from types import MappingProxyType
 from typing import Any
 
 # W5-A finding 39: ONE canonical JSON serializer (see jevmlx/json_text.py).
 from jevmlx.json_text import json_text
+
+_LOGGER = logging.getLogger(__name__)
+
+
+def _freeze_plan(plan: Any) -> Any:
+    """Deep-freeze a compiled plan for read-only exposure (W5b-1, C7).
+
+    Dicts become ``MappingProxyType`` views over recursively frozen copies;
+    lists become tuples. Token id lists are leaf data (ints), so tuples are
+    safe everywhere. Cached once at compile time; callers can no longer
+    corrupt a shared plan (e.g. strip lead-in twice) — mutation attempts
+    raise.
+    """
+    if isinstance(plan, dict):
+        return MappingProxyType({k: _freeze_plan(v) for k, v in plan.items()})
+    if isinstance(plan, list):
+        return tuple(_freeze_plan(v) for v in plan)
+    return plan
+
+
+def _freeze_choice_descriptions(
+    name: str, choices: tuple[str, ...], descriptions: Mapping[str, str] | None
+) -> Mapping[str, str]:
+    """Validate and freeze per-choice glosses (W5b-1, C7).
+
+    Keys must be declared choices; duplicates rejected by the caller. The
+    returned mapping is a ``MappingProxyType`` over a copy — mutation via
+    the schema raises ``TypeError``.
+    """
+    d = dict(descriptions or {})
+    if d:
+        unknown = sorted(set(d) - set(choices))
+        if unknown:
+            raise ValueError(
+                f"Field '{name}': choice_descriptions keys not in choices: "
+                f"{', '.join(repr(u) for u in unknown)}"
+            )
+    return MappingProxyType(d)
+
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -261,34 +303,45 @@ class SchemaCompileError(ValueError):
         self.field = field
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
 class FieldDefinition:
+    """One schema field, IMMUTABLE after construction (W5b-1, C7).
+
+    Frozen dataclass: every attribute is set exactly once, at construction;
+    any later mutation raises ``FrozenInstanceError``. The mutable inputs are
+    deep-copied and re-frozen at the boundary: ``choices`` becomes a tuple,
+    ``choice_descriptions`` a read-only mapping, and ``set_constraints`` —
+    populated only through :meth:`compile_set_constraints`, which swaps the
+    frozen field for a fresh one (validated copies, tuples inside) — is a
+    tuple of read-only constraint views, so nothing reachable from a
+    compiled schema can be mutated in place.
+    """
+
+    name: str
+    field_type: str
+    description: str
+    choices: tuple[str, ...]
+    choice_descriptions: Mapping[str, str]
+    depends_on: str | None
+    set_constraints: tuple[Mapping[str, Any], ...] = ()
+
     def __init__(
         self,
         name: str,
         field_type: str,
         description: str,
-        choices: list[str] | None = None,
-        choice_descriptions: dict[str, str] | None = None,
+        choices: Sequence[str] | None = None,
+        choice_descriptions: Mapping[str, str] | None = None,
         depends_on: str | None = None,
+        set_constraints: tuple[Mapping[str, Any], ...] = (),
     ):
-        self.name = name
-        self.field_type = field_type.lower()
-        self.description = description
-        # W3-D part 2: optional parent field name for the selective
-        # parent-conditioned second pass. When set, the child may get a
-        # second suffix pass conditioned on the parent's decided value.
-        self.depends_on: str | None = depends_on
-        # Optional per-choice glosses keyed by choice string. Validated only
-        # when choices exist: every key must be a declared choice. (coder1's
-        # prompt v2 renders them; the engine never reads them.)
-        self.choice_descriptions: dict[str, str] = dict(choice_descriptions or {})
-        # W2-SETCONS: hard set constraints for multi fields. Populated only
-        # via compile_set_constraints() (validated there); default empty.
-        self.set_constraints: list[dict] = []
-
-        if self.field_type == "boolean":
-            self.choices = ["true", "false"]
-        elif self.field_type == "multi":
+        # Frozen dataclass with a custom __init__: the validation logic is
+        # the constructor's contract; freeze happens through object.__setattr__.
+        field_type = field_type.lower()
+        if field_type == "boolean":
+            resolved_choices: tuple[str, ...] = ("true", "false")
+            resolved_descriptions: Mapping[str, str] = MappingProxyType({})
+        elif field_type == "multi":
             if not choices or len(choices) < 2:
                 raise ValueError(f"Field '{name}' of type multi must have at least 2 choices.")
             if len(choices) > 64:
@@ -296,8 +349,11 @@ class FieldDefinition:
                     f"Field '{name}' exceeds maximum cardinality of 64 choices "
                     f"for type multi (got {len(choices)})."
                 )
-            self.choices = choices
-        elif self.field_type in ("enum", "choice", "selection"):
+            resolved_choices = tuple(choices)
+            resolved_descriptions = _freeze_choice_descriptions(
+                name, resolved_choices, choice_descriptions
+            )
+        elif field_type in ("enum", "choice", "selection"):
             if not choices or len(choices) == 0:
                 raise ValueError(f"Field '{name}' of type enum must have choices defined.")
             if len(choices) > 255:
@@ -305,22 +361,26 @@ class FieldDefinition:
                     f"Field '{name}' exceeds maximum cardinality of 255 choices "
                     f"(got {len(choices)})."
                 )
-            self.choices = choices
+            resolved_choices = tuple(choices)
+            resolved_descriptions = _freeze_choice_descriptions(
+                name, resolved_choices, choice_descriptions
+            )
         else:
             raise ValueError(
                 f"Unsupported field type '{field_type}'. "
                 "Supported types: 'boolean', 'enum' and 'multi'."
             )
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "field_type", field_type)
+        object.__setattr__(self, "description", description)
+        object.__setattr__(self, "depends_on", depends_on)
+        object.__setattr__(self, "set_constraints", set_constraints)
+        object.__setattr__(self, "choices", resolved_choices)
+        object.__setattr__(self, "choice_descriptions", resolved_descriptions)
+
         if self.field_type in ("multi", "enum", "choice", "selection"):
-            if self.choice_descriptions:
-                unknown = sorted(set(self.choice_descriptions) - set(self.choices))
-                if unknown:
-                    raise ValueError(
-                        f"Field '{name}': choice_descriptions keys not in choices: "
-                        f"{', '.join(repr(u) for u in unknown)}"
-                    )
             seen: set[str] = set()
-            for choice in self.choices:
+            for choice in resolved_choices:
                 if choice in seen:
                     raise ValueError(
                         f"Field '{name}': duplicate choice '{choice}'; the engine "
@@ -332,9 +392,13 @@ class FieldDefinition:
     def cardinality(self) -> int:
         return len(self.choices)
 
-    def compile_set_constraints(self, constraints: list[dict] | None) -> None:
-        """Validate and attach W2-SETCONS hard set constraints to this multi
-        field.
+    def compile_set_constraints(
+        self, constraints: Sequence[Mapping[str, Any]] | None
+    ) -> "FieldDefinition":
+        """Validate W2-SETCONS hard set constraints and return a NEW frozen
+        field carrying them (W5b-1, C7: the field is immutable, so "attach"
+        means replace — :class:`StructuredSchema` swaps the field in its
+        dict; a bare reference to the old field keeps the empty tuple).
 
         Accepted types (all validated at SET time — contradictory or
         malformed sets raise SchemaCompileError here, at compile time, never
@@ -360,8 +424,7 @@ class FieldDefinition:
         raise SchemaCompileError immediately.
         """
         if constraints is None:
-            self.set_constraints = []
-            return
+            return self  # immutable: already constraint-free
         if self.field_type != "multi":
             raise SchemaCompileError(
                 self.name,
@@ -496,7 +559,13 @@ class FieldDefinition:
                             f"set constraint contradiction: '{a}' implies '{b}' "
                             f"but the exact_k=0 group excludes '{b}'",
                         )
-        self.set_constraints = list(constraints)
+        # W5b-1 (C7): deep-freeze the output — one validated copy per
+        # constraint, wrapped read-only, in an immutable tuple. Nothing
+        # reachable from the compiled field is caller-mutable. Idiomatic
+        # clone on a frozen dataclass: dataclasses.replace with the
+        # set_constraints field passed through the custom __init__.
+        frozen = tuple(MappingProxyType(dict(c)) for c in constraints)
+        return dataclasses.replace(self, set_constraints=frozen)
 
     def to_dict(self) -> dict[str, Any]:
         d = {
@@ -515,8 +584,18 @@ class FieldDefinition:
 
 
 class StructuredSchema:
+    """Immutable schema (W5b-1, C7): field set and field definitions are
+    frozen after construction.
+
+    ``fields`` exposes a read-only mapping (insert/clear/pop raise);
+    ``FieldDefinition`` attributes are frozen. Mutation attempts raise in
+    tests and at runtime — a schema is compiled once and shared across
+    engines, threads, and compiled-plan caches; in-place mutation would
+    silently invalidate every cached plan keyed to it.
+    """
+
     def __init__(self, schema_dict: dict[str, Any]):
-        self.fields: dict[str, FieldDefinition] = {}
+        fields: dict[str, FieldDefinition] = {}
         for field_name, spec in schema_dict.items():
             if "." in field_name:
                 # Field names become JSON row keys (json.dumps'd at candidate
@@ -544,7 +623,7 @@ class StructuredSchema:
                     f"Field name '{field_name}' contains '#'; hash-free field "
                     "names keep the '<field>#count' count-row keys injective"
                 )
-            self.fields[field_name] = FieldDefinition(
+            fields[field_name] = FieldDefinition(
                 name=field_name,
                 field_type=spec.get("type", "enum"),
                 description=spec.get("description", ""),
@@ -556,7 +635,11 @@ class StructuredSchema:
                 # W2-SETCONS: schema-dict-declared set constraints are
                 # validated at construction (compile time) — contradictory
                 # sets raise SchemaCompileError before any engine runs.
-                self.fields[field_name].compile_set_constraints(spec["set_constraints"])
+                # W5b-1 (C7): the field is frozen; compile_set_constraints
+                # returns a NEW frozen field — swap it into the dict.
+                fields[field_name] = fields[field_name].compile_set_constraints(
+                    spec["set_constraints"]
+                )
         # Compiled plans, keyed by tokenizer OBJECT IDENTITY (P2: a
         # WeakKeyDictionary keys by __eq__/__hash__, so two equal-but-distinct
         # tokenizers would wrongly share one plan). dict[id] =
@@ -564,6 +647,9 @@ class StructuredSchema:
         # tokenizer dies, so an id can never be reused by a live object while
         # its entry lingers. One schema object can be reused with several
         # models, and token IDs are tokenizer-specific.
+        # W5b-1 (C7): the field set is frozen after construction — exposed
+        # as a read-only mapping over the built dict.
+        self.fields: Mapping[str, FieldDefinition] = MappingProxyType(fields)
         self._plans: dict[int, tuple[weakref.ref, dict[str, Any]]] = {}
         self._logged_non_weakref = False
 
@@ -734,6 +820,12 @@ class StructuredSchema:
         segmentation the scoring pass depends on — everything the neutral
         prior must match. Compiled on demand; the result equals the hash of
         ``json.dumps(plan, sort_keys=True)`` with token ids as ints.
+
+        W5b-1 (C7): plans are read-only mappings; they are converted to
+        plain containers here (mappingproxy→dict) so the hash sees the
+        plan's CONTENT — the stdlib default (``default=list``) would
+        collapse every mappingproxy to its key list and hash slots/labels
+        plans identically.
         """
         if mode == "slots":
             plan = self.compile_slot_plan(tokenizer)
@@ -741,8 +833,16 @@ class StructuredSchema:
             plan = self.compile_labels_plan(tokenizer)
         else:
             raise ValueError(f"mode must be 'slots' or 'labels', got {mode!r}")
+
+        def thaw(value: Any) -> Any:
+            if isinstance(value, dict) or isinstance(value, MappingProxyType):
+                return {k: thaw(v) for k, v in value.items()}
+            if isinstance(value, (list, tuple)):
+                return [thaw(v) for v in value]
+            return value
+
         return hashlib.sha256(
-            json.dumps(plan, sort_keys=True, default=list).encode("utf-8")
+            json.dumps(thaw(plan), sort_keys=True, default=list).encode("utf-8")
         ).hexdigest()
 
     def _cached_plan(self, tokenizer, mode: str) -> dict[str, Any] | None:
@@ -759,7 +859,9 @@ class StructuredSchema:
         return None
 
     def _cache_plan(self, tokenizer, plan: dict[str, Any], mode: str) -> None:
-        """Store a plan keyed by tokenizer identity, evicted on tokenizer death.
+        """Store a (pre-frozen, read-only) plan keyed by tokenizer identity,
+        evicted on tokenizer death (W5b-1, C7: compiled plans are frozen at
+        compile time — mutating a returned plan raises).
 
         Non-weak-referenceable tokenizers are not cached at all (N3): an
         id()-keyed entry without a liveness check could be returned for a
@@ -911,6 +1013,7 @@ class StructuredSchema:
                 if "count" in p:
                     p["count"]["shared_ids"] = p["count"]["shared_ids"][len(lead_in) :]
         result = {"lead_in_ids": list(lead_in), "fields": fields_plan}
+        result = _freeze_plan(result)  # W5b-1 (C7): read-only, frozen once
         self._cache_plan(tokenizer, result, mode="slots")
         return result
 
@@ -1198,5 +1301,6 @@ class StructuredSchema:
         # Metadata lives beside the field plans, never mixed into them (D1:
         # a field could legally be named "_lead_in_ids").
         result = {"lead_in_ids": list(lead_in), "fields": plan}
+        result = _freeze_plan(result)  # W5b-1 (C7): read-only, frozen once
         self._cache_plan(tokenizer, result, mode="labels")
         return result

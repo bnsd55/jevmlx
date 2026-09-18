@@ -49,10 +49,10 @@ def test_row_key_uses_zero_padded_codes():
         schema = _multi_schema()
         plan = schema.compile_slot_plan(tok) if mode == "slots" else schema.compile_labels_plan(tok)
         p = plan["fields"]["tags"]
-        assert p["codes"] == ["00", "01", "02"]
-        assert p["options"] == ["alpha", "beta", "gamma"]
+        assert list(p["codes"]) == ["00", "01", "02"]
+        assert list(p["options"]) == ["alpha", "beta", "gamma"]
         for i, suffix in enumerate(p["suffix_ids_list"]):
-            row = _decode(plan["lead_in_ids"] + list(suffix))
+            row = _decode(list(plan["lead_in_ids"]) + list(suffix))
             assert f'"tags/{i:02d}"' in row, (mode, i, row)
             assert "alpha" not in row and "beta" not in row and "gamma" not in row
 
@@ -92,7 +92,7 @@ def test_codes_injective_across_options_and_schema_order():
         }
     )
     plan = schema.compile_labels_plan(tok)
-    assert plan["fields"]["m"]["codes"] == [f"{i:02d}" for i in range(12)]
+    assert list(plan["fields"]["m"]["codes"]) == [f"{i:02d}" for i in range(12)]
 
 
 def test_engine_telemetry_maps_codes_to_option_names():
