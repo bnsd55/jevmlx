@@ -24,7 +24,7 @@ from typing import Any
 
 from jinja2.exceptions import TemplateError
 
-from jevmlx.schema import StructuredSchema
+from jevmlx.schema import StructuredSchema, _common_token_prefix
 from jevmlx.trie import build_trie, logsumexp, score_trie, softmax
 
 logger = logging.getLogger(__name__)
@@ -565,13 +565,15 @@ def _rows_per_chunk(budget_bytes: int, bytes_per_row: int, max_rows: int | None)
 # measured peak lands in the result telemetry.
 _CHUNK_TARGET_FRACTION = 0.75
 
-# W3-D part 2: minimum parent probability_margin to condition a child's
-# second pass on. Below this the parent is too uncertain to teacher-force.
-_PARENT_CONFIDENCE_MARGIN = 0.3
+# W3-D part 2: minimum parent top1-top2 margin (in NATS — the units of
+# log_scores) to condition a child's second pass on. Below this the parent
+# is too uncertain to teacher-force. 0.3 nats ≈ P(top1) ≈ 0.57 vs 0.43.
+_PARENT_MIN_MARGIN_NATS = 0.3
 
-# W3-D part 2: a child gets a second pass when its own top1-top2 margin is
-# below this (low confidence) OR the MAP reconciler changed its value.
-_CHILD_LOW_MARGIN = 0.15
+# W3-D part 2: a child gets a second pass when its own top1-top2 margin
+# (in NATS) is below this (low confidence) OR the MAP reconciler changed
+# its value. 0.15 nats ≈ P(top1) ≈ 0.537 vs 0.463.
+_CHILD_LOW_MARGIN_NATS = 0.15
 
 
 def _memory_budget_bytes(target_fraction: float) -> int:
@@ -705,6 +707,123 @@ def _get_or_compute_prior(
         weakref.finalize(tokenizer, _PRIOR_CACHE.pop, key, None)
         _PRIOR_CACHE[key] = prior
     return prior
+
+
+def _score_rows(
+    model,
+    cache,
+    rows: list[list[int]],
+    row_decision: list[tuple[int, list[int]]],
+    vocab_size: int,
+    pad_id: int,
+    auto_max_rows: int,
+) -> tuple[dict[int, list[float]], dict[int, float], int, float]:
+    """Run batched suffix forward passes over prefill cache and gather logits.
+
+    Shared by the main scoring loop (run_parallel_generation) and the
+    selective second pass (_selective_second_pass). This is the ONE copy of
+    the padded/broadcast/gather scoring loop (F3: was duplicated).
+
+    Returns ``(row_logits, row_legal_mass_log, passes, t_gather_ms)``:
+    - row_logits: {row_idx -> [child logits in allowed order]}
+    - row_legal_mass_log: {row_idx -> log(legal_mass)} (logsumexp(allowed) -
+      logsumexp(vocab))
+    - passes: number of forward passes (for telemetry)
+    - t_gather_ms: time spent in the gather/eval step
+    """
+    row_logits: dict[int, list[float]] = {}
+    row_legal_mass_log: dict[int, float] = {}
+
+    if not rows:
+        return row_logits, row_legal_mass_log, 0, 0.0
+
+    # Bucket rows by suffix width: sort row indexes by row length, then cut
+    # the sorted sequence into chunks of at most auto_max_rows.
+    row_order = sorted(range(len(rows)), key=lambda ridx: len(rows[ridx]))
+    passes = 0
+    t_gather_ms = 0.0
+    for bucket_start in range(0, len(row_order), auto_max_rows):
+        bucket = row_order[bucket_start : bucket_start + auto_max_rows]
+        bucket_pos = 0
+        retried = False
+        bucket_len = len(bucket)
+        chunk_size = min(bucket_len, auto_max_rows)
+        while bucket_pos < bucket_len:
+            chunk_rows = bucket[bucket_pos : bucket_pos + chunk_size]
+            chunk_len = len(chunk_rows)
+            width = max(len(rows[ridx]) for ridx in chunk_rows)
+            lengths = [len(rows[ridx]) for ridx in chunk_rows]
+            padding = [width - length for length in lengths]
+            padded = mx.array(
+                [rows[ridx] + [pad_id] * (width - len(rows[ridx])) for ridx in chunk_rows],
+                dtype=mx.int32,
+            )
+            b_cache = _broadcast_cache(cache, chunk_len)
+            max_padding = max(padding) if padding else 0
+            if max_padding > 0:
+                for c in b_cache:
+                    if hasattr(c, "prepare"):
+                        c.prepare(lengths=lengths, right_padding=padding)
+            _eval_cache_state(b_cache)
+            passes += 1
+            try:
+                out = model(padded, cache=b_cache)
+            except Exception as exc:  # noqa: BLE001
+                if retried or chunk_len == 1:
+                    raise
+                retried = True
+                chunk_size = max(1, chunk_len // 2)
+                logger.warning(
+                    "Chunk allocation failed (%s); retrying %d rows as %d",
+                    type(exc).__name__,
+                    chunk_len,
+                    chunk_size,
+                )
+                continue
+            chunk_decisions = [row_decision[ridx] for ridx in chunk_rows]
+            positions = mx.array([d[0] for d in chunk_decisions])
+            max_allowed = max(len(d[1]) for d in chunk_decisions)
+            t_gather0 = time.perf_counter()
+            rows_at_pos = out[mx.arange(chunk_len), positions]
+            flat_idx = mx.array(
+                [
+                    i * vocab_size + tok
+                    for i, d in enumerate(chunk_decisions)
+                    for tok in (d[1] + [d[1][0]] * (max_allowed - len(d[1])))
+                ],
+                dtype=mx.int32,
+            )
+            gathered = mx.take(rows_at_pos.reshape(-1), flat_idx)
+            row_vocab_lse = mx.logsumexp(rows_at_pos, axis=1)
+            try:
+                mx.eval(gathered, row_vocab_lse)
+            except Exception as exc:  # noqa: BLE001
+                if retried or chunk_len == 1:
+                    raise
+                retried = True
+                chunk_size = max(1, chunk_len // 2)
+                logger.warning(
+                    "Chunk gather eval failed (%s); retrying %d rows as %d",
+                    type(exc).__name__,
+                    chunk_len,
+                    chunk_size,
+                )
+                continue
+            t_gather_ms += (time.perf_counter() - t_gather0) * 1000
+            gathered = gathered.tolist()
+            row_vocab_lse = row_vocab_lse.tolist()
+            for i, ridx in enumerate(chunk_rows):
+                allowed = chunk_decisions[i][1]
+                base = i * max_allowed
+                values = [float(gathered[base + j]) for j in range(len(allowed))]
+                allowed_lse = logsumexp(values)
+                mass_log = allowed_lse - row_vocab_lse[i]
+                row_logits[ridx] = values
+                row_legal_mass_log[ridx] = mass_log
+            del out
+            bucket_pos += len(chunk_rows)
+
+    return row_logits, row_legal_mass_log, passes, t_gather_ms
 
 
 def _constrained_map(
@@ -860,7 +979,7 @@ def _selective_second_pass(
     """W3-D part 2: selective parent-conditioned second pass.
 
     After the parallel pass + MAP, for each child whose parent is confident
-    (probability_margin above _PARENT_CONFIDENCE_MARGIN) AND whose own margin
+    (parent top1-top2 margin above _PARENT_MIN_MARGIN_NATS) AND whose own margin
     is low OR which MAP changed, build a conditioned row: the child's
     candidate prefixed by the parent's decided one-field JSON object. Batch
     all such children in ONE extra suffix pass over the same prefill cache.
@@ -870,11 +989,6 @@ def _selective_second_pass(
 
     Returns telemetry: rerun_fields, rerun_rows, second_pass_ms.
     """
-    import json as _json
-
-    from jevmlx.schema import _common_token_prefix
-    from jevmlx.trie import build_trie, score_trie, softmax
-
     t0 = time.perf_counter()
     rerun_fields: list[str] = []
 
@@ -902,7 +1016,7 @@ def _selective_second_pass(
         parent_probs = sorted(parent_scores.values(), reverse=True)
         parent_margin = (parent_probs[0] - parent_probs[1]) if len(parent_probs) > 1 else 1.0
         # Never condition on a low-confidence parent.
-        if parent_margin < _PARENT_CONFIDENCE_MARGIN:
+        if parent_margin < _PARENT_MIN_MARGIN_NATS:
             continue
         # Child needs rerun if its own margin is low OR MAP changed it.
         child_ft = field_telemetry.get(fname, {})
@@ -910,7 +1024,7 @@ def _selective_second_pass(
         child_probs = sorted(child_scores.values(), reverse=True)
         child_margin = (child_probs[0] - child_probs[1]) if len(child_probs) > 1 else 1.0
         was_reconciled = fname in reconciled_fields
-        if child_margin >= _CHILD_LOW_MARGIN and not was_reconciled:
+        if child_margin >= _CHILD_LOW_MARGIN_NATS and not was_reconciled:
             continue
         children_to_rerun.append((fname, parent))
 
@@ -938,16 +1052,17 @@ def _selective_second_pass(
         p = field_plans[fname]
         parent_val = parent_decided[parent]
         # Build the parent's decided one-field JSON object as a token prefix.
-        parent_json = _json.dumps({parent: parent_val}, ensure_ascii=False)
-        parent_ids = tokenizer.encode(parent_json, add_special_tokens=False)
+        parent_json = json.dumps({parent: parent_val}, ensure_ascii=False)
 
         # The conditioned candidate: parent_json + child's slot_candidate_text.
+        # parent_json is part of the candidate text, so it flows into
+        # shared/remainders naturally — no separate parent_ids needed in rows.
         def conditioned_text(
             alias: str,
             _fname=fname,
             _parent_json=parent_json,
         ) -> str:
-            return _parent_json + _json.dumps({_fname: alias}, ensure_ascii=False)
+            return _parent_json + json.dumps({_fname: alias}, ensure_ascii=False)
 
         aliases = p.get("aliases", p.get("choices", []))
         alias_map = p.get("alias_map", dict(zip(aliases, fdef.choices, strict=True)))
@@ -966,9 +1081,9 @@ def _selective_second_pass(
         }
         child_tries[fname] = trie
         for bi, node in enumerate(trie):
-            # Row: lead_in + parent_ids + shared + node path. The parent_ids
-            # are part of the suffix (they come after the prefill lead-in).
-            conditioned_rows.append(lead_in + parent_ids + list(shared) + list(node["path"]))
+            # Row: lead_in + shared + node path. The shared prefix already
+            # includes the parent tokens (conditioned_text prepends parent_json).
+            conditioned_rows.append(lead_in + list(shared) + list(node["path"]))
             row_child.append(fname)
             row_branch2[len(conditioned_rows) - 1] = bi
 
@@ -991,42 +1106,21 @@ def _selective_second_pass(
         allowed = list(node["children"])
         row_decision2.append((position, allowed))
 
-    # Run ONE suffix pass over the same prefill cache.
-    node_logits2: dict[int, dict[int, list[float]]] = {}
-    chunk_len = len(conditioned_rows)
-    width = max(len(r) for r in conditioned_rows)
-    lengths = [len(r) for r in conditioned_rows]
-    padding = [width - length for length in lengths]
-    padded = mx.array([r + [pad_id] * (width - len(r)) for r in conditioned_rows], dtype=mx.int32)
-    b_cache = _broadcast_cache(cache, chunk_len)
-    max_padding = max(padding) if padding else 0
-    if max_padding > 0:
-        for c in b_cache:
-            if hasattr(c, "prepare"):
-                c.prepare(lengths=lengths, right_padding=padding)
-    _eval_cache_state(b_cache)
-    out = model(padded, cache=b_cache)
-    chunk_decisions = row_decision2
-    positions = mx.array([d[0] for d in chunk_decisions])
-    max_allowed = max(len(d[1]) for d in chunk_decisions)
-    rows_at_pos = out[mx.arange(chunk_len), positions]
-    flat_idx = mx.array(
-        [
-            i * vocab_size + tok
-            for i, d in enumerate(chunk_decisions)
-            for tok in (d[1] + [d[1][0]] * (max_allowed - len(d[1])))
-        ],
-        dtype=mx.int32,
+    # Run ONE suffix pass over the same prefill cache via _score_rows (F3:
+    # the ONE copy of the padded/broadcast/gather scoring loop).
+    row_logits2, _legal, _passes, _t = _score_rows(
+        model,
+        cache,
+        conditioned_rows,
+        row_decision2,
+        vocab_size,
+        pad_id,
+        max(1, len(conditioned_rows)),
     )
-    gathered = mx.take(rows_at_pos.reshape(-1), flat_idx)
-    mx.eval(gathered)
-    gathered = gathered.tolist()
-    for i in range(chunk_len):
-        allowed = chunk_decisions[i][1]
-        base = i * max_allowed
-        values = [float(gathered[base + j]) for j in range(len(allowed))]
-        node_logits2[i] = {row_branch2[i]: values}
-    del out
+    # Map per-row logits back to branch-node logits for trie scoring.
+    node_logits2: dict[int, dict[int, list[float]]] = {}
+    for ridx in range(len(conditioned_rows)):
+        node_logits2[ridx] = {row_branch2[ridx]: row_logits2[ridx]}
 
     # Re-score each child through its conditioned trie.
     for fname, _parent in children_to_rerun:
@@ -1322,139 +1416,27 @@ def run_parallel_generation(
     # (mirrors node_logits). Multi option rows: {row idx -> log legal mass}
     # (one Y/N branch per option row; no branch-node index).
     node_legal_mass_log: dict[int, Any] = {}
-    # Bucket rows by suffix width: sort row indexes by row length, then cut
-    # the sorted sequence into chunks of at most auto_max_rows. Sorting only
-    # changes the ROW VISIT ORDER; every row keeps its own tokens, decision
-    # position and allowed set, and results are stored per row index, so the
-    # assembled scores are identical to an unsorted split (order is restored
-    # by the row-index-keyed dicts below).
-    row_order = sorted(range(len(rows)), key=lambda ridx: len(rows[ridx]))
-    passes = 0
-    for bucket_start in range(0, len(row_order), auto_max_rows):
-        bucket = row_order[bucket_start : bucket_start + auto_max_rows]
-        bucket_pos = 0
-        retried = False
-        bucket_len = len(bucket)
-        chunk_size = min(bucket_len, auto_max_rows)
-        while bucket_pos < bucket_len:
-            chunk_rows = bucket[bucket_pos : bucket_pos + chunk_size]
-            chunk_len = len(chunk_rows)
-            width = max(len(rows[ridx]) for ridx in chunk_rows)
-            lengths = [len(rows[ridx]) for ridx in chunk_rows]
-            padding = [width - length for length in lengths]
-            padded = mx.array(
-                [rows[ridx] + [pad_id] * (width - len(rows[ridx])) for ridx in chunk_rows],
-                dtype=mx.int32,
-            )
-            b_cache = _broadcast_cache(cache, chunk_len)
-            # Right-padded rows: tell the cache about per-row lengths so the
-            # attention mask excludes pad positions (mlx_lm batched-prompt
-            # pattern). No finalize() after the pass: b_cache is discarded when
-            # the chunk ends, nothing reads the rolled KV, and finalizing would
-            # only materialize state for nothing.
-            max_padding = max(padding) if padding else 0
-            if max_padding > 0:
-                for c in b_cache:
-                    if hasattr(c, "prepare"):
-                        c.prepare(lengths=lengths, right_padding=padding)
-            # Evaluate the COMPLETE cache state (see the prefill eval note).
-            _eval_cache_state(b_cache)
-            # F1: MLX is lazy — a Metal allocation error surfaces at
-            # mx.eval(gathered), not at the model call. The try must span
-            # model call THROUGH the eval, or the retry can never fire.
-            passes += 1
-            try:
-                out = model(padded, cache=b_cache)
-            except Exception as exc:  # noqa: BLE001 - Metal raises RuntimeError subclasses
-                # Halve-and-retry ONCE: a Metal allocation failure at this
-                # chunk size retries at half the rows. A second failure
-                # re-raises — the caller sees the real error, not a loop.
-                if retried or chunk_len == 1:
-                    raise
-                retried = True
-                chunk_size = max(1, chunk_len // 2)
-                logger.warning(
-                    "Chunk allocation failed (%s); retrying %d rows as %d",
-                    type(exc).__name__,
-                    chunk_len,
-                    chunk_size,
-                )
-                continue
-            # Gather BEFORE eval: [chunk_len, width, vocab] is never materialized;
-            # only the [chunk_len, max_allowed] decision slice is.
-            chunk_decisions = [row_decision[ridx] for ridx in chunk_rows]
-            positions = mx.array([d[0] for d in chunk_decisions])
-            max_allowed = max(len(d[1]) for d in chunk_decisions)
-            t_gather0 = time.perf_counter()
-            rows_at_pos = out[mx.arange(chunk_len), positions]  # [chunk_len, vocab]
-            # Flat-index gather: row-major index of (row, allowed_id) in the
-            # [chunk_len, vocab] matrix, resolved in one take. Ragged rows pad
-            # their allowed list with its first id (a real, evaluated logit);
-            # the tail slots are discarded per row below.
-            flat_idx = mx.array(
-                [
-                    i * vocab_size + tok
-                    for i, d in enumerate(chunk_decisions)
-                    for tok in (d[1] + [d[1][0]] * (max_allowed - len(d[1])))
-                ],
-                dtype=mx.int32,
-            )
-            gathered = mx.take(rows_at_pos.reshape(-1), flat_idx)  # [chunk_len * max_allowed]
-            # W2-D legal_mass: full-vocab logsumexp per row, for the leakage
-            # signal (probability the model wanted any valid code at this
-            # branch). Computed as a reduction over the already-sliced
-            # [chunk_len, vocab] rows_at_pos — NOT the full 3D `out` (W3-A's
-            # constraint: only the decision slice is evaluated). The result is
-            # [chunk_len], one float per row, far cheaper than eval'ing `out`.
-            # Always computed: the ~0.002 Metal FP drift it introduces means
-            # bit-identical batch=1 vs batch=N parity was never a real invariant
-            # on Metal (GPT Q4 confirms); the W1-A parity test asserts winners
-            # identical + log_scores within PARITY_ATOL instead.
-            row_vocab_lse = mx.logsumexp(rows_at_pos, axis=1)  # [chunk_len]
-            try:
-                mx.eval(gathered, row_vocab_lse)
-            except Exception as exc:
-                # F1: the lazy-eval surface — a Metal allocation failure most
-                # often lands HERE. Same halve-once contract as above.
-                if retried or chunk_len == 1:
-                    raise
-                retried = True
-                chunk_size = max(1, chunk_len // 2)
-                logger.warning(
-                    "Chunk gather eval failed (%s); retrying %d rows as %d",
-                    type(exc).__name__,
-                    chunk_len,
-                    chunk_size,
-                )
-                continue
-            t_gather_ms += (time.perf_counter() - t_gather0) * 1000
-            gathered = gathered.tolist()
-            row_vocab_lse = row_vocab_lse.tolist()
-            for i, ridx in enumerate(chunk_rows):
-                p = field_plans[row_field[ridx]]
-                allowed = chunk_decisions[i][1]
-                base = i * max_allowed
-                values = [float(gathered[base + j]) for j in range(len(allowed))]
-                if ridx in row_option:
-                    # RAW Y/N logits in remainder order ["Y", "N"]. Bug 8: these
-                    # raw logits are what the prior cache stores
-                    # (option_logit_pairs in the telemetry) — no reconstruction
-                    # from scaled probabilities.
-                    option_pair[ridx] = values
-                else:
-                    node_logits[ridx] = {row_branch[ridx]: values}
-                # legal_mass = sum(exp(z_allowed)) / sum(exp(z_vocab))
-                #           = exp(logsumexp(allowed) - logsumexp(vocab)).
-                # Trie-branch rows key by branch-node idx (mirrors node_logits);
-                # multi option rows store a flat float (one Y/N branch per row).
-                allowed_lse = logsumexp(values)
-                mass_log = allowed_lse - row_vocab_lse[i]
-                if ridx in row_option:
-                    node_legal_mass_log[ridx] = mass_log
-                else:
-                    node_legal_mass_log[ridx] = {row_branch[ridx]: mass_log}
-            del out
-            bucket_pos += len(chunk_rows)
+    # Run the batched suffix forward passes through _score_rows (F3: the ONE
+    # copy of the padded/broadcast/gather scoring loop, shared with
+    # _selective_second_pass). The caller dispatches the per-row logits into
+    # node_logits (branch-node rows) or option_pair (multi option rows).
+    row_logits, row_legal_mass_log, passes, t_gather_ms = _score_rows(
+        model, cache, rows, row_decision, vocab_size, pad_id, auto_max_rows
+    )
+    # Dispatch: branch-node rows go into node_logits keyed by branch idx;
+    # multi option rows go into option_pair (RAW Y/N logits in remainder
+    # order ["Y", "N"]; bug 8: these raw logits are what the prior cache
+    # stores — no reconstruction from scaled probabilities). legal_mass_log
+    # mirrors the same keying.
+    for ridx in range(len(rows)):
+        values = row_logits[ridx]
+        mass_log = row_legal_mass_log[ridx]
+        if ridx in row_option:
+            option_pair[ridx] = values
+            node_legal_mass_log[ridx] = mass_log
+        else:
+            node_logits[ridx] = {row_branch[ridx]: values}
+            node_legal_mass_log[ridx] = {row_branch[ridx]: mass_log}
 
     t_suffix_eval = (time.perf_counter() - t_suf0) * 1000
     peak_active_bytes = max(peak_active_bytes, int(mx.get_peak_memory()))
