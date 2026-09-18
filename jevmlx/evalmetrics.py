@@ -678,53 +678,13 @@ def _case_constraints(records: list[dict]) -> dict[str, list[dict]]:
 
 
 def _check_constraint(constraint: dict, preds: dict[str, object]) -> bool:
-    """Return True if the constraint is SATISFIED, False if VIOLATED."""
-    ctype = constraint.get("type")
-    if ctype == "implies":
-        parent = constraint.get("parent")
-        child = constraint.get("child")
-        mapping = constraint.get("mapping", {})
-        parent_val = preds.get(parent)
-        child_val = preds.get(child)
-        if parent_val is None or child_val is None:
-            return True  # unmeasured field can't violate
-        allowed = mapping.get(parent_val, [])
-        return child_val in allowed
-    if ctype == "excludes":
-        field = constraint.get("field")
-        value = constraint.get("value")
-        other = constraint.get("other")
-        field_val = preds.get(field)
-        other_val = preds.get(other)
-        if field_val is None or other_val is None:
-            return True
-        if field_val == value:
-            # When field==value, other must be empty/falsy
-            if isinstance(other_val, list):
-                return len(other_val) == 0
-            return other_val in (None, "", False)
-        return True
-    if ctype == "requires_parent":
-        parent = constraint.get("parent")
-        child = constraint.get("child")
-        mapping = constraint.get("mapping", {})
-        parent_val = preds.get(parent)
-        child_val = preds.get(child)
-        if parent_val is None or child_val is None:
-            return True
-        allowed = mapping.get(parent_val, [])
-        return child_val in allowed
-    if ctype == "exclusivity":
-        field = constraint.get("field")
-        options = set(constraint.get("options", []))
-        field_val = preds.get(field)
-        if field_val is None:
-            return True
-        if not isinstance(field_val, list):
-            field_val = [field_val] if field_val else []
-        selected = set(field_val) & options
-        return len(selected) <= 1  # at most one from the exclusivity group
-    return True  # unknown constraint type: assume satisfied
+    """Return True if the constraint is SATISFIED, False if VIOLATED.
+
+    Delegates to jevmlx.constraints.check_constraint (single source of truth).
+    """
+    from jevmlx.constraints import check_constraint
+
+    return check_constraint(constraint, preds)
 
 
 def constraint_violation_rate(records: list[dict]) -> dict | None:

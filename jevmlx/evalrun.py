@@ -119,7 +119,7 @@ def parallel_decide_fn(
     ``per_option`` instead; log_scores stays None for them.
     """
 
-    def decide(schema_dict: dict, context: str) -> dict[str, dict[str, Any]]:
+    def decide(schema_dict: dict, context: str, constraints=None) -> dict[str, dict[str, Any]]:
         from jevmlx.engine import run_parallel_generation
 
         schema = StructuredSchema(schema_dict)
@@ -131,6 +131,7 @@ def parallel_decide_fn(
             temperature=1.0,
             scoring=scoring,
             prior_correction=prior_correction,
+            constraints=constraints,
         )
         out: dict[str, dict[str, Any]] = {}
         for fname, telemetry in result["field_telemetry"].items():
@@ -164,7 +165,7 @@ def naive_local_decide_fn(model, tokenizer) -> DecideFn:
     crash).
     """
 
-    def decide(schema_dict: dict, context: str) -> dict[str, dict[str, Any]]:
+    def decide(schema_dict: dict, context: str, constraints=None) -> dict[str, dict[str, Any]]:
         from jevmlx.engine import run_naive_generation
 
         schema = StructuredSchema(schema_dict)
@@ -199,7 +200,7 @@ def api_baseline_decide_fn(
     Returns the decide_fn plus the request parameters to record in run.json.
     """
 
-    def decide(schema_dict: dict, context: str) -> dict[str, dict[str, Any]]:
+    def decide(schema_dict: dict, context: str, constraints=None) -> dict[str, dict[str, Any]]:
         schema = StructuredSchema(schema_dict)
         result = baseline_decide(base_url, model, api_key, schema, context)
         out: dict[str, dict[str, Any]] = {}
@@ -230,7 +231,7 @@ def openai_slots_decide_fn(
     field. Returns the decide_fn plus the request parameters for run.json.
     """
 
-    def decide(schema_dict: dict, context: str) -> dict[str, dict[str, Any]]:
+    def decide(schema_dict: dict, context: str, constraints=None) -> dict[str, dict[str, Any]]:
         from jevmlx.openai_slots import decide_openai
 
         schema = StructuredSchema(schema_dict)
@@ -353,7 +354,14 @@ def run_eval(
             else [(None, case["schema"])]
         )
         for tag, schema_dict in variants:
-            results = decide_fn(schema_dict, case["context"])
+            try:
+                results = decide_fn(
+                    schema_dict, case["context"], constraints=case.get("constraints")
+                )
+            except TypeError:
+                # decide_fn doesn't accept constraints (mock/baseline) —
+                # call without it (constraints only apply to the parallel track).
+                results = decide_fn(schema_dict, case["context"])
             meta = results.pop("_meta", {})
             if tag is None:
                 n_canonical += len(results)

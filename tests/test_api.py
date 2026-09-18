@@ -75,6 +75,7 @@ def test_decide_many_uses_one_engine_and_one_schema(monkeypatch):
         scoring="slots",
         calibration=None,
         prior_correction=False,
+        constraints=None,
     ):
         run_calls.append((engine_model, tokenizer, context, schema, temperature))
         return {
