@@ -170,10 +170,12 @@ def test_multi_field_returns_subset(engine):
     assert all(0.0 <= p <= 1.0 for p in telemetry["per_option"].values())
     assert "log_scores" not in telemetry  # multi: per_option instead, calibrate skips it
     assert len(telemetry["per_option"]) == 3
-    # V4: no field-level probability is claimed; margin = how close the
-    # closest option's decision sat to the threshold.
+    # V4: no field-level probability is claimed; uncalibrated margin = how
+    # close the closest option's decision sat to the fixed 0.5 rule (W2-E
+    # step 2: the threshold knob is deleted; telemetry carries `calibrated`).
     assert telemetry["probability"] is None
-    assert telemetry["threshold"] == 0.5
+    assert telemetry["calibrated"] is None
+    assert "threshold" not in telemetry
     assert telemetry["margin"] == pytest.approx(
         min(abs(p - 0.5) for p in telemetry["per_option"].values())
     )

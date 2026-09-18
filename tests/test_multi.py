@@ -1,6 +1,7 @@
 """Fast tests for the multi field type: batch-plan expansion, API mapping,
 and the pure fold function. No model loading."""
 
+import math
 from typing import Literal
 
 import pytest
@@ -97,35 +98,32 @@ def test_schema_from_model_non_literal_list_raises():
 
 
 def test_fold_multi():
-    # Threshold semantics: p_yes >= threshold selects; margin is the closest
-    # option's distance to the threshold, over ALL options (accepted or not).
-    selected, prob, margin = _fold_multi({"a": 0.9, "b": 0.6, "c": 0.2}, 0.5)
+    # Fixed 0.5 rule: p_yes >= 0.5 selects; margin is the closest option's
+    # distance to 0.5, over ALL options (accepted or not).
+    selected, prob, margin = _fold_multi({"a": 0.9, "b": 0.6, "c": 0.2})
     assert selected == ["a", "b"]
     assert prob is None  # no field-level probability is claimed
     assert margin == pytest.approx(0.1)  # b sits 0.1 above the threshold
 
     # A rejected option can be the closest: c sits just under threshold.
-    selected, prob, margin = _fold_multi({"a": 0.99, "b": 0.55, "c": 0.48}, 0.5)
+    selected, prob, margin = _fold_multi({"a": 0.99, "b": 0.55, "c": 0.48})
     assert selected == ["a", "b"]
     assert margin == pytest.approx(0.02)  # 0.5 - 0.48
 
     # Empty selection: margin from the strongest rejected option.
-    selected, prob, margin = _fold_multi({"a": 0.2, "b": 0.4, "c": 0.49}, 0.5)
+    selected, prob, margin = _fold_multi({"a": 0.2, "b": 0.4, "c": 0.49})
     assert selected == []
     assert margin == pytest.approx(0.01)
 
-    # A higher threshold moves both the selection and the margin.
-    selected, prob, margin = _fold_multi({"a": 0.9, "b": 0.6}, 0.7)
+    # W2-E step 2 (nit): the threshold parameter is gone — the rule is the
+    # fixed 0.5 cut, so there is no "higher threshold" path to exercise.
+    # Boundary p_yes == 0.5 selects.
+    selected, _prob, margin = _fold_multi({"a": 0.5, "b": 0.49})
     assert selected == ["a"]
-    assert margin == pytest.approx(0.1)  # |0.6 - 0.7|
-
-    # Boundary p_yes == threshold selects.
-    selected, _prob, margin = _fold_multi({"a": 0.5, "b": 0.49}, 0.5)
-    assert selected == ["a"]
-    assert margin == pytest.approx(0.0)  # a sits exactly on the threshold
+    assert margin == pytest.approx(0.0)  # a sits exactly on the 0.5 cut
 
     # No options at all: nothing selected, zero margin (vacuous).
-    selected, prob, margin = _fold_multi({}, 0.5)
+    selected, prob, margin = _fold_multi({})
     assert selected == []
     assert prob is None
     assert margin == 0.0
@@ -172,41 +170,53 @@ def test_multi_engine_result_semantics():
         {"flags": {"type": "multi", "description": "d", "choices": ["x", "y"]}}
     )
     model, tokenizer = FakeModel(), FakeTokenizer()
-    at_half = run_generation(schema, model, tokenizer, 0.5)
+    # Uncalibrated: zero logits -> P(yes) = 0.5 for every option -> all
+    # selected at the fixed 0.5 rule, margin 0 (boundary).
+    at_half = run_generation(schema, model, tokenizer)
     telemetry = at_half["field_telemetry"]["flags"]
     assert at_half["parsed_json"]["flags"]["value"] == ["x", "y"]
     assert at_half["parsed_json"]["flags"]["prob"] is None
     assert telemetry["probability"] is None
     assert telemetry["margin"] == pytest.approx(0.0)  # |0.5 - 0.5|
-    assert telemetry["threshold"] == 0.5
+    assert telemetry["calibrated"] is None
     assert telemetry["alternatives"] == (("x", 0.5), ("y", 0.5))
-    # Raising the threshold deselects everything; margin grows.
-    above = run_generation(schema, model, tokenizer, 0.51)
+    # Calibrated: b = -1 shifts every calibrated log-odds below 0 -> nothing
+    # selected; margin stays in PROBABILITY units (F1): |sigmoid(-1) - 0.5|,
+    # and the raw calibrated log-odds ride telemetry.
+    above = run_generation(schema, model, tokenizer, {"multi": {"a": 1.0, "b": -1.0}})
     assert above["parsed_json"]["flags"]["value"] == []
-    assert above["field_telemetry"]["flags"]["margin"] == pytest.approx(0.01)
-    # Lowering it keeps everything selected with a wider margin.
-    below = run_generation(schema, model, tokenizer, 0.4)
+    assert above["field_telemetry"]["flags"]["calibrated"] == {"a": 1.0, "b": -1.0}
+    assert above["field_telemetry"]["flags"]["calibrated_log_odds"] == {"x": -1.0, "y": -1.0}
+    assert above["field_telemetry"]["flags"]["margin"] == pytest.approx(
+        abs(1.0 / (1.0 + math.exp(1.0)) - 0.5)
+    )
+    # b = +1 shifts everything above 0 -> all selected; same probability-unit margin.
+    below = run_generation(schema, model, tokenizer, {"multi": {"a": 1.0, "b": 1.0}})
     assert below["parsed_json"]["flags"]["value"] == ["x", "y"]
-    assert below["field_telemetry"]["flags"]["margin"] == pytest.approx(0.1)
+    assert below["field_telemetry"]["flags"]["margin"] == pytest.approx(
+        abs(1.0 / (1.0 + math.exp(-1.0)) - 0.5)
+    )
     assert "log_scores" not in telemetry  # calibrate skips multi fields
 
 
-def run_generation(schema, model, tokenizer, threshold):
+def run_generation(schema, model, tokenizer, calibration=None):
     from jevmlx.engine import run_parallel_generation
 
-    return run_parallel_generation(model, tokenizer, "ctx", schema, multi_threshold=threshold)
+    return run_parallel_generation(model, tokenizer, "ctx", schema, calibration=calibration)
 
 
 def test_multi_threshold_validation():
-    """Threshold must live in (0, 1); the engine rejects anything else."""
-
+    """W2-E step 2: the threshold knob is DELETED. Bad calibration payloads
+    raise; the fake model returns zero logits everywhere, so the uncalibrated
+    rule selects everything (P(yes) = 0.5 >= 0.5) and a strongly negative
+    intercept calibrates everything away."""
     from tests.test_engine_fake import FakeModel, FakeTokenizer
 
     schema = StructuredSchema(
         {"flags": {"type": "multi", "description": "d", "choices": ["x", "y"]}}
     )
-    for bad in (0.0, 1.0, -0.1, 1.5):
-        with pytest.raises(ValueError, match="multi_threshold"):
+    for bad in (0.5, "nope", {"multi": {}}, {"multi": {"a": "x", "b": 0}}, 3.2):
+        with pytest.raises(ValueError, match="calibration"):
             run_generation(schema, FakeModel(), FakeTokenizer(), bad)
 
 

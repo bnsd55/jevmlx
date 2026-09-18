@@ -117,10 +117,12 @@ def main(argv=None) -> None:
         "token trie)",
     )
     decide.add_argument(
-        "--multi-threshold",
-        type=float,
-        default=0.5,
-        help="P(yes) above which a multi option is selected (default 0.5)",
+        "--calibration",
+        default=None,
+        help='JSON file with the fitted multi calibrator ({"multi": {"a": .., '
+        '"b": ..}} as written by jevmlx calibrate --out); selection = '
+        "calibrated log-odds > 0. Without it an option is selected at "
+        "P(yes) >= 0.5",
     )
     decide.add_argument(
         "--backend",
@@ -165,6 +167,12 @@ def main(argv=None) -> None:
         "--data", required=True, help="JSONL file: {schema, context, labels} per line"
     )
     calib.add_argument("--bins", type=int, default=10, help="ECE bin count")
+    calib.add_argument(
+        "--out",
+        default=None,
+        help='write the fitted calibrators to this JSON file ({"temperature": .., '
+        '"multi": {"a": .., "b": ..}}); pass it to jevmlx decide --calibration',
+    )
 
     serve_p = sub.add_parser("serve", help="Serve decisions over HTTP (one Metal GPU, serial)")
     serve_p.add_argument("--model", default=DEFAULT_MODEL, help="Hugging Face model id for mlx-lm")
@@ -364,7 +372,7 @@ def main(argv=None) -> None:
                 schema,
                 context,
                 timeout=args.timeout,
-                multi_threshold=args.multi_threshold,
+                calibration=args.calibration,
             )
             model_label = args.api_model
         else:
@@ -379,7 +387,7 @@ def main(argv=None) -> None:
                 schema,
                 temperature=args.temperature,
                 scoring=args.scoring,
-                multi_threshold=args.multi_threshold,
+                calibration=args.calibration,
                 prior_correction=args.prior_correction,
             )
             model_label = args.model
@@ -398,15 +406,44 @@ def main(argv=None) -> None:
         print(f"collecting scores from {len(cases)} labeled cases ...", flush=True)
         samples = calibrate.collect(model, tokenizer, cases)
 
-        t_fit = calibrate.fit_temperature(samples)
-        ece_before = calibrate.ece(samples, 1.0, bins=args.bins)
-        ece_after = calibrate.ece(samples, t_fit, bins=args.bins)
-        acc = calibrate.accuracy(samples)
-        print(f"n samples      : {len(samples)}")
-        print(f"fitted T       : {t_fit}")
-        print(f"ECE before     : {ece_before:.4f}  (T=1.0)")
-        print(f"ECE after      : {ece_after:.4f}  (T={t_fit})")
-        print(f"accuracy       : {acc:.4f}")
+        calibrators: dict = {}
+        if samples:
+            t_fit = calibrate.fit_temperature(samples)
+            ece_before = calibrate.ece(samples, 1.0, bins=args.bins)
+            ece_after = calibrate.ece(samples, t_fit, bins=args.bins)
+            acc = calibrate.accuracy(samples)
+            calibrators["temperature"] = t_fit
+            print(f"n samples      : {len(samples)}")
+            print(f"fitted T       : {t_fit}")
+            print(f"ECE before     : {ece_before:.4f}  (T=1.0)")
+            print(f"ECE after      : {ece_after:.4f}  (T={t_fit})")
+            print(f"accuracy       : {acc:.4f}")
+        else:
+            print("no scalar (enum/boolean) labels; skipping temperature fit")
+
+        # Pooled multi logistic: one (a, b) across every multi option's raw
+        # log-odds (W2-E step 2). Skipped when no multi labels exist.
+        multi_samples = calibrate.collect_multi(model, tokenizer, cases)
+        if multi_samples:
+            a_fit, b_fit = calibrate.fit_logistic(multi_samples)
+            calibrators["multi"] = {"a": a_fit, "b": b_fit}
+            n_yes = sum(y for _, y in multi_samples)
+            print(
+                f"n multi pairs  : {len(multi_samples)}  ({n_yes} yes / "
+                f"{len(multi_samples) - n_yes} no)"
+            )
+            print(f"fitted (a, b)  : ({a_fit}, {b_fit})")
+        else:
+            print("no multi labels; skipping pooled logistic fit")
+
+        if args.out:
+            if not calibrators:
+                print("nothing fitted; no --out file written")
+            else:
+                with open(args.out, "w", encoding="utf-8") as f:
+                    json.dump(calibrators, f, indent=2, sort_keys=True)
+                    f.write("\n")
+                print(f"calibrators -> {args.out}")
 
     elif args.command == "serve":
         from jevmlx.serve import serve

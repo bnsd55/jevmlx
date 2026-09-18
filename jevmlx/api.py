@@ -361,7 +361,7 @@ def _decide_once[T: BaseModel](
     scoring: str = "slots",
     allow_none_of_above: bool = False,
     abstain_below_margin: float | None = None,
-    multi_threshold: float = 0.5,
+    calibration: str | dict | None = None,
     prior_correction: bool = False,
 ) -> Decision[T]:
     """Decide one context with a loaded engine and a compiled schema."""
@@ -372,7 +372,7 @@ def _decide_once[T: BaseModel](
         schema,
         temperature=temperature,
         scoring=scoring,
-        multi_threshold=multi_threshold,
+        calibration=calibration,
         prior_correction=prior_correction,
     )
 
@@ -455,7 +455,7 @@ def decide[T: BaseModel](
     scoring: str = "slots",
     allow_none_of_above: bool = False,
     abstain_below_margin: float | None = None,
-    multi_threshold: float = 0.5,
+    calibration: str | dict | None = None,
     prior_correction: bool = False,
 ) -> Decision[T]:
     """Run parallel constrained decisions and return a validated model instance.
@@ -503,7 +503,7 @@ def decide[T: BaseModel](
         scoring=scoring,
         allow_none_of_above=allow_none_of_above,
         abstain_below_margin=abstain_below_margin,
-        multi_threshold=multi_threshold,
+        calibration=calibration,
         prior_correction=prior_correction,
     )
 
@@ -517,7 +517,7 @@ def decide_many[T: BaseModel](
     scoring: str = "slots",
     allow_none_of_above: bool = False,
     abstain_below_margin: float | None = None,
-    multi_threshold: float = 0.5,
+    calibration: str | dict | None = None,
     prior_correction: bool = False,
 ) -> list[Decision[T]]:
     """Decide many contexts against one schema and return one Decision per context.
@@ -560,7 +560,7 @@ def decide_many[T: BaseModel](
             scoring=scoring,
             allow_none_of_above=allow_none_of_above,
             abstain_below_margin=abstain_below_margin,
-            multi_threshold=multi_threshold,
+            calibration=calibration,
             prior_correction=prior_correction,
         )
         for context in contexts

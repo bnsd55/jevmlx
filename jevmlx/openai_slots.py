@@ -206,7 +206,7 @@ def _decide_multi_field(
     name: str,
     field,
     timeout: float,
-    threshold: float,
+    calibration: dict | None,
 ) -> tuple[dict, dict, int]:
     """One Y/N request per option. Returns (parsed, telemetry, n_requests)."""
     per_option: dict[str, float] = {}
@@ -239,8 +239,23 @@ def _decide_multi_field(
         probs, truncated = _yes_no_probabilities(top_entries or [])
         per_option[option] = probs["yes"]
         truncated_any = truncated_any or truncated
-    selected = [option for option, p in per_option.items() if p >= threshold]
-    margin = min((abs(p - threshold) for p in per_option.values()), default=0.0)
+    # W2-E step 2: same dual contract as the native engine. With calibration
+    # ({"multi": {"a", "b"}}) the option's P(yes) is folded to log-odds
+    # (log p - log(1-p)), calibrated a*log_odds + b, and selected when > 0;
+    # without it the fixed P(yes) >= 0.5 rule stands. The raw probabilities
+    # stay in per_option either way.
+    multi_ab = calibration.get("multi") if calibration else None
+    if multi_ab is not None:
+        a_coef, b_coef = multi_ab["a"], multi_ab["b"]
+        calibrated = {}
+        for option, p in per_option.items():
+            p_clamped = min(max(p, 1e-12), 1.0 - 1e-12)
+            calibrated[option] = a_coef * math.log(p_clamped / (1.0 - p_clamped)) + b_coef
+        selected = [option for option, c in calibrated.items() if c > 0]
+        margin = min((abs(c) for c in calibrated.values()), default=0.0)
+    else:
+        selected = [option for option, p in per_option.items() if p >= 0.5]
+        margin = min((abs(p - 0.5) for p in per_option.values()), default=0.0)
     ranked = sorted(per_option.items(), key=lambda kv: -kv[1])
     parsed = {"value": selected, "prob": None}
     telemetry = {
@@ -252,7 +267,7 @@ def _decide_multi_field(
         "alternatives": tuple(ranked),
         "rows": len(field.choices),
         "truncated": truncated_any,
-        "threshold": threshold,
+        "calibrated": {"a": multi_ab["a"], "b": multi_ab["b"]} if multi_ab else None,
     }
     return parsed, telemetry, n_requests
 
@@ -265,7 +280,7 @@ def decide_openai(
     context: str,
     *,
     timeout: float = 120.0,
-    multi_threshold: float = 0.5,
+    calibration: str | dict | None = None,
 ) -> dict[str, Any]:
     """Decide every schema field through an OpenAI-compatible endpoint.
 
@@ -274,8 +289,13 @@ def decide_openai(
     ``alternatives``, ``rows``, ``passes``), ``confidence_model:
     "openai_slots"``, ``prompt_version``, ``prompt_sha256``, ``elapsed_ms``.
     One ``max_tokens=1`` request per scalar field; one Y/N request per
-    multi option. Raises ChatCompletionsError on non-2xx responses.
+    multi option. ``calibration`` (JSON path or dict) selects multi options
+    by calibrated log-odds > 0, exactly like the native engine. Raises
+    ChatCompletionsError on non-2xx responses.
     """
+    from jevmlx.engine import _load_calibration
+
+    calib = _load_calibration(calibration)
     t0 = time.perf_counter()
     parsed_json: dict[str, Any] = {}
     field_telemetry: dict[str, Any] = {}
@@ -291,7 +311,7 @@ def decide_openai(
                 name,
                 field,
                 timeout,
-                multi_threshold,
+                calib,
             )
             n_requests += n
         else:

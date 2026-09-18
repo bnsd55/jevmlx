@@ -73,7 +73,7 @@ def test_decide_many_uses_one_engine_and_one_schema(monkeypatch):
         *,
         temperature=1.0,
         scoring="slots",
-        multi_threshold=0.5,
+        calibration=None,
         prior_correction=False,
     ):
         run_calls.append((engine_model, tokenizer, context, schema, temperature))
