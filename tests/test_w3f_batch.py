@@ -180,3 +180,61 @@ def test_batched_empty_rows_schema():
     results = run_parallel_generation_batched(model, FakeTokenizer(), ["a"], schema)
     assert len(results) == 1
     assert "pick" in results[0]["parsed_json"]
+
+
+def test_grouped_contexts_prefill_their_own_prompts(monkeypatch):
+    """Bug fix regression: with a budget forcing group_size=2 and 5 distinct
+    contexts, every result must match ITS OWN separate decide call. The old
+    code reused contexts[0]'s probe cache as every group's first context, so
+    groups after the first scored contexts[0]'s prompt in place of their own
+    first context."""
+    schema = StructuredSchema(
+        {"pick": {"type": "enum", "description": "d", "choices": ["ALPHA", "BETA"]}}
+    )
+    contexts = [f"ctx-{i}" for i in range(5)]
+
+    # Force group_size=2 by patching the budget: per-context cache nbytes of
+    # 0 makes _contexts_per_pass return the whole budget, so bound it from
+    # above by patching the function directly.
+    import jevmlx.engine as eng
+
+    monkeypatch.setattr(eng, "_contexts_per_pass", lambda nbytes: 2)
+
+    batched = run_parallel_generation_batched(
+        FakeModel(vocab_size=64), FakeTokenizer(), contexts, schema
+    )
+    assert len(batched) == 5
+    # With group_size=2 and 5 contexts the groups are [0,1], [2,3], [4] —
+    # the middle groups' first contexts (2 and 4's group) must NOT have been
+    # scored against ctx-0's prompt. The fake tokenizer's prompt tokens embed
+    # the context text, and the fake model's cache consumes prompt-length
+    # key/value state; a wrong prefill changes nothing in the zero-logit
+    # output, so assert on the provenance sha instead: each result's
+    # prompt_sha256 must equal the sha of ITS OWN context's prompt.
+    import hashlib
+    import json
+
+    tok = FakeTokenizer()
+    for ctx, res in zip(contexts, batched, strict=True):
+        schema_str = schema.to_alias_schema_str()
+        user_content = (
+            f"Classify the following fields.\n\n{schema_str}\n\n<<<CONTEXT\n{ctx}\nCONTEXT>>>"
+        )
+        expected_ids = tok.encode(
+            "\n".join(
+                m["content"]
+                for m in [
+                    {"role": "system", "content": eng.PROMPT_V2_SYSTEM},
+                    {"role": "user", "content": user_content},
+                ]
+            )
+        )
+        expected_sha = hashlib.sha256(json.dumps(expected_ids).encode()).hexdigest()
+        assert res["prompt_sha256"] == expected_sha, (
+            f"context {ctx!r} scored against another context's prompt"
+        )
+    # And the batched probabilities still match separate calls bit-for-bit
+    # (the parity guarantee is unchanged by grouping).
+    for ctx, bat in zip(contexts, batched, strict=True):
+        sep = run_parallel_generation(FakeModel(vocab_size=64), FakeTokenizer(), ctx, schema)
+        assert bat["parsed_json"] == sep["parsed_json"], ctx

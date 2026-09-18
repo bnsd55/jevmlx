@@ -2429,7 +2429,10 @@ def run_parallel_generation_batched(
     R = len(rows)
 
     # 2. Context-group bound from the measured budget (review F2): never
-    #    hold every context's cache at once.
+    #    hold every context's cache at once. The probe prefill sizes the
+    #    budget AND is reused as group 0's first prefill (it IS contexts[0]);
+    #    later groups prefill every one of their own contexts (bug fix: the
+    #    probe must never stand in for a context it isn't).
     probe = _prefill(model, tokenizer, contexts[0], schema, scoring)
     per_ctx_nbytes = _cache_nbytes(probe.cache)
     group_size = min(len(contexts), _contexts_per_pass(per_ctx_nbytes))
@@ -2440,8 +2443,14 @@ def run_parallel_generation_batched(
         group = contexts[g0 : g0 + group_size]
 
         # 3. Prefill each context in the group (width-1 forward passes).
-        group_pf: list[PrefillResult] = [probe]
-        group_pf.extend(_prefill(model, tokenizer, c, schema, scoring) for c in group[1:])
+        #    contexts[0] reuses the probe; every other context — including
+        #    the first context of later groups — prefills its own prompt.
+        group_pf: list[PrefillResult] = []
+        for gi, c in enumerate(group):
+            if g0 == 0 and gi == 0:
+                group_pf.append(probe)
+            else:
+                group_pf.append(_prefill(model, tokenizer, c, schema, scoring))
 
         if R == 0:
             # Degenerate schema (no rows): assembly still produces a result.
