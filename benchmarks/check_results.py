@@ -239,6 +239,45 @@ def _find_combo_folders(root: Path) -> list[Path]:
     return combos
 
 
+def check_parity(model_dir: Path) -> tuple[bool, list[str]]:
+    """Check that a model's results folder has a passing slow parity test.
+
+    A model enters the README compatibility table only with a passing slow
+    parity test (W1-A: batch vs chunked log_score agreement within
+    PARITY_ATOL) recorded in its results folder as ``parity.json``.
+
+    The ``parity.json`` schema::
+
+        {
+          "model": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+          "test": "test_w1a_scoring_parity_batch_vs_chunked_real_model",
+          "passed": true,
+          "max_drift_nats": 0.027,
+          "atol": 0.05,
+          "run_at": "2026-09-18T12:00:00Z"
+        }
+    """
+    problems: list[str] = []
+    name = str(model_dir)
+    parity_path = model_dir / "parity.json"
+    if not parity_path.exists():
+        problems.append(f"{name}: missing parity.json (slow parity test not recorded)")
+        return False, problems
+    try:
+        parity = json.loads(parity_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        problems.append(f"{name}: parity.json unreadable: {e}")
+        return False, problems
+    if not parity.get("passed"):
+        problems.append(
+            f"{name}: parity.json shows test did not pass "
+            f"(max_drift={parity.get('max_drift_nats')}, "
+            f"atol={parity.get('atol')})"
+        )
+        return False, problems
+    return True, []
+
+
 def check_root(root: Path) -> list[tuple[Path, bool, list[str]]]:
     """Validate every combo folder under root. Returns per-folder results."""
     folders = _find_combo_folders(root)
@@ -287,6 +326,12 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="published_agreement.json for --check-readme (L1 output, optional)",
     )
+    ap.add_argument(
+        "--check-parity",
+        action="store_true",
+        help="also verify each model folder has a passing slow parity test "
+        "(parity.json); a model without one cannot enter the README compat table",
+    )
     args = ap.parse_args(argv)
 
     # --check-readme: build the leaderboard table and compare the README block.
@@ -323,6 +368,31 @@ def main(argv: list[str] | None = None) -> int:
     all_results: list[tuple[Path, bool, list[str]]] = []
     for arg in argv_dirs:
         all_results.extend(check_root(Path(arg)))
+
+    # W4-A: optional slow parity gate. A model enters the README compat table
+    # only with a passing slow parity test (parity.json in the model folder).
+    if args.check_parity:
+        checked_models: set[Path] = set()
+        for arg in argv_dirs:
+            root = Path(arg)
+            # Model folders are either the root itself (single model) or
+            # children of the root (the <machine>-<model> layout). A model
+            # folder is any dir that contains parity.json OR contains combo
+            # subdirs (the <machine>-<model> level).
+            model_dirs: list[Path] = []
+            if (root / "parity.json").exists():
+                model_dirs = [root]
+            elif root.is_dir():
+                for child in sorted(root.iterdir()):
+                    if child.is_dir():
+                        model_dirs.append(child)
+            for model_dir in model_dirs:
+                if model_dir in checked_models:
+                    continue
+                checked_models.add(model_dir)
+                ok, problems = check_parity(model_dir)
+                all_results.append((model_dir, ok, problems))
+
     print(_summary(all_results))
     any_fail = False
     for folder, ok, problems in all_results:

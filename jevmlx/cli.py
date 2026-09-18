@@ -101,7 +101,11 @@ def main(argv=None) -> None:
     decide = sub.add_parser(
         "decide", help="Run parallel constrained decisions on a preset or schema/context"
     )
-    decide.add_argument("--model", default=DEFAULT_MODEL, help="Hugging Face model id for mlx-lm")
+    decide.add_argument(
+        "--model",
+        default=DEFAULT_MODEL,
+        help="Hugging Face model id or alias (fast, quality, test)",
+    )
     decide.add_argument(
         "--preset",
         help="preset name (bundled: fintech_fraud, support_triage, ...) or path to a .json file",
@@ -178,7 +182,11 @@ def main(argv=None) -> None:
     calib = sub.add_parser(
         "calibrate", help="Fit a temperature on labeled JSONL cases and report ECE"
     )
-    calib.add_argument("--model", default=DEFAULT_MODEL, help="Hugging Face model id for mlx-lm")
+    calib.add_argument(
+        "--model",
+        default=DEFAULT_MODEL,
+        help="Hugging Face model id or alias (fast, quality, test)",
+    )
     calib.add_argument(
         "--data", required=True, help="JSONL file: {schema, context, labels} per line"
     )
@@ -191,7 +199,11 @@ def main(argv=None) -> None:
     )
 
     serve_p = sub.add_parser("serve", help="Serve decisions over HTTP (one Metal GPU, serial)")
-    serve_p.add_argument("--model", default=DEFAULT_MODEL, help="Hugging Face model id for mlx-lm")
+    serve_p.add_argument(
+        "--model",
+        default=DEFAULT_MODEL,
+        help="Hugging Face model id or alias (fast, quality, test)",
+    )
     serve_p.add_argument("--host", default="127.0.0.1")
     serve_p.add_argument("--port", type=int, default=8000)
     ap.add_argument("-v", "--verbose", action="store_true", help="info-level logs on stderr")
@@ -214,7 +226,11 @@ def main(argv=None) -> None:
         help="Run labeled cases through a decision track; writes predictions + run manifest",
     )
     eval_p.add_argument("--data", required=True, help="cases JSONL (see the eval contract)")
-    eval_p.add_argument("--model", default=DEFAULT_MODEL, help="Hugging Face model id for mlx-lm")
+    eval_p.add_argument(
+        "--model",
+        default=DEFAULT_MODEL,
+        help="Hugging Face model id or alias (fast, quality, test)",
+    )
     eval_p.add_argument(
         "--track",
         required=True,
@@ -270,8 +286,8 @@ def main(argv=None) -> None:
     bench_p.add_argument(
         "--model",
         required=True,
-        help="Hugging Face model id(s) for mlx-lm; comma-separated list runs "
-        "them sequentially with one SUMMARY.md across all",
+        help="Hugging Face model id(s) or alias (fast, quality, test) for mlx-lm; "
+        "comma-separated list runs them sequentially with one SUMMARY.md across all",
     )
     bench_p.add_argument(
         "--models-file",

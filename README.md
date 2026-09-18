@@ -32,6 +32,23 @@ git clone https://github.com/bnsd55/jevmlx && cd jevmlx && ./setup.sh
 
 Requires an Apple Silicon Mac (M1 or later) and Python 3.12+.
 
+### Model aliases
+
+Instead of typing a full Hub id, use an alias:
+
+| Alias | Resolves to | Use |
+|---|---|---|
+| `quality` | `mlx-community/Qwen2.5-7B-Instruct-4bit` | **default** — best accuracy |
+| `fast` | `mlx-community/Qwen2.5-3B-Instruct-4bit` | lower latency |
+| `test` | `mlx-community/Qwen2.5-1.5B-Instruct-4bit` | tests only (too small for production) |
+
+```bash
+jevmlx decide --model quality --schema ticket.json --context ticket.txt
+jevmlx decide --model fast --schema ticket.json --context ticket.txt
+```
+
+A full Hub id also works (`--model mlx-community/Llama-3.2-3B-Instruct-4bit`).
+
 ## Use it from Python
 
 ```python
@@ -98,7 +115,7 @@ No local results yet — contribute one with `jevmlx bench`.
 ```bash
 git clone https://github.com/bnsd55/jevmlx && cd jevmlx
 ./setup.sh
-.venv/bin/jevmlx bench --model mlx-community/Qwen2.5-0.5B-Instruct-4bit
+.venv/bin/jevmlx bench --model quality
 # commit the results folder and open a PR
 ```
 

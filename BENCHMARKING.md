@@ -13,7 +13,7 @@ git clone https://github.com/bnsd55/jevmlx && cd jevmlx
 ## 2. Run the bench
 
 ```bash
-.venv/bin/jevmlx bench --model mlx-community/Qwen2.5-0.5B-Instruct-4bit
+.venv/bin/jevmlx bench --model quality
 ```
 
 (or `source .venv/bin/activate` first, then plain `jevmlx bench ...`)
@@ -84,6 +84,11 @@ than 5 MB total are gzipped automatically (the folder README says so).
 
 - [ ] Folder contains only the bench output (predictions, run.json,
       report.json/.md, dataset lock files, SUMMARY.md, folder README)
+- [ ] `parity.json` in the model folder — records the passing slow parity
+      test (W1-A batch vs chunked log_score agreement). A model cannot
+      enter the README leaderboard without it. Schema:
+      `{"model": "...", "test": "test_w1a_...", "passed": true,
+      "max_drift_nats": 0.027, "atol": 0.05, "run_at": "..."}`
 - [ ] `SUMMARY.md` pasted into the PR description
 - [ ] Machine specs (chip, RAM, macOS) mentioned in the PR body
 - [ ] No hand-edited numbers — recompute instead of fixing up

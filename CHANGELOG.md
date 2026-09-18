@@ -1,5 +1,92 @@
 # Changelog
 
+## Unreleased
+
+- W4-A named model defaults + compat metrics: `--model` accepts aliases
+  `fast` (Qwen2.5-3B), `quality` (Qwen2.5-7B, **default**), `test` (1.5B,
+  tests only). `resolve_model()` resolves aliases in `load_engine`, `doctor`,
+  and all CLI commands. Hub ids verified by a slow HEAD test (never at import).
+  `run.json` gains `config.tokenizer_metrics` (quoted-code token lengths,
+  single_branch_fraction, max_trie_depth, mean_legal_mass from telemetry).
+  `check_results.py --check-parity` gates the README compatibility table: a
+  model enters only with a passing slow parity test (`parity.json` in its
+  results folder). `_local_rows` in leaderboard.py enforces the same gate.
+  Also fixed a pre-existing test isolation bug (`sys.setrecursionlimit(60)`
+  leaked from `test_trie.py`).
+- Multi count row (W2-E step 3): every multi field gets an extra decision row
+  `<field>#count` (candidates `0`, `1`, `2`, `3`, `4+`, scored like a scalar
+  enum through the trie; the row always runs). When the count row's top-2
+  margin clears `COUNT_MARGIN_MIN` (0.7 nats) the selected set is reconciled
+  to the top-k options by calibrated log-odds (P(yes) order uncalibrated —
+  monotone-equivalent), k capped at the option count; otherwise the
+  per-option rule stands. Telemetry: `count_choice`, `count_margin`,
+  `reconciled_by` on the field entry plus a `<field>#count` scalar entry.
+
+
+- W2-D legal_mass telemetry: per-branch leakage signal added to engine
+  field telemetry. legal_mass = sum(exp(z_allowed)) / sum(exp(z_vocab)) —
+  the probability the model assigned to the union of allowed continuations
+  at the branch position, against the full vocabulary. A branch can
+  confidently pick A over B even when almost all unconstrained mass is on a
+  reasoning token, newline, or label text; legal_mass flags that leakage.
+  Product over the winner's branch path (scalar fields) / per-option Y/N
+  branches (multi fields); 1.0 for cardinality-1 fields. Raw, pre-prior-
+  correction logits. Always computed: the ~0.002 Metal FP drift from the
+  full-vocab mx.logsumexp means bit-identical batch=1 vs batch=N parity was
+  never a real invariant on Metal (GPT Q4 confirms); the W1-A parity test
+  now asserts winners identical + log_scores within tests/conftest.py's
+  PARITY_ATOL = 1e-2 (measured Metal batch-shape drift ~0.004 nats, winners
+  stable; coder1's PR #21 imports the same constant post-merge; exact
+  equality still holds on the deterministic FakeModel path). trie.py:
+  score_trie returns (log_probs, legal_mass_logs) — one function, the
+  legal_mass_at_node callback optional (None = mass 1.0, for the MLX-free
+  unit tests); score_trie_with_legal_mass removed. Calibration feature for
+  the abstention model (R9, bug 10). forced_prefix_logprob deferred (needs
+  prefix-position logits the engine currently discards; conflicts with
+  W3-A's gather-only constraint — noted in ROADMAP).
+
+- Apple Silicon platform check moved from engine.py import time into
+  `load_engine` (via `_require_mlx`): `import jevmlx`, `import jevmlx.engine`,
+  and schema/plan/metrics tooling now work on Linux (ubuntu-latest CI);
+  the clear RuntimeError fires only when a model is actually loaded.
+  `engine_metadata` returns `mlx_version`/`mlx_lm_version` as None when mlx
+  isn't installed (best-effort provenance, no raise).
+- Doc sweep: ARCHITECTURE updated to the current contracts — prompt v5,
+  corrected line citations (engine.py:293/430/471-490/508-516/621-629),
+  PromptProfile in the engine module-map row, a new FieldResult contract
+  table (margins unit-split, reason as the single source of truth), Y/N
+  codes in the assembly line. Stale `prompt v2` / `jevmlx-parallel-v2`
+  mentions fixed; no UNKNOWN/allow_unknown/prompt-v2 references remain.
+- UNKNOWN split into two concepts (was one conflated kwarg):
+  `allow_none_of_above=True` adds an explicit `NONE_OF_ABOVE` choice
+  ("none of the options apply") mapped to `None` with
+  `FieldResult.reason="none_of_above"`; `abstain_below_margin=X` is a
+  separate confidence gate — fields whose margin falls below the cut are
+  withheld from the model (`FieldResult.reason="abstain"`; the raw value
+  stays for provenance). `allow_unknown` is removed with no alias. The
+  calibrated correctness model is W2.
+- Multi calibration (W2-E step 2): `jevmlx calibrate --out` fits a pooled
+  logistic (a, b) on raw multi option log-odds alongside the scalar
+  temperature and writes both to one JSON file; `decide`/`decide_many`/
+  `run_parallel_generation`/`decide_openai` accept `calibration=<path or
+  dict>` and select multi options by calibrated log-odds > 0. The
+  `multi_threshold` parameter and `--multi-threshold` flag are DELETED (no
+  dual path); uncalibrated selection stays at the fixed P(yes) >= 0.5 rule.
+- Prompt profiles: a frozen `PromptProfile` (template kwargs + system-role
+  support) is resolved once at engine load. Qwen3-family models get
+  `enable_thinking=False` so answers land in the direct channel; the
+  system-role probe replaces the per-request TemplateError retry.
+- PEP 604 optionals accepted everywhere: `Literal[...] | None` and
+  `EnumClass | None` now work like `Optional[...]` (pydantic keeps the enum
+  form as a raw `types.UnionType`).
+- Naive baseline honesty: `run_naive_generation` is greedy by definition —
+  the never-applied `temperature` argument is removed — and its JSON-schema
+  prompt now shows every choice instead of truncating enums over 50 options
+  to 20.
+- Small fixes: duplicate engine-load log line removed; stop-token discovery
+  no longer treats the unknown token as a stop (Mistral-style tokenizers
+  map absent strings to unk).
+
 ## 0.1.0 - 2026-09-17
 
 First release.

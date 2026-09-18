@@ -216,6 +216,14 @@ class TestHFCache:
     def test_lists_models_and_default(self, tmp_path, monkeypatch):
         cache = self._make_cache(tmp_path)
         monkeypatch.setattr(doctor, "_hf_cache_dir", lambda: cache)
+        # The default is 'quality' (7B); mock resolve_model so the 1.5B in
+        # the mock cache is treated as the default (avoids depending on the
+        # real alias map in a unit test).
+        import jevmlx.api as _api_mod
+
+        monkeypatch.setattr(
+            _api_mod, "resolve_model", lambda model: "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+        )
         check, models = check_hf_cache()
         assert check.status == "OK"
         assert {name for name, _ in models} == {
@@ -227,6 +235,11 @@ class TestHFCache:
     def test_missing_default_warns(self, tmp_path, monkeypatch):
         cache = self._make_cache(tmp_path, with_default=False)
         monkeypatch.setattr(doctor, "_hf_cache_dir", lambda: cache)
+        import jevmlx.api as _api_mod
+
+        monkeypatch.setattr(
+            _api_mod, "resolve_model", lambda model: "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+        )
         check, _ = check_hf_cache()
         assert check.status == "WARN"
         assert "NOT cached" in check.detail

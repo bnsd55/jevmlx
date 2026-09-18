@@ -109,6 +109,76 @@ def _sha256_file(path: str | None) -> str | None:
     return digest.hexdigest()
 
 
+def _compute_tokenizer_metrics(
+    schema: StructuredSchema,
+    plan_provider: Callable[..., dict],
+    field_telemetry: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Per-model tokenizer metrics for run.json (W4-A).
+
+    Quantifies how the tokenizer segments the schema's quoted codes:
+    - ``quoted_code_token_lengths``: list of candidate token lengths
+      (shared_ids + remainder per choice) across all scalar fields.
+    - ``single_branch_fraction``: fraction of scalar fields whose codebook
+      search produced a single-branch trie (all choices diverge at one node).
+    - ``max_trie_depth``: deepest branch-node path across all fields.
+    - ``mean_legal_mass``: mean legal_mass from the first result's field
+      telemetry (1.0 = no leakage; lower = model wanted off-schema tokens).
+    """
+    from jevmlx.trie import build_trie
+
+    plan = plan_provider(schema)
+    fields_plan = plan.get("fields", {})
+
+    code_lengths: list[int] = []
+    single_branch_count = 0
+    scalar_count = 0
+    max_depth = 0
+
+    for _fname, fp in fields_plan.items():
+        if not isinstance(fp, dict):
+            continue
+        if "remainders" in fp:
+            # Scalar field (enum/boolean).
+            scalar_count += 1
+            shared = fp.get("shared_ids", [])
+            if fp.get("single_branch"):
+                single_branch_count += 1
+            for remainder in fp["remainders"]:
+                code_lengths.append(len(shared) + len(remainder))
+            trie = build_trie(fp["remainders"])
+            for node in trie:
+                depth = len(node.get("path", []))
+                if depth > max_depth:
+                    max_depth = depth
+        elif "suffix_ids_list" in fp:
+            # Multi field: each option is a Y/N row.
+            for suffix in fp["suffix_ids_list"]:
+                for rem_list in fp.get("remainders", []):
+                    if isinstance(rem_list, list):
+                        code_lengths.append(len(suffix) + len(rem_list[0]) if rem_list else 0)
+
+    mean_legal_mass = None
+    if field_telemetry:
+        masses = [
+            ft.get("legal_mass")
+            for ft in field_telemetry.values()
+            if isinstance(ft, dict) and ft.get("legal_mass") is not None
+        ]
+        if masses:
+            mean_legal_mass = sum(masses) / len(masses)
+
+    return {
+        "quoted_code_token_lengths": code_lengths,
+        "quoted_code_token_length_mean": (
+            sum(code_lengths) / len(code_lengths) if code_lengths else 0
+        ),
+        "single_branch_fraction": (single_branch_count / scalar_count if scalar_count else 0),
+        "max_trie_depth": max_depth,
+        "mean_legal_mass": mean_legal_mass,
+    }
+
+
 def parallel_decide_fn(
     model, tokenizer, scoring: str = "slots", prior_correction: bool = False
 ) -> DecideFn:
@@ -373,6 +443,10 @@ def run_eval(
     timing_meta: list[dict[str, Any]] = []  # W3-R: parallel _meta timings
     lines: list[dict] = []
     n_canonical = 0
+    # Capture the first parallel result's field_telemetry for tokenizer metrics
+    # (legal_mass, rows). Only the first case is needed — the schema is the
+    # same across cases in a run; later cases would add noise, not signal.
+    first_field_telemetry: dict[str, Any] | None = None
     for case in selected:
         schema = StructuredSchema(case["schema"])
         variants = (
@@ -394,6 +468,8 @@ def run_eval(
             # collect per-case for the combo timing.json (median over cases).
             if track == "parallel" and tag is None and meta:
                 timing_meta.append(meta)
+            if tag is None and first_field_telemetry is None and meta.get("field_telemetry"):
+                first_field_telemetry = meta["field_telemetry"]
             if tag is None:
                 n_canonical += len(results)
 
@@ -510,6 +586,17 @@ def run_eval(
             plan_provider(StructuredSchema(selected[0]["schema"])), sort_keys=True
         )
         config["compiled_plan_sha256"] = hashlib.sha256(plan_json.encode()).hexdigest()
+
+    # W4-A: per-model tokenizer metrics — quantified how the tokenizer
+    # segments the schema's quoted codes. These are model-specific (different
+    # tokenizers split JSON differently) and feed the compatibility table.
+    if track == "parallel" and plan_provider is not None and selected:
+        config["tokenizer_metrics"] = _compute_tokenizer_metrics(
+            StructuredSchema(selected[0]["schema"]),
+            plan_provider,
+            first_field_telemetry,
+        )
+
     config["dataset_lock_sha256"] = _sha256_file(dataset_lock_path)
 
     run = {

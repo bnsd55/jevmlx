@@ -237,7 +237,7 @@ def _cached_models(cache: Path) -> list[tuple[str, float]]:
 
 def check_hf_cache() -> tuple[Check, list[tuple[str, float]]]:
     """Cache path, size, cached mlx-community models; default model cached?"""
-    from jevmlx.api import DEFAULT_MODEL
+    import jevmlx.api as api
 
     cache = _hf_cache_dir()
     if not cache.is_dir():
@@ -251,14 +251,19 @@ def check_hf_cache() -> tuple[Check, list[tuple[str, float]]]:
         )
     models = _cached_models(cache)
     total_gb = round(_dir_size_bytes(cache) / 2**30, 2)
-    slug = "models--" + DEFAULT_MODEL.replace("/", "--")
+    default_hub_id = api.resolve_model(api.DEFAULT_MODEL)
+    slug = "models--" + default_hub_id.replace("/", "--")
     default_cached = (cache / slug).is_dir()
     detail = (
         f"{cache} ({total_gb} GB, {len(models)} mlx-community models); "
-        f"default {DEFAULT_MODEL}: {'cached' if default_cached else 'NOT cached'}"
+        f"default {api.DEFAULT_MODEL} ({default_hub_id}): "
+        f"{'cached' if default_cached else 'NOT cached'}"
     )
     if not default_cached:
-        return _warn("hf-cache", detail, f"first run will download {DEFAULT_MODEL}"), models
+        return (
+            _warn("hf-cache", detail, f"first run will download {default_hub_id}"),
+            models,
+        )
     return _ok("hf-cache", detail), models
 
 

@@ -124,6 +124,19 @@ def _write_local_result(tmp_path: Path) -> Path:
         "counts": {"cases": 4, "fields": 4, "prediction_lines": 4},
     }
     (combo / "run.json").write_text(json.dumps(run), encoding="utf-8")
+    # W4-A: a model needs a passing parity.json to enter the leaderboard.
+    (machine_dir / "parity.json").write_text(
+        json.dumps(
+            {
+                "model": "fake-1b",
+                "test": "w1a",
+                "passed": True,
+                "max_drift_nats": 0.02,
+                "atol": 0.05,
+            }
+        ),
+        encoding="utf-8",
+    )
     report = {
         "environment": {"chip": "fake"},
         "metrics": {
