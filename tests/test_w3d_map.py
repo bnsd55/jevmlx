@@ -14,7 +14,14 @@ from __future__ import annotations
 
 import math
 
+from jevmlx.constraints import compile_constraints
 from jevmlx.engine import _constrained_map
+from jevmlx.schema import StructuredSchema
+
+
+def _compile(constraints, schema):
+    """Compile raw dicts against a real StructuredSchema."""
+    return compile_constraints(constraints, schema)
 
 
 def _field_scores(scores: dict[str, dict[str, float]]) -> dict[str, dict[str, float]]:
@@ -44,12 +51,19 @@ def test_implies_map_flips_low_margin_child():
         }
     ]
 
-    class FakeSchema:
-        fields = {}
-
-    reconciled, changed = _constrained_map(
-        field_log_scores, field_values, constraints, FakeSchema()
+    # W5b-11: the MAP unit evaluates COMPILED constraints — compile once.
+    schema = StructuredSchema(
+        {
+            "intent": {"type": "enum", "description": "d", "choices": ["billing", "technical"]},
+            "subtype": {
+                "type": "enum",
+                "description": "d",
+                "choices": ["refund", "dispute", "bug"],
+            },
+        }
     )
+    compiled = compile_constraints(constraints, schema)
+    reconciled, changed = _constrained_map(field_log_scores, field_values, compiled, schema)
     assert reconciled["intent"] == "billing"  # parent unchanged
     assert reconciled["subtype"] == "refund"  # flipped to best valid
     assert "subtype" in changed
@@ -61,10 +75,11 @@ def test_no_constraint_path_bit_identical():
     field_log_scores = {"risk": {"LOW": -1.0, "HIGH": -0.5}}
     field_values = {"risk": {"value": "HIGH"}}
 
-    class FakeSchema:
-        fields = {}
-
-    reconciled, changed = _constrained_map(field_log_scores, field_values, [], FakeSchema())
+    schema = StructuredSchema(
+        {"risk": {"type": "enum", "description": "d", "choices": ["LOW", "HIGH"]}}
+    )
+    compiled = compile_constraints([], schema)
+    reconciled, changed = _constrained_map(field_log_scores, field_values, compiled, schema)
     assert reconciled == {}
     assert changed == []
 
@@ -81,16 +96,25 @@ def test_excludes_constraint():
         "approved": {"value": "true"},
         "rejection_reason": {"value": "policy"},  # violates excludes
     }
+    # W5b-11: compiled constraints carry TYPED domains — boolean fields
+    # compile to [True, False], so the constraint value is the Python bool
+    # (the old string-key path silently accepted "true").
     constraints = [
-        {"type": "excludes", "field": "approved", "value": "true", "other": "rejection_reason"}
+        {"type": "excludes", "field": "approved", "value": True, "other": "rejection_reason"}
     ]
 
-    class FakeSchema:
-        fields = {}
-
-    reconciled, changed = _constrained_map(
-        field_log_scores, field_values, constraints, FakeSchema()
+    schema = StructuredSchema(
+        {
+            "approved": {"type": "boolean", "description": "d"},
+            "rejection_reason": {
+                "type": "enum",
+                "description": "d",
+                "choices": ["policy", "eligibility", "duplicate"],
+            },
+        }
     )
+    compiled = compile_constraints(constraints, schema)
+    reconciled, changed = _constrained_map(field_log_scores, field_values, compiled, schema)
     # approved=true is strong (-0.1); rejection_reason must be empty.
     # But "" is not in the candidates — the MAP should pick approved=false
     # (flip approved, keep rejection_reason=policy which has -0.2).
@@ -100,7 +124,9 @@ def test_excludes_constraint():
     # rejection_reason=eligibility (-1.5) = -1.6 but eligibility also violates.
     # The only valid assignments: approved=false + any reason, or approved=true
     # + reason="". Since "" is not a candidate, only approved=false + reason.
-    assert reconciled["approved"] == "false"
+    # W5b-11: the MAP decides TYPED values (the boolean field reconciles to
+    # Python False, not the score key "false").
+    assert reconciled["approved"] is False
     assert reconciled["rejection_reason"] == "policy"  # best reason
     assert "approved" in changed
 
@@ -115,13 +141,24 @@ def test_large_component_raises():
         {"type": "implies", "parent": "f1", "child": "f2", "mapping": {"c0": ["c0"]}},
     ]
 
-    class FakeSchema:
-        fields = {}
+    schema = StructuredSchema(
+        {
+            **{
+                f"f{i}": {
+                    "type": "enum",
+                    "description": "d",
+                    "choices": [f"c{j}" for j in range(20)],
+                }
+                for i in range(3)
+            }
+        }
+    )
+    compiled = compile_constraints(constraints, schema)
 
     import pytest
 
     with pytest.raises(NotImplementedError, match="too large"):
-        _constrained_map(field_log_scores, field_values, constraints, FakeSchema())
+        _constrained_map(field_log_scores, field_values, compiled, schema)
 
 
 def test_reconciled_fields_in_telemetry():
@@ -145,11 +182,17 @@ def test_reconciled_fields_in_telemetry():
         }
     ]
 
-    class FakeSchema:
-        fields = {}
-
-    reconciled, changed = _constrained_map(
-        field_log_scores, field_values, constraints, FakeSchema()
+    schema = StructuredSchema(
+        {
+            "intent": {"type": "enum", "description": "d", "choices": ["billing", "technical"]},
+            "subtype": {
+                "type": "enum",
+                "description": "d",
+                "choices": ["refund", "dispute", "bug"],
+            },
+        }
     )
+    compiled = compile_constraints(constraints, schema)
+    reconciled, changed = _constrained_map(field_log_scores, field_values, compiled, schema)
     assert "subtype" in changed
     assert reconciled["subtype"] == "refund"

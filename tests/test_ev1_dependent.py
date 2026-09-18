@@ -22,6 +22,7 @@ from jevmlx.evalmetrics import (
     order_flip_rate,
 )
 from jevmlx.evalreport import _metric_rows
+from jevmlx.schema import StructuredSchema
 
 
 def _record(case_id, field, label, prediction, ctype="enum", constraints=None, correct=None):
@@ -44,6 +45,31 @@ _IMPLIES = [
         "mapping": {"billing": ["refund", "dispute"], "technical": ["bug", "feature"]},
     }
 ]
+
+# W5b-11: the constraint metrics compile against a real schema — the domain
+# membership checks need the field choices.
+_SCHEMA = StructuredSchema(
+    {
+        "intent": {"type": "enum", "description": "d", "choices": ["billing", "technical"]},
+        "subtype": {
+            "type": "enum",
+            "description": "d",
+            "choices": ["refund", "dispute", "bug", "feature"],
+        },
+        "approved": {"type": "boolean", "description": "d"},
+        "rejection_reason": {
+            "type": "enum",
+            "description": "d",
+            "choices": ["policy", "eligibility"],
+        },
+        "channels": {
+            "type": "multi",
+            "description": "d",
+            "choices": ["organic", "enterprise", "partner"],
+        },
+        "tags": {"type": "multi", "description": "d", "choices": ["fast", "cheap", "premium"]},
+    }
+)
 
 
 # --------------------------------------------------------------- synthetic set
@@ -133,7 +159,7 @@ def test_constraint_violation_rate_detects_implies_violation():
         _record("c2", "intent", "technical", "technical", constraints=_IMPLIES),
         _record("c2", "subtype", "bug", "bug", constraints=_IMPLIES),
     ]
-    result = constraint_violation_rate(records)
+    result = constraint_violation_rate(records, schema=_SCHEMA)
     assert result is not None
     assert result["overall"] == 0.5  # 1 of 2 cases violated
     assert result["by_type"]["implies"] == 0.5  # 1 of 2 implies constraints violated
@@ -144,7 +170,7 @@ def test_constraint_violation_rate_none_when_no_constraints():
         _record("c1", "intent", "billing", "billing"),
         _record("c2", "intent", "technical", "technical"),
     ]
-    assert constraint_violation_rate(records) is None
+    assert constraint_violation_rate(records, schema=_SCHEMA) is None
 
 
 def test_constraint_violation_rate_excludes():
@@ -158,7 +184,7 @@ def test_constraint_violation_rate_excludes():
         _record("c2", "approved", True, True, ctype="boolean", constraints=excludes_c),
         _record("c2", "rejection_reason", "", "", constraints=excludes_c),
     ]
-    result = constraint_violation_rate(records)
+    result = constraint_violation_rate(records, schema=_SCHEMA)
     assert result["overall"] == 0.5
     assert result["by_type"]["excludes"] == 0.5
 
@@ -191,7 +217,7 @@ def test_constraint_violation_rate_exclusivity():
             constraints=excl_c,
         ),
     ]
-    result = constraint_violation_rate(records)
+    result = constraint_violation_rate(records, schema=_SCHEMA)
     assert result["overall"] == 0.5
 
 
@@ -214,7 +240,7 @@ def test_exact_record_accuracy_stricter_than_case_exact_match():
         # (invalid for billing) — this is both a field error and a constraint violation.
         _record("c2", "subtype", "dispute", "bug", constraints=_IMPLIES),
     ]
-    era = exact_record_accuracy(records)
+    era = exact_record_accuracy(records, schema=_SCHEMA)
     # c1: all correct, constraint satisfied -> perfect. c2: subtype wrong AND
     # constraint violated -> not perfect. So exact_record = 0.5.
     assert era == 0.5
@@ -258,7 +284,7 @@ def test_compute_metrics_includes_dependent_metrics():
             "c2", "subtype", "bug", "refund", constraints=_IMPLIES
         ),  # refund NOT in technical's [bug, feature] -> VIOLATION
     ]
-    m = compute_metrics(records)
+    m = compute_metrics(records, schema=_SCHEMA)
     assert "exact_record_accuracy" in m
     assert "constraint_violation_rate" in m
     assert "child_accuracy_given_parent_correct" in m

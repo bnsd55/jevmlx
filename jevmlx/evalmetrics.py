@@ -678,19 +678,18 @@ def _case_constraints(records: list[dict]) -> dict[str, list[dict]]:
     return by_case
 
 
-def _check_constraint(constraint: dict, preds: dict[str, object]) -> bool:
-    """Return True if the constraint is SATISFIED, False if VIOLATED.
-
-    Delegates to jevmlx.constraints.check_constraint (single source of truth).
-    """
-    from jevmlx.constraints import check_constraint
-
-    return check_constraint(constraint, preds)
-
-
-def constraint_violation_rate(records: list[dict]) -> dict | None:
+def constraint_violation_rate(records: list[dict], schema=None) -> dict | None:
     """Fraction of cases with ≥1 constraint violation, and per-constraint-type
-    breakdown. Returns None when no case carries constraints."""
+    breakdown. Returns None when no case carries constraints.
+
+    W5b-11: the compiled path ONLY — no dict-walking dual path. Each case's
+    constraints compile ONCE (jevmlx.constraints.compile_constraints) and
+    evaluation is ``compiled.<kind>.satisfied(case_preds)``. ``schema`` is
+    the StructuredSchema to compile against (compile needs the field
+    domains — records don't carry it); None raises ConstraintError.
+    """
+    from jevmlx.constraints import ConstraintError, compile_constraints
+
     preds = _case_predictions(records)
     constraints_by_case = _case_constraints(records)
     if not constraints_by_case:
@@ -700,14 +699,30 @@ def constraint_violation_rate(records: list[dict]) -> dict | None:
     by_type: dict[str, int] = defaultdict(int)
     total_by_type: dict[str, int] = defaultdict(int)
     for case_id, constraints in constraints_by_case.items():
+        if schema is None:
+            raise ConstraintError(
+                "constraint_violation_rate needs a StructuredSchema to compile "
+                "the case constraints against (no dict-walking fallback exists)"
+            )
+        compiled = compile_constraints(constraints, schema)
         case_preds = preds.get(case_id, {})
         case_violated = False
-        for c in constraints:
-            ctype = c.get("type", "unknown")
-            total_by_type[ctype] += 1
-            if not _check_constraint(c, case_preds):
-                by_type[ctype] += 1
-                case_violated = True
+        # W5b-11: evaluation is by INDEX inside the compiled objects; the
+        # name-keyed entry point is CompiledConstraints.satisfied (the
+        # members' satisfied() take an index-keyed map). One compile-level
+        # call per case; per-type counting walks the same members with the
+        # index map built once.
+        values_by_idx = compiled.name_index_values(case_preds)
+        for kind, group in (
+            ("implies", compiled.implications),
+            ("excludes", compiled.exclusions),
+            ("exclusivity", compiled.exclusivities),
+        ):
+            for c in group:
+                total_by_type[kind] += 1
+                if not c.satisfied(values_by_idx):
+                    by_type[kind] += 1
+                    case_violated = True
         if case_violated:
             violated += 1
     result = {"overall": violated / n_cases if n_cases else 0.0}
@@ -816,7 +831,7 @@ def oracle_parent_gap(records: list[dict]) -> dict | None:
     }
 
 
-def exact_record_accuracy(records: list[dict]) -> float | None:
+def exact_record_accuracy(records: list[dict], schema=None) -> float | None:
     """Fraction of cases where EVERY labelled field is correct AND no
     constraint is violated. Stricter than case_exact_match (which ignores
     constraints). Returns None when no cases carry labels."""
@@ -833,11 +848,20 @@ def exact_record_accuracy(records: list[dict]) -> float | None:
         labelled = _labelled(case_records)
         if not labelled or not all(_valid_correct(r) for r in labelled):
             continue
-        # If this case has constraints, they must all be satisfied too.
+        # If this case has constraints, they must all be satisfied too
+        # (W5b-11: compiled path only — compile once, satisfied by index).
         constraints = constraints_by_case.get(case_id, [])
         if constraints:
+            from jevmlx.constraints import ConstraintError as _ce
+            from jevmlx.constraints import compile_constraints as _cc
+
+            if schema is None:
+                raise _ce(
+                    f"case {case_id!r} carries constraints; this metric needs "
+                    "a schema to compile them against"
+                )
             case_preds = preds.get(case_id, {})
-            if not all(_check_constraint(c, case_preds) for c in constraints):
+            if not _cc(constraints, schema).satisfied(case_preds):
                 continue
         perfect += 1
     return perfect / len(by_case)
@@ -853,11 +877,14 @@ def order_flip_rate(records: list[dict]) -> dict | None:
     return None
 
 
-def compute_metrics(records: list[dict]) -> dict:
+def compute_metrics(records: list[dict], schema=None) -> dict:
     """Assemble the metrics dict for evalreport.write_report.
 
     Missing-data safety: a metric that cannot be computed (no labelled rows,
     no confidences, no log_scores) is simply absent rather than zero-filled.
+    ``schema`` compiles the constraint-based metrics (W5b-11: the compiled
+    path only); without it those metrics are absent from the result rather
+    than silently dict-walked.
     """
     metrics: dict = {}
     accuracy = field_accuracy(records)
@@ -915,12 +942,15 @@ def compute_metrics(records: list[dict]) -> dict:
     if tvd:
         metrics["tvd_vs_consensus"] = tvd
     # Dependent-schema metrics (EV1: review Q1 'The correct diagnostic').
-    exact_record = exact_record_accuracy(records)
+    # W5b-11: compiled path only — they need the schema to compile against;
+    # absent schema => absent metric (never a silent dict-walk fallback).
+    exact_record = exact_record_accuracy(records, schema)
     if exact_record is not None:
         metrics["exact_record_accuracy"] = exact_record
-    violations = constraint_violation_rate(records)
-    if violations:
-        metrics["constraint_violation_rate"] = violations
+    if schema is not None:
+        violations = constraint_violation_rate(records, schema)
+        if violations:
+            metrics["constraint_violation_rate"] = violations
     child_acc = child_accuracy_given_parent_correct(records)
     if child_acc:
         metrics["child_accuracy_given_parent_correct"] = child_acc
