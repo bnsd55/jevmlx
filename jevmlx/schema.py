@@ -187,10 +187,10 @@ class StructuredSchema:
                     f'  "{name}": [{choices_str}], // {field.description} (select all that apply)'
                 )
             else:
-                choices_limit = 20 if len(field.choices) > 50 else len(field.choices)
-                choices_str = " | ".join(f'"{c}"' for c in field.choices[:choices_limit])
-                if len(field.choices) > choices_limit:
-                    choices_str += f" | ... ({len(field.choices)} total options)"
+                # Every choice, always: the parallel path sees all choices,
+                # so a naive baseline that truncates large enums would not
+                # be a fair comparison.
+                choices_str = " | ".join(f'"{c}"' for c in field.choices)
                 lines.append(f'  "{name}": {choices_str}, // {field.description}')
         lines.append("}")
         return "\n".join(lines)

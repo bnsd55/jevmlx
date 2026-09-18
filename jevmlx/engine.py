@@ -18,6 +18,7 @@ import platform
 import re
 import time
 import weakref
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,69 @@ logger = logging.getLogger(__name__)
 # prompt_sha256, so result sets from different prompt versions are not
 # comparable).
 PROMPT_VERSION = "jevmlx-parallel-v2"
+
+
+@dataclass(frozen=True)
+class PromptProfile:
+    """Per-model chat-template behaviour, resolved ONCE at engine load.
+
+    ``template_kwargs`` are passed to every ``apply_chat_template`` call
+    (e.g. ``enable_thinking=False`` for the Qwen3 family, whose standard
+    template turns the reasoning channel on by default). ``supports_system``
+    is probed at load by rendering a tiny system+user message list and
+    catching TemplateError — the per-call broad TemplateError retry is gone.
+    Templates that reject a system role get the system text merged into the
+    user turn, decided by this flag instead of an exception mid-request.
+    """
+
+    template_kwargs: dict[str, Any] = field(default_factory=dict)
+    supports_system: bool = True
+
+
+def _tokenizer_model_id(tokenizer) -> str:
+    """Model id hint for profile resolution: the tokenizer's name_or_path,
+    empty when absent."""
+    return getattr(tokenizer, "name_or_path", "") or ""
+
+
+def _resolve_profile(tokenizer) -> PromptProfile:
+    """Self-contained profile resolution: probe this tokenizer's system-role
+    support and derive template kwargs from its name. Deliberately NOT
+    cached: run_parallel_generation / run_naive_generation receive
+    (model, tokenizer) directly — from eval, serve and tests, often without
+    load_engine — and a registry would silently hand those callers the
+    default profile (Qwen3 with thinking ON). The probe renders two tiny
+    messages, microseconds next to a model pass."""
+    return _probe_system_role(tokenizer, _profile_for(_tokenizer_model_id(tokenizer)))
+
+
+def _profile_for(model_id: str) -> PromptProfile:
+    """PromptProfile from the model id. The Qwen3 family ships a thinking
+    chat template that is ON by default and would put the answer in the
+    reasoning channel unless explicitly disabled; nothing else needs
+    template kwargs today."""
+    base = model_id.rsplit("/", 1)[-1].lower()
+    if base.startswith("qwen3"):
+        return PromptProfile(template_kwargs={"enable_thinking": False})
+    return PromptProfile()
+
+
+def _probe_system_role(tokenizer, profile: PromptProfile) -> PromptProfile:
+    """Probe system-role support once: render a tiny system+user list.
+    TemplateError means the template rejects the system role (Gemma-style);
+    the caller then merges the system text into the user turn."""
+    probe = [
+        {"role": "system", "content": "probe"},
+        {"role": "user", "content": "probe"},
+    ]
+    try:
+        tokenizer.apply_chat_template(
+            probe, add_generation_prompt=True, tokenize=True, **profile.template_kwargs
+        )
+    except TemplateError:
+        return PromptProfile(template_kwargs=profile.template_kwargs, supports_system=False)
+    return profile
+
 
 # Run before any mlx import: on a non-Apple-Silicon machine the mlx import
 # itself fails with a low-level error, and the platform message is the useful one.
@@ -61,7 +125,15 @@ def load_engine(model_id: str):
     t0 = time.perf_counter()
     model, tokenizer = load(model_id)
     logger.info("Engine loaded in %.2fs.", time.perf_counter() - t0)
-    logger.info("Engine loaded in %.2fs.", time.perf_counter() - t0)
+
+    # Resolve the chat-template profile once for logging visibility: the
+    # same resolution runs self-contained inside _resolve_profile on every
+    # generation call (tiny render, no registry — see its docstring).
+    logger.info(
+        "Prompt profile: template_kwargs=%s supports_system=%s",
+        _profile_for(model_id).template_kwargs,
+        _probe_system_role(tokenizer, _profile_for(model_id)).supports_system,
+    )
 
     # Warmup: compile prefill and broadcast decode shaders ahead of time.
     logger.info("Warming up Metal shaders on Apple Silicon GPU...")
@@ -163,34 +235,27 @@ PROMPT_V2_SYSTEM = (
 )
 
 
-def _chat_ids(tokenizer, user_content: str, system_content: str | None = None) -> list:
+def _chat_ids(
+    tokenizer, user_content: str, system_content: str | None, profile: PromptProfile
+) -> list:
     """Apply the model's own chat template to the prompt (specials like BOS
     are added exactly once, by the template). The prompt ends exactly at the
     generation marker; the assistant JSON tail belongs to the candidate
     tokenization, not the prompt.
 
-    With ``system_content``, the message list is system + user (prompt v2).
-    Templates that reject a system role (e.g. Gemma) get the system text
-    prepended to the user turn — the one tokenizer-dependent branch.
+    ``profile`` is resolved once at engine load: ``template_kwargs`` (e.g.
+    ``enable_thinking=False`` for Qwen3) goes to every render; a template
+    that rejects the system role (Gemma-style, probed at load) gets the
+    system text merged into the user turn.
     """
     messages = [{"role": "system", "content": system_content}] if system_content else []
     messages.append({"role": "user", "content": user_content})
-    try:
-        return tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=True)
-    except TemplateError:
-        # Templates that reject a system role (e.g. Gemma) raise TemplateError
-        # from apply_chat_template (transformers maps template `raise_exception`
-        # calls to jinja2.exceptions.TemplateError); merge the system text
-        # into the user turn. Without a system message there is nothing to
-        # fall back to.
-        if not system_content:
-            raise
+    if system_content and not profile.supports_system:
         merged = f"{system_content}\n\n{user_content}"
-        return tokenizer.apply_chat_template(
-            [{"role": "user", "content": merged}],
-            add_generation_prompt=True,
-            tokenize=True,
-        )
+        messages = [{"role": "user", "content": merged}]
+    return tokenizer.apply_chat_template(
+        messages, add_generation_prompt=True, tokenize=True, **profile.template_kwargs
+    )
 
 
 def _prompt_sha256(prompt_ids: list[int]) -> str:
@@ -202,7 +267,16 @@ def _stop_token_ids(tokenizer) -> set:
     stop = {tokenizer.eos_token_id}
     for tok_str in ["<end_of_turn>", "<|im_end|>", "<eos>"]:
         tok_id = tokenizer.convert_tokens_to_ids(tok_str)
-        if tok_id is not None and isinstance(tok_id, int) and tok_id > 0:
+        # Some tokenizers (sentencepiece-style, e.g. Mistral) return
+        # unk_token_id for an absent token string instead of None. Treating
+        # the unknown token as a stop would halt generation on the first
+        # off-vocabulary step.
+        if (
+            tok_id is not None
+            and isinstance(tok_id, int)
+            and tok_id > 0
+            and tok_id != tokenizer.unk_token_id
+        ):
             stop.add(tok_id)
     return stop
 
@@ -279,11 +353,15 @@ def run_naive_generation(
     context: str,
     schema: StructuredSchema,
     max_tokens: int = 700,
-    temperature: float = 0.2,
 ) -> dict[str, Any]:
     """
     Standard autoregressive generation baseline:
     prompts the LLM to generate the entire JSON object token-by-token.
+
+    Greedy by definition: every step is argmax. The old ``temperature``
+    argument was never applied to anything (a benchmark baseline that
+    pretends to sample while decoding greedily is worse than no argument),
+    so it is removed.
     """
     user_content = (
         f"{schema.to_json_schema_prompt_str()}\n\n"
@@ -293,7 +371,7 @@ def run_naive_generation(
         "instructions:\n\n"
         f"<<<CONTEXT\n{context}\nCONTEXT>>>"
     )
-    prompt_ids = _chat_ids(tokenizer, user_content, system_content=PROMPT_V2_SYSTEM)
+    prompt_ids = _chat_ids(tokenizer, user_content, PROMPT_V2_SYSTEM, _resolve_profile(tokenizer))
     # Naive generation writes the JSON itself, so its assistant prefix stays
     # part of the prompt (it does not use candidate-aligned rows).
     prompt_ids = prompt_ids + tokenizer.encode("{\n  ", add_special_tokens=False)
@@ -615,7 +693,7 @@ def run_parallel_generation(
     user_content = (
         f"Classify the following fields.\n\n{schema_str}\n\n<<<CONTEXT\n{context}\nCONTEXT>>>"
     )
-    base_ids = _chat_ids(tokenizer, user_content, system_content=PROMPT_V2_SYSTEM)
+    base_ids = _chat_ids(tokenizer, user_content, PROMPT_V2_SYSTEM, _resolve_profile(tokenizer))
     base_arr = mx.array(base_ids)[None]
 
     t_pre0 = time.perf_counter()

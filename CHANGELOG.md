@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- Prompt profiles: a frozen `PromptProfile` (template kwargs + system-role
+  support) is resolved once at engine load. Qwen3-family models get
+  `enable_thinking=False` so answers land in the direct channel; the
+  system-role probe replaces the per-request TemplateError retry.
+- PEP 604 optionals accepted everywhere: `Literal[...] | None` and
+  `EnumClass | None` now work like `Optional[...]` (pydantic keeps the enum
+  form as a raw `types.UnionType`).
+- Naive baseline honesty: `run_naive_generation` is greedy by definition —
+  the never-applied `temperature` argument is removed — and its JSON-schema
+  prompt now shows every choice instead of truncating enums over 50 options
+  to 20.
+- Small fixes: duplicate engine-load log line removed; stop-token discovery
+  no longer treats the unknown token as a stop (Mistral-style tokenizers
+  map absent strings to unk).
+
 ## 0.1.0 - 2026-09-17
 
 First release.

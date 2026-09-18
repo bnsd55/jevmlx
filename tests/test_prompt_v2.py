@@ -139,19 +139,39 @@ def test_gemma_style_template_rejects_system_role():
     seen = []
 
     class GemmaTokenizer(FakeTokenizer):
+        name_or_path = "gemma-fake"
+
         def apply_chat_template(self, messages, add_generation_prompt=True, tokenize=True):
             seen.append(messages)
             if any(m["role"] == "system" for m in messages):
                 raise TemplateError("system role not supported")
             return super().apply_chat_template(messages, add_generation_prompt, tokenize)
 
+    # The system-role rejection is probed by the self-contained
+    # _resolve_profile, never inside the scoring request: the real call
+    # goes out as a single user turn with the system text merged in.
+    # Probing is deliberately uncached, so each generation call probes
+    # once more (microseconds); seen records: probe, probe (from
+    # run_parallel_generation's own resolution), merged scoring render.
+    from jevmlx.engine import _resolve_profile
+
     tok = GemmaTokenizer()
+    profile = _resolve_profile(tok)
+    assert not profile.supports_system
+    assert seen[-1] == [
+        {"role": "system", "content": "probe"},
+        {"role": "user", "content": "probe"},
+    ]
+
     result = run_parallel_generation(FakeModel(), tok, "ctx", SCHEMA)
     assert result["prompt_version"] == "jevmlx-parallel-v2"
-    # The retried single-turn prompt merges the system text into the user turn.
-    assert len(seen) == 2
-    assert seen[1][0]["role"] == "user"
-    assert PROMPT_V2_SYSTEM in seen[1][0]["content"]
+    # The scoring prompt is a single user turn with the merged system text.
+    assert all(m["role"] != "system" for m in seen[-1])
+    assert PROMPT_V2_SYSTEM in seen[-1][0]["content"]
+    assert len(seen) == 3  # probe (test) + probe (generation) + one merged render
+    # No system-role message ever reached a scoring render: only the two
+    # probes (seen[0], seen[1]) contain a system role, and both raised.
+    assert not any(m["role"] == "system" for m in seen[2])
 
 
 def test_scoring_accepts_only_slots_and_labels():
