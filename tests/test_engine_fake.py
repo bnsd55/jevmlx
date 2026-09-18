@@ -619,6 +619,8 @@ def test_probability_status_truthful_at_temperature_ne_one():
     assert "not a T=1 probability" in status
     at_two = run_parallel_generation(model, tokenizer, "ctx", schema, temperature=2.0)
     assert "temperature=2.0" in at_two["probability_status"]
+
+
 class _StatefulFakeCache:
     """A minimal cache class with EXTRA state beyond keys/values.
 
@@ -799,4 +801,3 @@ def test_parity_exact_across_chunk_boundaries_real_positions():
             assert again_tel[fname]["log_scores"] == full_tel[fname]["log_scores"], (
                 f"max_rows={max_rows}, field={fname}"
             )
-

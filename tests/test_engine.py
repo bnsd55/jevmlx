@@ -460,6 +460,8 @@ def test_api_field_margins_on_real_model(engine):
         else:
             assert fr.log_score_margin is None and fr.probability_margin is None
             assert fr.threshold_distance >= 0.0
+
+
 @pytest.mark.slow
 def test_w1a_scoring_parity_batch_vs_chunked_real_model(engine):
     """W1-A (slow, M5): batch=1 vs batch=N vs chunked scoring must produce
@@ -492,4 +494,3 @@ def test_w1a_scoring_parity_batch_vs_chunked_real_model(engine):
                 again["field_telemetry"][fname]["log_scores"]
                 == full["field_telemetry"][fname]["log_scores"]
             ), f"max_rows={max_rows}, field={fname}"
- (W1-A: cache-class merge broadcast, full-state eval, batch parity)
