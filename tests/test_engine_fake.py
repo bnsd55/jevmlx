@@ -801,3 +801,49 @@ def test_parity_exact_across_chunk_boundaries_real_positions():
             assert again_tel[fname]["log_scores"] == full_tel[fname]["log_scores"], (
                 f"max_rows={max_rows}, field={fname}"
             )
+
+
+def test_metal_allocation_failure_halves_chunk_and_scores_all_rows():
+    """W3-C F1+F2: a Metal allocation failure (surfacing at the lazy
+    mx.eval, not the model call) must halve the chunk ONCE and still score
+    EVERY row — the pre-fix bug: rows_left doubled as 'remaining' and
+    'chunk size', so the tail of a bucket was silently dropped."""
+
+    class AllocFailModel(StatefulCacheModel):
+        """Fails the FIRST eval of any chunk wider than 1 row (the lazy
+        eval surface), succeeds on retries with <= 1 row."""
+
+        def __init__(self, vocab_size: int = 64):
+            super().__init__(vocab_size=vocab_size)
+            self.failed_once = False
+
+        def __call__(self, tokens, cache=None):
+            out = super().__call__(tokens, cache=cache)
+            if tokens.shape[0] > 1 and not self.failed_once:
+                self.failed_once = True
+                raise RuntimeError("Metal allocation failure (forced)")
+            return out
+
+    model = AllocFailModel(vocab_size=64)
+    tokenizer = FakeTokenizer()
+    schema = StructuredSchema(
+        {
+            "alpha": {"type": "enum", "description": "d", "choices": ["AA", "AB", "BA"]},
+            "beta": {"type": "boolean", "description": "d"},
+        }
+    )
+    # Baseline without failure: same model class, no failure injected.
+    clean = StatefulCacheModel(vocab_size=64)
+    expected = run_parallel_generation(clean, tokenizer, "ctx", schema)
+
+    result = run_parallel_generation(model, tokenizer, "ctx", schema, max_rows=4)
+    assert model.failed_once, "the injected allocation failure never fired"
+    assert result["parsed_json"] == expected["parsed_json"]
+    for fname in expected["field_telemetry"]:
+        assert (
+            result["field_telemetry"][fname]["log_scores"]
+            == (expected["field_telemetry"][fname]["log_scores"])
+        ), fname
+    # 4 rows in a bucket: first pass (2 rows) fails, retries as 1+1.
+    assert result["sequential_forward_passes"] >= 3
+    assert result["peak_active_bytes"] > 0

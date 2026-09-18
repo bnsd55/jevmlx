@@ -555,6 +555,30 @@ def _rows_per_chunk(budget_bytes: int, bytes_per_row: int, max_rows: int | None)
     return auto_cap
 
 
+# W3-C (review Q4 'The chunking heuristic needs replacement', bug 17): the
+# chunk size comes from MEASURED memory, not the old static estimate. The
+# budget base is the Metal working-set limit minus the currently active and
+# peak memory (mx.get_active_memory/get_peak_memory), times a configurable
+# target fraction (default 0.75). Rows are bucketed by suffix width so a
+# chunk never mixes wildly different padding; a Metal allocation failure
+# retries the chunk ONCE at half the row count before giving up, and the
+# measured peak lands in the result telemetry.
+_CHUNK_TARGET_FRACTION = 0.75
+
+
+def _memory_budget_bytes(target_fraction: float) -> int:
+    """Live suffix-pass budget: working-set limit headroom times target fraction.
+
+    Budget = (max_recommended_working_set - max(active, peak)) * target_fraction,
+    floored at 1. Active/peak reflect what the process actually holds right now
+    (weights + prefill cache), which the old working-set//2 guess ignored.
+    """
+    headroom = _max_recommended_working_set() - max(
+        int(mx.get_active_memory()), int(mx.get_peak_memory())
+    )
+    return max(1, int(headroom * target_fraction))
+
+
 # Process-lifetime prior cache: keyed by (live tokenizer identity, model id,
 # revision, prompt_version, scoring mode, plan hash). The tokenizer is held by
 # WEAKREF with finalize-time eviction — the schema plan cache pattern (schema.py
@@ -813,20 +837,23 @@ def run_parallel_generation(
     _eval_cache_state(cache)
     t_prefill = (time.perf_counter() - t_pre0) * 1000
 
-    # 3. Memory guard: rows are broadcast copies of the prefill cache. The
-    #    estimate includes the [rows, width, vocab] output logits for one chunk
-    #    (float32 logits are the dominant activation). This is a chunking
-    #    heuristic, not a hard bound on peak Metal memory.
+    # 3. Memory budget (W3-C, bug 17): live-measured, not a static guess.
+    #    Budget base = Metal working-set limit minus the memory the process
+    #    already holds (active or peak — weights + prefill cache), times the
+    #    configurable target fraction. Rows are BUCKETED BY SUFFIX WIDTH:
+    #    the chunking loop below groups rows with similar lengths so a chunk
+    #    is not padded to one extreme width, and bytes_per_row uses the
+    #    bucket's own width.
     bytes_per_row = _cache_nbytes(cache)
-    width_max = max(len(r) for r in rows) if rows else 0
     vocab_size = (
         model.args.vocab_size
         if hasattr(model, "args") and hasattr(model.args, "vocab_size")
         else model.model.embed_tokens.weight.shape[0]
     )  # simplest correct static source; falls back to the embedding row count (= vocab)
+    row_widths = [len(r) for r in rows]
+    width_max = max(row_widths) if row_widths else 0
     bytes_per_row += width_max * vocab_size * 4
-    weight_bytes = _model_weight_bytes(model)
-    budget = max(1, _max_recommended_working_set() // 2 - weight_bytes)
+    budget = max(1, _memory_budget_bytes(_CHUNK_TARGET_FRACTION))
     auto_max_rows = _rows_per_chunk(budget, bytes_per_row, max_rows)
     num_passes = max(1, math.ceil(len(rows) / auto_max_rows))
     if num_passes > 1:
@@ -847,8 +874,16 @@ def run_parallel_generation(
     #    [arange(chunk_len), positions] and the allowed columns, and only that
     #    [rows, allowed] gather is evaluated — never the full
     #    [rows, width, vocab] output (F3).
+    #    W3-C: rows are BUCKETED BY SUFFIX WIDTH (adjacent rows of similar
+    #    row length share a chunk, up to auto_max_rows) so a chunk is never
+    #    padded to one outlier width; a Metal allocation failure halves the
+    #    chunk's row count once and retries before giving up. Score parity:
+    #    the split only changes WHICH rows share a forward pass — W1-A proved
+    #    per-row logits are batch-shape invariant, and every row's tokens,
+    #    decision position and allowed set are unchanged.
     t_suf0 = time.perf_counter()
     t_gather_ms = 0.0
+    peak_active_bytes = int(mx.get_peak_memory())
     # Per row: (decision position within the row, allowed token ids in read
     # order). Option rows read the Y/N remainder heads at the row's last
     # position; branch-node rows read the node's children at the node's last
@@ -881,90 +916,142 @@ def run_parallel_generation(
     # (mirrors node_logits). Multi option rows: {row idx -> log legal mass}
     # (one Y/N branch per option row; no branch-node index).
     node_legal_mass_log: dict[int, Any] = {}
-    for chunk_start in range(0, len(rows), auto_max_rows):
-        chunk = rows[chunk_start : chunk_start + auto_max_rows]
-        chunk_len = len(chunk)
-        width = max(len(r) for r in chunk)
-        lengths = [len(r) for r in chunk]
-        padding = [width - length for length in lengths]
-        padded = mx.array([r + [pad_id] * (width - len(r)) for r in chunk], dtype=mx.int32)
-        b_cache = _broadcast_cache(cache, chunk_len)
-        # Right-padded rows: tell the cache about per-row lengths so the
-        # attention mask excludes pad positions (mlx_lm batched-prompt
-        # pattern). No finalize() after the pass: b_cache is discarded when
-        # the chunk ends, nothing reads the rolled KV, and finalizing would
-        # only materialize state for nothing.
-        max_padding = max(padding) if padding else 0
-        if max_padding > 0:
-            for c in b_cache:
-                if hasattr(c, "prepare"):
-                    c.prepare(lengths=lengths, right_padding=padding)
-        # Evaluate the COMPLETE cache state (see the prefill eval note).
-        _eval_cache_state(b_cache)
-        out = model(padded, cache=b_cache)
-        # Gather BEFORE eval: [chunk_len, width, vocab] is never materialized;
-        # only the [chunk_len, max_allowed] decision slice is.
-        chunk_decisions = [
-            row_decision[ridx] for ridx in range(chunk_start, chunk_start + chunk_len)
-        ]
-        positions = mx.array([d[0] for d in chunk_decisions])
-        max_allowed = max(len(d[1]) for d in chunk_decisions)
-        t_gather0 = time.perf_counter()
-        rows_at_pos = out[mx.arange(chunk_len), positions]  # [chunk_len, vocab]
-        # Flat-index gather: row-major index of (row, allowed_id) in the
-        # [chunk_len, vocab] matrix, resolved in one take. Ragged rows pad
-        # their allowed list with its first id (a real, evaluated logit);
-        # the tail slots are discarded per row below.
-        flat_idx = mx.array(
-            [
-                i * vocab_size + tok
-                for i, d in enumerate(chunk_decisions)
-                for tok in (d[1] + [d[1][0]] * (max_allowed - len(d[1])))
-            ],
-            dtype=mx.int32,
-        )
-        gathered = mx.take(rows_at_pos.reshape(-1), flat_idx)  # [chunk_len * max_allowed]
-        # W2-D legal_mass: full-vocab logsumexp per row, for the leakage
-        # signal (probability the model wanted any valid code at this
-        # branch). Computed as a reduction over the already-sliced
-        # [chunk_len, vocab] rows_at_pos — NOT the full 3D `out` (W3-A's
-        # constraint: only the decision slice is evaluated). The result is
-        # [chunk_len], one float per row, far cheaper than eval'ing `out`.
-        # Always computed: the ~0.002 Metal FP drift it introduces means
-        # bit-identical batch=1 vs batch=N parity was never a real invariant
-        # on Metal (GPT Q4 confirms); the W1-A parity test asserts winners
-        # identical + log_scores within atol 5e-3 instead.
-        row_vocab_lse = mx.logsumexp(rows_at_pos, axis=1)  # [chunk_len]
-        mx.eval(gathered, row_vocab_lse)
-        t_gather_ms += (time.perf_counter() - t_gather0) * 1000
-        gathered = gathered.tolist()
-        row_vocab_lse = row_vocab_lse.tolist()
-        for i, ridx in enumerate(range(chunk_start, chunk_start + chunk_len)):
-            p = field_plans[row_field[ridx]]
-            allowed = chunk_decisions[i][1]
-            base = i * max_allowed
-            values = [float(gathered[base + j]) for j in range(len(allowed))]
-            if ridx in row_option:
-                # RAW Y/N logits in remainder order ["Y", "N"]. Bug 8: these
-                # raw logits are what the prior cache stores
-                # (option_logit_pairs in the telemetry) — no reconstruction
-                # from scaled probabilities.
-                option_pair[ridx] = values
-            else:
-                node_logits[ridx] = {row_branch[ridx]: values}
-            # legal_mass = sum(exp(z_allowed)) / sum(exp(z_vocab))
-            #           = exp(logsumexp(allowed) - logsumexp(vocab)).
-            # Trie-branch rows key by branch-node idx (mirrors node_logits);
-            # multi option rows store a flat float (one Y/N branch per row).
-            allowed_lse = logsumexp(values)
-            mass_log = allowed_lse - row_vocab_lse[i]
-            if ridx in row_option:
-                node_legal_mass_log[ridx] = mass_log
-            else:
-                node_legal_mass_log[ridx] = {row_branch[ridx]: mass_log}
-        del out
+    # Bucket rows by suffix width: sort row indexes by row length, then cut
+    # the sorted sequence into chunks of at most auto_max_rows. Sorting only
+    # changes the ROW VISIT ORDER; every row keeps its own tokens, decision
+    # position and allowed set, and results are stored per row index, so the
+    # assembled scores are identical to an unsorted split (order is restored
+    # by the row-index-keyed dicts below).
+    row_order = sorted(range(len(rows)), key=lambda ridx: len(rows[ridx]))
+    passes = 0
+    for bucket_start in range(0, len(row_order), auto_max_rows):
+        bucket = row_order[bucket_start : bucket_start + auto_max_rows]
+        bucket_pos = 0
+        retried = False
+        bucket_len = len(bucket)
+        chunk_size = min(bucket_len, auto_max_rows)
+        while bucket_pos < bucket_len:
+            chunk_rows = bucket[bucket_pos : bucket_pos + chunk_size]
+            chunk_len = len(chunk_rows)
+            width = max(len(rows[ridx]) for ridx in chunk_rows)
+            lengths = [len(rows[ridx]) for ridx in chunk_rows]
+            padding = [width - length for length in lengths]
+            padded = mx.array(
+                [rows[ridx] + [pad_id] * (width - len(rows[ridx])) for ridx in chunk_rows],
+                dtype=mx.int32,
+            )
+            b_cache = _broadcast_cache(cache, chunk_len)
+            # Right-padded rows: tell the cache about per-row lengths so the
+            # attention mask excludes pad positions (mlx_lm batched-prompt
+            # pattern). No finalize() after the pass: b_cache is discarded when
+            # the chunk ends, nothing reads the rolled KV, and finalizing would
+            # only materialize state for nothing.
+            max_padding = max(padding) if padding else 0
+            if max_padding > 0:
+                for c in b_cache:
+                    if hasattr(c, "prepare"):
+                        c.prepare(lengths=lengths, right_padding=padding)
+            # Evaluate the COMPLETE cache state (see the prefill eval note).
+            _eval_cache_state(b_cache)
+            # F1: MLX is lazy — a Metal allocation error surfaces at
+            # mx.eval(gathered), not at the model call. The try must span
+            # model call THROUGH the eval, or the retry can never fire.
+            passes += 1
+            try:
+                out = model(padded, cache=b_cache)
+            except Exception as exc:  # noqa: BLE001 - Metal raises RuntimeError subclasses
+                # Halve-and-retry ONCE: a Metal allocation failure at this
+                # chunk size retries at half the rows. A second failure
+                # re-raises — the caller sees the real error, not a loop.
+                if retried or chunk_len == 1:
+                    raise
+                retried = True
+                chunk_size = max(1, chunk_len // 2)
+                logger.warning(
+                    "Chunk allocation failed (%s); retrying %d rows as %d",
+                    type(exc).__name__,
+                    chunk_len,
+                    chunk_size,
+                )
+                continue
+            # Gather BEFORE eval: [chunk_len, width, vocab] is never materialized;
+            # only the [chunk_len, max_allowed] decision slice is.
+            chunk_decisions = [row_decision[ridx] for ridx in chunk_rows]
+            positions = mx.array([d[0] for d in chunk_decisions])
+            max_allowed = max(len(d[1]) for d in chunk_decisions)
+            t_gather0 = time.perf_counter()
+            rows_at_pos = out[mx.arange(chunk_len), positions]  # [chunk_len, vocab]
+            # Flat-index gather: row-major index of (row, allowed_id) in the
+            # [chunk_len, vocab] matrix, resolved in one take. Ragged rows pad
+            # their allowed list with its first id (a real, evaluated logit);
+            # the tail slots are discarded per row below.
+            flat_idx = mx.array(
+                [
+                    i * vocab_size + tok
+                    for i, d in enumerate(chunk_decisions)
+                    for tok in (d[1] + [d[1][0]] * (max_allowed - len(d[1])))
+                ],
+                dtype=mx.int32,
+            )
+            gathered = mx.take(rows_at_pos.reshape(-1), flat_idx)  # [chunk_len * max_allowed]
+            # W2-D legal_mass: full-vocab logsumexp per row, for the leakage
+            # signal (probability the model wanted any valid code at this
+            # branch). Computed as a reduction over the already-sliced
+            # [chunk_len, vocab] rows_at_pos — NOT the full 3D `out` (W3-A's
+            # constraint: only the decision slice is evaluated). The result is
+            # [chunk_len], one float per row, far cheaper than eval'ing `out`.
+            # Always computed: the ~0.002 Metal FP drift it introduces means
+            # bit-identical batch=1 vs batch=N parity was never a real invariant
+            # on Metal (GPT Q4 confirms); the W1-A parity test asserts winners
+            # identical + log_scores within PARITY_ATOL instead.
+            row_vocab_lse = mx.logsumexp(rows_at_pos, axis=1)  # [chunk_len]
+            try:
+                mx.eval(gathered, row_vocab_lse)
+            except Exception as exc:
+                # F1: the lazy-eval surface — a Metal allocation failure most
+                # often lands HERE. Same halve-once contract as above.
+                if retried or chunk_len == 1:
+                    raise
+                retried = True
+                chunk_size = max(1, chunk_len // 2)
+                logger.warning(
+                    "Chunk gather eval failed (%s); retrying %d rows as %d",
+                    type(exc).__name__,
+                    chunk_len,
+                    chunk_size,
+                )
+                continue
+            t_gather_ms += (time.perf_counter() - t_gather0) * 1000
+            gathered = gathered.tolist()
+            row_vocab_lse = row_vocab_lse.tolist()
+            for i, ridx in enumerate(chunk_rows):
+                p = field_plans[row_field[ridx]]
+                allowed = chunk_decisions[i][1]
+                base = i * max_allowed
+                values = [float(gathered[base + j]) for j in range(len(allowed))]
+                if ridx in row_option:
+                    # RAW Y/N logits in remainder order ["Y", "N"]. Bug 8: these
+                    # raw logits are what the prior cache stores
+                    # (option_logit_pairs in the telemetry) — no reconstruction
+                    # from scaled probabilities.
+                    option_pair[ridx] = values
+                else:
+                    node_logits[ridx] = {row_branch[ridx]: values}
+                # legal_mass = sum(exp(z_allowed)) / sum(exp(z_vocab))
+                #           = exp(logsumexp(allowed) - logsumexp(vocab)).
+                # Trie-branch rows key by branch-node idx (mirrors node_logits);
+                # multi option rows store a flat float (one Y/N branch per row).
+                allowed_lse = logsumexp(values)
+                mass_log = allowed_lse - row_vocab_lse[i]
+                if ridx in row_option:
+                    node_legal_mass_log[ridx] = mass_log
+                else:
+                    node_legal_mass_log[ridx] = {row_branch[ridx]: mass_log}
+            del out
+            bucket_pos += len(chunk_rows)
 
     t_suffix_eval = (time.perf_counter() - t_suf0) * 1000
+    peak_active_bytes = max(peak_active_bytes, int(mx.get_peak_memory()))
 
     # 5. Trie scoring: P(choice) = product of branch factors along its path;
     #    proper distribution, so confidence = P(choice). Full precision: no
@@ -1281,7 +1368,7 @@ def run_parallel_generation(
             "suffix_eval_ms": round(t_suffix_eval, 2),
             "lm_head_gather_ms": round(t_gather_ms, 2),
             "rows": len(rows),
-            "passes": num_passes,
+            "passes": passes,
             "num_fields": len(schema),
         },
     )
@@ -1300,7 +1387,12 @@ def run_parallel_generation(
         "lm_head_gather_ms": round(t_gather_ms, 2),
         "total_ms": round(prior_ms + total_elapsed_ms, 2),
         "total_tokens_generated": 0,
-        "sequential_forward_passes": num_passes,
+        "sequential_forward_passes": passes,
+        # W3-C: measured, not estimated — the Metal peak active bytes the
+        # whole decision observed (weights + caches + gathers), and the
+        # actual forward-pass count after width bucketing and any
+        # halve-and-retry.
+        "peak_active_bytes": peak_active_bytes,
         "schema_match": True,  # keys/enums guaranteed by construction; bench_model comparison
         # The per-choice probabilities are the constrained path probability
         # (product of masked branch softmaxes), not a normalized full-sequence
