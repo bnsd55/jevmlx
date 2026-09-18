@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 from jinja2.exceptions import TemplateError
 
+from jevmlx.constraints import CompiledConstraints
 from jevmlx.models import resolve_model
 
 if TYPE_CHECKING:
@@ -1779,7 +1780,13 @@ def _selective_second_pass(
 
     # ---- 5. MAP re-run over affected components + assert every constraint
     # (review 8): the dependency pass must never undo a hard constraint.
+    # W5b-11: the MAP evaluates the COMPILED objects by index; the assert is
+    # compiled.satisfied(final_assignment).
     if not is_oracle and constraints:
+        if compiled_constraints is None:
+            from jevmlx.constraints import compile_constraints
+
+            compiled_constraints = compile_constraints(constraints, schema)
         field_log_scores = {
             fname: ft["log_scores"] for fname, ft in field_telemetry.items() if "log_scores" in ft
         }
@@ -1792,9 +1799,7 @@ def _selective_second_pass(
                 parsed_json[fname]["value"] = val
                 field_telemetry[fname]["value"] = val
         final_assignment = {fname: pj["value"] for fname, pj in parsed_json.items()}
-        if compiled_constraints is not None and not compiled_constraints.satisfied(
-            final_assignment
-        ):
+        if not compiled_constraints.satisfied(final_assignment):
             raise InternalConstraintViolationError(
                 "dependency second pass produced an assignment violating a "
                 f"compiled constraint; assignment={final_assignment!r}"
@@ -2122,13 +2127,13 @@ def run_parallel_generation(
         raise ValueError(f"scoring must be 'slots' or 'labels', got {scoring!r}")
     if not math.isfinite(temperature) or temperature <= 0:
         raise ValueError(f"temperature must be a finite number > 0, got {temperature!r}")
-    # W5-B (review 12): compile the case-level constraints against the schema
-    # BEFORE any model work — unknown types, unknown fields, out-of-domain
-    # values and multi-field case constraints all fail here, loudly. The
-    # neutral prior pass (prior-mode recursion) runs with constraints=None,
-    # so this never fires twice. W5b-11: compile ONCE into frozen typed
-    # objects (field indices + value-index domains) — validation AND
-    # compilation are one step; the MAP evaluates by index.
+    # W5-B (review 12) + W5b-11: compile the case-level constraints against
+    # the schema BEFORE any model work — unknown types, unknown fields,
+    # out-of-domain values and multi-field case constraints all fail here,
+    # loudly. The neutral prior pass (prior-mode recursion) runs with
+    # constraints=None, so this never fires twice. compile_constraints is
+    # the ONLY entry: validation AND compilation are one step, and the MAP
+    # evaluates the frozen objects by field index.
     compiled_constraints: CompiledConstraints | None = None
     if constraints:
         from jevmlx.constraints import compile_constraints
@@ -2910,6 +2915,7 @@ def reconcile_case_constraints(
     state: AssembledState,
     constraints,
     schema: StructuredSchema,
+    compiled_constraints: "CompiledConstraints | None" = None,
 ) -> AssembledState:
     """Stage 4 (W5b-10 C1): constrained MAP over the first-pass decisions.
 
@@ -2928,6 +2934,10 @@ def reconcile_case_constraints(
         return AssembledState(
             state.parsed_json, state.field_telemetry, state.rescored_fields, tuple()
         )
+    if compiled_constraints is None:
+        from jevmlx.constraints import compile_constraints
+
+        compiled_constraints = compile_constraints(constraints, schema)
     parsed_json = state.parsed_json
     field_telemetry = state.field_telemetry
     field_log_scores = {
@@ -2935,7 +2945,7 @@ def reconcile_case_constraints(
     }
     field_values = {fname: {"value": pj["value"]} for fname, pj in parsed_json.items()}
     reconciled, reconciled_fields = _constrained_map(
-        field_log_scores, field_values, list(constraints), schema
+        field_log_scores, field_values, compiled_constraints, schema
     )
     for fname, val in reconciled.items():
         if fname in parsed_json:
@@ -2969,6 +2979,7 @@ def run_dependency_waves(
     temperature: float,
     prior: dict | None,
     constraints,
+    compiled_constraints: "CompiledConstraints | None" = None,
     oracle_overrides: dict[str, object] | None,
 ) -> tuple[AssembledState, dict[str, Any]]:
     """Stage 5 (W5b-10 C1): the selective parent-conditioned second pass.
@@ -2995,6 +3006,7 @@ def run_dependency_waves(
         temperature=temperature,
         prior=prior,
         constraints=list(constraints) if constraints is not None else None,
+        compiled_constraints=compiled_constraints,
         oracle_overrides=oracle_overrides,
     )
     return state, telemetry
