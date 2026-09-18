@@ -426,10 +426,16 @@ class StructuredSchema:
                 if "shared_ids" in p:
                     p["shared_ids"] = p["shared_ids"][len(lead_in) :]
                 if "suffix_ids_list" in p:
-                    p["suffix_ids_list"] = [
-                        ids[len(lead_in) :] if ids[: len(lead_in)] == lead_in else ids
-                        for ids in p["suffix_ids_list"]
-                    ]
+                    for ids in p["suffix_ids_list"]:
+                        if ids[: len(lead_in)] != lead_in:
+                            raise SchemaCompileError(
+                                "<multi>",
+                                "option prefix does not start with the "
+                                "schema-wide lead-in — impossible by "
+                                "construction (lead_in is the common prefix "
+                                "of these lists)",
+                            )
+                    p["suffix_ids_list"] = [ids[len(lead_in) :] for ids in p["suffix_ids_list"]]
         result = {"lead_in_ids": list(lead_in), "fields": fields_plan}
         self._cache_plan(tokenizer, result, mode="slots")
         return result
@@ -550,12 +556,13 @@ class StructuredSchema:
             """
             return "{\n" + f"  {json.dumps(name)}: {value_text}" + ",\n"
 
+        multi_plan = self._compile_multi_plan(tokenizer)
         for fname, fdef in self.fields.items():
             if fdef.field_type == "multi":
                 # Built by the shared private multi-plan builder (Q6-1: same
                 # UNSTRIPPED prefixes used by slot mode; the lead-in strip
                 # happens once, below, after the full plan exists).
-                plan[fname] = self._compile_multi_plan(tokenizer)[fname]
+                plan[fname] = multi_plan[fname]
                 continue
 
             if fdef.field_type == "boolean":
@@ -625,10 +632,15 @@ class StructuredSchema:
         # prepend lead_in uniformly to every row (R1: one rule for all rows).
         for p in plan.values():
             if "suffix_ids_list" in p and lead_in:
-                p["suffix_ids_list"] = [
-                    ids[len(lead_in) :] if ids[: len(lead_in)] == lead_in else ids
-                    for ids in p["suffix_ids_list"]
-                ]
+                for ids in p["suffix_ids_list"]:
+                    if ids[: len(lead_in)] != lead_in:
+                        raise SchemaCompileError(
+                            "<multi>",
+                            "option prefix does not start with the schema-wide "
+                            "lead-in — impossible by construction (lead_in is "
+                            "the common prefix of these lists)",
+                        )
+                p["suffix_ids_list"] = [ids[len(lead_in) :] for ids in p["suffix_ids_list"]]
         for p in plan.values():
             if "shared_ids" in p:
                 p["shared_ids"] = p["shared_ids"][len(lead_in) :]
