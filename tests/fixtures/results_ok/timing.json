@@ -1,0 +1,21 @@
+{
+  "calls": 2,
+  "median": {
+    "cache_broadcast_ms": 0.2,
+    "failed_attempts": 0.0,
+    "latency_ms": 5.5,
+    "lm_head_gather_ms": 0.3,
+    "num_fields": 1.0,
+    "padded_token_positions": 6.0,
+    "peak_active_bytes": 1024.0,
+    "peak_incremental_bytes": 512.0,
+    "plan_compile_ms": 0.1,
+    "prefill_ms": 2.0,
+    "prior_ms": 0.0,
+    "rerun_fields_count": 0.0,
+    "rescored_fields_count": 0.0,
+    "second_pass_ms": 0.0,
+    "suffix_eval_ms": 2.5,
+    "total_ms": 5.5
+  }
+}
