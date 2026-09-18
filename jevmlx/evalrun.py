@@ -29,6 +29,7 @@ import json
 import logging
 import os
 import random
+import statistics
 from collections.abc import Callable
 from typing import Any
 
@@ -154,6 +155,22 @@ def parallel_decide_fn(
             "latency_ms": result.get("elapsed_ms"),
             "rows": result.get("rows"),
             "passes": result.get("passes"),
+            # W3-R: the engine's full timing split rides _meta so bench
+            # writes the timing JSON per combo from the SAME decide calls
+            # (no second run). Missing keys default to 0.0 for mocks.
+            "prior_ms": result.get("prior_ms", 0.0),
+            "prefill_ms": result.get("prefill_ms", 0.0),
+            "plan_compile_ms": result.get("plan_compile_ms", 0.0),
+            "cache_broadcast_ms": result.get("cache_broadcast_ms", 0.0),
+            "suffix_eval_ms": result.get("suffix_eval_ms", 0.0),
+            "lm_head_gather_ms": result.get("lm_head_gather_ms", 0.0),
+            "second_pass_ms": result.get("second_pass_ms", 0.0),
+            "total_ms": result.get("total_ms", 0.0),
+            "peak_active_bytes": result.get("peak_active_bytes", 0),
+            "padded_token_positions": result.get("padded_token_positions", 0),
+            "rescored_fields_count": len(result.get("rescored_fields", []) or []),
+            "rerun_fields_count": len(result.get("rerun_fields", []) or []),
+            "num_fields": result.get("num_fields", 0),
         }
         return out
 
@@ -353,6 +370,7 @@ def run_eval(
 
     selected = [c for c in cases if split == "all" or c.get("split", "train") == split]
 
+    timing_meta: list[dict[str, Any]] = []  # W3-R: parallel _meta timings
     lines: list[dict] = []
     n_canonical = 0
     for case in selected:
@@ -372,6 +390,10 @@ def run_eval(
                 # call without it (constraints only apply to the parallel track).
                 results = decide_fn(schema_dict, case["context"])
             meta = results.pop("_meta", {})
+            # W3-R: parallel-track _meta carries the engine's timing split —
+            # collect per-case for the combo timing.json (median over cases).
+            if track == "parallel" and tag is None and meta:
+                timing_meta.append(meta)
             if tag is None:
                 n_canonical += len(results)
 
@@ -504,6 +526,23 @@ def run_eval(
     with open(os.path.join(out_dir, "predictions.jsonl"), "w", encoding="utf-8") as f:
         for line in lines:
             f.write(json.dumps(line, sort_keys=True) + "\n")
+    if timing_meta:
+        # W3-R: per-combo timing JSON — the median of each split across the
+        # canonical decide calls. Same calls the predictions came from (no
+        # second run).
+        timing_summary: dict[str, float] = {}
+        for key in timing_meta[0]:
+            values = [m[key] for m in timing_meta if key in m]
+            if values and all(isinstance(v, (int, float)) for v in values):
+                timing_summary[key] = round(statistics.median(values), 4)
+        with open(os.path.join(out_dir, "timing.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {"calls": len(timing_meta), "median": timing_summary},
+                f,
+                indent=2,
+                sort_keys=True,
+            )
+            f.write("\n")
     with open(os.path.join(out_dir, "run.json"), "w", encoding="utf-8") as f:
         json.dump(run, f, indent=2, sort_keys=True)
         f.write("\n")
