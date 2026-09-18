@@ -7,6 +7,7 @@ from jevmlx.cli import load_preset
 from jevmlx.engine import load_engine, run_naive_generation, run_parallel_generation
 from jevmlx.schema import StructuredSchema
 from jevmlx.trie import build_trie
+from tests.conftest import PARITY_ATOL
 
 MODEL_ID = "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
 
@@ -465,10 +466,16 @@ def test_api_field_margins_on_real_model(engine):
 @pytest.mark.slow
 def test_w1a_scoring_parity_batch_vs_chunked_real_model(engine):
     """W1-A (slow, M5): batch=1 vs batch=N vs chunked scoring must produce
-    identical parsed values and log_scores on a real model with the merge-
-    based broadcast and full-state evaluation. Exact equality on logits read
-    from the same model — any divergence means the broadcast or the eval
-    dropped state."""
+    identical WINNERS and log_scores within atol=PARITY_ATOL on a real model.
+
+    Bit-identical logits were never a real invariant on Metal: batched
+    matmuls tile differently at different batch shapes, and the legal-mass
+    full-vocab logsumexp (W2-D) adds a reduction that perturbs the lazy
+    evaluation graph by ~0.002 nats. GPT Q4 reaches the same conclusion.
+    The invariant that MATTERS is the decision: the same winner per field,
+    and log_scores that agree to within FP tolerance (PARITY_ATOL, coordinated with
+    the W3-A parity suite). Exact equality is still asserted on the
+    FakeModel path (test_engine_fake.py) where the model is deterministic."""
     model, tokenizer = engine
     schema = StructuredSchema(
         {
@@ -488,9 +495,18 @@ def test_w1a_scoring_parity_batch_vs_chunked_real_model(engine):
     full = run_parallel_generation(model, tokenizer, ctx, schema)
     for max_rows in (1, 2):
         again = run_parallel_generation(model, tokenizer, ctx, schema, max_rows=max_rows)
-        assert again["parsed_json"] == full["parsed_json"], f"max_rows={max_rows}"
+        # Winners must be identical: a different decision is a real bug.
+        # (Compare values, not probs: probs carry ~0.002 Metal FP drift.)
+        full_vals = {f: v["value"] for f, v in full["parsed_json"].items()}
+        again_vals = {f: v["value"] for f, v in again["parsed_json"].items()}
+        assert again_vals == full_vals, f"max_rows={max_rows}"
+        # log_scores agree within Metal FP tolerance (batched matmul tiling +
+        # the legal-mass logsumexp reduction perturb the graph ~0.002 nats).
         for fname in full["field_telemetry"]:
-            assert (
-                again["field_telemetry"][fname]["log_scores"]
-                == full["field_telemetry"][fname]["log_scores"]
-            ), f"max_rows={max_rows}, field={fname}"
+            full_ls = full["field_telemetry"][fname]["log_scores"]
+            again_ls = again["field_telemetry"][fname]["log_scores"]
+            assert set(full_ls) == set(again_ls), f"max_rows={max_rows}, field={fname}"
+            for choice in full_ls:
+                assert full_ls[choice] == pytest.approx(again_ls[choice], abs=PARITY_ATOL), (
+                    f"max_rows={max_rows}, field={fname}, choice={choice}"
+                )
