@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import dataclasses
 import enum
+import types
 import typing
 from collections.abc import Sequence
 
@@ -159,8 +160,15 @@ def _enum_class_descriptions(ann) -> dict[str, str]:
 
 
 def _optional_inner(ann):
-    """Inner type of Optional[X] (Union with exactly one non-None arg), else None."""
-    if typing.get_origin(ann) is not typing.Union:
+    """Inner type of Optional[X] (Union with exactly one non-None arg), else None.
+
+    Both Optional spellings count: ``typing.Union[X, None]`` (origin
+    ``typing.Union``) and PEP 604 ``X | None`` (origin ``types.UnionType``).
+    Pydantic normalizes some annotations to one form and not the other
+    (Literal[...] | None arrives as typing.Union, an enum class | None
+    arrives as types.UnionType), so both must be accepted.
+    """
+    if typing.get_origin(ann) not in (typing.Union, types.UnionType):
         return None
     args = [a for a in typing.get_args(ann) if a is not type(None)]
     return args[0] if len(args) == 1 else None
@@ -183,7 +191,7 @@ def schema_from_model(model_cls: type[BaseModel]) -> dict:
     for name, info in model_cls.model_fields.items():
         ann = info.annotation
         origin = typing.get_origin(ann)
-        if origin is typing.Union:
+        if origin in (typing.Union, types.UnionType):
             inner = _optional_inner(ann)
             if inner is None:
                 raise TypeError(
@@ -232,10 +240,15 @@ def schema_from_model(model_cls: type[BaseModel]) -> dict:
 
 
 def _is_optional_enum(model_cls: type[BaseModel], name: str) -> bool:
-    """True when the field's annotation is Optional[<enum-like>]."""
+    """True when the field's annotation is Optional[<enum-like>].
+
+    Both Optional spellings (typing.Union and PEP 604 types.UnionType) —
+    pydantic keeps ``EnumClass | None`` as a raw types.UnionType, which the
+    old ``is typing.Union`` check silently rejected.
+    """
     ann = model_cls.model_fields[name].annotation
     origin = typing.get_origin(ann)
-    if origin is not typing.Union:
+    if origin not in (typing.Union, types.UnionType):
         return False
     args = [a for a in typing.get_args(ann) if a is not type(None)]
     if len(args) != 1:
