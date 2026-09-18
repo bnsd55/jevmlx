@@ -1223,6 +1223,28 @@ def _selective_second_pass(
         "second_pass_ms": round(elapsed_ms, 2),
     }
 
+
+def _apply_prior(
+    raw_scores: list[float], real_choices: list[str], prior_entry: dict | None
+) -> list[float]:
+    """Prior correction (V2): subtract the neutral-context prior per choice,
+    then renormalise (log-softmax) over the choices. Used by the main scalar
+    path AND the W3-E batch=1 rescore — one implementation, no re-derivation
+    of scoring semantics.
+
+    ``prior_entry`` is the field's entry from the prior cache ({"log_scores":
+    {real choice: log-prob}}); ``real_choices`` order matches raw_scores.
+    """
+    if prior_entry is None:
+        return list(raw_scores)
+    prior_scores = prior_entry["log_scores"]
+    scores = [s - prior_scores.get(c, 0.0) for s, c in zip(raw_scores, real_choices, strict=True)]
+    m = max(scores)
+    total = sum(math.exp(s - m) for s in scores)
+    # log-softmax renormalisation keeps scores as proper log-probs.
+    return [s - (m + math.log(total)) for s in scores]
+
+
 def _rescore_rows_batch1(
     model,
     cache,
@@ -1577,6 +1599,36 @@ def run_parallel_generation(
             # W2-E row codes: rows are keyed '<field>/<code>', but codes are
             # positional (choices order), so row oi IS options[oi] — no map
             # needed; results and telemetry stay option-keyed directly.
+            #
+            # W3-E near-tie rescore for multi (review F3): a Y/N decision
+            # near p=0.5 is the same near-tie as a scalar enum — a
+            # |logit_yes - logit_no| inside INSTABILITY_BAND is batch-shape
+            # noise. Rescore those options' rows at batch=1 (the helper
+            # stores option rows' [yes, no] values under option_pair keyed
+            # by row index) and replace their raw pairs BEFORE the scoring
+            # loop below, so prior + softmax + selection all see the
+            # canonical result. The merge into node_legal_mass_log is
+            # option-row safe here: option rows carry a flat float (the
+            # branch-row {bi: float} shape would crash .update — option rows
+            # are exactly the rescored ones).
+            rescored_oids = [
+                oi
+                for oi, ridx in enumerate(idxs)
+                if abs(option_pair[ridx][0] - option_pair[ridx][1]) < INSTABILITY_BAND
+            ]
+            multi_rescored = False
+            if rescored_oids:
+                rescore_ridxs = [ridx for oi, ridx in enumerate(idxs) if oi in rescored_oids]
+                rescored_raw = _rescore_rows_batch1(
+                    model, cache, rows, rescore_ridxs, row_decision, row_branch, row_option
+                )
+                multi_rescored = True
+                rescored_fields.append(fname)
+                for _oi, ridx in zip(rescored_oids, rescore_ridxs, strict=True):
+                    # Replace the option's raw Y/N pair with the canonical
+                    # (batch=1) logits; the scoring loop below consumes them.
+                    option_pair[ridx] = list(rescored_raw["option_pair"][ridx])
+                    node_legal_mass_log[ridx] = rescored_raw["node_legal_mass_log"][ridx]
             for oi, ridx in enumerate(idxs):
                 pair = list(option_pair[ridx])
                 option_name = p["options"][oi]
@@ -1734,6 +1786,9 @@ def run_parallel_generation(
                     p["options"][oi]: node_legal_mass_log.get(ridx, 0.0)
                     for oi, ridx in enumerate(idxs)
                 },
+                # W3-E: set when any option's Y/N decision sat inside the
+                # instability band and was rescored at batch=1.
+                "rescored": multi_rescored,
             }
             if prior_entry is not None:
                 field_telemetry[fname]["prior_option_pairs"] = {
@@ -1831,24 +1886,12 @@ def run_parallel_generation(
         # winner, probability, margin, tie policy and telemetry all use the
         # corrected values.
         prior_entry = prior.get(fname) if prior is not None else None
-        if prior_entry is not None:
-            # display_choices here are alias strings in slots mode; the
-            # prior is keyed by REAL choice string, so map first.
-            real_choices = (
-                [p["alias_map"][raw] for raw in choices_list]
-                if scoring == "slots"
-                else list(choices_list)
-            )
-            prior_scores = prior_entry["log_scores"]
-            scores = [
-                s - prior_scores.get(c, 0.0) for s, c in zip(raw_scores, real_choices, strict=True)
-            ]
-            m = max(scores)
-            total = sum(math.exp(s - m) for s in scores)
-            # log-softmax renormalisation keeps scores as proper log-probs.
-            scores = [s - (m + math.log(total)) for s in scores]
-        else:
-            scores = raw_scores
+        real_choices = (
+            [p["alias_map"][raw] for raw in choices_list]
+            if scoring == "slots"
+            else list(choices_list)
+        )
+        scores = _apply_prior(raw_scores, real_choices, prior_entry)
         # Confidence temperature applied once to the final per-choice scores
         # (softmax(scores / T)): ranking is invariant, calibrate.py fits this T.
         probs_list = softmax(scores, temperature=temperature)
@@ -1867,14 +1910,7 @@ def run_parallel_generation(
         band_candidates = [i for i in order if scores[order[0]] - scores[i] < INSTABILITY_BAND]
         if len(band_candidates) > 1:
             rescored_raw = _rescore_rows_batch1(
-                model,
-                cache,
-                rows,
-                idxs,
-                row_decision,
-                tries[fname],
-                row_branch,
-                row_option,
+                model, cache, rows, idxs, row_decision, row_branch, row_option
             )
             rescored = True
             rescored_fields.append(fname)
@@ -1902,26 +1938,9 @@ def run_parallel_generation(
                 field_trie, n_choices, logits_at_node, legal_mass_at_node
             )
             # Re-run the prior correction + temperature exactly as above so
-            # the rescored result is the canonical answer end to end.
-            prior_entry_rescored = None
-            if prior is not None:
-                prior_entry_rescored = prior.get(fname)
-            if prior_entry_rescored is not None:
-                real_choices = (
-                    [p["alias_map"][raw] for raw in choices_list]
-                    if scoring == "slots"
-                    else list(choices_list)
-                )
-                prior_scores = prior_entry_rescored["log_scores"]
-                scores = [
-                    s - prior_scores.get(c, 0.0)
-                    for s, c in zip(raw_scores, real_choices, strict=True)
-                ]
-                m = max(scores)
-                total = sum(math.exp(s - m) for s in scores)
-                scores = [s - (m + math.log(total)) for s in scores]
-            else:
-                scores = raw_scores
+            # the rescored result is the canonical answer end to end —
+            # through the SAME _apply_prior helper (no re-derivation).
+            scores = _apply_prior(raw_scores, real_choices, prior.get(fname) if prior else None)
             probs_list = softmax(scores, temperature=temperature)
             order = sorted(range(n_choices), key=probs_list.__getitem__, reverse=True)
             w_idx = order[0]
