@@ -471,11 +471,15 @@ def test_w1a_scoring_parity_batch_vs_chunked_real_model(engine):
     Bit-identical logits were never a real invariant on Metal: batched
     matmuls tile differently at different batch shapes, and the legal-mass
     full-vocab logsumexp (W2-D) adds a reduction that perturbs the lazy
-    evaluation graph by ~0.002 nats. GPT Q4 reaches the same conclusion.
-    The invariant that MATTERS is the decision: the same winner per field,
-    and log_scores that agree to within FP tolerance (PARITY_ATOL, coordinated with
-    the W3-A parity suite). Exact equality is still asserted on the
-    FakeModel path (test_engine_fake.py) where the model is deterministic."""
+    evaluation graph by ~0.002 nats (GPT Q4 reaches the same conclusion).
+    W3-C's measurement on this machine: since W2-B shortened the slot rows
+    to 4 tokens the observed worst drift is ~0.029 nats on the fintech_fraud
+    preset (winner stable) — hence the shared PARITY_ATOL constant in
+    conftest.py, coordinated with coder3's W2-D tolerance change. The
+    invariant that MATTERS is the decision: the same winner per field, and
+    log_scores that agree to within FP tolerance. Exact equality is still
+    asserted on the FakeModel path (test_engine_fake.py) where the model is
+    deterministic.
     model, tokenizer = engine
     schema = StructuredSchema(
         {
@@ -509,4 +513,10 @@ def test_w1a_scoring_parity_batch_vs_chunked_real_model(engine):
             for choice in full_ls:
                 assert full_ls[choice] == pytest.approx(again_ls[choice], abs=PARITY_ATOL), (
                     f"max_rows={max_rows}, field={fname}, choice={choice}"
-                )
+                )        # Probabilities drift with batch shape (see the docstring): within
+        # PARITY_ATOL, not bit-identical.
+        for fname in full["parsed_json"]:
+            assert abs(
+                again["parsed_json"][fname]["prob"] - full["parsed_json"][fname]["prob"]
+            ) < PARITY_ATOL, f"max_rows={max_rows}, field={fname}"
+
