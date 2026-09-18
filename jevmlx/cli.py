@@ -397,13 +397,20 @@ def main(argv=None) -> None:
             if args.prior_correction:
                 decide.error("--prior-correction is native-backend only")
             schema = StructuredSchema(schema_dict)
+            # W5-A finding 1: the schema block renders from the compiled
+            # slot plan, which needs a tokenizer. Use the API model's own
+            # tokenizer (the adapter's prompts must match what the endpoint
+            # model sees, exactly as the native path uses its model's).
+            from transformers import AutoTokenizer
+
+            api_tokenizer = AutoTokenizer.from_pretrained(args.api_model)
             result = decide_openai(
                 args.base_url,
                 args.api_model,
                 os.environ.get(args.api_key_env),
                 schema,
                 context,
-                tokenizer,
+                api_tokenizer,
                 timeout=args.timeout,
                 calibration=args.calibration,
             )
