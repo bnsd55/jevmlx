@@ -10,7 +10,7 @@ jobs:
   build:
     runs-on: ubuntu-latest  # packaging only; MLX is not needed to build a wheel
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: astral-sh/setup-uv@v7
         with:
