@@ -156,6 +156,41 @@ def _p50_latency_ms(folder: Path) -> float | None:
     return statistics.median(latencies)
 
 
+def _per_item_end_to_end_ms(folder: Path) -> float | None:
+    """Median per-item END-TO-END latency (ms) from predictions.jsonl.
+
+    Results contract v2 (W5-D finding 27): batched (decide_many) prediction
+    lines carry ``per_item_end_to_end_ms`` — that context's own prefill plus
+    its share of the group pass — the honest per-case number. Returns None
+    when the lines carry no such key (single-context path; the caller falls
+    back to the per-field ``latency_ms`` median).
+    """
+    import gzip
+
+    pred = folder / "predictions.jsonl"
+    gz = folder / "predictions.jsonl.gz"
+    if not pred.exists() and not gz.exists():
+        return None
+
+    def opener():
+        if pred.exists():
+            return open(pred, encoding="utf-8")
+        return gzip.open(gz, "rt", encoding="utf-8")
+
+    values: list[float] = []
+    with opener() as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            ms = json.loads(line).get("per_item_end_to_end_ms")
+            if isinstance(ms, int | float):
+                values.append(float(ms))
+    if not values:
+        return None
+    return statistics.median(values)
+
+
 def _local_rows(results_root: Path) -> list[dict]:
     """One row per results folder with dataset=typesafe and track=parallel.
 
@@ -205,10 +240,12 @@ def _local_rows(results_root: Path) -> list[dict]:
             _, scorer, _ = _combo_parts(combo)
             machine, _ = _machine_model(combo)
             p50_ms = _p50_latency_ms(combo)
-            # Time per case in seconds: median per-case latency. predictions
-            # carry per-field latency_ms; approximate per-case as the median of
-            # the per-field medians (one value per case).
-            time_per_case_s = (p50_ms / 1000.0) if p50_ms is not None else None
+            # Time per case in seconds: the honest per-item end-to-end
+            # median (results contract v2) when the predictions carry it,
+            # else the per-field latency_ms median — an approximation of
+            # per-case latency that predates per-item timing.
+            end_to_end = _per_item_end_to_end_ms(combo)
+            time_per_case_s = ((end_to_end or p50_ms) or 0) / 1000.0
             rows.append(
                 {
                     "model": model,
