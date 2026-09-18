@@ -156,7 +156,9 @@ def _compute_tokenizer_metrics(
 
     mean_legal_mass = None
     if field_telemetry:
-        masses = [ft["legal_mass"] for ft in field_telemetry.values() if ft["legal_mass"] is not None]
+        masses = [
+            ft["legal_mass"] for ft in field_telemetry.values() if ft["legal_mass"] is not None
+        ]
         if masses:
             mean_legal_mass = sum(masses) / len(masses)
 
