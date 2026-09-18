@@ -48,28 +48,24 @@ def _variance(values: list[int]) -> float:
     return sum((v - mean) ** 2 for v in values) / len(values)
 
 
-def _search_codebook(tokenizer, candidate_text_fn, n_choices: int) -> tuple[list[str], bool, bool]:
+def _search_codebook(
+    tokenizer, candidate_text_fn, n_choices: int, field_name: str = "<field>"
+) -> tuple[list[str], bool]:
     """Search a codebook for the best alias set for one field.
 
-    Candidate codes in priority order: A-Z, then digits, then 2-char
-    alphanumerics. For each complete candidate set (every choice gets one
-    code), tokenize the COMPLETE candidate row per code and reject the set
-    when any two remainders are token-identical or one is a token-prefix of
-    another (R5: a strict-prefix continuation can never be distinguished by
-    branch scoring). Among the surviving sets, choose the lexicographic
-    minimum by ``(branch nodes, max trie depth, max candidate tokens,
-    token-length variance, code length)`` — fewer branch nodes = fewer
-    forward rows. DETERMINISTIC: candidates are enumerated in a fixed order
-    and ties resolve to the first-enumerated set.
+    GREEDY (F1): tokenize each candidate row ONCE per code (a code's tokens
+    do not depend on the other codes), then pick n_choices codes greedily in
+    priority order, skipping any code whose remainder equals or is a
+    token-prefix of an already chosen one. O(pool) tokenizations.
 
-    Returns ``(codes, single_branch, searched)``: the chosen codes
-    (len == n_choices), whether the best set needs exactly one decision row
-    (a single branch node — all candidates share their first token and
-    diverge once), and whether any pool set validated (False means the
-    index fallback was used).
+    Candidate codes: A-Z, then digits, then 2-char alphanumerics. Homogeneous
+    pools first (letters, then digits, then mixed), then 2-char. DETERMINISTIC.
+    The lexicographic objective (branch nodes, max trie depth, max candidate
+    tokens, token-length variance, code length) is computed on the FINAL set.
+
+    Returns ``(codes, single_branch)``. Raises :class:`SchemaCompileError`
+    when no valid set exists (F2: no silent fallback).
     """
-    from itertools import combinations
-
     from jevmlx.trie import build_trie
 
     pair_codes = [
@@ -78,60 +74,69 @@ def _search_codebook(tokenizer, candidate_text_fn, n_choices: int) -> tuple[list
         for b in _CODEBOOK_SINGLE + _CODEBOOK_DIGITS
     ]
 
-    def evaluate(codes: list[str]) -> tuple[bool, tuple[int, int, int, float, int], bool]:
-        """(valid, sort key, single_branch) for one candidate code set."""
-        rows = [candidate_text_fn(code) for code in codes]
-        tokenized = [tokenizer.encode(row, add_special_tokens=False) for row in rows]
-        # Reject token-identical or strict-prefix remainders on the full rows.
-        for i in range(len(tokenized)):
-            for j in range(len(tokenized)):
-                if i == j:
-                    continue
-                a, b = tokenized[i], tokenized[j]
-                if a[: len(b)] == b or b[: len(a)] == a:
-                    return False, (), False
-        shared = _common_token_prefix(tokenized)
-        remainders = [full[len(shared) :] for full in tokenized]
-        if not shared and len({r[0] for r in remainders if r}) > 1:
-            return False, (), False
+    def _is_prefix_pair(a: list[int], b: list[int]) -> bool:
+        return a[: len(b)] == b or b[: len(a)] == a
+
+    def _greedy_pick(pool: list[str]) -> list[str] | None:
+        # Pre-tokenize each code's complete candidate row (once per code).
+        tokenized = {
+            code: tokenizer.encode(candidate_text_fn(code), add_special_tokens=False)
+            for code in pool
+        }
+        chosen: list[str] = []
+        for code in pool:
+            full = tokenized[code]
+            all_fulls = [tokenized[c] for c in chosen] + [full]
+            shared = _common_token_prefix(all_fulls)
+            remainder = full[len(shared) :]
+            prior_remainders = [tokenized[c][len(shared) :] for c in chosen]
+            if any(_is_prefix_pair(remainder, pr) for pr in prior_remainders):
+                continue
+            chosen.append(code)
+            if len(chosen) == n_choices:
+                return chosen
+        return None if len(chosen) < n_choices else chosen
+
+    def _score(codes: list[str]) -> tuple[int, int, int, float, int]:
+        fulls = [tokenizer.encode(candidate_text_fn(c), add_special_tokens=False) for c in codes]
+        shared = _common_token_prefix(fulls)
+        remainders = [f[len(shared) :] for f in fulls]
         trie = build_trie(remainders)
         max_depth = max((len(n["path"]) for n in trie), default=0)
-        key = (
+        return (
             len(trie),
             max_depth,
-            max(len(r) for r in tokenized),
-            float(_variance([len(r) for r in tokenized])),
+            max(len(r) for r in fulls),
+            float(_variance([len(r) for r in fulls])),
             max(len(c) for c in codes),
         )
-        single_branch = len(trie) <= 1
-        return True, key, single_branch
 
-    best: tuple[tuple[int, int, int, float, int], list[str], bool] | None = None
-    searched = False
-    # Try homogeneous single-char pools first (letters, then digits), then
-    # the mixed single-char pool, then 2-char codes. This prefers a clean
-    # digit set over a mixed letter+digit set when letters collide.
     single_pool = list(_CODEBOOK_SINGLE) + list(_CODEBOOK_DIGITS)
-    for width in (1, 2):
-        if width == 1:
-            pools = [list(_CODEBOOK_SINGLE), list(_CODEBOOK_DIGITS), single_pool]
-        else:
-            pools = [pair_codes]
-        for pool in pools:
-            if not pool or n_choices > len(pool):
-                continue
-            for combo in combinations(pool, n_choices):
-                ok, key, single = evaluate(list(combo))
-                if ok:
-                    searched = True
-                    if best is None or key < best[0]:
-                        best = (key, list(combo), single)
-            if best is not None:
-                return best[1], best[2], searched
-    # Fall back to the index-derived codes (A..Z, AA..) — the pre-W2-C
-    # behaviour — when nothing in the pool validates.
-    fallback = [_alias_code(i) for i in range(n_choices)]
-    return fallback, False, False
+    pools = [list(_CODEBOOK_SINGLE), list(_CODEBOOK_DIGITS), single_pool, pair_codes]
+    best: tuple[tuple, list[str]] | None = None
+    for pool in pools:
+        if not pool or n_choices > len(pool):
+            continue
+        codes = _greedy_pick(pool)
+        if codes is None:
+            continue
+        key = _score(codes)
+        if best is None or key < best[0]:
+            best = (key, codes)
+    if best is None:
+        raise SchemaCompileError(
+            field_name,
+            f"field '{field_name}': no codebook set of {n_choices} codes "
+            f"tokenizes to distinguishable rows under tokenizer "
+            f"{type(tokenizer).__name__}",
+        )
+    codes = best[1]
+    fulls = [tokenizer.encode(candidate_text_fn(c), add_special_tokens=False) for c in codes]
+    shared = _common_token_prefix(fulls)
+    remainders = [f[len(shared) :] for f in fulls]
+    trie = build_trie(remainders)
+    single_branch = len(trie) <= 1
+    return codes, single_branch
 
 
 def _common_token_prefix(sequences: list[list[int]]) -> list[int]:
@@ -482,10 +487,13 @@ class StructuredSchema:
                 values = ["true", "false"]
             else:
                 values = list(fdef.choices)
-            aliases, single_branch, searched = _search_codebook(
+            from functools import partial
+
+            aliases, single_branch = _search_codebook(
                 tokenizer,
-                lambda alias, _fname=fname: slot_candidate_text(_fname, alias),
+                partial(slot_candidate_text, fname),
                 len(values),
+                field_name=fname,
             )
             alias_map = dict(zip(aliases, values, strict=True))
 
@@ -528,7 +536,6 @@ class StructuredSchema:
                 # validated (False = index fallback), and whether the winning
                 # set scores through a single branch node.
                 "codebook": list(aliases),
-                "codebook_searched": searched,
                 "single_branch": single_branch,
             }
 

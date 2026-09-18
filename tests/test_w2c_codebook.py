@@ -1,19 +1,23 @@
 """W2-C tests: tokenizer-specific codebook search (review Q3 + bug 7).
 
 Verifies:
-- A fake tokenizer where letters collide (A, B tokenize to the same token)
-  but digits don't (0, 1 are distinct) -> the search picks digits over letters.
-- single_branch detection: a code set whose trie has exactly one branch node.
+- A fake tokenizer where ALL letters collide but digits don't -> picks digits.
+- single_branch detection.
 - Determinism: same schema + tokenizer -> same codes.
-- codebook_searched=False when the fallback (index-derived A..) is used.
-- Telemetry: codebook, codebook_searched, single_branch land in the plan.
+- SchemaCompileError when no valid set exists (F2: no silent fallback).
+- Telemetry: codebook and single_branch land in the plan.
+- Codes differ from index fallback when searched.
+- F1 perf: a 26-choice field compiles in under 1 second (greedy, not O(C(n,k))).
 """
 
 from __future__ import annotations
 
 import json
+import time
 
-from jevmlx.schema import StructuredSchema, _alias_code, _search_codebook
+import pytest
+
+from jevmlx.schema import SchemaCompileError, StructuredSchema, _alias_code, _search_codebook
 
 
 class CollidingLetterTokenizer:
@@ -79,13 +83,12 @@ def _candidate_text(name: str, alias: str) -> str:
 
 
 def test_letters_collide_digits_dont():
-    """When A and B tokenize identically, the search rejects the letter set
-    and picks digits (0, 1) instead."""
+    """When ALL letters tokenize identically, the search rejects the letter
+    set and picks digits (0, 1) instead."""
     tok = CollidingLetterTokenizer()
-    codes, _single_branch, searched = _search_codebook(
-        tok, lambda alias: _candidate_text("risk", alias), 2
+    codes, _single_branch = _search_codebook(
+        tok, lambda alias: _candidate_text("risk", alias), 2, field_name="risk"
     )
-    assert searched, "codebook search should have validated a set"
     assert codes != ["A", "B"], f"colliding letter set was not rejected: {codes}"
     assert codes == ["0", "1"], f"expected digits, got {codes}"
 
@@ -94,10 +97,9 @@ def test_single_branch_detection():
     """When all candidates share their first token and diverge once, the trie
     has exactly one branch node -> single_branch=True."""
     tok = SingleBranchTokenizer()
-    codes, single_branch, searched = _search_codebook(
-        tok, lambda alias: _candidate_text("risk", alias), 2
+    codes, single_branch = _search_codebook(
+        tok, lambda alias: _candidate_text("risk", alias), 2, field_name="risk"
     )
-    assert searched
     assert single_branch, f"expected single_branch=True, got codes={codes}"
 
 
@@ -115,34 +117,27 @@ def test_determinism_same_codes():
     assert plan1 is plan2  # cached
 
 
-def test_codebook_searched_false_on_fallback():
-    """When no pool set validates, the fallback (A..) is used and
-    codebook_searched=False."""
+def test_no_valid_set_raises():
+    """F2: when no pool set validates, raise SchemaCompileError (no fallback)."""
 
     class AllCollidingTokenizer:
         name_or_path = "fake-all-colliding"
 
         def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
-            # All chars map to token 1 EXCEPT the structural chars that
-            # differ — so candidates DO differ (different lengths) but every
-            # alias char collides. The search cannot find a valid 2-code set
-            # from single-char codes because A==B and 0==1 under this tok.
-            return [1 if c.isalnum() else ord(c) for c in text]
+            # Every character (including digits) maps to the same token.
+            return [1] * len(text)
 
         def __len__(self) -> int:
             return 128
 
     tok = AllCollidingTokenizer()
-    codes, _single_branch, searched = _search_codebook(
-        tok, lambda alias: _candidate_text("risk", alias), 2
-    )
-    assert not searched, "should have fallen back to index-derived codes"
-    assert codes == ["A", "B"]  # fallback
+    with pytest.raises(SchemaCompileError, match="no codebook set"):
+        _search_codebook(tok, lambda alias: _candidate_text("risk", alias), 2, field_name="risk")
 
 
 def test_telemetry_in_plan():
-    """The plan carries codebook, codebook_searched, and single_branch per
-    field."""
+    """The plan carries codebook and single_branch per field (no
+    codebook_searched — F2 removed it)."""
     tok = DistinctTokenizer()
     schema = StructuredSchema(
         {"risk": {"type": "enum", "description": "d", "choices": ["LOW", "HIGH"]}}
@@ -150,10 +145,9 @@ def test_telemetry_in_plan():
     plan = schema.compile_slot_plan(tok)
     fp = plan["fields"]["risk"]
     assert "codebook" in fp
-    assert "codebook_searched" in fp
     assert "single_branch" in fp
+    assert "codebook_searched" not in fp  # F2 removed
     assert isinstance(fp["codebook"], list)
-    assert isinstance(fp["codebook_searched"], bool)
     assert isinstance(fp["single_branch"], bool)
     assert len(fp["codebook"]) == 2
 
@@ -169,3 +163,16 @@ def test_codes_not_index_derived_when_searched():
     codes = plan["fields"]["risk"]["codebook"]
     index_codes = [_alias_code(i) for i in range(2)]
     assert codes != index_codes, f"codes match index fallback: {codes}"
+
+
+def test_26_choice_field_compiles_under_1_second():
+    """F1 perf: greedy search is O(pool), not O(C(n,k)). A 26-choice field
+    must compile in under 1 second with the fake tokenizer."""
+    tok = DistinctTokenizer()
+    choices = [f"choice_{i}" for i in range(26)]
+    schema = StructuredSchema({"big": {"type": "enum", "description": "d", "choices": choices}})
+    start = time.monotonic()
+    plan = schema.compile_slot_plan(tok)
+    elapsed = time.monotonic() - start
+    assert elapsed < 1.0, f"26-choice compile took {elapsed:.2f}s (greedy should be <1s)"
+    assert len(plan["fields"]["big"]["codebook"]) == 26
