@@ -126,6 +126,7 @@ def plan_steps(
     ab_branch: str | None = None,
     typesafe_data: Path = TYPESAFE_JSONL,
     quality: str = QUALITY_ALIAS,
+    probe: bool = False,
 ) -> list[Step]:
     """The ordered step list. Pure apart from writing ``models-rest.txt``.
 
@@ -319,6 +320,46 @@ def plan_steps(
             in_process=True,
         )
     )
+    if probe:
+        # W6-2 prep (optional, non-gating): memory slope probe + adapter
+        # parity probe on the quality model. Runs AFTER the core runbook;
+        # outputs are standalone JSON.
+        steps.append(
+            Step(
+                id="probe-slope",
+                title="benchmarks.probe --command slope",
+                argv=(
+                    sys.executable,
+                    "-m",
+                    "benchmarks.probe",
+                    "--model",
+                    quality,
+                    "--command",
+                    "slope",
+                    "--out",
+                    str(out / "probe-slope.json"),
+                ),
+                outputs=(out / "probe-slope.json",),
+            )
+        )
+        steps.append(
+            Step(
+                id="probe-adapters",
+                title="benchmarks.probe --command adapters",
+                argv=(
+                    sys.executable,
+                    "-m",
+                    "benchmarks.probe",
+                    "--model",
+                    quality,
+                    "--command",
+                    "adapters",
+                    "--out",
+                    str(out / "probe-adapters.json"),
+                ),
+                outputs=(out / "probe-adapters.json",),
+            )
+        )
     return steps
 
 
@@ -643,6 +684,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--fresh", action="store_true", help="rerun steps whose outputs already exist"
     )
+    parser.add_argument(
+        "--probe",
+        action="store_true",
+        help="append the W6-2 prep probes (memory slope + adapter parity) "
+        "as optional steps (python -m benchmarks.probe)",
+    )
     args = parser.parse_args(argv)
 
     if args.parity_models:
@@ -660,6 +707,7 @@ def main(argv: list[str] | None = None) -> int:
         extra=args.extra,
         reps=args.reps,
         ab_branch=args.ab_branch,
+        probe=args.probe,
     )
 
     if not (out / "RUNBOOK.md").exists():
