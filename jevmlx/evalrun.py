@@ -119,7 +119,9 @@ def parallel_decide_fn(
     ``per_option`` instead; log_scores stays None for them.
     """
 
-    def decide(schema_dict: dict, context: str, constraints=None) -> dict[str, dict[str, Any]]:
+    def decide(
+        schema_dict: dict, context: str, constraints=None, oracle_overrides=None
+    ) -> dict[str, dict[str, Any]]:
         from jevmlx.engine import run_parallel_generation
 
         schema = StructuredSchema(schema_dict)
@@ -132,6 +134,7 @@ def parallel_decide_fn(
             scoring=scoring,
             prior_correction=prior_correction,
             constraints=constraints,
+            oracle_overrides=oracle_overrides,
         )
         out: dict[str, dict[str, Any]] = {}
         for fname, telemetry in result["field_telemetry"].items():
@@ -165,7 +168,9 @@ def naive_local_decide_fn(model, tokenizer) -> DecideFn:
     crash).
     """
 
-    def decide(schema_dict: dict, context: str, constraints=None) -> dict[str, dict[str, Any]]:
+    def decide(
+        schema_dict: dict, context: str, constraints=None, oracle_overrides=None
+    ) -> dict[str, dict[str, Any]]:
         from jevmlx.engine import run_naive_generation
 
         schema = StructuredSchema(schema_dict)
@@ -200,7 +205,9 @@ def api_baseline_decide_fn(
     Returns the decide_fn plus the request parameters to record in run.json.
     """
 
-    def decide(schema_dict: dict, context: str, constraints=None) -> dict[str, dict[str, Any]]:
+    def decide(
+        schema_dict: dict, context: str, constraints=None, oracle_overrides=None
+    ) -> dict[str, dict[str, Any]]:
         schema = StructuredSchema(schema_dict)
         result = baseline_decide(base_url, model, api_key, schema, context)
         out: dict[str, dict[str, Any]] = {}
@@ -231,7 +238,9 @@ def openai_slots_decide_fn(
     field. Returns the decide_fn plus the request parameters for run.json.
     """
 
-    def decide(schema_dict: dict, context: str, constraints=None) -> dict[str, dict[str, Any]]:
+    def decide(
+        schema_dict: dict, context: str, constraints=None, oracle_overrides=None
+    ) -> dict[str, dict[str, Any]]:
         from jevmlx.openai_slots import decide_openai
 
         schema = StructuredSchema(schema_dict)
@@ -365,6 +374,39 @@ def run_eval(
             meta = results.pop("_meta", {})
             if tag is None:
                 n_canonical += len(results)
+
+            # W3-D part 2: oracle pass — teacher-force the TRUE parent for
+            # fields with depends_on, so oracle_parent_gap can be computed.
+            oracle_results: dict[str, Any] = {}
+            if track == "parallel" and tag is None:
+                labels = case.get("labels", {})
+                has_depends = any(
+                    isinstance(spec, dict) and spec.get("depends_on")
+                    for spec in schema_dict.values()
+                )
+                if has_depends and labels:
+                    # Build oracle overrides: for each field with depends_on,
+                    # set the parent to its TRUE label value.
+                    oracle_parents: dict[str, object] = {}
+                    for spec in schema_dict.values():
+                        if isinstance(spec, dict) and spec.get("depends_on"):
+                            parent = spec["depends_on"]
+                            if parent in labels:
+                                oracle_parents[parent] = labels[parent]
+                    if oracle_parents:
+                        try:
+                            oracle_out = decide_fn(
+                                schema_dict,
+                                case["context"],
+                                constraints=case.get("constraints"),
+                                oracle_overrides=oracle_parents,
+                            )
+                            oracle_out.pop("_meta", None)
+                            for ofname, ores in oracle_out.items():
+                                if "oracle_prediction" in ores:
+                                    oracle_results[ofname] = ores["oracle_prediction"]
+                        except TypeError:
+                            pass  # decide_fn doesn't support oracle_overrides
             for fname, res in results.items():
                 field_def = schema.fields.get(fname)
                 prediction = res.get("prediction")
@@ -401,6 +443,7 @@ def run_eval(
                     "passes": meta.get("passes"),
                     "error": res.get("error"),
                     "salvage_prediction": res.get("salvage_prediction"),
+                    "oracle_prediction": oracle_results.get(fname),
                 }
                 if carry_perturbation:
                     line["perturbation"] = (case.get("meta") or {}).get("perturbation")

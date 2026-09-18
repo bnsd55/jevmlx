@@ -95,6 +95,7 @@ def test_predictions_contract_lines(tmp_path):
         "passes",
         "error",
         "salvage_prediction",
+        "oracle_prediction",
     }
     assert first["run_id"] == "r1"
     assert first["track"] == "parallel"
@@ -324,6 +325,7 @@ def test_parallel_log_scores_reads_finalized_dict(tmp_path, monkeypatch):
         scoring="slots",
         prior_correction=False,
         constraints=None,
+        oracle_overrides=None,
     ):
         calls["temperature"] = temperature
         return {

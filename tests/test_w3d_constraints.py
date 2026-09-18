@@ -212,6 +212,7 @@ def test_evalrun_constraint_violation_rate_zero_with_map(monkeypatch):
         scoring="slots",
         prior_correction=False,
         constraints=None,
+        oracle_overrides=None,
     ):
         # Simulate the constrained MAP: with constraints, subtype flips to refund.
         reconciled_subtype = "refund" if constraints else "bug"
@@ -308,6 +309,7 @@ def test_evalrun_constraint_violation_without_map(monkeypatch):
         scoring="slots",
         prior_correction=False,
         constraints=None,
+        oracle_overrides=None,
     ):
         # No MAP: subtype stays at argmax 'bug'.
         return {

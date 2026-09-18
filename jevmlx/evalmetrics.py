@@ -24,6 +24,7 @@ __all__ = [
     "exact_record_accuracy",
     "constraint_violation_rate",
     "child_accuracy_given_parent_correct",
+    "oracle_parent_gap",
     "order_flip_rate",
 ]
 
@@ -756,6 +757,65 @@ def child_accuracy_given_parent_correct(records: list[dict]) -> dict | None:
     }
 
 
+def oracle_parent_gap(records: list[dict]) -> dict | None:
+    """For each (parent, child) pair with a depends_on relationship, the gap
+    between child accuracy under the TRUE parent (teacher-forced oracle pass)
+    and child accuracy under the PREDICTED parent.
+
+    Records carry ``oracle_prediction`` (the child's value when the true parent
+    is teacher-forced in eval). The gap = oracle_acc - predicted_acc; a positive
+    gap means conditioning on the true parent helps the child.
+
+    Returns None when no records carry ``oracle_prediction``.
+    """
+    preds = _case_predictions(records)
+    labels = _case_labels(records)
+    # Collect oracle predictions: case_id -> {field: oracle_pred}.
+    oracle_preds: dict[str, dict[str, object]] = defaultdict(dict)
+    for r in records:
+        case_id = r.get("case_id")
+        if case_id is None or r.get("label") is None:
+            continue
+        oracle = r.get("oracle_prediction")
+        if oracle is not None:
+            oracle_preds[case_id][r["field"]] = oracle
+    if not oracle_preds:
+        return None
+    # Collect (parent, child) pairs from constraints.
+    constraints_by_case = _case_constraints(records)
+    if not constraints_by_case:
+        return None
+    pairs: dict[tuple[str, str], list[tuple[bool, bool]]] = defaultdict(list)
+    for case_id, constraints in constraints_by_case.items():
+        case_preds = preds.get(case_id, {})
+        case_labels = labels.get(case_id, {})
+        case_oracle = oracle_preds.get(case_id, {})
+        for c in constraints:
+            if c.get("type") not in ("implies", "requires_parent"):
+                continue
+            parent = c.get("parent")
+            child = c.get("child")
+            child_pred = case_preds.get(child)
+            child_label = case_labels.get(child)
+            child_oracle = case_oracle.get(child)
+            if child_pred is None or child_label is None or child_oracle is None:
+                continue
+            pred_correct = child_pred == child_label
+            oracle_correct = child_oracle == child_label
+            pairs[(parent, child)].append((oracle_correct, pred_correct))
+    if not pairs:
+        return None
+    return {
+        f"{parent}→{child}": {
+            "oracle_accuracy": sum(o for o, _ in v) / len(v) if v else 0.0,
+            "predicted_accuracy": sum(p for _, p in v) / len(v) if v else 0.0,
+            "gap": (sum(o for o, _ in v) - sum(p for _, p in v)) / len(v) if v else 0.0,
+            "n": len(v),
+        }
+        for (parent, child), v in sorted(pairs.items())
+    }
+
+
 def exact_record_accuracy(records: list[dict]) -> float | None:
     """Fraction of cases where EVERY labelled field is correct AND no
     constraint is violated. Stricter than case_exact_match (which ignores
@@ -864,7 +924,12 @@ def compute_metrics(records: list[dict]) -> dict:
     child_acc = child_accuracy_given_parent_correct(records)
     if child_acc:
         metrics["child_accuracy_given_parent_correct"] = child_acc
-    # oracle_parent_gap: needs a conditioned rerun (W3-D); None until then.
+    # oracle_parent_gap: child accuracy under the TRUE parent (teacher-forced)
+    # vs under the predicted parent. Requires oracle_prediction in records
+    # (W3-D part 2: evalrun runs a conditioned pass with the true parent).
+    oracle = oracle_parent_gap(records)
+    if oracle:
+        metrics["oracle_parent_gap"] = oracle
     flips = order_flip_rate(records)
     if flips:
         metrics["order_flip_rate"] = flips
