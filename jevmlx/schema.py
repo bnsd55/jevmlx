@@ -640,6 +640,69 @@ class StructuredSchema:
                 fields[field_name] = fields[field_name].compile_set_constraints(
                     spec["set_constraints"]
                 )
+
+        # W5-B (review 5): depends_on must name an existing earlier field and
+        # must never target a multi child — dependency conditioning scores a
+        # scalar candidate row for the child; a multi child has per-option
+        # Y/N rows and no joint set solver exists yet. Also reject cycles:
+        # the selective second pass runs in topological waves, which need a
+        # DAG.
+        for field_name, fd in fields.items():
+            dep = fd.depends_on
+            if dep is None:
+                continue
+            if dep not in fields:
+                raise SchemaCompileError(
+                    field_name,
+                    f"field '{field_name}': depends_on references unknown field '{dep}'",
+                )
+            if dep == field_name:
+                raise SchemaCompileError(field_name, f"field '{field_name}': depends_on itself")
+            if fields[dep].field_type == "multi":
+                raise SchemaCompileError(
+                    field_name,
+                    f"field '{field_name}': depends_on '{dep}' is a multi field; "
+                    "dependency conditioning on multi parents is not supported "
+                    "(no joint set solver) — declare the parent as an enum or boolean",
+                )
+            if fd.field_type == "multi":
+                raise SchemaCompileError(
+                    field_name,
+                    f"field '{field_name}' is a multi field with depends_on; "
+                    "conditioned multi scoring is not supported yet — drop "
+                    "depends_on or make the field an enum/boolean",
+                )
+        # Cycle check (review 10: topological waves need a DAG).
+        _TOPSORT_STATE = {}
+        for start in fields:
+            if _TOPSORT_STATE.get(start) == 2:
+                continue
+            stack = [
+                (
+                    start,
+                    iter(fd.depends_on for fd in [fields[start]])
+                    if fields[start].depends_on
+                    else iter(()),
+                )
+            ]
+            _TOPSORT_STATE[start] = 1
+            while stack:
+                node, it = stack[-1]
+                advanced = False
+                for nxt in it:
+                    state = _TOPSORT_STATE.get(nxt, 0)
+                    if state == 1:
+                        raise SchemaCompileError(node, f"depends_on cycle through '{nxt}'")
+                    if state == 0:
+                        _TOPSORT_STATE[nxt] = 1
+                        nxt_deps = [fields[nxt].depends_on] if fields[nxt].depends_on else []
+                        stack.append((nxt, iter(nxt_deps)))
+                        advanced = True
+                        break
+                if not advanced:
+                    _TOPSORT_STATE[node] = 2
+                    stack.pop()
+
         # Compiled plans, keyed by tokenizer OBJECT IDENTITY (P2: a
         # WeakKeyDictionary keys by __eq__/__hash__, so two equal-but-distinct
         # tokenizers would wrongly share one plan). dict[id] =
