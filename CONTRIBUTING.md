@@ -40,4 +40,6 @@ To contribute accuracy or latency numbers from your own Mac, follow
 ## Conduct
 
 Be civil and assume good faith; this project follows the
-[Contributor Covenant](https://www.contributor-covenant.org/) spirit.
+[Contributor Covenant](https://www.contributor-covenant.org/) spirit — see
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) and [SECURITY.md](SECURITY.md) for
+how to report conduct or security issues.
