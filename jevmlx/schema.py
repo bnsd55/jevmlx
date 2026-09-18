@@ -417,11 +417,14 @@ class FieldDefinition:
           case-level implies between FIELDS lives in jevmlx/constraints.py
           and is untouched).
 
-        Every referenced option must be a declared choice. Contradictions
-        detected at set time (an exact_k k above the group size, k < 0,
-        implies cycles like X->Y->X, an option required by an implies chain
-        while excluded by an exact_k=0 over its group, empty option lists)
-        raise SchemaCompileError immediately.
+        Every referenced option must be a declared choice. Malformed
+        constraints (unknown options, bad k, empty option lists, unknown
+        types) raise SchemaCompileError immediately. Satisfiability is
+        decided by running the same feasibility solver the engine uses
+        (jevmlx.setcons, no scores): a constraint set with no feasible
+        selection raises SchemaCompileError at compile time (W5-C finding
+        17 — the old syntactic rules falsely rejected satisfiable sets like
+        A->B + B->A, both absent).
         """
         if constraints is None:
             return self  # immutable: already constraint-free
@@ -446,6 +449,7 @@ class FieldDefinition:
                 "mutually_exclusive",
                 "at_most_one",
                 "at_least_one",
+                "at_least_k",
                 "exact_k",
                 "at_most_k",
             ):
@@ -468,7 +472,7 @@ class FieldDefinition:
                         self.name,
                         f"set constraint [{i}] ({ctype}): duplicate options in {options!r}",
                     )
-                if ctype in ("exact_k", "at_most_k"):
+                if ctype in ("exact_k", "at_most_k", "at_least_k"):
                     k = c.get("k")
                     if not isinstance(k, int) or isinstance(k, bool) or k < 0:
                         raise SchemaCompileError(
@@ -508,57 +512,25 @@ class FieldDefinition:
                 raise SchemaCompileError(
                     self.name,
                     f"set constraint [{i}].type must be one of "
-                    f"['at_least_one', 'at_most_k', 'at_most_one', 'exact_k', "
+                    f"['at_least_one', 'at_least_k', 'at_most_k', 'at_most_one', 'exact_k', "
                     f"'implies', 'mutually_exclusive'], got {ctype!r}",
                 )
-        # Contradiction checks ACROSS constraints (compile-time, per the
-        # step-4 spec): an implies cycle makes the group unsatisfiable at
-        # k=... no — a cycle X->Y->X only forces X and Y to co-occur, which
-        # is satisfiable UNLESS an exclusivity group contains both. That
-        # cross-check runs here: implies-adjacent options sharing a
-        # mutually_exclusive / at_most_one group is a compile error.
-        implied_pairs: set[tuple[str, str]] = set()
-        for c in constraints:
-            if c.get("type") == "implies":
-                implied_pairs.add((c["if_option"], c["then_option"]))
-        # transitive closure of the implies relation (Floyd-Warshall over
-        # the option set; sizes are tiny — at most 64 options).
-        closure = set(implied_pairs)
-        changed = True
-        while changed:
-            changed = False
-            for a, b in list(closure):
-                for c2, d2 in list(closure):
-                    if b == c2 and (a, d2) not in closure:
-                        closure.add((a, d2))
-                        changed = True
-        for a, b in closure:
-            if a == b:
-                raise SchemaCompileError(
-                    self.name,
-                    f"set constraint contradiction: implies chain loops back "
-                    f"onto '{a}' (cycle); the constraint set is unsatisfiable",
-                )
-        for c in constraints:
-            if c.get("type") in ("mutually_exclusive", "at_most_one"):
-                group = set(c["options"])
-                for a, b in closure:
-                    if a in group and b in group:
-                        raise SchemaCompileError(
-                            self.name,
-                            f"set constraint contradiction: '{a}' implies '{b}' "
-                            f"but both are in an at-most-one group "
-                            f"{sorted(c['options'])!r}",
-                        )
-            if c.get("type") == "exact_k" and c.get("k") == 0:
-                excluded = set(c["options"])
-                for a, b in closure:
-                    if b in excluded:
-                        raise SchemaCompileError(
-                            self.name,
-                            f"set constraint contradiction: '{a}' implies '{b}' "
-                            f"but the exact_k=0 group excludes '{b}'",
-                        )
+        # W5-C finding 17: NO syntactic contradiction rules. The old rules
+        # falsely rejected satisfiable sets — A->B + B->A (both absent),
+        # A->B + at_most_one(A,B) (A forbidden), A->B + exact_k([B], 0) (A
+        # not selected) — and even an implies 2-cycle is satisfiable (both
+        # absent). Satisfiability is decided by running the SAME feasibility
+        # solver the engine uses (jevmlx.setcons, no scores, empty
+        # proposal); a constraint set with no feasible selection is a
+        # compile error.
+        from jevmlx.setcons import is_feasible
+
+        if not is_feasible(list(self.choices), list(constraints)):
+            raise SchemaCompileError(
+                self.name,
+                f"set constraint contradiction: no selection of "
+                f"{list(self.choices)} satisfies {constraints!r}",
+            )
         # W5b-1 (C7): deep-freeze the output — one validated copy per
         # constraint, wrapped read-only, in an immutable tuple. Nothing
         # reachable from the compiled field is caller-mutable. Idiomatic
