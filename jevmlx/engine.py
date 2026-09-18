@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 # Bumped whenever the parallel path's prompt text changes (it feeds
 # prompt_sha256, so result sets from different prompt versions are not
 # comparable).
-PROMPT_VERSION = "jevmlx-parallel-v6"
+PROMPT_VERSION = "jevmlx-parallel-v7"
 
 
 @dataclass(frozen=True)

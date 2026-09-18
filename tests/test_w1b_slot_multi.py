@@ -263,4 +263,4 @@ def test_prompt_version_bumped():
     """PROMPT_VERSION is now v3 (W1-B)."""
     from jevmlx.engine import PROMPT_VERSION
 
-    assert PROMPT_VERSION == "jevmlx-parallel-v6"
+    assert PROMPT_VERSION == "jevmlx-parallel-v7"
