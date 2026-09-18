@@ -595,42 +595,45 @@ def test_build_trie_output_order_unchanged_vs_reference():
     """N1: the iterative walk reproduces the recursive pre-order exactly."""
     import sys
 
+    original_limit = sys.getrecursionlimit()
     sys.setrecursionlimit(60)  # would explode on the recursive version
+    try:
+        # Reference: independent recursive implementation.
+        def recursive_nodes(remainders):
+            root: dict = {"children": {}, "choices": []}
+            for idx, remainder in enumerate(remainders):
+                root["choices"].append(idx)
+                node = root
+                for token in remainder:
+                    node = node["children"].setdefault(token, {"children": {}, "choices": []})
+                    node["choices"].append(idx)
+            out = []
 
-    # Reference: independent recursive implementation.
-    def recursive_nodes(remainders):
-        root: dict = {"children": {}, "choices": []}
-        for idx, remainder in enumerate(remainders):
-            root["choices"].append(idx)
-            node = root
-            for token in remainder:
-                node = node["children"].setdefault(token, {"children": {}, "choices": []})
-                node["choices"].append(idx)
-        out = []
-
-        def walk(node, path):
-            if len(node["children"]) >= 2:
-                out.append(
-                    (
-                        list(path),
-                        {t: node["children"][t]["choices"] for t in sorted(node["children"])},
+            def walk(node, path):
+                if len(node["children"]) >= 2:
+                    out.append(
+                        (
+                            list(path),
+                            {t: node["children"][t]["choices"] for t in sorted(node["children"])},
+                        )
                     )
-                )
-            for token in sorted(node["children"]):
-                walk(node["children"][token], [*path, token])
+                for token in sorted(node["children"]):
+                    walk(node["children"][token], [*path, token])
 
-        walk(root, [])
-        return out
+            walk(root, [])
+            return out
 
-    remainders = [
-        [1, 2, 3],
-        [1, 2, 4],
-        [1, 5],
-        [6, 7],
-        [6, 8, 9],
-    ]
-    got = [(n["path"], n["children"]) for n in build_trie(remainders)]
-    assert got == recursive_nodes(remainders)
+        remainders = [
+            [1, 2, 3],
+            [1, 2, 4],
+            [1, 5],
+            [6, 7],
+            [6, 8, 9],
+        ]
+        got = [(n["path"], n["children"]) for n in build_trie(remainders)]
+        assert got == recursive_nodes(remainders)
+    finally:
+        sys.setrecursionlimit(original_limit)
 
 
 def test_equal_but_distinct_tokenizers_get_distinct_plans():

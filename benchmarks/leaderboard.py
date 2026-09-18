@@ -157,13 +157,28 @@ def _p50_latency_ms(folder: Path) -> float | None:
 
 
 def _local_rows(results_root: Path) -> list[dict]:
-    """One row per results folder with dataset=typesafe and track=parallel."""
+    """One row per results folder with dataset=typesafe and track=parallel.
+
+    W4-A: a model appears only if its folder has a passing slow parity test
+    (parity.json with ``passed: true``). Without it, the model is excluded
+    from the leaderboard — it hasn't proven batch/chunked log_score parity.
+    """
     from benchmarks.summarize_results import _combo_parts, _machine_model
 
     rows: list[dict] = []
     if not results_root.exists():
         return rows
     for machine_dir in sorted(p for p in results_root.iterdir() if p.is_dir()):
+        # W4-A: skip models without a passing parity test.
+        parity_path = machine_dir / "parity.json"
+        if not parity_path.exists():
+            continue
+        try:
+            parity = json.loads(parity_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not parity.get("passed"):
+            continue
         for combo in sorted(p for p in machine_dir.iterdir() if p.is_dir()):
             report_path = combo / "report.json"
             if not report_path.exists():

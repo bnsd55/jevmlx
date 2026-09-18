@@ -24,6 +24,7 @@ from typing import Any, NamedTuple
 
 from jinja2.exceptions import TemplateError
 
+from jevmlx.models import resolve_model
 from jevmlx.schema import StructuredSchema, _common_token_prefix, count_key, is_count_key
 from jevmlx.setcons import select_constrained_set
 from jevmlx.trie import build_trie, logsumexp, score_trie, softmax
@@ -149,11 +150,15 @@ def load_engine(model_id: str):
     previous one. Call :func:`clear_engine_cache` to release memory without
     loading anything else.
 
+    ``model_id`` may be an alias (``fast``, ``quality``, ``test``) — resolved
+    via :func:`jevmlx.api.resolve_model` before loading.
+
     Raises RuntimeError on a non-Apple-Silicon machine (mlx unavailable) —
     the only place the platform check lives, so `import jevmlx.engine`
     succeeds on Linux for schema/plan/metrics tooling.
     """
     _require_mlx()
+    model_id = resolve_model(model_id)
     logger.info("Loading %s into Apple Silicon unified memory...", model_id)
     t0 = time.perf_counter()
     model, tokenizer = load(model_id)

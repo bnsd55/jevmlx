@@ -184,3 +184,120 @@ def test_imports_without_mlx(monkeypatch):
     records = [_record()]
     metrics = benchmarks.check_results.compute_metrics(records)
     assert isinstance(metrics, dict)
+
+
+class TestParityGate:
+    """W4-A: a model enters the README compat table only with a passing
+    slow parity test (parity.json in the model folder)."""
+
+    def test_passing_parity_passes(self, tmp_path):
+        from benchmarks.check_results import check_parity
+
+        (tmp_path / "parity.json").write_text(
+            json.dumps(
+                {
+                    "model": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+                    "test": "test_w1a_scoring_parity_batch_vs_chunked_real_model",
+                    "passed": True,
+                    "max_drift_nats": 0.027,
+                    "atol": 0.05,
+                    "run_at": "2026-09-18T12:00:00Z",
+                }
+            )
+        )
+        ok, problems = check_parity(tmp_path)
+        assert ok
+        assert problems == []
+
+    def test_missing_parity_fails(self, tmp_path):
+        from benchmarks.check_results import check_parity
+
+        ok, problems = check_parity(tmp_path)
+        assert not ok
+        assert any("missing parity.json" in p for p in problems)
+
+    def test_failed_parity_fails(self, tmp_path):
+        from benchmarks.check_results import check_parity
+
+        (tmp_path / "parity.json").write_text(
+            json.dumps(
+                {
+                    "model": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+                    "test": "test_w1a_scoring_parity_batch_vs_chunked_real_model",
+                    "passed": False,
+                    "max_drift_nats": 0.15,
+                    "atol": 0.05,
+                    "run_at": "2026-09-18T12:00:00Z",
+                }
+            )
+        )
+        ok, problems = check_parity(tmp_path)
+        assert not ok
+        assert any("did not pass" in p for p in problems)
+
+    def test_corrupt_parity_fails(self, tmp_path):
+        from benchmarks.check_results import check_parity
+
+        (tmp_path / "parity.json").write_text("{not valid json")
+        ok, problems = check_parity(tmp_path)
+        assert not ok
+        assert any("unreadable" in p for p in problems)
+
+    def test_leaderboard_excludes_model_without_parity(self, tmp_path):
+        """_local_rows skips a model folder that has no parity.json."""
+        from benchmarks.leaderboard import _local_rows
+
+        model_dir = tmp_path / "m2pro--qwen2.5-7b"
+        combo = model_dir / "parallel-trie-typesafe"
+        combo.mkdir(parents=True)
+        # No parity.json — model must be excluded.
+        (combo / "report.json").write_text(
+            json.dumps({"metrics": {"agreement": {"agreement_common_subset": 0.9}}})
+        )
+        (combo / "run.json").write_text(
+            json.dumps(
+                {
+                    "run_id": "x",
+                    "environment": {},
+                    "config": {"track": "parallel", "dataset_path": "typesafe", "model": "qwen7b"},
+                    "counts": {"cases": 1, "fields": 1, "prediction_lines": 1},
+                }
+            )
+        )
+        rows = _local_rows(tmp_path)
+        assert rows == []
+
+    def test_leaderboard_includes_model_with_passing_parity(self, tmp_path):
+        """_local_rows includes a model folder that has a passing parity.json."""
+        from benchmarks.leaderboard import _local_rows
+
+        model_dir = tmp_path / "m2pro--qwen2.5-7b"
+        combo = model_dir / "parallel-trie-typesafe"
+        combo.mkdir(parents=True)
+        (model_dir / "parity.json").write_text(
+            json.dumps(
+                {
+                    "model": "qwen7b",
+                    "test": "w1a",
+                    "passed": True,
+                    "max_drift_nats": 0.02,
+                    "atol": 0.05,
+                }
+            )
+        )
+        (combo / "report.json").write_text(
+            json.dumps({"metrics": {"agreement": {"agreement_common_subset": 0.9, "n_cases": 20}}})
+        )
+        (combo / "run.json").write_text(
+            json.dumps(
+                {
+                    "run_id": "x",
+                    "environment": {},
+                    "config": {"track": "parallel", "dataset_path": "typesafe", "model": "qwen7b"},
+                    "counts": {"cases": 1, "fields": 1, "prediction_lines": 1},
+                }
+            )
+        )
+        rows = _local_rows(tmp_path)
+        assert len(rows) == 1
+        assert rows[0]["model"] == "qwen7b"

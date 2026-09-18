@@ -26,9 +26,16 @@ from collections.abc import Sequence
 from pydantic import BaseModel
 
 from jevmlx.engine import load_engine, run_parallel_generation
+from jevmlx.models import DEFAULT_MODEL, MODEL_ALIASES, resolve_model
 from jevmlx.schema import StructuredSchema
 
-DEFAULT_MODEL = "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+# Re-exports for backwards compatibility (external code may import these
+# from jevmlx.api). New code should import from jevmlx.models directly.
+__all__ = [
+    "DEFAULT_MODEL",
+    "MODEL_ALIASES",
+    "resolve_model",
+]
 
 _SUPPORTED = (
     "supported field types: bool, Literal[str, ...], enum.Enum/enum.StrEnum with str values, "
