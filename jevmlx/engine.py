@@ -550,6 +550,16 @@ def _fold_multi(probs_true: dict[str, float]) -> tuple[list[str], float | None, 
     return selected, None, margin
 
 
+# W3-E (GPT-REVIEW Q4 'Near-tie nondeterminism', bug 13): the measured
+# batch-shape instability band on Metal (see the W3-C measurement in
+# tests/conftest.py — worst 0.0293 nats on main itself, identical with the
+# W3-C branch). Log-score gaps inside this band are batch-shape noise, not
+# model signal: a field whose top candidates sit within the band is RESCORED
+# at batch=1 (the canonical shape) and that result is taken. conftest.py
+# imports this constant so tests and engine share one number.
+INSTABILITY_BAND = 5e-2
+
+
 def _rows_per_chunk(budget_bytes: int, bytes_per_row: int, max_rows: int | None) -> int:
     """Rows per suffix chunk: budget-limited cap, optionally tightened by max_rows.
 
@@ -1213,6 +1223,56 @@ def _selective_second_pass(
         "second_pass_ms": round(elapsed_ms, 2),
     }
 
+def _rescore_rows_batch1(
+    model,
+    cache,
+    rows: list[list[int]],
+    idxs: list[int],
+    row_decision: list[tuple[int, list[int]]],
+    row_branch: dict[int, int],
+    row_option: dict[int, int],
+    vocab_size: int,
+    pad_id: int,
+) -> dict:
+    """Rescore one field's rows at batch=1 (W3-E, the canonical shape).
+
+    The suffix pass normally runs rows together; Metal batched matmuls tile
+    differently per batch shape and logit gaps inside INSTABILITY_BAND are
+    noise. This re-runs ONLY this field's rows through the SHARED
+    _score_rows helper (auto_max_rows=1: one row per forward pass, the
+    canonical shape) on a fresh broadcast of the same prefill cache, then
+    dispatches each row's logits into the shapes the batched pass fills:
+    branch rows -> node_logits keyed by branch-node index; multi option
+    rows -> option_pair ([yes_logit, no_logit]). One copy of the scoring
+    loop (review F3, PR #27).
+    """
+    if not idxs:
+        return {"node_logits": {}, "node_legal_mass_log": {}, "option_pair": {}}
+    sub_rows = [rows[ridx] for ridx in idxs]
+    sub_decisions = [row_decision[ridx] for ridx in idxs]
+    row_logits, row_mass_log, _passes, _t = _score_rows(
+        model, cache, sub_rows, sub_decisions, vocab_size, pad_id, auto_max_rows=1
+    )
+    node_logits: dict[int, dict[int, list[float]]] = {}
+    node_legal_mass_log: dict[int, Any] = {}
+    option_pair: dict[int, list[float]] = {}
+    for i, ridx in enumerate(idxs):
+        values = row_logits[ridx]
+        mass_log = row_mass_log[ridx]
+        if ridx in row_option:
+            # Multi option row: RAW [yes_logit, no_logit] + flat legal mass.
+            option_pair[ridx] = values
+            node_legal_mass_log[ridx] = mass_log
+        else:
+            # Branch row: per-node logits in node["children"] order.
+            bi = row_branch[ridx]
+            node_logits[ridx] = {bi: values}
+            node_legal_mass_log[ridx] = {bi: mass_log}
+    return {
+        "node_logits": node_logits,
+        "node_legal_mass_log": node_legal_mass_log,
+        "option_pair": option_pair,
+    }
 
 def run_parallel_generation(
     model,
@@ -1483,6 +1543,8 @@ def run_parallel_generation(
     #    rounding anywhere in the engine's results (presentation rounds in cli).
     parsed_json: dict[str, Any] = {}
     field_telemetry: dict[str, Any] = {}
+    # W3-E: fields whose batched result was replaced by the batch=1 rescore.
+    rescored_fields: list[str] = []
 
     field_rows: dict[str, list[int]] = {}
     for idx, fname in enumerate(row_field):
@@ -1792,12 +1854,83 @@ def run_parallel_generation(
         probs_list = softmax(scores, temperature=temperature)
         order = sorted(range(n_choices), key=probs_list.__getitem__, reverse=True)
         w_idx = order[0]
-        # Deterministic tie policy: logits from batched Metal matmuls vary
-        # slightly with batch shape; equal-scoring choices are resolved by
-        # schema order and flagged.
-        is_tie = len(scores) > 1 and (scores[order[0]] - scores[order[1]]) < 1e-6
-        if is_tie:
-            w_idx = next(i for i in range(n_choices) if i in order[:2])
+        # W3-E near-tie rescore (GPT-REVIEW Q4, bug 13): log-score gaps inside
+        # INSTABILITY_BAND are Metal batch-shape noise, not model signal — the
+        # old 1e-6 threshold mislabelled real noise as exact ties. Every
+        # candidate within the band of the leader competes; when the field's
+        # top candidates sit inside the band, the field's rows are rescored at
+        # batch=1 (the canonical shape: one row per forward pass) and THAT
+        # result replaces the batched one. tie=True only if the rescored
+        # scores are STILL within the band — i.e. the model genuinely cannot
+        # separate the candidates even at the canonical shape.
+        rescored = False
+        band_candidates = [i for i in order if scores[order[0]] - scores[i] < INSTABILITY_BAND]
+        if len(band_candidates) > 1:
+            rescored_raw = _rescore_rows_batch1(
+                model,
+                cache,
+                rows,
+                idxs,
+                row_decision,
+                tries[fname],
+                row_branch,
+                row_option,
+            )
+            rescored = True
+            rescored_fields.append(fname)
+            # Rebuild this field's score inputs from the canonical-shape
+            # logits: same score_trie path as the batched pass, batch-1
+            # logits_by_branch instead.
+            logits_by_branch = {}
+            legal_mass_log_by_branch = {}
+            for ridx in idxs:
+                logits_by_branch.update(rescored_raw["node_logits"][ridx])
+                legal_mass_log_by_branch.update(rescored_raw["node_legal_mass_log"].get(ridx, {}))
+            branch_index = {id(node): bi for bi, node in enumerate(field_trie)}
+
+            def logits_at_node(
+                node: dict, _lookup=logits_by_branch, _index=branch_index
+            ) -> list[float]:
+                return _lookup[_index[id(node)]]
+
+            def legal_mass_at_node(
+                node: dict, _lookup=legal_mass_log_by_branch, _index=branch_index
+            ) -> float:
+                return math.exp(_lookup[_index[id(node)]])
+
+            raw_scores, raw_legal_mass_logs = score_trie(
+                field_trie, n_choices, logits_at_node, legal_mass_at_node
+            )
+            # Re-run the prior correction + temperature exactly as above so
+            # the rescored result is the canonical answer end to end.
+            prior_entry_rescored = None
+            if prior is not None:
+                prior_entry_rescored = prior.get(fname)
+            if prior_entry_rescored is not None:
+                real_choices = (
+                    [p["alias_map"][raw] for raw in choices_list]
+                    if scoring == "slots"
+                    else list(choices_list)
+                )
+                prior_scores = prior_entry_rescored["log_scores"]
+                scores = [
+                    s - prior_scores.get(c, 0.0)
+                    for s, c in zip(raw_scores, real_choices, strict=True)
+                ]
+                m = max(scores)
+                total = sum(math.exp(s - m) for s in scores)
+                scores = [s - (m + math.log(total)) for s in scores]
+            else:
+                scores = raw_scores
+            probs_list = softmax(scores, temperature=temperature)
+            order = sorted(range(n_choices), key=probs_list.__getitem__, reverse=True)
+            w_idx = order[0]
+        # The rescore already ran the canonical-shape decision; the 1e-6 check
+        # below applies ONLY to the unrescored path (an exact-equality tie is
+        # still inside the band, so unrescored means the band check passed
+        # with a single candidate — the 1e-6 branch is then unreachable; kept
+        # for cardinality-1 and degenerate safety).
+        is_tie = len(scores) > 1 and (scores[order[0]] - scores[order[1]]) < INSTABILITY_BAND
         w_prob = probs_list[w_idx]
 
         raw = choices_list[w_idx]
@@ -1842,9 +1975,16 @@ def run_parallel_generation(
             "log_scores": {choice: lp for choice, lp in zip(display_choices, scores, strict=True)},
             "top_choices": scored_choices[:5],
             "rows": len(field_trie),
-            # Set when top1-top2 < 1e-6 in log-score space: the winner was
-            # resolved by schema order, not by the model.
+            # W3-E: True only when the top candidates are STILL within
+            # INSTABILITY_BAND after the batch=1 rescore — the model genuinely
+            # cannot separate them at the canonical shape. Without the rescore
+            # (single band candidate), False: the batched margin was already
+            # decisive. The old 1e-6 semantics (exact-equality tie) is
+            # subsumed: exact equality is inside the band.
             "tie": is_tie,
+            # W3-E: set when this field's batched result was replaced by the
+            # batch=1 canonical rescore (top candidates inside the band).
+            "rescored": rescored,
             # W2-D: legal_mass — probability the model assigned to the union
             # of allowed continuations at the winner's branch point(s),
             # against the FULL vocabulary. A per-branch leakage signal:
@@ -1960,6 +2100,9 @@ def run_parallel_generation(
         "total_tokens_generated": 0,
         "peak_active_bytes": peak_active_bytes,
         "sequential_forward_passes": passes,
+        # W3-E: fields whose batched result was replaced by the batch=1
+        # canonical rescore (top candidates inside INSTABILITY_BAND).
+        "rescored_fields": rescored_fields,
         "schema_match": True,  # keys/enums guaranteed by construction; bench_model comparison
         # The per-choice probabilities are the constrained path probability
         # (product of masked branch softmaxes), not a normalized full-sequence
