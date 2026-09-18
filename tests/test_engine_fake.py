@@ -29,10 +29,13 @@ class FakeModel:
         batch, seq_len = tokens.shape
         if cache is not None:
             for c in cache:
-                if hasattr(c, "keys") and c.keys is not None:
-                    n_kv, seq_cached, head_dim = c.keys.shape[1], c.keys.shape[2], c.keys.shape[3]
-                    c.keys = mx.zeros((batch, n_kv, seq_cached + seq_len, head_dim))
-                    c.values = mx.zeros((batch, n_kv, seq_cached + seq_len, head_dim))
+                # Drive the cache like a real layer: update_and_fetch keeps
+                # BatchKVCache/KVCache offsets correct after the merge-based
+                # broadcast (the old direct keys/values stomp only worked for
+                # unbatched KVCache).
+                c.update_and_fetch(
+                    mx.zeros((batch, 2, seq_len, 8)), mx.zeros((batch, 2, seq_len, 8))
+                )
         return mx.zeros((batch, seq_len, self.vocab_size))
 
 
@@ -616,3 +619,184 @@ def test_probability_status_truthful_at_temperature_ne_one():
     assert "not a T=1 probability" in status
     at_two = run_parallel_generation(model, tokenizer, "ctx", schema, temperature=2.0)
     assert "temperature=2.0" in at_two["probability_status"]
+class _StatefulFakeCache:
+    """A minimal cache class with EXTRA state beyond keys/values.
+
+    Mimics ArraysCache-style caches: ``state`` carries an extra per-row array
+    that a keys/values-only broadcast would drop. Supports merge() like the
+    real mlx_lm classes (BatchKVCache-style batched cache after merge).
+    """
+
+    def __init__(self, keys=None, extra=None):
+        self.keys = keys
+        self.extra = extra  # e.g. a per-batch-row vector the model reads
+        self.offset = 0 if keys is None else keys.shape[2]
+
+    @property
+    def state(self):
+        return (self.keys, self.extra, self.offset)
+
+    @state.setter
+    def state(self, v):
+        self.keys, self.extra, self.offset = v
+
+    def empty(self):
+        return self.keys is None
+
+    @property
+    def nbytes(self):
+        if self.keys is None:
+            return 0
+        return int(self.keys.nbytes) + (int(self.extra.nbytes) if self.extra is not None else 0)
+
+    def update_and_fetch(self, keys, values):
+        prev_keys = self.keys
+        prev_extra = self.extra
+        if prev_keys is None:
+            self.keys = keys
+            self.extra = mx.zeros((keys.shape[0],), dtype=mx.float32) + 7.0
+        else:
+            self.keys = mx.concatenate([prev_keys, keys], axis=2)
+            self.extra = mx.concatenate([prev_extra, mx.zeros((keys.shape[0],))])
+        self.offset += keys.shape[2]
+        return self.keys, self.extra
+
+    @classmethod
+    def merge(cls, caches):
+        merged = cls()
+        merged.keys = mx.concatenate([c.keys for c in caches], axis=0)
+        merged.extra = mx.concatenate([c.extra for c in caches], axis=0)
+        merged.offset = caches[0].offset
+        return merged
+
+
+class StatefulCacheModel(FakeModel):
+    """FakeModel whose layers use _StatefulFakeCache.
+
+    The logits encode the extra state: the cache's extra value feeds the
+    winning token's logit. If a broadcast drops ``extra``, the winner flips —
+    so the parity test proves the old copy.keys/values path was lossy.
+    """
+
+    def __init__(self, vocab_size: int = 64):
+        super().__init__(vocab_size=vocab_size, n_layers=2)
+        self.seen_extra: list[float] = []
+
+    def make_cache(self):
+        # Like real mlx_lm models with custom caches: make_prompt_cache
+        # defers to model.make_cache().
+        return [_StatefulFakeCache() for _ in range(self.n_layers)]
+
+    def __call__(self, tokens, cache=None):
+        batch, seq_len = tokens.shape
+        for c in cache:
+            _keys, extra = c.update_and_fetch(
+                mx.zeros((batch, 2, seq_len, 8)), mx.zeros((batch, 2, seq_len, 8))
+            )
+            self.seen_extra.append(float(mx.reshape(extra[0], ())))
+        out = mx.zeros((batch, seq_len, self.vocab_size))
+        # Winner token gets a boost PROPORTIONAL to the extra state, so a
+        # dropped/zeroed extra changes the winner.
+        boost = self.seen_extra[-1]
+        return out.at[..., ord("A") % 60].add(boost)
+        # extra is 7.0 on a correct broadcast, 0.0 if dropped.
+
+
+def test_broadcast_keeps_extra_cache_state():
+    """W1-A bug 4: a cache with state beyond keys/values must survive the
+    broadcast. The old copy.copy + keys/values repeat dropped ``extra``; the
+    merge-based broadcast carries the full state and the winner reflects it."""
+    from jevmlx.engine import _broadcast_cache
+
+    base = _StatefulFakeCache(
+        keys=mx.zeros((1, 2, 4, 8)), extra=mx.zeros((1,), dtype=mx.float32) + 7.0
+    )
+    b = _broadcast_cache([base], 3)
+    assert b[0].extra.shape[0] == 3  # extra state broadcast, not dropped
+    assert float(b[0].extra[0]) == 7.0
+
+
+def test_broadcast_rejects_unmergeable_cache():
+    """W1-A: cache classes without merge raise UnsupportedCacheError instead
+    of being silently copied (quantized/concatenated state would corrupt)."""
+    import pytest as _pytest
+
+    from jevmlx.engine import UnsupportedCacheError, _broadcast_cache
+
+    class QuantizedLikeCache:
+        """mlx_lm QuantizedKVCache shape-alike: no merge classmethod."""
+
+        def __init__(self):
+            self.keys = (mx.zeros((1, 2, 4, 8)),)
+            self.offset = 4
+
+        def empty(self):
+            return False
+
+    with _pytest.raises(UnsupportedCacheError, match="no merge"):
+        _broadcast_cache([QuantizedLikeCache()], 2)
+
+
+def test_scoring_parity_batch1_vs_batchN_vs_chunked():
+    """W1-A bugs 4+5: scoring must be identical for batch=1 (row-per-pass),
+    one batch=N pass, and chunked passes — the old keys/values-only broadcast
+    and partial state evaluation made these diverge for nonstandard caches.
+
+    Uses the StatefulCacheModel: if extra state were dropped or the cache
+    evaluated incompletely, the winner token's boost would change and the
+    parsed values would differ between strategies.
+    """
+    model = StatefulCacheModel(vocab_size=64)
+    tokenizer = FakeTokenizer()
+    schema = StructuredSchema(
+        {"pick": {"type": "enum", "description": "d", "choices": ["ALPHA", "BETA"]}}
+    )
+    one = run_parallel_generation(model, tokenizer, "ctx", schema, max_rows=1)
+    model2 = StatefulCacheModel(vocab_size=64)
+    many = run_parallel_generation(model2, tokenizer, "ctx", schema)
+    assert one["parsed_json"] == many["parsed_json"]
+    # The winner must reflect the BROADCAST extra state (7.0 boost on 'A'
+    # alias); a dropped extra (0.0) would leave an exact tie.
+    telemetry = one["field_telemetry"]["pick"]
+    assert telemetry["tie"] is False
+
+
+def test_full_state_evaluation_includes_extra():
+    """W1-A bug 5: _eval_cache_state evaluates c.state (which includes
+    ``extra``), not just keys/values — a lazily-evaluated extra array would
+    be None/unevaluated at read time."""
+    from jevmlx.engine import _eval_cache_state
+
+    c = _StatefulFakeCache(
+        keys=mx.zeros((1, 2, 4, 8)), extra=mx.zeros((1,), dtype=mx.float32) + 7.0
+    )
+    _eval_cache_state([c])  # must not raise; extra is part of state
+    assert float(c.extra[0]) == 7.0
+
+
+def test_parity_exact_across_chunk_boundaries_real_positions():
+    """W1-A: scoring with two chunk boundaries must give EXACTLY the same
+    telemetry as one full batch — logits come from the fake model whose
+    outputs don't depend on batch composition, and the broadcast now carries
+    the full state, so chunking can only change grouping, never values."""
+    model = StatefulCacheModel(vocab_size=64)
+    tokenizer = FakeTokenizer()
+    schema = StructuredSchema(
+        {
+            "alpha": {"type": "enum", "description": "d", "choices": ["AA", "AB", "BA"]},
+            "beta": {"type": "boolean", "description": "d"},
+        }
+    )
+    full = run_parallel_generation(model, tokenizer, "ctx", schema)
+    for max_rows in (1, 2, 3):
+        again = run_parallel_generation(
+            StatefulCacheModel(vocab_size=64), tokenizer, "ctx", schema, max_rows=max_rows
+        )
+        assert again["parsed_json"] == full["parsed_json"], f"max_rows={max_rows}"
+        full_tel = full["field_telemetry"]
+        again_tel = again["field_telemetry"]
+        for fname in full_tel:
+            assert again_tel[fname]["log_scores"] == full_tel[fname]["log_scores"], (
+                f"max_rows={max_rows}, field={fname}"
+            )
+
