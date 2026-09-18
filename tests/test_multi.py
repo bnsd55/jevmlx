@@ -172,41 +172,47 @@ def test_multi_engine_result_semantics():
         {"flags": {"type": "multi", "description": "d", "choices": ["x", "y"]}}
     )
     model, tokenizer = FakeModel(), FakeTokenizer()
-    at_half = run_generation(schema, model, tokenizer, 0.5)
+    # Uncalibrated: zero logits -> P(yes) = 0.5 for every option -> all
+    # selected at the fixed 0.5 rule, margin 0 (boundary).
+    at_half = run_generation(schema, model, tokenizer)
     telemetry = at_half["field_telemetry"]["flags"]
     assert at_half["parsed_json"]["flags"]["value"] == ["x", "y"]
     assert at_half["parsed_json"]["flags"]["prob"] is None
     assert telemetry["probability"] is None
     assert telemetry["margin"] == pytest.approx(0.0)  # |0.5 - 0.5|
-    assert telemetry["threshold"] == 0.5
+    assert telemetry["calibrated"] is None
     assert telemetry["alternatives"] == (("x", 0.5), ("y", 0.5))
-    # Raising the threshold deselects everything; margin grows.
-    above = run_generation(schema, model, tokenizer, 0.51)
+    # Calibrated: b = -1 shifts every calibrated log-odds below 0 -> nothing
+    # selected; margin = 1 (the |calibrated| gap).
+    above = run_generation(schema, model, tokenizer, {"multi": {"a": 1.0, "b": -1.0}})
     assert above["parsed_json"]["flags"]["value"] == []
-    assert above["field_telemetry"]["flags"]["margin"] == pytest.approx(0.01)
-    # Lowering it keeps everything selected with a wider margin.
-    below = run_generation(schema, model, tokenizer, 0.4)
+    assert above["field_telemetry"]["flags"]["margin"] == pytest.approx(1.0)
+    assert above["field_telemetry"]["flags"]["calibrated"] == {"a": 1.0, "b": -1.0}
+    # b = +1 shifts everything above 0 -> all selected.
+    below = run_generation(schema, model, tokenizer, {"multi": {"a": 1.0, "b": 1.0}})
     assert below["parsed_json"]["flags"]["value"] == ["x", "y"]
-    assert below["field_telemetry"]["flags"]["margin"] == pytest.approx(0.1)
+    assert below["field_telemetry"]["flags"]["margin"] == pytest.approx(1.0)
     assert "log_scores" not in telemetry  # calibrate skips multi fields
 
 
-def run_generation(schema, model, tokenizer, threshold):
+def run_generation(schema, model, tokenizer, calibration=None):
     from jevmlx.engine import run_parallel_generation
 
-    return run_parallel_generation(model, tokenizer, "ctx", schema, multi_threshold=threshold)
+    return run_parallel_generation(model, tokenizer, "ctx", schema, calibration=calibration)
 
 
 def test_multi_threshold_validation():
-    """Threshold must live in (0, 1); the engine rejects anything else."""
-
+    """W2-E step 2: the threshold knob is DELETED. Bad calibration payloads
+    raise; the fake model returns zero logits everywhere, so the uncalibrated
+    rule selects everything (P(yes) = 0.5 >= 0.5) and a strongly negative
+    intercept calibrates everything away."""
     from tests.test_engine_fake import FakeModel, FakeTokenizer
 
     schema = StructuredSchema(
         {"flags": {"type": "multi", "description": "d", "choices": ["x", "y"]}}
     )
-    for bad in (0.0, 1.0, -0.1, 1.5):
-        with pytest.raises(ValueError, match="multi_threshold"):
+    for bad in (0.5, "nope", {"multi": {}}, {"multi": {"a": "x", "b": 0}}, 3.2):
+        with pytest.raises(ValueError, match="calibration"):
             run_generation(schema, FakeModel(), FakeTokenizer(), bad)
 
 

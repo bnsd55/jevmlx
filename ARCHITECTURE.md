@@ -83,7 +83,8 @@ result dict  {parsed_json, field_telemetry, prompt_sha256, …}
 | `cardinality` | Number of choices. |
 | `log_scores` | Constrained-path log P per choice at T=1, keyed by real choice string. Absent for multi. |
 | `per_option` | multi only: independent per-option P(yes). |
-| `option_logit_pairs` | multi only: raw [yes, no] logits per option at T=1 (what the prior cache stores). |
+| `option_logit_pairs` | multi only: raw [yes, no] logits per option at T=1 (what the prior cache and the multi calibrator consume). |
+| `calibrated` | multi only: the applied {"a", "b"} pooled-logistic calibrator, or None (fixed P(yes) >= 0.5 rule; the threshold knob is deleted). |
 | `top_choices` | Top (choice, probability) pairs, most probable first (top 5). |
 | `rows` | Rows the field consumed (0 for cardinality-1 fields). |
 | `margin` | Multi only: min |P(yes) - threshold| (engine-side name; the API exposes it as `threshold_distance`). |

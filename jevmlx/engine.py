@@ -487,6 +487,46 @@ def run_naive_generation(
     }
 
 
+def _load_calibration(calibration: str | dict | None) -> dict | None:
+    """Resolve the ``calibration`` argument to the {"multi": {"a", "b"}} dict.
+
+    Accepts a JSON file path (what ``jevmlx calibrate --out`` writes) or an
+    inline dict of the same shape. None -> None (uncalibrated path).
+    Raises ValueError on unreadable JSON, a wrong-shaped payload, or
+    non-finite coefficients.
+    """
+    if calibration is None:
+        return None
+    if isinstance(calibration, str):
+        try:
+            with open(calibration, encoding="utf-8") as f:
+                payload = json.load(f)
+        except FileNotFoundError as exc:
+            raise ValueError(f"calibration file not found: {calibration}") from exc
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"calibration file is not valid JSON: {calibration}: {exc}") from exc
+    elif isinstance(calibration, dict):
+        payload = calibration
+    else:
+        raise ValueError(
+            f"calibration must be a JSON file path, a dict, or None, "
+            f"got {type(calibration).__name__}"
+        )
+    multi = payload.get("multi") if isinstance(payload, dict) else None
+    if not isinstance(multi, dict):
+        raise ValueError(
+            'calibration payload must be {"multi": {"a": ..., "b": ...}}; '
+            f"got {json.dumps(payload)[:120]}"
+        )
+    try:
+        a, b = float(multi["a"]), float(multi["b"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f'calibration["multi"] must carry numeric "a" and "b": {exc}') from exc
+    if not (math.isfinite(a) and math.isfinite(b)):
+        raise ValueError(f"calibration coefficients must be finite, got a={a!r}, b={b!r}")
+    return {"multi": {"a": a, "b": b}}
+
+
 def _fold_multi(
     probs_true: dict[str, float], threshold: float
 ) -> tuple[list[str], float | None, float]:
@@ -644,7 +684,7 @@ def run_parallel_generation(
     temperature: float = 1.0,
     max_rows: int | None = None,
     scoring: str = "slots",
-    multi_threshold: float = 0.5,
+    calibration: str | dict | None = None,
     prior_correction: bool = False,
 ) -> dict[str, Any]:
     """Decide every schema field in one batched forward pass.
@@ -666,9 +706,13 @@ def run_parallel_generation(
     log-probability of its branch. Fields whose candidates never share a
     first token get exactly one row. Candidate probabilities sum to 1, so
     confidence = P(candidate). Multi fields use one yes/no row per option —
-    the row text is the natural question ('"<field>/<option>": ') and the
-    scored candidates are the quoted aliases "Y"/"N"; ``multi_threshold``
-    (0.5 by default) turns per-option P(yes) into the selected set.
+    the row text is the natural question ('"<field>/<code>": ' with the
+    quoted aliases "Y"/"N"). Without ``calibration`` an option is selected
+    when its P(yes) >= 0.5; with ``calibration`` (a JSON file path or a dict
+    with {"multi": {"a": ..., "b": ...}} — the shape ``jevmlx calibrate
+    --out`` writes) selection is calibrated_log_odds > 0 with
+    calibrated_log_odds = a * (yes_logit - no_logit) + b (W2-E step 2: no
+    threshold path exists anywhere).
 
     The prefill KV cache is broadcast across rows; batches larger than the
     chunking heuristic allows run in chunks over the same prefill cache.
@@ -684,8 +728,7 @@ def run_parallel_generation(
         raise ValueError(f"scoring must be 'slots' or 'labels', got {scoring!r}")
     if not math.isfinite(temperature) or temperature <= 0:
         raise ValueError(f"temperature must be a finite number > 0, got {temperature!r}")
-    if not 0.0 < multi_threshold < 1.0:
-        raise ValueError(f"multi_threshold must be in (0, 1), got {multi_threshold!r}")
+    calib = _load_calibration(calibration)
     if max_rows is not None and max_rows < 1:
         raise ValueError(f"max_rows must be >= 1, got {max_rows!r}")
 
@@ -946,6 +989,7 @@ def run_parallel_generation(
             # is claimed (calibrate skips multi fields). The margin is how
             # close the closest option's decision sat to the threshold.
             probs_yes = {}
+            raw_pairs: dict[str, list[float]] = {}
             prior_entry = prior.get(fname) if prior is not None else None
             prior_pairs = prior_entry["option_pairs"] if prior_entry else None
             # W2-E row codes: rows are keyed '<field>/<code>', but codes are
@@ -954,6 +998,7 @@ def run_parallel_generation(
             for oi, ridx in enumerate(idxs):
                 pair = list(option_pair[ridx])
                 option_name = p["options"][oi]
+                raw_pairs[option_name] = pair
                 if prior_pairs is not None and option_name in prior_pairs:
                     # Per-option additive prior in log space on the Y/N pair
                     # (P(yes) semantics: prior_pairs[option] =
@@ -966,7 +1011,23 @@ def run_parallel_generation(
                     pair = [v - (m + math.log(total)) for v in pair]
                 (p_yes, _p_no) = softmax(pair, temperature=temperature)
                 probs_yes[option_name] = p_yes
-            selected, _prob, margin = _fold_multi(probs_yes, multi_threshold)
+            # W2-E step 2 selection: with calibration, calibrated log-odds
+            # (a * (yes - no) + b) > 0 picks the option — the margin is the
+            # smallest |calibrated| gap (same nats scale, 0 means an option
+            # sits exactly on the decision boundary). Without calibration
+            # the fixed P(yes) >= 0.5 rule stands.
+            multi_ab = calib["multi"] if calib is not None else None
+            if multi_ab is not None:
+                a_coef, b_coef = multi_ab["a"], multi_ab["b"]
+                calibrated = {
+                    option: a_coef * (pair[0] - pair[1]) + b_coef
+                    for option, pair in raw_pairs.items()
+                }
+                selected = [option for option, c in calibrated.items() if c > 0]
+                margin = min((abs(c) for c in calibrated.values()), default=0.0)
+                probs_yes = {option: 1.0 / (1.0 + math.exp(-c)) for option, c in calibrated.items()}
+            else:
+                selected, _prob, margin = _fold_multi(probs_yes, threshold=0.5)
             ranked = sorted(probs_yes.items(), key=lambda kv: -kv[1])
             parsed_json[fname] = {
                 "value": selected,
@@ -995,7 +1056,19 @@ def run_parallel_generation(
                     {"choice": option, "probability": p_yes} for option, p_yes in ranked
                 ],
                 "rows": len(idxs),
-                "threshold": multi_threshold,
+                # W2-E step 2: calibrated (a, b) when a calibrator ran, else
+                # None — the threshold key is gone (no dual path).
+                # calibrated_log_odds: raw a*x+b per option (log-odds units)
+                # when calibrated, else absent; selection used c > 0 while
+                # margin stays in probability units (F1).
+                "calibrated": {"a": multi_ab["a"], "b": multi_ab["b"]}
+                if multi_ab is not None
+                else None,
+                **(
+                    {"calibrated_log_odds": {k: v for k, v in calibrated_log_odds.items()}}
+                    if calibrated_log_odds is not None
+                    else {}
+                ),
                 # W2-D: legal_mass for multi = product of per-option legal
                 # masses (each option's Y/N branch has its own leakage
                 # signal). Low mass at any option's Y/N position flags that

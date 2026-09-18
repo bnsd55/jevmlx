@@ -43,7 +43,14 @@
   separate confidence gate — fields whose margin falls below the cut are
   withheld from the model (`FieldResult.reason="abstain"`; the raw value
   stays for provenance). `allow_unknown` is removed with no alias. The
-  calibrated correctness model is a later milestone.
+  calibrated correctness model is W2.
+- Multi calibration (W2-E step 2): `jevmlx calibrate --out` fits a pooled
+  logistic (a, b) on raw multi option log-odds alongside the scalar
+  temperature and writes both to one JSON file; `decide`/`decide_many`/
+  `run_parallel_generation`/`decide_openai` accept `calibration=<path or
+  dict>` and select multi options by calibrated log-odds > 0. The
+  `multi_threshold` parameter and `--multi-threshold` flag are DELETED (no
+  dual path); uncalibrated selection stays at the fixed P(yes) >= 0.5 rule.
 - Prompt profiles: a frozen `PromptProfile` (template kwargs + system-role
   support) is resolved once at engine load. Qwen3-family models get
   `enable_thinking=False` so answers land in the direct channel; the
@@ -65,7 +72,7 @@ First release.
 
 - Parallel constrained decisions: every schema field decided in one batched forward pass on Apple Silicon (MLX), with per-choice probabilities from a token trie over the choices — probabilities sum to 1 with no extra softmax.
 - `jevmlx decide` CLI: run a bundled preset or your own schema/context; table output or `--json`; slot scoring (neutral aliases) by default, `--scoring labels` for real choice text; opt-in prior correction.
-- Multi-select fields decided as per-option yes/no rows with an exposed threshold (`--multi-threshold`); no field-level probability claimed, a threshold margin instead.
+- Multi-select fields decided as per-option yes/no rows; no field-level probability claimed, a margin instead (0.5-threshold distance uncalibrated, calibrated log-odds gap when a calibrator runs).
 - Typed Python API: `jevmlx.decide(PydanticModel, context)` returns a validated instance plus per-field provenance (probability, score, margin, top alternatives, calibration state, scoring mode); `decide_many` for batches.
 - Temperature calibration on labeled JSONL data (`jevmlx calibrate`).
 - New backend: the same decision semantics through any OpenAI-compatible chat endpoint that returns logprobs (`jevmlx decide --backend openai --base-url URL --api-model M`), one request per field; missing candidates in the endpoint's top-k get an explicit floor probability and are flagged in the output.
