@@ -10,6 +10,9 @@ import logging
 import weakref
 from typing import Any
 
+# W5-A finding 39: ONE canonical JSON serializer (see jevmlx/json_text.py).
+from jevmlx.json_text import json_text
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -536,14 +539,14 @@ class StructuredSchema:
         'Schema block format')."""
         parts = []
         for i, choice in enumerate(field.choices):
-            safe_choice = json.dumps(choice, ensure_ascii=False)
+            safe_choice = json_text(choice)
             gloss = field.choice_descriptions.get(choice)
-            gloss_part = f" — {json.dumps(gloss, ensure_ascii=False)}" if gloss else ""
+            gloss_part = f" — {json_text(gloss)}" if gloss else ""
             parts.append(f"{self.code_for_index(i)} = {safe_choice}{gloss_part}")
         return (
             "; ".join(parts)
             + " — how many of these apply? Answer one of "
-            + ", ".join(json.dumps(c) for c in COUNT_CODES)
+            + ", ".join(json_text(c) for c in COUNT_CODES)
             + "."
         )
 
@@ -554,27 +557,49 @@ class StructuredSchema:
         choices, so two digits always suffice)."""
         return f"{index:02d}"
 
-    def to_schema_str(self, mode: str = "slots") -> str:
+    def to_schema_str(self, mode: str = "slots", tokenizer=None) -> str:
         """Schema block for prompt v2, rendered per scoring mode.
 
-        mode ``"slots"`` lists each field's choices as neutral aliases
-        (``A) <choice>`` plus `` — <gloss>`` when a gloss exists); mode
-        ``"labels"`` lists the real choice strings (``LOW | MEDIUM``). The
-        aliases are what slot-trie scoring reads back on assembly; labels
-        mode shows exactly the text the scorer reads.
+        mode ``"slots"`` lists each field's choices under the aliases THE
+        COMPILED PLAN scored for this tokenizer (``A) <choice>`` when the
+        search picks the index aliases, ``0) <choice>`` when it picks
+        digits, etc.), plus `` — <gloss>`` when a gloss exists; mode
+        ``"labels"`` lists the real choice strings — exactly the text the
+        scorer reads.
+
+        W5-A finding 1: the compiled plan OWNS the displayed aliases. The
+        old independent ``_alias_code(i)`` rendering path taught the model
+        one protocol (A, B, C...) while the scorer judged another (whatever
+        ``_search_codebook`` picked, e.g. digits). Prompt and scorer can no
+        longer disagree because they are the same data: the slot block is
+        rendered from ``plan['fields'][name]['aliases']``.
+
+        ``tokenizer`` is REQUIRED for mode ``"slots"`` (the plan must be
+        compiled to know the searched codes) and ignored for ``"labels"``.
 
         Multi fields render once as a described yes/no menu — the field
         header states that each option is answered yes or no; the per-option
-        decision rows below (``"<field>/<option>"``) are answered with the
-        aliases Y/N.
+        decision rows below (``"<field>/<code>"``) are answered with Y/N.
         """
         if mode not in ("slots", "labels"):
             raise ValueError(f"mode must be 'slots' or 'labels', got {mode!r}")
+        slot_plan: dict[str, dict[str, Any]] | None = None
+        if mode == "slots":
+            if tokenizer is None:
+                raise ValueError(
+                    "to_schema_str(mode='slots') needs the tokenizer: the "
+                    "displayed aliases come from the COMPILED plan (W5-A "
+                    "finding 1 — the prompt must show the codebook the "
+                    "scorer reads), and that is tokenizer-specific"
+                )
+            slot_plan = self._cached_plan(tokenizer, mode="slots") or self.compile_slot_plan(
+                tokenizer
+            )
         lines = []
         for name, field in self.fields.items():
-            safe_name = json.dumps(name, ensure_ascii=False)
+            safe_name = json_text(name)
             desc = field.description.split("\n")[0].strip()
-            safe_desc = json.dumps(desc, ensure_ascii=False)
+            safe_desc = json_text(desc)
             if field.field_type == "multi":
                 menu = self._multi_field_header(field)
                 lines.append(
@@ -586,26 +611,36 @@ class StructuredSchema:
                 ["true", "false"] if field.field_type == "boolean" else list(field.choices)
             )
             if mode == "slots":
+                # W5-A finding 1: display the aliases the compiled plan
+                # scored (tokenizer-specific searched codes), never an
+                # independent index-derived rendering.
+                assert slot_plan is not None
+                displayed_aliases = slot_plan["fields"][name]["aliases"]
+                assert len(displayed_aliases) == len(choices_list), (
+                    f"plan aliases for {name!r} do not cover the choices"
+                )
                 parts = []
                 for i, choice in enumerate(choices_list):
-                    alias = _alias_code(i)
-                    safe_choice = json.dumps(choice, ensure_ascii=False)
+                    alias = displayed_aliases[i]
+                    safe_choice = json_text(choice)
                     gloss = field.choice_descriptions.get(choice)
-                    gloss_part = f" — {json.dumps(gloss, ensure_ascii=False)}" if gloss else ""
+                    gloss_part = f" — {json_text(gloss)}" if gloss else ""
                     parts.append(f"{alias}) {safe_choice}{gloss_part}")
             else:
                 parts = []
                 for choice in choices_list:
-                    safe_choice = json.dumps(choice, ensure_ascii=False)
+                    safe_choice = json_text(choice)
                     gloss = field.choice_descriptions.get(choice)
-                    gloss_part = f" — {json.dumps(gloss, ensure_ascii=False)}" if gloss else ""
+                    gloss_part = f" — {json_text(gloss)}" if gloss else ""
                     parts.append(f"{safe_choice}{gloss_part}")
             lines.append(f"  {safe_name}: {'  '.join(parts)}  // {safe_desc}")
         return "\n".join(lines)
 
-    def to_alias_schema_str(self) -> str:
-        """Schema block in slots mode (neutral aliases)."""
-        return self.to_schema_str("slots")
+    def to_alias_schema_str(self, tokenizer) -> str:
+        """Schema block in slots mode: aliases from the COMPILED plan for
+        ``tokenizer`` (W5-A finding 1 — the prompt shows the codebook the
+        scorer reads)."""
+        return self.to_schema_str("slots", tokenizer=tokenizer)
 
     def to_labels_schema_str(self) -> str:
         """Schema block in labels mode (real choice strings)."""
@@ -613,7 +648,12 @@ class StructuredSchema:
 
     @staticmethod
     def alias_for_index(index: int) -> str:
-        """The neutral alias for the choice at ``index`` (A, B, ..., AA, AB...)."""
+        """The index-derived alias (A, B, ..., AA, AB...).
+
+        W5-A finding 1: this is NO LONGER the prompt's displayed alias —
+        prompts render from the compiled plan. It remains only for the
+        OpenAI-compatible endpoint adapter's per-field requests, which do
+        not go through the compiled plan (openai_slots.py:113)."""
         return _alias_code(index)
 
     def plan_hash(self, tokenizer, mode: str) -> str:
@@ -699,7 +739,7 @@ class StructuredSchema:
             """The complete one-field JSON object for one alias row (W2-B:
             the candidate row protocol is the complete object, not a
             dangling '{\n  "field": "A",\n')."""
-            return json.dumps({name: alias}, ensure_ascii=False)
+            return json_text({name: alias})
 
         # Lead-in candidates: scalar fields' shared prefixes. Computed after
         # the per-field plans exist (same two-pass shape as labels mode).
@@ -829,7 +869,7 @@ class StructuredSchema:
             '{\n  "field": value,\n'). value_text is a pre-serialized JSON
             value (e.g. '"LOW"', 'true'), so we build the object string
             directly rather than double-encoding through json.dumps."""
-            return "{" + f"{json.dumps(name, ensure_ascii=False)}: {value_text}" + "}"
+            return "{" + f"{json_text(name)}: {value_text}" + "}"
 
         for fname, fdef in self.fields.items():
             if fdef.field_type != "multi":
@@ -991,7 +1031,7 @@ class StructuredSchema:
             keys and '<field>/<option>' option keys are injective across
             (field, option) pairs and field names).
             """
-            return "{" + f"{json.dumps(name, ensure_ascii=False)}: {value_text}" + "}"
+            return "{" + f"{json_text(name)}: {value_text}" + "}"
 
         multi_plan = self._compile_multi_plan(tokenizer)
         for fname, fdef in self.fields.items():
@@ -1005,7 +1045,7 @@ class StructuredSchema:
             if fdef.field_type == "boolean":
                 value_texts = ["true", "false"]
             else:
-                value_texts = [json.dumps(choice) for choice in fdef.choices]
+                value_texts = [json_text(choice) for choice in fdef.choices]
             candidates = [
                 tokenizer.encode(candidate_text(fname, value_text), add_special_tokens=False)
                 for value_text in value_texts

@@ -215,11 +215,11 @@ def test_grouped_contexts_prefill_their_own_prompts(monkeypatch):
     import json
 
     tok = FakeTokenizer()
+    from jevmlx.engine import _context_block
+
     for ctx, res in zip(contexts, batched, strict=True):
-        schema_str = schema.to_alias_schema_str()
-        user_content = (
-            f"Classify the following fields.\n\n{schema_str}\n\n<<<CONTEXT\n{ctx}\nCONTEXT>>>"
-        )
+        schema_str = schema.to_alias_schema_str(tok)
+        user_content = f"Classify the following fields.\n\n{schema_str}\n\n{_context_block(ctx)}"
         expected_ids = tok.encode(
             "\n".join(
                 m["content"]

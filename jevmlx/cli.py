@@ -403,6 +403,7 @@ def main(argv=None) -> None:
                 os.environ.get(args.api_key_env),
                 schema,
                 context,
+                tokenizer,
                 timeout=args.timeout,
                 calibration=args.calibration,
             )
