@@ -27,8 +27,14 @@ from jinja2.exceptions import TemplateError
 
 from jevmlx.json_text import json_text
 from jevmlx.models import resolve_model
-from jevmlx.schema import StructuredSchema, _common_token_prefix, count_key, is_count_key
-from jevmlx.setcons import select_constrained_set
+from jevmlx.schema import (
+    COUNT_CODES,
+    StructuredSchema,
+    _common_token_prefix,
+    count_key,
+    is_count_key,
+)
+from jevmlx.setcons import is_feasible, select_constrained_set
 from jevmlx.trie import build_trie, logsumexp, score_trie, softmax
 
 logger = logging.getLogger(__name__)
@@ -577,12 +583,20 @@ def _fold_multi(probs_true: dict[str, float]) -> tuple[list[str], float | None, 
     Returns (selected options, field probability, margin): an option is
     selected when its p_yes >= 0.5 (the fixed uncalibrated rule). No
     field-level probability is claimed (an exact-set probability would need
-    a separate calibrator); the margin is min |p_yes - 0.5| over ALL options
-    — how close the closest yes/no decision was (probability units, same
-    scale the abstention gate consumes).
+    a separate calibrator); the margin is min over ALL options of the
+    per-option distance from its threshold side (W5-C finding 20: floored
+    at 0 — an option on its decided side always contributes its distance;
+    a forced-against-side option contributes 0 after reconciliation, which
+    recomputes this same formula over the final set).
     """
     selected = [option for option, p_yes in probs_true.items() if p_yes >= 0.5]
-    margin = min((abs(p_yes - 0.5) for p_yes in probs_true.values()), default=0.0)
+    margin = min(
+        (
+            max(0.0, p_yes - 0.5) if p_yes >= 0.5 else max(0.0, 0.5 - p_yes)
+            for p_yes in probs_true.values()
+        ),
+        default=0.0,
+    )
     return selected, None, margin
 
 
@@ -2133,7 +2147,19 @@ def _assemble(
                 }
                 probs_yes = {option: 1.0 / (1.0 + math.exp(-c)) for option, c in calibrated.items()}
                 selected = [option for option, c in calibrated.items() if c > 0]
-                margin = min((abs(p - 0.5) for p in probs_yes.values()), default=0.0)
+                # W5-C finding 20 (threshold rule too): the pre-reconciler
+                # margin is min over ALL options of the per-option distance
+                # from its threshold side, floored at 0. The final margin is
+                # RECOMPUTED after every reconciler below.
+                margin = min(
+                    (
+                        max(0.0, probs_yes[o] - 0.5)
+                        if o in set(selected)
+                        else max(0.0, 0.5 - probs_yes[o])
+                        for o in probs_yes
+                    ),
+                    default=0.0,
+                )
                 calibrated_log_odds = calibrated
             else:
                 selected, _prob, margin = _fold_multi(probs_yes)
@@ -2188,30 +2214,50 @@ def _assemble(
                 else float("inf")
             )
             reconciled_by = "per_option"
+            # W5-C finding 19: the '4' bucket means AT LEAST FOUR, not
+            # exactly four. Internally it becomes an at-least-4 constraint
+            # in the joint optimization below (finding 18), never k=4.
+            count_is_at_least_4 = count_choice == COUNT_CODES[-1]
+            count_k = 4 if count_is_at_least_4 else int(count_choice)
+            # W5-C finding 18: ONE optimization. A trusted count becomes a
+            # constraint (exact-k for buckets 0-3, at-least-4 for the '4'
+            # bucket) inside the same solver that applies the schema's set
+            # constraints — never two reconcilers in sequence (the old code
+            # let the set solver erase a trusted count). The count evidence
+            # enters as a synthetic constraint alongside fdef.set_constraints.
+            trusted_count_constraints: list[dict] = []
             if count_margin > COUNT_MARGIN_MIN:
-                # Confident count: pick top-k by calibrated log-odds when a
-                # calibrator ran, else by P(yes) (monotone in log-odds —
-                # same ordering). k comes from the count bucket, capped at
-                # the field's option count ('4' = four or more).
-                k = min(4 if count_choice == "4" else int(count_choice), len(p["options"]))
-                if multi_ab is not None:
-                    ranked_by = sorted(calibrated_log_odds.items(), key=lambda kv: -kv[1])
+                capped_k = min(count_k, len(p["options"]))
+                if count_is_at_least_4:
+                    # at-least-4 as a constraint: synthesize at_least_k over
+                    # ALL options. The solver maximizes within it.
+                    trusted_count_constraints = [
+                        {
+                            "type": "at_least_k",
+                            "options": list(p["options"]),
+                            "k": min(4, len(p["options"])),
+                        }
+                    ]
+                elif capped_k <= len(p["options"]):
+                    trusted_count_constraints = [
+                        {"type": "exact_k", "options": list(p["options"]), "k": capped_k}
+                    ]
+                # Precedence: schema constraints are HARD (user-declared);
+                # the count is evidence. When they are jointly infeasible
+                # the count is unreliable and drops — the same solver,
+                # unscored, decides this before the single scored run.
+                if trusted_count_constraints and not is_feasible(
+                    list(p["options"]), [*fdef.set_constraints, *trusted_count_constraints]
+                ):
+                    trusted_count_constraints = []
                 else:
-                    ranked_by = sorted(probs_yes.items(), key=lambda kv: -kv[1])
-                selected = [option for option, _score in ranked_by[:k]]
-                reconciled_by = "count"
-            # W2-SETCONS: hard set constraints (schema-validated at compile
-            # time), applied LAST — after the threshold rule and the count
-            # reconciliation have proposed. The solver selects the
-            # score-maximizing set under the constraints, so a count- or
-            # threshold-proposed set that violates a declared constraint is
-            # corrected rather than emitted. Scores: the calibrated
-            # log-odds when a calibrator ran, else the RAW yes/no log-odds
-            # (the same per-option quantity calibration rescales — F3: no
-            # clamped logit(p), no magic constants; monotone in P(yes)
-            # either way, so a non-binding constraint set reproduces the
-            # proposal exactly).
-            set_constraints = fdef.set_constraints
+                    reconciled_by = "count"
+            # W2-SETCONS + W5-C finding 18: one optimization over the schema's
+            # set constraints AND the trusted-count constraint. The solver
+            # selects the score-maximizing set satisfying both. Scores: the
+            # calibrated log-odds when a calibrator ran, else the RAW yes/no
+            # log-odds (monotone in P(yes) either way).
+            set_constraints = [*fdef.set_constraints, *trusted_count_constraints]
             if set_constraints:
                 if calibrated_log_odds is not None:
                     option_scores = dict(calibrated_log_odds)
@@ -2225,13 +2271,25 @@ def _assemble(
                     set_constraints,
                     set(selected),
                 )
-                # The closest decision AFTER reconciliation: min |p_yes - 0.5|
-                # over the FINAL set's boundary options (an option forced in
-                # against its p_yes has margin 0 — the truth-telling signal).
+                reconciled_by = "count" if trusted_count_constraints else setcons_rule
+                # W5-C finding 20: the margin is min over ALL options of the
+                # per-option distance from its threshold side, recomputed
+                # after EVERY reconciler. An option forced against its
+                # threshold side (selected with p_yes < 0.5, or excluded
+                # with p_yes > 0.5) gets margin 0 — the truth-telling signal.
                 final_set = set(selected)
-                margins = [abs(probs_yes[o] - 0.5) for o in p["options"] if o in final_set]
-                margin = min(margins, default=margin)
+                margin = min(
+                    (
+                        max(0.0, probs_yes[o] - 0.5)
+                        if o in final_set
+                        else max(0.0, 0.5 - probs_yes[o])
+                        for o in p["options"]
+                    ),
+                    default=margin,
+                )
             else:
+                # No constraints at all (neither schema nor trusted count):
+                # the threshold proposal stands untouched.
                 setcons_rule = None
             ranked = sorted(probs_yes.items(), key=lambda kv: -kv[1])
             parsed_json[fname] = {

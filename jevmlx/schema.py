@@ -676,7 +676,9 @@ class StructuredSchema:
             "; ".join(parts)
             + " — how many of these apply? Answer one of "
             + ", ".join(json_text(c) for c in COUNT_CODES)
-            + "."
+            + " ("
+            + json_text(COUNT_CODES[-1])
+            + " means four or more)."
         )
 
     @staticmethod

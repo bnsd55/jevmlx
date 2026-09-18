@@ -224,3 +224,106 @@ def test_count_code_4_no_token_prefix_collision():
             _multi_schema().compile_slot_plan(_TruncatingTokenizer())
     finally:
         compile_globals["COUNT_CODES"] = old
+
+
+class TestW5CCountAndMargin:
+    """W5-C findings 18-20: count + set constraints are ONE optimization;
+    '4' means AT LEAST 4; decision_margin is min over ALL options of the
+    per-option distance from its threshold side, recomputed after every
+    reconciler."""
+
+    def test_trusted_count_not_erased_by_weaker_set_constraint(self):
+        """Finding 18: confident count=1 + a non-binding at_most_k(2)
+        constraint must NOT inflate the set back to two. The old code ran
+        count reconciliation then the set solver, which maximized positive
+        log-odds and returned two options, silently erasing the count."""
+        schema = StructuredSchema(
+            {
+                "flags": {
+                    "type": "multi",
+                    "description": "d",
+                    "choices": ["x", "y", "z"],
+                    "set_constraints": [{"type": "at_most_k", "options": ["x", "y", "z"], "k": 2}],
+                }
+            }
+        )
+        # Confident count '1'; all options say yes (p_yes = 0.5+ each).
+        model = _BiasedModel(count_bias={"0": -1.0, "1": 3.0}, yes_logit=1.0, no_logit=-1.0)
+        result = run_parallel_generation(model, _CountTokenizer(), "ctx", schema)
+        telemetry = result["field_telemetry"]["flags"]
+        assert telemetry["count_margin"] > COUNT_MARGIN_MIN
+        assert telemetry["count_choice"] == "1"
+        assert telemetry["reconciled_by"] == "count"
+        # The count wins: exactly one option, not the solver's two.
+        assert result["parsed_json"]["flags"]["value"] == ["x"]
+
+    def test_bucket_4_is_at_least_four_not_exactly_four(self):
+        """Finding 19: a 5-option field with a confident '4' bucket and four
+        strong-yes + one weak-yes must select the four strong options — but
+        '4' must NOT truncate a set that satisfies at-least-4 with more when
+        scores demand. With 5 options all tied, at-least-4 maximizes score
+        by selecting ALL five (each yes has positive log-odds)."""
+        schema = StructuredSchema(
+            {"flags": {"type": "multi", "description": "d", "choices": ["a", "b", "c", "d", "e"]}}
+        )
+        # Confident '4'; all options lean yes.
+        model = _BiasedModel(
+            count_bias={"0": -1.0, "1": -1.0, "2": -1.0, "3": -1.0, "4": 3.0},
+            yes_logit=1.0,
+            no_logit=-1.0,
+        )
+        result = run_parallel_generation(model, _CountTokenizer(), "ctx", schema)
+        telemetry = result["field_telemetry"]["flags"]
+        assert telemetry["count_margin"] > COUNT_MARGIN_MIN
+        assert telemetry["count_choice"] == "4"
+        # AT LEAST four: with all-tied positive scores the score-maximizer
+        # takes all five (the old exact-4 truncation returned exactly 4).
+        assert len(result["parsed_json"]["flags"]["value"]) == 5
+
+    def test_count_prompt_says_four_or_more(self):
+        """Finding 19: the prompt text must state that '4' means 'four or
+        more' — not just list the codes."""
+        schema = _multi_schema()
+        header = schema._multi_field_header(schema["flags"])
+        assert "four or more" in header
+
+    def test_margin_zero_when_count_forces_against_threshold(self):
+        """Finding 20: count forces an option IN that has p_yes < 0.5 —
+        the reported margin must be 0 (the final decision contradicts the
+        threshold side), not the distance of a comfortable option."""
+        schema = _multi_schema()
+        # Confident count '1'; options lean NO (p_yes < 0.5): the count
+        # forces one option in against its threshold side.
+        model = _BiasedModel(count_bias={"0": -1.0, "1": 3.0}, yes_logit=-1.0, no_logit=1.0)
+        result = run_parallel_generation(model, _CountTokenizer(), "ctx", schema)
+        telemetry = result["field_telemetry"]["flags"]
+        assert telemetry["reconciled_by"] == "count"
+        assert telemetry["margin"] == 0.0
+
+    def test_margin_includes_excluded_near_boundary_option(self):
+        """Finding 20: an excluded option at p_yes = 0.5001 must make the
+        margin ~0 (it sits on the wrong side of its threshold by a hair),
+        even though the selected options are comfortable."""
+        schema = StructuredSchema(
+            {
+                "flags": {
+                    "type": "multi",
+                    "description": "d",
+                    "choices": ["x", "y"],
+                    "set_constraints": [{"type": "at_most_one", "options": ["x", "y"]}],
+                }
+            }
+        )
+        # Both options lean yes (p_yes > 0.5); at_most_one keeps only the
+        # stronger. The EXCLUDED one is forced against its threshold side:
+        # margin must be 0.
+        model = _BiasedModel(
+            count_bias={"0": -1.0, "1": -1.0, "2": -1.0, "3": -1.0, "4": 3.0},
+            yes_logit=1.0,
+            no_logit=-1.0,
+        )
+        result = run_parallel_generation(model, _CountTokenizer(), "ctx", schema)
+        telemetry = result["field_telemetry"]["flags"]
+        # Both p_yes identical (same bias) — the solver keeps one, excludes
+        # the other; the excluded one is forced against its side.
+        assert telemetry["margin"] == 0.0
