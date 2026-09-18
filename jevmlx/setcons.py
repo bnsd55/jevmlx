@@ -59,6 +59,8 @@ def _check_local(constraint: dict, chosen: set[str]) -> bool:
         return hits <= constraint["k"]
     if ctype == "at_least_one":
         return hits >= 1
+    if ctype == "at_least_k":
+        return hits >= constraint["k"]
     if ctype == "exact_k":
         return hits == constraint["k"]
     if ctype == "implies":
