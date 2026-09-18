@@ -388,7 +388,7 @@ def test_multi_option_strict_prefix_pair_rejected():
             base = super().encode(text, add_special_tokens)
             # Make option_a's Y candidate a strict token-prefix of its N
             # candidate: encode the Y row as the N row minus its last token.
-            if "/opt_a" in text and ': "Y"' in text:
+            if "/00" in text and ': "Y"' in text:
                 n_cand = self.encode(text.replace(': "Y"', ': "N"'), add_special_tokens)
                 return n_cand[:-1]
             return base
@@ -530,7 +530,7 @@ def test_multi_option_no_common_prefix_rejected():
     schema = StructuredSchema(
         {"flags": {"type": "multi", "description": "d", "choices": ["opt_a", "opt_b"]}}
     )
-    with pytest.raises(ValueError, match="option 'opt_a'.*share no token prefix"):
+    with pytest.raises(ValueError, match=r"option '00' \('opt_a'\).*share no token prefix"):
         schema.compile_labels_plan(NoCommonPair())
 
 

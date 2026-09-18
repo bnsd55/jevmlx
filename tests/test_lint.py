@@ -280,7 +280,7 @@ def test_multi_only_schema_strict_prefix_pair_yields_one_compile_error():
 
         def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
             # opt_a's Y candidate is a strict token-prefix of its N candidate.
-            if "/opt_a" in text and ': "Y"' in text:
+            if "/00" in text and ': "Y"' in text:
                 n_cand = self.encode(text.replace(': "Y"', ': "N"'), add_special_tokens)
                 return n_cand[:-1]
             return super().encode(text, add_special_tokens)

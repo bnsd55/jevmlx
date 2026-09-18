@@ -141,13 +141,16 @@ def _check_multi_reconstruction(schema, tokenizer, mode: str):
         if "suffix_ids_list" not in fplan:
             continue
         options = fplan["options"]
+        # W2-E row codes: rows are keyed '<field>/<code>'; the reconstruction
+        # target must be built from the CODE, not the raw option text.
+        codes = fplan["codes"]
         for opt_idx, (suffix, remainders) in enumerate(
             zip(fplan["suffix_ids_list"], fplan["remainders"], strict=True)
         ):
-            option = options[opt_idx]
+            option, code = options[opt_idx], codes[opt_idx]
             for yn_idx, alias in enumerate(("Y", "N")):
                 remainder = remainders[yn_idx]
-                full_text = _candidate_text_multi(fname, option, alias)
+                full_text = _candidate_text_multi(fname, code, alias)
                 full_ids = tokenizer.encode(full_text, add_special_tokens=False)
                 recon = _reconstruct_row(lead_in, suffix, remainder)
                 assert recon == full_ids, (
@@ -230,11 +233,12 @@ def test_slot_plan_does_not_call_labels_plan():
 
 
 def test_multi_prompt_shows_yn_codes():
-    """Q6-6: the multi section must show exact Y/N codes next to options."""
+    """Q6-6 + W2-E: the multi section maps code = option (choices order) and
+    shows the exact quoted Y/N codes the scorer reads."""
     schema = _multi_only_schema()
     block = schema.to_schema_str("slots")
-    assert "Y = applies" in block
-    assert "N = does not apply" in block
+    assert '"Y" = applies or "N" = does not apply' in block
+    assert '00 = "alpha"' in block and '01 = "beta"' in block
 
 
 def test_field_names_json_dumps_escaped():
@@ -259,4 +263,4 @@ def test_prompt_version_bumped():
     """PROMPT_VERSION is now v3 (W1-B)."""
     from jevmlx.engine import PROMPT_VERSION
 
-    assert PROMPT_VERSION == "jevmlx-parallel-v3"
+    assert PROMPT_VERSION == "jevmlx-parallel-v4"
