@@ -11,7 +11,7 @@ import urllib.request
 
 import pytest
 
-from jevmlx.api import DEFAULT_MODEL, MODEL_ALIASES, resolve_model
+from jevmlx.models import DEFAULT_MODEL, MODEL_ALIASES, resolve_model
 
 
 class TestAliasResolution:

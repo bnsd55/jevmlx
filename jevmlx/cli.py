@@ -16,7 +16,8 @@ import sys
 from importlib import resources
 
 from jevmlx import __version__
-from jevmlx.api import DEFAULT_MODEL
+from jevmlx.api import _SUPPORTED, NONE_OF_ABOVE, NONE_OF_ABOVE_DESCRIPTION
+from jevmlx.models import DEFAULT_MODEL
 from jevmlx.engine import load_engine, run_parallel_generation
 from jevmlx.lint import lint_schema
 from jevmlx.log import configure

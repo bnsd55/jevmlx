@@ -49,6 +49,9 @@ jevmlx decide --model fast --schema ticket.json --context ticket.txt
 
 A full Hub id also works (`--model mlx-community/Llama-3.2-3B-Instruct-4bit`).
 
+The default `quality` model downloads ~4.5 GB on first use; `fast` (~2 GB)
+is a lighter alternative if download size or latency matters.
+
 ## Use it from Python
 
 ```python

@@ -24,6 +24,8 @@ import sys
 import urllib.request
 from pathlib import Path
 
+from jevmlx.models import DEFAULT_MODEL, resolve_model
+
 __all__ = ["Check", "doctor_checks", "run_doctor"]
 
 
@@ -237,8 +239,6 @@ def _cached_models(cache: Path) -> list[tuple[str, float]]:
 
 def check_hf_cache() -> tuple[Check, list[tuple[str, float]]]:
     """Cache path, size, cached mlx-community models; default model cached?"""
-    import jevmlx.api as api
-
     cache = _hf_cache_dir()
     if not cache.is_dir():
         return (
@@ -251,12 +251,12 @@ def check_hf_cache() -> tuple[Check, list[tuple[str, float]]]:
         )
     models = _cached_models(cache)
     total_gb = round(_dir_size_bytes(cache) / 2**30, 2)
-    default_hub_id = api.resolve_model(api.DEFAULT_MODEL)
+    default_hub_id = resolve_model(DEFAULT_MODEL)
     slug = "models--" + default_hub_id.replace("/", "--")
     default_cached = (cache / slug).is_dir()
     detail = (
         f"{cache} ({total_gb} GB, {len(models)} mlx-community models); "
-        f"default {api.DEFAULT_MODEL} ({default_hub_id}): "
+        f"default {DEFAULT_MODEL} ({default_hub_id}): "
         f"{'cached' if default_cached else 'NOT cached'}"
     )
     if not default_cached:

@@ -128,43 +128,35 @@ def _compute_tokenizer_metrics(
     from jevmlx.trie import build_trie
 
     plan = plan_provider(schema)
-    fields_plan = plan.get("fields", {})
+    fields_plan = plan["fields"]
 
     code_lengths: list[int] = []
     single_branch_count = 0
     scalar_count = 0
     max_depth = 0
 
-    for _fname, fp in fields_plan.items():
-        if not isinstance(fp, dict):
-            continue
+    for fp in fields_plan.values():
         if "remainders" in fp:
             # Scalar field (enum/boolean).
             scalar_count += 1
-            shared = fp.get("shared_ids", [])
-            if fp.get("single_branch"):
+            shared = fp["shared_ids"]
+            if fp["single_branch"]:
                 single_branch_count += 1
             for remainder in fp["remainders"]:
                 code_lengths.append(len(shared) + len(remainder))
-            trie = build_trie(fp["remainders"])
-            for node in trie:
-                depth = len(node.get("path", []))
+            for node in build_trie(fp["remainders"]):
+                depth = len(node["path"])
                 if depth > max_depth:
                     max_depth = depth
         elif "suffix_ids_list" in fp:
-            # Multi field: each option is a Y/N row.
-            for suffix in fp["suffix_ids_list"]:
-                for rem_list in fp.get("remainders", []):
-                    if isinstance(rem_list, list):
-                        code_lengths.append(len(suffix) + len(rem_list[0]) if rem_list else 0)
+            # Multi field: each option pairs with its own Y/N remainders.
+            for suffix, remainders in zip(fp["suffix_ids_list"], fp["remainders"], strict=True):
+                # Y candidate: suffix + first Y remainder token length.
+                code_lengths.append(len(suffix) + len(remainders[0]))
 
     mean_legal_mass = None
     if field_telemetry:
-        masses = [
-            ft.get("legal_mass")
-            for ft in field_telemetry.values()
-            if isinstance(ft, dict) and ft.get("legal_mass") is not None
-        ]
+        masses = [ft["legal_mass"] for ft in field_telemetry.values() if ft["legal_mass"] is not None]
         if masses:
             mean_legal_mass = sum(masses) / len(masses)
 

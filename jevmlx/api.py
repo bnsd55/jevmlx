@@ -28,34 +28,7 @@ from pydantic import BaseModel
 from jevmlx.engine import load_engine, run_parallel_generation
 from jevmlx.schema import StructuredSchema
 
-DEFAULT_MODEL = "quality"
-
-#: Human-friendly aliases for common MLX instruct models. ``--model fast`` /
-#: ``--model quality`` resolve to a specific Hub id; a bare alias keeps
-#: demos short and makes the default model swappable in one place.
-MODEL_ALIASES: dict[str, str] = {
-    "fast": "mlx-community/Qwen2.5-3B-Instruct-4bit",
-    "quality": "mlx-community/Qwen2.5-7B-Instruct-4bit",
-    # The 1.5B stays only in tests — it's too small for production use.
-    "test": "mlx-community/Qwen2.5-1.5B-Instruct-4bit",
-}
-
-
-def resolve_model(model: str) -> str:
-    """Resolve a model alias to a Hugging Face Hub id.
-
-    Aliases (``fast``, ``quality``, ``test``) are case-insensitive and map to
-    full Hub ids. A literal Hub id (contains ``/``) is returned as-is. This
-    runs at every call, never at import — no network request is made here;
-    a slow test verifies the Hub ids exist.
-    """
-    if "/" in model:
-        return model
-    key = model.lower()
-    if key in MODEL_ALIASES:
-        return MODEL_ALIASES[key]
-    return model
-
+from jevmlx.models import DEFAULT_MODEL, MODEL_ALIASES, resolve_model
 
 _SUPPORTED = (
     "supported field types: bool, Literal[str, ...], enum.Enum/enum.StrEnum with str values, "
