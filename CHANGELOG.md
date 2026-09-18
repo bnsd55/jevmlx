@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Multi count row (W2-E step 3): every multi field gets an extra decision row
+  `<field>#count` (candidates `0`, `1`, `2`, `3`, `4+`, scored like a scalar
+  enum through the trie; the row always runs). When the count row's top-2
+  margin clears `COUNT_MARGIN_MIN` (0.7 nats) the selected set is reconciled
+  to the top-k options by calibrated log-odds (P(yes) order uncalibrated —
+  monotone-equivalent), k capped at the option count; otherwise the
+  per-option rule stands. Telemetry: `count_choice`, `count_margin`,
+  `reconciled_by` on the field entry plus a `<field>#count` scalar entry.
+
+
 - W2-D legal_mass telemetry: per-branch leakage signal added to engine
   field telemetry. legal_mass = sum(exp(z_allowed)) / sum(exp(z_vocab)) —
   the probability the model assigned to the union of allowed continuations

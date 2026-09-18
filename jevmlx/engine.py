@@ -1408,6 +1408,10 @@ def run_parallel_generation(
     # order of the remainders pair, ["Y", "N"); used both for the P(yes)
     # softmax and, verbatim at T=1, as the cached prior pair (bug 8).
     option_pair: dict[int, list[float]] = {}
+    # W2-E step 3: count-row branch logits — {row idx -> {count-branch idx
+    # -> [child logits in children order]}}. Kept separate from node_logits
+    # (a field could legally have both a scalar trie and a count row).
+    count_node_logits: dict[int, dict[int, list[float]]] = {}
     # Per branch row: the natural-log legal mass = logsumexp(allowed) -
     # logsumexp(full vocab) at the branch position. The probability the model
     # assigned to the union of allowed continuations against the full
@@ -1419,21 +1423,25 @@ def run_parallel_generation(
     # Run the batched suffix forward passes through _score_rows (F3: the ONE
     # copy of the padded/broadcast/gather scoring loop, shared with
     # _selective_second_pass). The caller dispatches the per-row logits into
-    # node_logits (branch-node rows) or option_pair (multi option rows).
+    # node_logits (branch-node rows), option_pair (multi option rows, RAW Y/N
+    # logits in remainder order ["Y", "N"]; bug 8: these raw logits are what
+    # the prior cache stores — no reconstruction from scaled probabilities)
+    # or count_node_logits (W2-E step 3 count rows, keyed by count-branch idx).
     row_logits, row_legal_mass_log, passes, t_gather_ms = _score_rows(
         model, cache, rows, row_decision, vocab_size, pad_id, auto_max_rows
     )
-    # Dispatch: branch-node rows go into node_logits keyed by branch idx;
-    # multi option rows go into option_pair (RAW Y/N logits in remainder
-    # order ["Y", "N"]; bug 8: these raw logits are what the prior cache
-    # stores — no reconstruction from scaled probabilities). legal_mass_log
-    # mirrors the same keying.
     for ridx in range(len(rows)):
         values = row_logits[ridx]
         mass_log = row_legal_mass_log[ridx]
         if ridx in row_option:
             option_pair[ridx] = values
             node_legal_mass_log[ridx] = mass_log
+        elif ridx in row_count:
+            # W2-E step 3 count row: branch logits under the count trie's
+            # branch-node index (a separate dict — never mixed with
+            # option/branch keys); legal mass mirrors the scalar shape.
+            count_node_logits[ridx] = {row_count[ridx]: values}
+            node_legal_mass_log[ridx] = {row_count[ridx]: mass_log}
         else:
             node_logits[ridx] = {row_branch[ridx]: values}
             node_legal_mass_log[ridx] = {row_branch[ridx]: mass_log}

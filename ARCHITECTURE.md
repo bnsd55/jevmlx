@@ -85,6 +85,7 @@ result dict  {parsed_json, field_telemetry, prompt_sha256, …}
 | `per_option` | multi only: independent per-option P(yes). |
 | `option_logit_pairs` | multi only: raw [yes, no] logits per option at T=1 (what the prior cache and the multi calibrator consume). |
 | `calibrated` | multi only: the applied {"a", "b"} pooled-logistic calibrator, or None (fixed P(yes) >= 0.5 rule; the threshold knob is deleted). |
+| `count_choice` / `count_margin` / `reconciled_by` | multi only: the `<field>#count` row's winning bucket ('0'..'4+'), its top-2 log-score margin (nats), and which rule produced the selected set ('count' when the margin cleared COUNT_MARGIN_MIN, else 'per_option'). |
 | `top_choices` | Top (choice, probability) pairs, most probable first (top 5). |
 | `rows` | Rows the field consumed (0 for cardinality-1 fields). |
 | `margin` | Multi only: min |P(yes) - threshold| (engine-side name; the API exposes it as `threshold_distance`). |

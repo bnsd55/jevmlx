@@ -58,7 +58,7 @@ for name, f in result.fields.items():
 - `allow_none_of_above=True` adds an explicit `NONE_OF_ABOVE` choice — the answer "none of the options apply" — and maps it to `None` (`FieldResult.reason` is `"none_of_above"`). Fields must be Optional.
 - `abstain_below_margin=X` is the confidence gate, separate from the opt-out: any field whose margin (`probability_margin` for scalar, `threshold_distance` for multi) sits below `X` is withheld from the model (`FieldResult.reason="abstain"`; the raw value stays on the FieldResult). A raw margin cut for now — calibrated abstention is a later milestone.
 - `alternatives` lists the other options with their probabilities.
-- Multi-select options are selected at P(yes) >= 0.5, or by fitted calibration: `calibration=<path-or-dict>` (what `jevmlx calibrate --out` writes) selects an option when `a * log_odds + b > 0` on its raw yes/no logits.
+- Multi-select options are selected at P(yes) >= 0.5, or by fitted calibration: `calibration=<path-or-dict>` (what `jevmlx calibrate --out` writes) selects an option when `a * log_odds + b > 0` on its raw yes/no logits. A per-field count row (`<field>#count`, candidates `0..4+`, always runs) reconciles the set to top-k by calibrated log-odds when its own top-2 margin clears `COUNT_MARGIN_MIN` (0.7 nats); below the gate the per-option rule stands.
 - Margins are unit-split and nullable: `log_score_margin` (scalar fields, top1-top2 log-score gap at T=1), `probability_margin` (scalar fields, top1-top2 probability after temperature), `threshold_distance` (multi fields, min |P(yes) - 0.5| uncalibrated or min |calibrated log-odds| calibrated). A field carries exactly one of the three.
 - CLI equivalent: `jevmlx decide --help`.
 
