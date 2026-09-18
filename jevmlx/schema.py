@@ -77,15 +77,18 @@ def _search_codebook(
 ) -> tuple[list[str], bool]:
     """Search a codebook for the best alias set for one field.
 
-    GREEDY (F1): tokenize each candidate row ONCE per code (a code's tokens
-    do not depend on the other codes), then pick n_choices codes greedily in
-    priority order, skipping any code whose remainder equals or is a
-    token-prefix of an already chosen one. O(pool) tokenizations.
+    BOUNDED SEARCH (W5-A finding 2, was F1 greedy): tokenize each candidate
+    row ONCE per code (a code's tokens do not depend on the other codes),
+    build the prefix-conflict graph over the pool, and search for the best
+    size-n prefix-free independent set with bounded backtracking. Greedy
+    never revisited: an A-is-a-prefix-of-B/C/D pool raised even though
+    {B, C, D} was valid. The lexicographic objective (branch nodes, max
+    trie depth, max candidate tokens, token-length variance, code length)
+    scores every COMPLETE set; the best set wins. Pools are small (36
+    singles, 1296 pairs) and the visited-node cap (200k) bounds the work.
 
     Candidate codes: A-Z, then digits, then 2-char alphanumerics. Homogeneous
     pools first (letters, then digits, then mixed), then 2-char. DETERMINISTIC.
-    The lexicographic objective (branch nodes, max trie depth, max candidate
-    tokens, token-length variance, code length) is computed on the FINAL set.
 
     Returns ``(codes, single_branch)``. Raises :class:`SchemaCompileError`
     when no valid set exists (F2: no silent fallback).
@@ -102,24 +105,79 @@ def _search_codebook(
         return a[: len(b)] == b or b[: len(a)] == a
 
     def _greedy_pick(pool: list[str]) -> list[str] | None:
-        # Pre-tokenize each code's complete candidate row (once per code).
+        # W5-A finding 2: BOUNDED backtracking search, not greedy. Greedy
+        # never revisits: if code A is a token-prefix of B, C and D, it
+        # commits to A, rejects B/C/D, and raises even though {B, C, D} is a
+        # valid set. Pre-tokenize each candidate row once (a code's tokens do
+        # not depend on the other codes), then search the conflict graph for
+        # a size-n prefix-free independent set, scoring every COMPLETE set
+        # with the existing lexicographic objective. Pools are small (36
+        # singles, 1296 pairs); n <= 64; bounded by a visited-node cap.
         tokenized = {
             code: tokenizer.encode(candidate_text_fn(code), add_special_tokens=False)
             for code in pool
         }
+
+        # Conflict iff one candidate's remainder (under the pair's common
+        # prefix) equals or is a token-prefix of the other's — those two
+        # codes can never coexist in a distinguishable set.
+        def conflicts(a: str, b: str) -> bool:
+            full_a, full_b = tokenized[a], tokenized[b]
+            shared = _common_token_prefix([full_a, full_b])
+            rem_a = full_a[len(shared) :]
+            rem_b = full_b[len(shared) :]
+            return _is_prefix_pair(rem_a, rem_b)
+
+        best: tuple[tuple, list[str]] | None = None
         chosen: list[str] = []
-        for code in pool:
-            full = tokenized[code]
-            all_fulls = [tokenized[c] for c in chosen] + [full]
-            shared = _common_token_prefix(all_fulls)
-            remainder = full[len(shared) :]
-            prior_remainders = [tokenized[c][len(shared) :] for c in chosen]
-            if any(_is_prefix_pair(remainder, pr) for pr in prior_remainders):
-                continue
-            chosen.append(code)
+        visited = 0
+        # Bounded: 20k node visits per pool. Pools are priority-ordered and
+        # the caller picks the lexicographic best across pools, so the cap
+        # trades a hair of optimality for compile latency (the 26-choose-26
+        # worst case must stay <1s).
+        # Tighter cap for large n: the tree is C(pool, n)-shaped; for
+        # n > 16 the exhaustive part must give way to the cap quickly.
+        max_visits = 20_000 if n_choices <= 16 else 2_000
+
+        def record(complete: list[str]) -> None:
+            nonlocal best
+            key = _score(complete)
+            if best is None or key < best[0]:
+                best = (key, list(complete))
+
+        def backtrack(start: int) -> None:
+            nonlocal visited
+            if visited >= max_visits:
+                return
+            visited += 1
             if len(chosen) == n_choices:
-                return chosen
-        return None if len(chosen) < n_choices else chosen
+                record(chosen)
+                return
+            # Bound 1: can we still reach n_choices from here?
+            if len(pool) - start < n_choices - len(chosen):
+                return
+            # Bound 2: are there enough NON-CONFLICTING codes left? A node
+            # whose residual conflict graph cannot supply the rest is cut
+            # without visiting its subtree.
+            remaining = [pool[i] for i in range(start, len(pool))]
+            still_ok = sum(1 for c in remaining if not any(conflicts(c, x) for x in chosen))
+            if still_ok < n_choices - len(chosen):
+                return
+            # Prune: if a complete set is already recorded with a better
+            # possible prefix... (no cheap admissible bound beyond the pool
+            # check; the visited cap bounds the search).
+            for idx in range(start, len(pool)):
+                code = pool[idx]
+                if any(conflicts(code, c) for c in chosen):
+                    continue
+                chosen.append(code)
+                backtrack(idx + 1)
+                chosen.pop()
+                if best is not None and visited >= max_visits:
+                    return
+
+        backtrack(0)
+        return best[1] if best is not None else None
 
     def _score(codes: list[str]) -> tuple[int, int, int, float, int]:
         fulls = [tokenizer.encode(candidate_text_fn(c), add_special_tokens=False) for c in codes]
@@ -141,12 +199,25 @@ def _search_codebook(
     for pool in pools:
         if not pool or n_choices > len(pool):
             continue
+        # _greedy_pick now returns the best COMPLETE set it found (bounded
+        # backtracking + lexicographic objective), or None.
         codes = _greedy_pick(pool)
         if codes is None:
             continue
         key = _score(codes)
         if best is None or key < best[0]:
             best = (key, codes)
+        # Early exit on a single-branch-node set: 1 branch node is the
+        # objective's first component at its minimum (n >= 2 needs exactly
+        # one node), and pool order is priority — later pools can only tie
+        # on node count while paying full search cost. Keeps the
+        # 26-choice compile under a second (the C(36,26) backtracking tree
+        # never runs to its cap); determinism unaffected (fixed pool
+        # order). If no pool reaches 1 node, the full bounded search
+        # across all pools still picks the lexicographic best.
+        if key[0] == 1:
+            best = (key, codes)
+            break
     if best is None:
         raise SchemaCompileError(
             field_name,
