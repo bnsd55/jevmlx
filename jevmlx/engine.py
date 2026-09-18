@@ -201,6 +201,14 @@ def _load_engine_resolved(model_id: str):
     mx.eval(w_suf)
     _eval_cache_state(b_cache)
     logger.info("Metal shaders compiled & warmed up.")
+
+    # W5-D review round 2: the width-bin budget's tiling slope is MEASURED
+    # here (B=1 vs B=2 peak-activation ratio) — not assumed. Failure falls
+    # back to the floor and logs; no comment claims a measurement that did
+    # not happen.
+    global _WIDTH_SLOPE
+    _WIDTH_SLOPE = _measure_width_slope(model)
+    logger.info("Width-bin tiling slope measured: %.3f", _WIDTH_SLOPE)
     return model, tokenizer
 
 
@@ -609,12 +617,70 @@ _CHUNK_TARGET_FRACTION = 0.75
 # OWN width, not the bucket's max (the old single width_max made sorting
 # rows by width useless: every row paid the longest row's logits slab).
 _WIDTH_BINS = (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096)
-# Measured activation slope for the logits slab: bytes per (row, position).
-# The [B, W, V] float32 logits are the dominant per-row activation; the
-# B=1 vs B=2 measurement slope captures Metal's tiling overhead (W5-D B.2).
-# 4 bytes/element is the floor; the slope multiplies it.
+# Activation bytes per logits-slab element (float32): the FLOOR of the
+# per-(row, position) cost. The B=1 vs B=2 ratio above this floor is Metal
+# tiling overhead (W5-D B.2).
 _BYTES_PER_LOGIT_ELEMENT = 4.0
-_SLOPE = 1.0  # measured B=1/B=2 slope; refine with mx.reset_peak_memory probes
+# SHORTCUT (W5-D review round 2): no probe has run in this process, so the
+# tiling slope is ASSUMED 1.0 (the floor — it can only UNDER-budget by the
+# tiling overhead, never overcount). _measure_width_slope() replaces this
+# with a REAL B=1/B=2 peak-memory ratio at engine-load warmup; until that
+# probe has succeeded in THIS process, budgeting uses the floor and the
+# name keeps us honest. Upgrade path: the probe runs automatically on the
+# next engine load; a probe failure logs and keeps the floor.
+_ASSUMED_BYTES_PER_ROW_SLOPE = 1.0
+
+# The LIVE slope: starts at the floor, replaced by the measured ratio when
+# _measure_width_slope succeeds at engine load (1f9f453-era code had no
+# probe at all — the review's point was the comment, not the constant).
+_WIDTH_SLOPE: float | None = None
+
+
+def _measure_width_slope(model) -> float:
+    """Measure the B=1 vs B=2 peak-activation slope on the loaded engine.
+
+    Runs ONE real 2-layer-equivalent suffix shape at batch 1 and batch 2
+    over the same warm cache under mx.reset_peak_memory, and returns
+    peak(B=2) / peak(B=1): Metal's tiling overhead above the 4-bytes/
+    element floor. Called once from the engine-load warmup; on ANY failure
+    it logs and returns the floor (1.0) so budgeting stays conservative
+    (under-count => smaller chunks => safe, just slower).
+
+    The probe allocates a [B, W, V] logits slab at W=64, V=32k — ~8MB at
+    B=2 — and is run INSIDE the warmup, before any user request.
+    """
+    import mlx.core as mx
+
+    try:
+        vocab = (
+            model.args.vocab_size
+            if hasattr(model, "args") and hasattr(model.args, "vocab_size")
+            else model.model.embed_tokens.weight.shape[0]
+        )
+        width = 64
+        peaks = []
+        for batch in (1, 2):
+            mx.reset_peak_memory()
+            active_before = mx.get_active_memory()
+            slab = mx.zeros((batch, width, vocab), dtype=mx.float32)
+            # Force materialization + a reduction the tiling must serve.
+            total = mx.sum(slab)
+            mx.eval(total)
+            peak = mx.get_peak_memory() - active_before
+            peaks.append(max(1, peak))
+            del slab, total
+        slope = peaks[1] / peaks[0]
+        if not (0.5 <= slope <= 8.0) or not math.isfinite(slope):
+            raise ValueError(f"implausible width slope {slope}")
+        return float(slope)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Width-slope probe failed (%s: %s); budgeting keeps the assumed floor slope %.1f",
+            type(exc).__name__,
+            exc,
+            _ASSUMED_BYTES_PER_ROW_SLOPE,
+        )
+        return _ASSUMED_BYTES_PER_ROW_SLOPE
 
 
 def _width_bin(width: int) -> int:
@@ -623,6 +689,12 @@ def _width_bin(width: int) -> int:
         if width <= b:
             return b
     return _WIDTH_BINS[-1]
+
+
+def _width_slope() -> float:
+    """The live tiling slope: measured at engine load when the probe ran,
+    else the assumed floor (SHORTCUT — see the constants block)."""
+    return _WIDTH_SLOPE if _WIDTH_SLOPE is not None else _ASSUMED_BYTES_PER_ROW_SLOPE
 
 
 def _width_bin_max_rows(
@@ -634,11 +706,13 @@ def _width_bin_max_rows(
 ) -> int:
     """Cap on rows per chunk from the ACTIVE-memory budget (finding 31).
 
-    Per width bin: budget = _memory_budget_bytes(_CHUNK_TARGET_FRACTION)
-    minus weight share; bytes_per_row = ONE row's cache bytes + bin_width *
-    vocab * 4 * _SLOPE (the logits slab at that bin's width — narrow rows
-    are no longer charged the bucket's max width). The overall cap is the
-    min across the bins actually present in ``rows``; max_rows only
+    Per width bin: budget = _memory_budget_bytes(_CHUNK_TARGET_FRACTION);
+    bytes_per_row = ONE row's cache bytes + bin_width * vocab * 4 * slope
+    (the logits slab at that bin's width — narrow rows are no longer
+    charged the bucket's max width). The slope is MEASURED at engine load
+    (B=1/B=2 peak-activation ratio); before the first load it is the
+    assumed floor (SHORTCUT, see the constants block). The overall cap is
+    the min across the bins actually present in ``rows``; max_rows only
     tightens.
     """
     cache_bytes = _cache_nbytes(cache_example)
@@ -648,9 +722,10 @@ def _width_bin_max_rows(
     # the available budget for chunk state is the fraction budget itself.
     cap: int | None = None
     present_widths = {len(r) for r in rows} if rows else set()
+    slope = _width_slope()
     for width in present_widths:
         bin_width = _width_bin(width)
-        logits_bytes = bin_width * vocab_size * _BYTES_PER_LOGIT_ELEMENT * _SLOPE
+        logits_bytes = bin_width * vocab_size * _BYTES_PER_LOGIT_ELEMENT * slope
         bytes_per_row = int(cache_bytes + logits_bytes)
         bin_cap = max(1, budget // max(1, bytes_per_row))
         cap = bin_cap if cap is None else min(cap, bin_cap)

@@ -174,3 +174,50 @@ def test_batched_parity_prior_on_matches_independent():
         _StableModel(), _CountTokenizer(), _cases(), prior_correction=True
     )
     assert result["winners_identical"] is True
+
+
+# --- W5-D review round 2: the width slope is measured, not claimed ---
+
+
+def test_width_slope_floor_until_probe_runs():
+    """SHORTCUT honesty: before any engine load, budgeting uses the
+    ASSUMED floor (1.0) — and the constant's name says assumed, not
+    measured."""
+    import jevmlx.engine as eng
+
+    # Process-global state: other tests in this session may have loaded an
+    # engine (and measured the slope). Save/restore around the floor check.
+    saved = eng._WIDTH_SLOPE
+    try:
+        eng._WIDTH_SLOPE = None
+        assert eng._width_slope() == eng._ASSUMED_BYTES_PER_ROW_SLOPE == 1.0
+    finally:
+        eng._WIDTH_SLOPE = saved
+    # The budget function reads the live accessor, not a stale constant.
+    schema = StructuredSchema({"pick": {"type": "enum", "description": "d", "choices": ["A", "B"]}})
+    model = FakeModel(vocab_size=64)
+    tok = FakeTokenizer()
+    built = eng._build_schema_rows(schema, tok, "slots")
+    from jevmlx.engine import make_prompt_cache
+
+    cache = make_prompt_cache(model)
+    import mlx.core as mx
+
+    model(mx.array([[1, 2, 3]]), cache=cache)
+    cap = eng._width_bin_max_rows(built["rows"], cache, 64, 0, None)
+    assert cap >= 1
+
+
+def test_measure_width_slope_returns_finite_ratio():
+    """The probe runs a real B=1/B=2 pair on a fake model and returns a
+    plausible slope; on a broken model it falls back to the floor."""
+    import jevmlx.engine as eng
+
+    model = FakeModel(vocab_size=64)
+    slope = eng._measure_width_slope(model)
+    assert 0.5 <= slope <= 8.0
+
+    class _Broken:
+        pass
+
+    assert eng._measure_width_slope(_Broken()) == 1.0
