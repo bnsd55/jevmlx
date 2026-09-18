@@ -25,6 +25,7 @@ from typing import Any, NamedTuple
 
 from jinja2.exceptions import TemplateError
 
+from jevmlx.calibrate import CalibrationBundle
 from jevmlx.json_text import json_text
 from jevmlx.models import resolve_model
 from jevmlx.schema import (
@@ -537,44 +538,90 @@ def run_naive_generation(
     }
 
 
-def _load_calibration(calibration: str | dict | None) -> dict | None:
-    """Resolve the ``calibration`` argument to the {"multi": {"a", "b"}} dict.
+def _load_calibration(
+    calibration: str | dict | CalibrationBundle | None,
+    *,
+    temperature: float = 1.0,
+    scoring: str = "slots",
+    prior_correction: bool = False,
+) -> tuple[CalibrationBundle | None, float]:
+    """Resolve the ``calibration`` argument to a typed bundle (W5-C finding 22).
 
-    Accepts a JSON file path (what ``jevmlx calibrate --out`` writes) or an
-    inline dict of the same shape. None -> None (uncalibrated path).
-    Raises ValueError on unreadable JSON, a wrong-shaped payload, or
-    non-finite coefficients.
+    Accepts a JSON file path (what ``jevmlx calibrate --out`` writes), an
+    inline dict of the same shapes, or an already-constructed
+    :class:`~jevmlx.calibrate.CalibrationBundle`. None -> (None, temperature).
+
+    Provenance (finding 21/22): a bundle that names a prompt_version,
+    scoring mode, prior_mode, or model_revision the request does not match
+    is REJECTED — never silently applied. The scalar temperature is derived
+    from the bundle; an explicit caller temperature conflicting with it
+    (not equal within 1e-9) is an error. prior_mode 'neutral_v1' requires
+    prior_correction=True and vice versa on the multi path.
+
+    Returns ``(bundle_or_None, effective_temperature)``.
     """
     if calibration is None:
-        return None
-    if isinstance(calibration, str):
-        try:
-            with open(calibration, encoding="utf-8") as f:
-                payload = json.load(f)
-        except FileNotFoundError as exc:
-            raise ValueError(f"calibration file not found: {calibration}") from exc
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"calibration file is not valid JSON: {calibration}: {exc}") from exc
-    elif isinstance(calibration, dict):
-        payload = calibration
+        return None, temperature
+    if isinstance(calibration, CalibrationBundle):
+        bundle = calibration
     else:
+        if isinstance(calibration, str):
+            try:
+                with open(calibration, encoding="utf-8") as f:
+                    payload = json.load(f)
+            except FileNotFoundError as exc:
+                raise ValueError(f"calibration file not found: {calibration}") from exc
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"calibration file is not valid JSON: {calibration}: {exc}"
+                ) from exc
+        elif isinstance(calibration, dict):
+            payload = calibration
+        else:
+            raise ValueError(
+                f"calibration must be a JSON file path, a dict, a "
+                f"CalibrationBundle, or None, got {type(calibration).__name__}"
+            )
+        try:
+            bundle = CalibrationBundle.from_payload(payload)
+        except ValueError as exc:
+            raise ValueError(f"calibration payload invalid: {exc}") from exc
+
+    # Provenance checks (finding 21/22): reject a bundle that does not
+    # describe this request.
+    from jevmlx.engine import PROMPT_VERSION as _PV  # noqa: PLC0415 — avoids import cycle at module load
+
+    if bundle.prompt_version is not None and bundle.prompt_version != _PV:
         raise ValueError(
-            f"calibration must be a JSON file path, a dict, or None, "
-            f"got {type(calibration).__name__}"
+            f"calibration bundle prompt_version {bundle.prompt_version!r} does not "
+            f"match this engine's {_PV!r}; the fitted coefficients do not apply"
         )
-    multi = payload.get("multi") if isinstance(payload, dict) else None
-    if not isinstance(multi, dict):
+    if bundle.scoring is not None and bundle.scoring != scoring:
         raise ValueError(
-            'calibration payload must be {"multi": {"a": ..., "b": ...}}; '
-            f"got {json.dumps(payload)[:120]}"
+            f"calibration bundle scoring {bundle.scoring!r} does not match the "
+            f"request scoring {scoring!r}"
         )
-    try:
-        a, b = float(multi["a"]), float(multi["b"])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError(f'calibration["multi"] must carry numeric "a" and "b": {exc}') from exc
-    if not (math.isfinite(a) and math.isfinite(b)):
-        raise ValueError(f"calibration coefficients must be finite, got a={a!r}, b={b!r}")
-    return {"multi": {"a": a, "b": b}}
+    if bundle.prior_mode == "neutral_v1" and not prior_correction:
+        raise ValueError(
+            "calibration bundle prior_mode='neutral_v1' was fitted on "
+            "prior-corrected log-odds; the request runs prior_correction=False"
+        )
+    if bundle.prior_mode == "off" and prior_correction and bundle.has_multi:
+        raise ValueError(
+            "calibration bundle prior_mode='off' was fitted on raw evidence "
+            "log-odds; the request runs prior_correction=True. Fit and apply "
+            "must use the same input (finding 21)"
+        )
+    effective_temperature = temperature
+    if bundle.has_scalar:
+        if abs(temperature - 1.0) > 1e-9 and abs(temperature - bundle.temperature) > 1e-9:
+            raise ValueError(
+                f"explicit temperature={temperature} conflicts with the "
+                f"calibration bundle's fitted temperature={bundle.temperature}; "
+                "pass temperature=1.0 to defer to the bundle"
+            )
+        effective_temperature = bundle.temperature
+    return bundle, effective_temperature
 
 
 def _fold_multi(probs_true: dict[str, float]) -> tuple[list[str], float | None, float]:
@@ -946,10 +993,8 @@ def _get_or_compute_prior(
     prior: dict[str, Any] = {}
     for fname, telemetry in result["field_telemetry"].items():
         if is_count_key(fname):
-            # W2-E step 3: count rows surface in telemetry under
-            # '<field>#count' as scalar-type entries — cache their
-            # log_scores verbatim (the evidence path subtracts them like
-            # any scalar prior).
+            # W5-C finding 24: count rows live under internal_telemetry; this
+            # branch stays for old cached payloads written before the split.
             prior[fname] = {
                 "type": "scalar",
                 "log_scores": dict(telemetry["log_scores"]),
@@ -967,6 +1012,13 @@ def _get_or_compute_prior(
         else:
             prior[fname] = {
                 "type": telemetry["type"],
+                "log_scores": dict(telemetry["log_scores"]),
+            }
+    # W5-C finding 24: count rows moved to internal_telemetry.
+    for fname, telemetry in result.get("internal_telemetry", {}).items():
+        if is_count_key(fname):
+            prior[fname] = {
+                "type": "scalar",
                 "log_scores": dict(telemetry["log_scores"]),
             }
 
@@ -1852,7 +1904,12 @@ def run_parallel_generation(
         raise ValueError(f"scoring must be 'slots' or 'labels', got {scoring!r}")
     if not math.isfinite(temperature) or temperature <= 0:
         raise ValueError(f"temperature must be a finite number > 0, got {temperature!r}")
-    calib = _load_calibration(calibration)
+    calib, temperature = _load_calibration(
+        calibration,
+        temperature=temperature,
+        scoring=scoring,
+        prior_correction=prior_correction,
+    )
     if max_rows is not None and max_rows < 1:
         raise ValueError(f"max_rows must be >= 1, got {max_rows!r}")
 
@@ -1959,7 +2016,7 @@ def _assemble(
     prior: dict[str, Any] | None,
     prior_ms: float,
     prior_correction: bool,
-    calib: dict | str | None,
+    calib: CalibrationBundle | None,
     scoring: str,
     temperature: float,
     max_rows: int | None,
@@ -2037,6 +2094,10 @@ def _assemble(
     #    rounding anywhere in the engine's results (presentation rounds in cli).
     parsed_json: dict[str, Any] = {}
     field_telemetry: dict[str, Any] = {}
+    # W5-C finding 24: internal scoring rows (the '<field>#count' rows) live
+    # here, never in field_telemetry — public API construction iterates
+    # field_telemetry only, so internal rows cannot reach Decision.fields.
+    internal_telemetry: dict[str, Any] = {}
     # W3-E: fields whose batched result was replaced by the batch=1 rescore.
     rescored_fields: list[str] = []
 
@@ -2138,9 +2199,11 @@ def _assemble(
             # compares it to a [0, 1) cut) — min |sigmoid(c) - 0.5|; the raw
             # calibrated log-odds ride telemetry as calibrated_log_odds.
             # Without calibration the fixed P(yes) >= 0.5 rule stands.
-            multi_ab = calib["multi"] if calib is not None else None
+            multi_ab = (
+                (calib.multi_a, calib.multi_b) if calib is not None and calib.has_multi else None
+            )
             if multi_ab is not None:
-                a_coef, b_coef = multi_ab["a"], multi_ab["b"]
+                a_coef, b_coef = multi_ab
                 calibrated = {
                     option: a_coef * (pair[0] - pair[1]) + b_coef
                     for option, pair in raw_pairs.items()
@@ -2324,9 +2387,20 @@ def _assemble(
                 # calibrated_log_odds: raw a*x+b per option (log-odds units)
                 # when calibrated, else absent; selection used c > 0 while
                 # margin stays in probability units (F1).
-                "calibrated": {"a": multi_ab["a"], "b": multi_ab["b"]}
+                "calibrated": {"a": multi_ab[0], "b": multi_ab[1]}
                 if multi_ab is not None
                 else None,
+                # W5-C finding 23: FieldResult.calibrated must reflect the
+                # APPLIED calibrator per field — the identity rides the
+                # telemetry (bundle provenance: prior_mode the calibrator
+                # was fitted under, per finding 21).
+                **(
+                    {
+                        "calibration_id": calib.identity()
+                        if calib is not None and calib.has_multi
+                        else None
+                    }
+                ),
                 **(
                     {"calibrated_log_odds": {k: v for k, v in calibrated_log_odds.items()}}
                     if calibrated_log_odds is not None
@@ -2381,12 +2455,15 @@ def _assemble(
                 }
                 field_telemetry[fname]["prior_corrected"] = True
 
-            # W2-E step 3: the count row surfaces as its own scalar-type
-            # telemetry entry keyed '<field>#count' (the prior pass reads
-            # it; parsed_json stays multi-field only).
+            # W2-E step 3 + W5-C finding 24: the count row surfaces under
+            # internal_telemetry keyed '<field>#count' (the prior pass reads
+            # it; parsed_json stays multi-field only). Internal rows NEVER
+            # enter field_telemetry — the public Decision.fields mapping is
+            # built from field_telemetry, so a '#count' key can no longer
+            # leak into the user's result.
             count_display = list(p["count"]["codes"])
             count_probs = [math.exp(lp) for lp in count_log_probs]
-            field_telemetry[count_key(fname)] = {
+            internal_telemetry[count_key(fname)] = {
                 "value": count_choice,
                 "type": "enum",
                 "probability": max(count_probs),
@@ -2751,6 +2828,9 @@ def _assemble(
         "second_pass_ms": second_pass_telemetry["second_pass_ms"],
         "parsed_json": parsed_json,
         "field_telemetry": field_telemetry,
+        # W5-C finding 24: internal rows ('<field>#count') — separate from
+        # field_telemetry so public API construction never sees them.
+        "internal_telemetry": internal_telemetry,
         "num_fields": len(schema),
     }
 
@@ -2851,6 +2931,15 @@ def run_parallel_generation_batched(
     #    should have similar cache sizes so the incremental budget check
     #    (below) admits groups that actually fit together.
     pf_cache: dict[int, PrefillResult] = {}
+    # W5-C finding 22: resolve the calibration bundle ONCE (provenance
+    # validated against this request) and hand the same object to every
+    # _assemble — no repeated file parsing, no per-group re-resolution.
+    calib_resolved, temperature = _load_calibration(
+        calibration,
+        temperature=temperature,
+        scoring=scoring,
+        prior_correction=prior_correction,
+    )
 
     def _prefill_cached(idx: int, ctx: str) -> PrefillResult:
         if idx not in pf_cache:
@@ -2921,7 +3010,7 @@ def run_parallel_generation_batched(
                     prior=prior,
                     prior_ms=prior_ms,
                     prior_correction=prior_correction,
-                    calib=_load_calibration(calibration),
+                    calib=calib_resolved,
                     scoring=scoring,
                     temperature=temperature,
                     max_rows=max_rows,
@@ -2995,7 +3084,7 @@ def run_parallel_generation_batched(
                 prior=prior,
                 prior_ms=prior_ms,
                 prior_correction=prior_correction,
-                calib=_load_calibration(calibration),
+                calib=calib_resolved,
                 scoring=scoring,
                 temperature=temperature,
                 max_rows=max_rows,

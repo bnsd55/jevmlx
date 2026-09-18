@@ -26,14 +26,16 @@ def _multi_schema():
 def test_count_row_always_runs_and_lands_in_telemetry():
     """The count row always runs when a multi field exists (no flag): the
     result carries count_choice/count_margin/reconciled_by plus a separate
-    '<field>#count' scalar entry; the parsed value is unchanged."""
+    '<field>#count' scalar entry under internal_telemetry (W5-C finding 24:
+    internal rows never enter field_telemetry); the parsed value is
+    unchanged."""
     model = _BiasedModel(count_bias={}, yes_logit=1.0, no_logit=-1.0)
     result = run_parallel_generation(model, _CountTokenizer(), "ctx", _multi_schema())
     telemetry = result["field_telemetry"]["flags"]
     assert telemetry["count_choice"] in ("0", "1", "2", "3", "4")
     assert isinstance(telemetry["count_margin"], float)
     assert telemetry["reconciled_by"] in ("per_option", "count")
-    count_entry = result["field_telemetry"]["flags#count"]
+    count_entry = result["internal_telemetry"]["flags#count"]
     assert count_entry["type"] == "enum"
     assert set(count_entry["log_scores"]) == {"0", "1", "2", "3", "4"}
     # All logits zero -> margin 0 < gate -> per_option rule stands.
