@@ -79,13 +79,13 @@ def _mixed_schema():
 
 
 def _candidate_text_scalar(name: str, value_text: str) -> str:
-    """The full assistant tail for one scalar row (matches schema.py)."""
-    return "{\n" + f"  {json.dumps(name)}: {value_text}" + ",\n"
+    """The complete one-field JSON object for one scalar row (W2-B protocol)."""
+    return "{" + f"{json.dumps(name)}: {value_text}" + "}"
 
 
 def _candidate_text_multi(name: str, option: str, alias: str) -> str:
-    """The full assistant tail for one multi Y/N row (matches schema.py)."""
-    return "{\n" + f'  {json.dumps(f"{name}/{option}")}: "{alias}"' + ",\n"
+    """The complete one-field JSON object for one multi Y/N row (W2-B protocol)."""
+    return "{" + f'{json.dumps(f"{name}/{option}")}: "{alias}"' + "}"
 
 
 def _reconstruct_row(lead_in: list[int], shared: list[int], remainder: list[int]) -> list[int]:
@@ -263,4 +263,4 @@ def test_prompt_version_bumped():
     """PROMPT_VERSION is now v3 (W1-B)."""
     from jevmlx.engine import PROMPT_VERSION
 
-    assert PROMPT_VERSION == "jevmlx-parallel-v4"
+    assert PROMPT_VERSION == "jevmlx-parallel-v5"

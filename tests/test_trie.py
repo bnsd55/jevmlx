@@ -64,16 +64,17 @@ def test_plan_uses_full_sequence_tokenization():
     tok = NonCompositionalTokenizer()
     plan = schema.compile_labels_plan(tok)
     remainders = plan["fields"]["action"]["remainders"]
-    # '  "action": "LOW"'+',\n' -> [7, _QUOTE, comma, newline]
-    # '  "action": "LOWER"'+',\n' -> [999, _QUOTE, comma, newline]
+    # W2-B: candidate is the complete one-field JSON object '{"action": "LOW"}'.
+    # Remainder = 'LOW"}' -> [7, _QUOTE, }]
+    # Remainder = 'LOWER"}' -> [999, _QUOTE, }]
     # (LOWER is ONE token; the old character-prefix plan would have produced
     # token 8 (ER) somewhere and missed the terminator.)
-    assert remainders == [[7, _QUOTE, 44, 10], [999, _QUOTE, 44, 10]]
+    assert remainders == [[7, _QUOTE, 125], [999, _QUOTE, 125]]
     flat = [t for remainder in remainders for t in remainder]
     assert 8 not in flat
-    # The shared lead-in is the '{\n  "action": "' structure, kept out of
+    # The shared lead-in is the '{"action": "' structure, kept out of
     # shared_ids as the schema-wide prefix (the engine's prefill tail).
-    assert plan["lead_in_ids"] == tok.encode('{\n  "action": "')
+    assert plan["lead_in_ids"] == tok.encode('{"action": "')
     assert plan["fields"]["action"]["shared_ids"] == []
     assert 999 not in plan["lead_in_ids"]
 
@@ -89,8 +90,8 @@ def test_plan_cache_is_per_tokenizer():
     tok_b = OtherTokenizer()
     plan_a = schema.compile_labels_plan(tok_a)
     plan_b = schema.compile_labels_plan(tok_b)
-    assert plan_a["fields"]["action"]["remainders"] == [[7, _QUOTE, 44, 10], [999, _QUOTE, 44, 10]]
-    assert plan_b["fields"]["action"]["remainders"] == [[3, _QUOTE, 44, 10], [555, _QUOTE, 44, 10]]
+    assert plan_a["fields"]["action"]["remainders"] == [[7, _QUOTE, 125], [999, _QUOTE, 125]]
+    assert plan_b["fields"]["action"]["remainders"] == [[3, _QUOTE, 125], [555, _QUOTE, 125]]
     assert len(schema._plans) == 2
     assert schema.compile_labels_plan(tok_a) is plan_a
     assert schema.compile_labels_plan(tok_b) is plan_b
@@ -222,26 +223,23 @@ def test_choice_with_double_quote_is_json_escaped():
 
     bs_quote = chr(92) + chr(34)  # backslash + double quote, the JSON escape
     candidate_text = (
-        chr(123)
-        + chr(10)
-        + "  "
-        + chr(34)
+        chr(123)  # {
+        + chr(34)  # "
         + "quote"
-        + chr(34)
+        + chr(34)  # "
         + ": "
-        + chr(34)
+        + chr(34)  # "
         + "say "
         + bs_quote
         + "hi"
         + bs_quote
-        + chr(34)
-        + ","
-        + chr(10)
+        + chr(34)  # "
+        + chr(125)  # }
     )
     expected_escaped = tok.encode(candidate_text)
     assert lead_in + shared + remainders[0] == expected_escaped
     # A naive f-string candidate (invalid JSON) would tokenize differently.
-    assert tok.encode('{\n  "quote": "say ""hi"""\n') != expected_escaped
+    assert tok.encode('{"quote": "say ""hi"""}') != expected_escaped
 
 
 def test_strict_token_prefix_remainder_rejected():
@@ -374,7 +372,7 @@ def test_mixed_schema_rows_carry_lead_in_exactly_once():
     # And the enum candidate must still round-trip to its full text.
     p = plan["fields"]["action"]
     full = lead_in + p["shared_ids"] + p["remainders"][0]
-    assert full == tok.encode('{\n  "action": "LOW",\n')
+    assert full == tok.encode('{"action": "LOW"}')
 
 
 def test_multi_option_strict_prefix_pair_rejected():
@@ -568,7 +566,7 @@ def test_field_named_lead_in_ids_does_not_collide():
     )
     plan = schema.compile_labels_plan(tok)
     # Metadata key present and correct.
-    assert plan["lead_in_ids"] == tok.encode('{\n  "')
+    assert plan["lead_in_ids"] == tok.encode('{"')
     # Both fields have their own untouched plans.
     assert "_lead_in_ids" in plan["fields"]
     assert "lead_in_ids" in plan["fields"]

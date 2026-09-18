@@ -72,7 +72,7 @@ def test_exact_token_reconstruction_with_codes():
         ):
             code = p["codes"][i]
             for alias, remainder in zip(("Y", "N"), remainders, strict=True):
-                full_text = "{\n" + f'  {json.dumps(f"tags/{code}")}: "{alias}"' + ",\n"
+                full_text = "{" + f'{json.dumps(f"tags/{code}")}: "{alias}"' + "}"
                 full_ids = tok.encode(full_text, add_special_tokens=False)
                 recon = list(plan["lead_in_ids"]) + list(suffix) + list(remainder)
                 assert recon == full_ids, (mode, code, alias)
@@ -110,4 +110,4 @@ def test_engine_telemetry_maps_codes_to_option_names():
     assert [c for c, _ in telemetry["alternatives"]] == ["alpha", "beta", "gamma"]
     assert [e["choice"] for e in telemetry["top_choices"]] == ["alpha", "beta", "gamma"]
     assert result["parsed_json"]["tags"]["value"] == ["alpha", "beta", "gamma"]
-    assert result["prompt_version"] == "jevmlx-parallel-v4"
+    assert result["prompt_version"] == "jevmlx-parallel-v5"
