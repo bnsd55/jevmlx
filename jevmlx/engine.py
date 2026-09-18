@@ -766,12 +766,19 @@ def _score_rows(
     vocab_size: int,
     pad_id: int,
     auto_max_rows: int,
+    cache_slots: list | None = None,
 ) -> ScoreRowsResult:
     """Run batched suffix forward passes over prefill cache and gather logits.
 
     Shared by the main scoring loop (run_parallel_generation) and the
     selective second pass (_selective_second_pass). This is the ONE copy of
     the padded/broadcast/gather scoring loop (F3: was duplicated).
+
+    ``cache_slots`` (W3-F): optional per-row cache list (len == len(rows)).
+    When given, each chunk merges exactly its own cache slots (batched
+    decide_many: slot i holds context i//R's prefill) instead of broadcasting
+    ONE cache. None (default) broadcasts the single prefill cache — the
+    original per-context behaviour, unchanged.
 
     Returns ``(row_logits, row_legal_mass_log, passes, t_gather_ms)``:
     - row_logits: {row_idx -> [child logits in allowed order]}
@@ -814,7 +821,17 @@ def _score_rows(
                 dtype=mx.int32,
             )
             t_bcast0 = time.perf_counter()
-            b_cache = _broadcast_cache(cache, chunk_len)
+            if cache_slots is not None:
+                # W3-F batched path: merge exactly this chunk's slots (row i
+                # of the chunk pairs with cache slot chunk_rows[i]).
+                b_cache = [
+                    type(cache_slots[0][li]).merge(
+                        [copy.copy(cache_slots[ridx][li]) for ridx in chunk_rows]
+                    )
+                    for li in range(len(cache_slots[0]))
+                ]
+            else:
+                b_cache = _broadcast_cache(cache, chunk_len)
             max_padding = max(padding) if padding else 0
             if max_padding > 0:
                 for c in b_cache:
@@ -1344,6 +1361,143 @@ def _rescore_rows_batch1(
     }
 
 
+class PrefillResult(NamedTuple):
+    """What one context's prefill produces (W3-F stage split)."""
+
+    base_ids: list[int]  # the prompt token ids (for prompt_sha256 provenance)
+    cache: list  # per-layer prefill KV cache (unbatched)
+    t_prefill_ms: float  # prefill wall time in ms
+
+
+def _build_schema_rows(schema: StructuredSchema, tokenizer, scoring: str) -> dict:
+    """Build the shared candidate row set for a schema (W3-F stage 1).
+
+    The rows depend only on (schema, tokenizer, scoring) — NOT on the
+    context — so every context in a batched decide_many call shares them.
+    Returns rows, row_field, row_branch, row_option, row_count, tries,
+    row_decision, lead_in, field_plans, plan_compile_ms, pad_id.
+    """
+    if scoring not in ("slots", "labels"):
+        raise ValueError(f"scoring must be 'slots' or 'labels', got {scoring!r}")
+    t_plan0 = time.perf_counter()
+    plan = (
+        schema.compile_slot_plan(tokenizer)
+        if scoring == "slots"
+        else schema.compile_labels_plan(tokenizer)
+    )
+    plan_compile_ms = (time.perf_counter() - t_plan0) * 1000
+
+    rows: list[list[int]] = []
+    row_field: list[str] = []
+    row_branch: dict[int, int] = {}
+    row_option: dict[int, int] = {}
+    row_count: dict[int, int] = {}
+    tries: dict[str, list[dict]] = {}
+    lead_in = plan["lead_in_ids"]
+    field_plans = plan["fields"]
+    pad_id = tokenizer.pad_token_id or 0
+    for fname in schema.fields:
+        p = field_plans[fname]
+        if "options" in p:
+            # multi: one boolean row per option. suffix_ids_list entries are
+            # stored WITHOUT the schema-wide lead-in (one rule for every row
+            # type), so the lead-in is prepended exactly once here.
+            for oi, suffix_ids in enumerate(p["suffix_ids_list"]):
+                rows.append(lead_in + list(suffix_ids))
+                row_field.append(fname)
+                row_option[len(rows) - 1] = oi
+            # W2-E step 3: the count row — always present for a multi field
+            # (no flag). One scalar-enum-style row scored through the same
+            # trie machinery; its decision feeds the reconciliation gate.
+            count_plan = p["count"]
+            field_trie = build_trie(count_plan["remainders"])
+            tries[count_key(fname)] = field_trie
+            for bi, node in enumerate(field_trie):
+                rows.append(lead_in + list(count_plan["shared_ids"]) + list(node["path"]))
+                row_field.append(fname)
+                row_count[len(rows) - 1] = bi
+            continue
+        field_trie = build_trie(p["remainders"])
+        tries[fname] = field_trie
+        for bi, node in enumerate(field_trie):
+            rows.append(lead_in + list(p["shared_ids"]) + list(node["path"]))
+            row_field.append(fname)
+            row_branch[len(rows) - 1] = bi
+
+    # Per row: (decision position within the row, allowed token ids in read
+    # order). Option rows read the Y/N remainder heads at the row's last
+    # position; branch/count rows read the node's children at the row's last
+    # position.
+    row_decision: list[tuple[int, list[int]]] = []
+    for ridx in range(len(rows)):
+        p = field_plans[row_field[ridx]]
+        if ridx in row_option:
+            # multi option row: RAW Y/N logits at the option row's last
+            # position (the row ends right before the Y/N divergence),
+            # in remainder order ["Y", "N"].
+            position = len(lead_in) + len(p["suffix_ids_list"][row_option[ridx]]) - 1
+            allowed = [t[0] for t in p["remainders"][row_option[ridx]]]
+        elif ridx in row_count:
+            # W2-E step 3 count row: a scalar-enum-style trie row over the
+            # count plan (tries live under the '<field>#count' key).
+            cp = p["count"]
+            node = tries[count_key(row_field[ridx])][row_count[ridx]]
+            position = len(lead_in) + len(cp["shared_ids"]) + len(node["path"]) - 1
+            allowed = list(node["children"])
+        else:
+            node = tries[row_field[ridx]][row_branch[ridx]]
+            position = len(lead_in) + len(p["shared_ids"]) + len(node["path"]) - 1
+            allowed = list(node["children"])
+        row_decision.append((position, allowed))
+
+    return {
+        "rows": rows,
+        "row_field": row_field,
+        "row_branch": row_branch,
+        "row_option": row_option,
+        "row_count": row_count,
+        "tries": tries,
+        "row_decision": row_decision,
+        "lead_in": lead_in,
+        "field_plans": field_plans,
+        "plan_compile_ms": plan_compile_ms,
+        "pad_id": pad_id,
+    }
+
+
+def _prefill(
+    model,
+    tokenizer,
+    context: str,
+    schema: StructuredSchema,
+    scoring: str = "slots",
+) -> PrefillResult:
+    """Prefill ONE context's prompt into a fresh unbatched KV cache (W3-F)."""
+    schema_str = (
+        schema.to_alias_schema_str() if scoring == "slots" else schema.to_labels_schema_str()
+    )
+    user_content = (
+        f"Classify the following fields.\n\n{schema_str}\n\n<<<CONTEXT\n{context}\nCONTEXT>>>"
+    )
+    base_ids = _chat_ids(tokenizer, user_content, PROMPT_V2_SYSTEM, _resolve_profile(tokenizer))
+    # Bug 16 explored and REJECTED here: moving the schema-wide lead-in from
+    # the rows into the prefill passes the W1-A parity suite only when the
+    # decision read happens at the same kernel shape — the shortened rows
+    # (3-wide instead of lead_in+shared) change Metal matmul tiling and break
+    # BIT-identical batch=1 vs batch=N parity (measured: 0.005-nat drift on
+    # the action row). Keep the lead-in in the rows; the gather change below
+    # is the memory win this PR ships.
+    t0 = time.perf_counter()
+    cache = make_prompt_cache(model)
+    model(mx.array(base_ids)[None], cache=cache)
+    # Evaluate the COMPLETE cache state (some mlx_lm caches carry meaningful
+    # state outside keys/values — ArraysCache arrays, BatchKVCache offsets,
+    # quantization scales): relying on the keys/values attributes would leave
+    # nested or nonstandard state unevaluated.
+    _eval_cache_state(cache)
+    return PrefillResult(base_ids, cache, (time.perf_counter() - t0) * 1000)
+
+
 def run_parallel_generation(
     model,
     tokenizer,
@@ -1418,86 +1572,16 @@ def run_parallel_generation(
 
     t0 = time.perf_counter()
 
-    # 1. Batch plan, then rows per field: one row per branch point of the
-    #    candidate remainders (fields with distinct first tokens: exactly one
-    #    row). Slots mode scores quoted aliases and maps them back after.
-    #    Timed (W3-R: plan_compile_ms) — the plan cache makes this ~0 on warm
-    #    runs, but the first call is pure Python work the report should see.
-    t_plan0 = time.perf_counter()
-    plan = (
-        schema.compile_slot_plan(tokenizer)
-        if scoring == "slots"
-        else schema.compile_labels_plan(tokenizer)
-    )
-    plan_compile_ms = (time.perf_counter() - t_plan0) * 1000
-
-    rows: list[list[int]] = []  # token ids per row (WITHOUT the lead-in —
-    # the lead-in lives in the prefill cache, bug 16)
-    row_field: list[str] = []  # field each row belongs to
-    row_branch: dict[int, int] = {}  # row idx -> branch-node index within its field
-    row_option: dict[int, int] = {}  # row idx -> option index (multi fields only)
-    row_count: dict[int, int] = {}  # row idx -> count-code index (multi count rows only)
-    tries: dict[str, list[dict]] = {}
-    lead_in = plan["lead_in_ids"]
-    field_plans = plan["fields"]
-    pad_id = tokenizer.pad_token_id or 0
-    for fname in schema.fields:
-        p = field_plans[fname]
-        if "options" in p:
-            # multi: one boolean row per option. suffix_ids_list entries are
-            # stored WITHOUT the schema-wide lead-in (one rule for every row
-            # type), so the lead-in is prepended exactly once here.
-            for oi, suffix_ids in enumerate(p["suffix_ids_list"]):
-                rows.append(lead_in + list(suffix_ids))
-                row_field.append(fname)
-                row_option[len(rows) - 1] = oi
-            # W2-E step 3: the count row — always present for a multi field
-            # (no flag). One scalar-enum-style row scored through the same
-            # trie machinery; its decision feeds the reconciliation gate.
-            count_plan = p["count"]
-            field_trie = build_trie(count_plan["remainders"])
-            tries[count_key(fname)] = field_trie
-            for bi, node in enumerate(field_trie):
-                rows.append(lead_in + list(count_plan["shared_ids"]) + list(node["path"]))
-                row_field.append(fname)
-                row_count[len(rows) - 1] = bi
-            continue
-        field_trie = build_trie(p["remainders"])
-        tries[fname] = field_trie
-        for bi, node in enumerate(field_trie):
-            rows.append(lead_in + list(p["shared_ids"]) + list(node["path"]))
-            row_field.append(fname)
-            row_branch[len(rows) - 1] = bi
+    # 1. Batch plan + rows per field (context-independent — W3-F stage split).
+    built = _build_schema_rows(schema, tokenizer, scoring)
+    rows = built["rows"]
 
     # 2. Prefill once (prompt v2: system paragraph + user schema block and
-    #    delimited context). The prompt ends at
-    #    the chat template's generation marker; '{\n' and everything after is
-    #    part of the candidate rows (T3 boundary alignment).
-    schema_str = (
-        schema.to_alias_schema_str() if scoring == "slots" else schema.to_labels_schema_str()
-    )
-    user_content = (
-        f"Classify the following fields.\n\n{schema_str}\n\n<<<CONTEXT\n{context}\nCONTEXT>>>"
-    )
-    base_ids = _chat_ids(tokenizer, user_content, PROMPT_V2_SYSTEM, _resolve_profile(tokenizer))
-    # Bug 16 explored and REJECTED here: moving the schema-wide lead-in from
-    # the rows into the prefill passes the W1-A parity suite only when the
-    # decision read happens at the same kernel shape — the shortened rows
-    # (3-wide instead of lead_in+shared) change Metal matmul tiling and break
-    # BIT-identical batch=1 vs batch=N parity (measured: 0.005-nat drift on
-    # the action row). Keep the lead-in in the rows; the gather change below
-    # is the memory win this PR ships.
-    base_arr = mx.array(base_ids)[None]
-
-    t_pre0 = time.perf_counter()
-    cache = make_prompt_cache(model)
-    model(base_arr, cache=cache)
-    # Evaluate the COMPLETE cache state (some mlx_lm caches carry meaningful
-    # state outside keys/values — ArraysCache arrays, BatchKVCache offsets,
-    # quantization scales): relying on the keys/values attributes would leave
-    # nested or nonstandard state unevaluated.
-    _eval_cache_state(cache)
-    t_prefill = (time.perf_counter() - t_pre0) * 1000
+    #    delimited context) — W3-F stage split.
+    pf = _prefill(model, tokenizer, context, schema, scoring)
+    base_ids = pf.base_ids
+    cache = pf.cache
+    t_prefill = pf.t_prefill_ms
 
     # 3. Memory guard: rows are broadcast copies of the prefill cache. The
     #    estimate includes the [rows, width, vocab] output logits for one chunk
@@ -1523,74 +1607,91 @@ def run_parallel_generation(
             bytes_per_row,
         )
 
-    # 4. Batched suffix forward passes (re-broadcast per chunk, no re-prefill).
-    #    Rows in a chunk are right-padded to a common length; scoring reads
-    #    positions from real lengths, and right-padding cannot affect logits at
-    #    earlier (real) positions under causal attention.
-    #    Only the DECISION logits are ever materialized (Q4/bug 15): each row's
-    #    decision position and allowed token ids are resolved from the plan +
-    #    tries BEFORE the loop; per chunk the model output is lazily indexed at
-    #    [arange(chunk_len), positions] and the allowed columns, and only that
-    #    [rows, allowed] gather is evaluated — never the full
-    #    [rows, width, vocab] output (F3).
+    # 4. Batched suffix forward passes + per-row dispatch into
+    #    node_logits / option_pair / count_node_logits (W3-F stage split:
+    #    _score = the padded/broadcast/gather loop in _score_rows, the ONE
+    #    copy; _assemble = everything from trie scoring to the result dict).
     t_suf0 = time.perf_counter()
-    t_gather_ms = 0.0
-    peak_active_bytes = int(mx.get_peak_memory())
-    # Per row: (decision position within the row, allowed token ids in read
-    # order). Option rows read the Y/N remainder heads at the row's last
-    # position; branch-node rows read the node's children at the node's last
-    # position.
-    row_decision: list[tuple[int, list[int]]] = []
-    for ridx in range(len(rows)):
-        p = field_plans[row_field[ridx]]
-        if ridx in row_option:
-            # multi option row: RAW Y/N logits at the option row's last
-            # position (the row ends right before the Y/N divergence),
-            # in remainder order ["Y", "N"].
-            position = len(lead_in) + len(p["suffix_ids_list"][row_option[ridx]]) - 1
-            allowed = [t[0] for t in p["remainders"][row_option[ridx]]]
-        elif ridx in row_count:
-            # W2-E step 3 count row: a scalar-enum-style trie row over the
-            # count plan (tries live under the '<field>#count' key).
-            cp = p["count"]
-            node = tries[count_key(row_field[ridx])][row_count[ridx]]
-            position = len(lead_in) + len(cp["shared_ids"]) + len(node["path"]) - 1
-            allowed = list(node["children"])
-        else:
-            node = tries[row_field[ridx]][row_branch[ridx]]
-            position = len(lead_in) + len(p["shared_ids"]) + len(node["path"]) - 1
-            allowed = list(node["children"])
-        row_decision.append((position, allowed))
-    # Row idx -> {branch-node index: [child logits in node["children"] order]}.
+    scored = _score_rows(
+        model, cache, rows, built["row_decision"], vocab_size, built["pad_id"], auto_max_rows
+    )
+    t_suffix_eval = (time.perf_counter() - t_suf0) * 1000
+    return _assemble(
+        model,
+        tokenizer,
+        schema,
+        built,
+        scored,
+        t0,
+        cache,
+        prior=prior,
+        prior_ms=prior_ms,
+        prior_correction=prior_correction,
+        calib=calib,
+        scoring=scoring,
+        temperature=temperature,
+        max_rows=max_rows,
+        base_ids=base_ids,
+        t_prefill=t_prefill,
+        t_suffix_eval=t_suffix_eval,
+        constraints=constraints,
+        oracle_overrides=oracle_overrides,
+    )
+
+
+def _assemble(
+    model,
+    tokenizer,
+    schema: StructuredSchema,
+    built: dict,
+    scored: ScoreRowsResult,
+    t0: float,
+    cache: list,
+    *,
+    prior: dict[str, Any] | None,
+    prior_ms: float,
+    prior_correction: bool,
+    calib: dict | str | None,
+    scoring: str,
+    temperature: float,
+    max_rows: int | None,
+    base_ids: list[int],
+    t_prefill: float,
+    t_suffix_eval: float,
+    constraints: list[dict] | None,
+    oracle_overrides: dict[str, object] | None,
+) -> dict[str, Any]:
+    """Assemble per-field decisions from the scored rows (W3-F stage 3).
+
+    Dispatches per-row logits into node_logits (branch rows), option_pair
+    (multi option rows) and count_node_logits (count rows), then runs trie
+    scoring, W3-E near-tie rescore, MAP reconciliation (W3-D) and the
+    selective parent-conditioned second pass (W3-D part 2), and returns the
+    result dict. Everything AFTER the forward passes lives here — the
+    batched path reuses it unchanged.
+    """
+    rows = built["rows"]
+    row_decision = built["row_decision"]
+    row_field = built["row_field"]
+    row_branch = built["row_branch"]
+    row_option = built["row_option"]
+    row_count = built["row_count"]
+    tries = built["tries"]
+    lead_in = built["lead_in"]
+    field_plans = built["field_plans"]
+    plan_compile_ms = built["plan_compile_ms"]
+    pad_id = built["pad_id"]
+
+    # Dispatch the per-row logits into node_logits (branch-node rows),
+    # option_pair (multi option rows, RAW Y/N logits in remainder order
+    # ["Y", "N"]; bug 8: these raw logits are what the prior cache stores —
+    # no reconstruction from scaled probabilities) and count_node_logits
+    # (W2-E step 3 count rows, keyed by count-branch idx). Legal mass
+    # mirrors the same keying.
     node_logits: dict[int, dict[int, list[float]]] = {}
-    # Multi option rows: RAW [yes_logit, no_logit] at the suffix end (the
-    # order of the remainders pair, ["Y", "N"); used both for the P(yes)
-    # softmax and, verbatim at T=1, as the cached prior pair (bug 8).
     option_pair: dict[int, list[float]] = {}
-    # W2-E step 3: count-row branch logits - {row idx -> {count-branch idx
-    # -> [child logits in children order]}}. Kept separate from node_logits
-    # (a field could legally have both a scalar trie and a count row).
     count_node_logits: dict[int, dict[int, list[float]]] = {}
-    # W2-E step 3: count-row branch logits — {row idx -> {count-branch idx
-    # -> [child logits in children order]}}. Kept separate from node_logits
-    # (a field could legally have both a scalar trie and a count row).
-    count_node_logits: dict[int, dict[int, list[float]]] = {}
-    # Per branch row: the natural-log legal mass = logsumexp(allowed) -
-    # logsumexp(full vocab) at the branch position. The probability the model
-    # assigned to the union of allowed continuations against the full
-    # vocabulary — a per-branch leakage signal (legal_mass telemetry, W2-D).
-    # Trie-branch rows: {row idx -> {branch-node idx -> log legal mass}}
-    # (mirrors node_logits). Multi option rows: {row idx -> log legal mass}
-    # (one Y/N branch per option row; no branch-node index).
     node_legal_mass_log: dict[int, Any] = {}
-    # Run the batched suffix forward passes through _score_rows (F3: the ONE
-    # copy of the padded/broadcast/gather scoring loop, shared with
-    # _selective_second_pass). The caller dispatches the per-row logits into
-    # node_logits (branch-node rows), option_pair (multi option rows, RAW Y/N
-    # logits in remainder order ["Y", "N"]; bug 8: these raw logits are what
-    # the prior cache stores — no reconstruction from scaled probabilities)
-    # or count_node_logits (W2-E step 3 count rows, keyed by count-branch idx).
-    scored = _score_rows(model, cache, rows, row_decision, vocab_size, pad_id, auto_max_rows)
     for ridx in range(len(rows)):
         values = scored.row_logits[ridx]
         mass_log = scored.row_legal_mass_log[ridx]
@@ -1607,12 +1708,16 @@ def run_parallel_generation(
             node_logits[ridx] = {row_branch[ridx]: values}
             node_legal_mass_log[ridx] = {row_branch[ridx]: mass_log}
 
-    passes = scored.passes
     t_gather_ms = scored.gather_ms
     t_broadcast_ms = scored.broadcast_ms
     chunk_shapes = scored.chunk_shapes
-    t_suffix_eval = (time.perf_counter() - t_suf0) * 1000
-    peak_active_bytes = max(peak_active_bytes, int(mx.get_peak_memory()))
+    passes = scored.passes
+    peak_active_bytes = int(mx.get_peak_memory())
+    vocab_size = (
+        model.args.vocab_size
+        if hasattr(model, "args") and hasattr(model.args, "vocab_size")
+        else model.model.embed_tokens.weight.shape[0]
+    )
 
     # 5. Trie scoring: P(choice) = product of branch factors along its path;
     #    proper distribution, so confidence = P(choice). Full precision: no
@@ -2259,3 +2364,185 @@ def run_parallel_generation(
         "field_telemetry": field_telemetry,
         "num_fields": len(schema),
     }
+
+
+def _contexts_per_pass(per_context_cache_nbytes: int) -> int:
+    """How many contexts' prefills may be alive at once (W3-F review F2).
+
+    Bound from the same measured budget the suffix pass uses: working-set
+    headroom times _CHUNK_TARGET_FRACTION, divided by ONE context's cache
+    size, at least 1. 500 contexts therefore never hold 500 caches — they
+    are processed in context groups of this size (one merged scoring pass
+    per group).
+    """
+    budget = _memory_budget_bytes(_CHUNK_TARGET_FRACTION)
+    return max(1, budget // max(1, per_context_cache_nbytes))
+
+
+def run_parallel_generation_batched(
+    model,
+    tokenizer,
+    contexts: list[str],
+    schema: StructuredSchema,
+    temperature: float = 1.0,
+    max_rows: int | None = None,
+    scoring: str = "slots",
+    calibration: str | dict | None = None,
+    prior_correction: bool = False,
+    constraints: list[dict] | None = None,
+    oracle_overrides: dict[str, object] | None = None,
+) -> list[dict[str, Any]]:
+    """Decide N contexts with ONE merged suffix pass per context group (W3-F).
+
+    Stages (W3-F review F1 — explicit, no sentinel dict):
+
+    - ``_prefill`` per context (N width-1 forward passes; different contexts
+      have different prompt lengths).
+    - ``_build_schema_rows`` once — the candidate rows depend only on
+      (schema, tokenizer, scoring), never on the context.
+    - ``_score_rows`` ONCE per context group with per-row cache slots
+      (row i of the group pairs with slot cache_slots[i]; BatchKVCache.merge
+      left-pads the different prompt lengths so each slot sees only its own
+      history). Caches are passed UNMERGED — re-merging an already-batched
+      BatchKVCache fails (its offset is an array, not an int); the single
+      merge happens inside _score_rows.
+    - ``_assemble`` per context (re-keyed 0..R-1 row logits) — the batched
+      path shares the exact assembly the per-context path uses.
+
+    Contexts are bounded per pass by the measured memory budget
+    (:func:`_contexts_per_pass`): 500 contexts never hold 500 caches. The
+    group count lands in telemetry as ``contexts_per_pass``.
+
+    Within PARITY_ATOL the results equal N separate run_parallel_generation
+    calls: identical rows, identical per-context cache state (left-padding
+    sits inside the causal mask), only the batch width differs. Group
+    telemetry (passes, gather/broadcast ms, chunk shapes) is divided per
+    context for the per-context reports.
+    """
+    if not contexts:
+        return []
+
+    # 1. Shared row set (context-independent).
+    built = _build_schema_rows(schema, tokenizer, scoring)
+    rows = built["rows"]
+    row_decision = built["row_decision"]
+    R = len(rows)
+
+    # 2. Context-group bound from the measured budget (review F2): never
+    #    hold every context's cache at once.
+    probe = _prefill(model, tokenizer, contexts[0], schema, scoring)
+    per_ctx_nbytes = _cache_nbytes(probe.cache)
+    group_size = min(len(contexts), _contexts_per_pass(per_ctx_nbytes))
+
+    results: list[dict[str, Any]] = []
+    t_scored_ms = 0.0
+    for g0 in range(0, len(contexts), group_size):
+        group = contexts[g0 : g0 + group_size]
+
+        # 3. Prefill each context in the group (width-1 forward passes).
+        group_pf: list[PrefillResult] = [probe]
+        group_pf.extend(_prefill(model, tokenizer, c, schema, scoring) for c in group[1:])
+
+        if R == 0:
+            # Degenerate schema (no rows): assembly still produces a result.
+            for pf in group_pf:
+                t0 = time.perf_counter()
+                results.append(
+                    _assemble(
+                        model,
+                        tokenizer,
+                        schema,
+                        built,
+                        ScoreRowsResult({}, {}, 0, 0.0, 0.0, []),
+                        t0,
+                        pf.cache,
+                        prior=None,
+                        prior_ms=0.0,
+                        prior_correction=prior_correction,
+                        calib=_load_calibration(calibration),
+                        scoring=scoring,
+                        temperature=temperature,
+                        max_rows=max_rows,
+                        base_ids=pf.base_ids,
+                        t_prefill=pf.t_prefill_ms,
+                        t_suffix_eval=0.0,
+                        constraints=constraints,
+                        oracle_overrides=oracle_overrides,
+                    )
+                )
+            continue
+
+        # 4. ONE scoring pass per group over len(group)*R rows. Row i of the
+        #    group pairs with cache slot cache_slots[i] = group[i // R]'s
+        #    per-layer cache list.
+        cache_slots: list[list] = []
+        for pf in group_pf:
+            cache_slots.extend([pf.cache] * R)
+        all_rows: list[list[int]] = []
+        all_row_decision: list[tuple[int, list[int]]] = []
+        for _ in group_pf:
+            all_rows.extend(rows)
+            all_row_decision.extend(row_decision)
+        pad_id = built["pad_id"]
+        vocab_size = (
+            model.args.vocab_size
+            if hasattr(model, "args") and hasattr(model.args, "vocab_size")
+            else model.model.embed_tokens.weight.shape[0]
+        )
+        width_max = max(len(r) for r in all_rows)
+        bytes_per_row = _cache_nbytes(cache_slots[0]) + width_max * vocab_size * 4
+        weight_bytes = _model_weight_bytes(model)
+        budget = max(1, _max_recommended_working_set() // 2 - weight_bytes)
+        auto_max_rows = _rows_per_chunk(budget, bytes_per_row, max_rows)
+        t0s = time.perf_counter()
+        scored = _score_rows(
+            model,
+            cache_slots[0],
+            all_rows,
+            all_row_decision,
+            vocab_size,
+            pad_id,
+            auto_max_rows,
+            cache_slots=cache_slots,
+        )
+        t_scored_ms += (time.perf_counter() - t0s) * 1000
+
+        # 5. Split per context (re-key row indexes to 0..R-1) and assemble.
+        n_group = len(group_pf)
+        for ci, pf in enumerate(group_pf):
+            lo, hi = ci * R, (ci + 1) * R
+            ctx_scored = ScoreRowsResult(
+                row_logits={i - lo: v for i, v in scored.row_logits.items() if lo <= i < hi},
+                row_legal_mass_log={
+                    i - lo: v for i, v in scored.row_legal_mass_log.items() if lo <= i < hi
+                },
+                passes=scored.passes,
+                gather_ms=scored.gather_ms / n_group,
+                broadcast_ms=scored.broadcast_ms / n_group,
+                chunk_shapes=scored.chunk_shapes,
+            )
+            t0 = time.perf_counter()
+            res = _assemble(
+                model,
+                tokenizer,
+                schema,
+                built,
+                ctx_scored,
+                t0,
+                pf.cache,
+                prior=None,
+                prior_ms=0.0,
+                prior_correction=prior_correction,
+                calib=_load_calibration(calibration),
+                scoring=scoring,
+                temperature=temperature,
+                max_rows=max_rows,
+                base_ids=pf.base_ids,
+                t_prefill=pf.t_prefill_ms,
+                t_suffix_eval=(time.perf_counter() - t0) * 1000,
+                constraints=constraints,
+                oracle_overrides=oracle_overrides,
+            )
+            res["contexts_per_pass"] = group_size
+            results.append(res)
+    return results
