@@ -779,7 +779,9 @@ def run_parallel_generation(
         b_cache = _broadcast_cache(cache, chunk_len)
         # Right-padded rows: tell the cache about per-row lengths so the
         # attention mask excludes pad positions (mlx_lm batched-prompt
-        # pattern); finalize rolls the padding back out of the KV afterwards.
+        # pattern). No finalize() after the pass: b_cache is discarded when
+        # the chunk ends, nothing reads the rolled KV, and finalizing would
+        # only materialize state for nothing.
         max_padding = max(padding) if padding else 0
         if max_padding > 0:
             for c in b_cache:
@@ -789,11 +791,6 @@ def run_parallel_generation(
         _eval_cache_state(b_cache)
         out = model(padded, cache=b_cache)
         mx.eval(out)
-        if max_padding > 0:
-            for c in b_cache:
-                if hasattr(c, "finalize"):
-                    c.finalize()
-            _eval_cache_state(b_cache)
         for i, ridx in enumerate(range(chunk_start, chunk_start + chunk_len)):
             p = field_plans[row_field[ridx]]
             if ridx in row_option:
