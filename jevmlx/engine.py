@@ -1390,7 +1390,7 @@ def _selective_second_pass(
         def legal_mass_at_node2(
             node: dict, _lookup=child_branch_logits, _index=child_branch_idx
         ) -> float:
-            return 1.0  # legal_mass not recomputed in the second pass
+            return 0.0  # legal_mass not recomputed in the second pass (log 1.0)
 
         raw_scores, _ = score_trie(trie, len(p["aliases"]), logits_at_node2, legal_mass_at_node2)
         scores = raw_scores
@@ -1780,6 +1780,14 @@ def run_parallel_generation(
     built = _build_schema_rows(schema, tokenizer, scoring)
     rows = built["rows"]
 
+    # W5-D finding 32: the peak counter is process-lifetime state — without
+    # a reset it describes an earlier request (or the warmup). Record the
+    # request's starting active memory and reset the peak so the reported
+    # absolute peak and the incremental peak (peak - active_start) both
+    # describe THIS request.
+    active_start = int(mx.get_active_memory())
+    mx.reset_peak_memory()
+
     # 2. Prefill once (prompt v2: system paragraph + user schema block and
     #    delimited context) — W3-F stage split.
     pf = _prefill(model, tokenizer, context, schema, scoring)
@@ -1839,6 +1847,7 @@ def run_parallel_generation(
         t_suffix_eval=t_suffix_eval,
         constraints=constraints,
         oracle_overrides=oracle_overrides,
+        active_start=active_start,
     )
 
 
@@ -1863,6 +1872,7 @@ def _assemble(
     t_suffix_eval: float,
     constraints: list[dict] | None,
     oracle_overrides: dict[str, object] | None,
+    active_start: int = 0,
 ) -> dict[str, Any]:
     """Assemble per-field decisions from the scored rows (W3-F stage 3).
 
@@ -1915,7 +1925,11 @@ def _assemble(
     t_broadcast_ms = scored.broadcast_ms
     chunk_shapes = scored.chunk_shapes
     passes = scored.passes
+    # W5-D finding 32: absolute peak since the request's reset, plus the
+    # INCREMENTAL peak over the request's starting active memory — the old
+    # single number could describe an earlier request or the warmup.
     peak_active_bytes = int(mx.get_peak_memory())
+    peak_incremental_bytes = max(0, peak_active_bytes - active_start)
     vocab_size = (
         model.args.vocab_size
         if hasattr(model, "args") and hasattr(model.args, "vocab_size")
@@ -1998,7 +2012,14 @@ def _assemble(
                     # Replace the option's raw Y/N pair with the canonical
                     # (batch=1) logits; the scoring loop below consumes them.
                     option_pair[ridx] = list(rescored_raw["option_pair"][ridx])
-                    node_legal_mass_log[ridx] = rescored_raw["node_legal_mass_log"][ridx]
+                    # Branch rows carry {bi: log_mass} (the batched dispatch
+                    # shape); storing the flat float here made the lookup
+                    # .update() a bare float — telemetry read garbage (and
+                    # >1.0 "masses").
+                    mass_log = rescored_raw["node_legal_mass_log"][ridx]
+                    node_legal_mass_log[ridx] = (
+                        {row_branch[ridx]: mass_log} if ridx in row_branch else mass_log
+                    )
             for oi, ridx in enumerate(idxs):
                 pair = list(option_pair[ridx])
                 option_name = p["options"][oi]
@@ -2058,7 +2079,7 @@ def _assemble(
             ) -> list[float]:
                 return _lookup[_index[id(node)]]
 
-            count_scores_raw, _count_legal = score_trie(
+            count_scores_raw, count_legal_mass_logs = score_trie(
                 count_trie, len(p["count"]["codes"]), count_logits_at_node
             )
             # Prior correction on the count row, same shape as the enum
@@ -2188,13 +2209,22 @@ def _assemble(
                     if set_constraints
                     else {}
                 ),
-                # W2-D: legal_mass for multi = product of per-option legal
-                # masses (each option's Y/N branch has its own leakage
-                # signal). Low mass at any option's Y/N position flags that
-                # the model wanted neither Y nor N there — the constrained
-                # Y/N softmax can still be confident while the model leaked.
-                # Multi option rows store a flat log mass per ridx.
-                "legal_mass": math.exp(sum(node_legal_mass_log.get(ridx, 0.0) for ridx in idxs)),
+                # W5-D finding 38: the old field-level product underflowed
+                # and was cardinality-confounded (per-option 0.9 -> 40
+                # options = 0.015). Field-level stats are cardinality-free:
+                # min_option_legal_mass (worst option's leakage, probability
+                # space) + mean_log_legal_mass (additive, stable). The
+                # per-option logs stay on legal_mass_logs.
+                "min_option_legal_mass": (
+                    math.exp(min(node_legal_mass_log.get(ridx, 0.0) for ridx in idxs))
+                    if idxs
+                    else 1.0
+                ),
+                "mean_log_legal_mass": (
+                    sum(node_legal_mass_log.get(ridx, 0.0) for ridx in idxs) / len(idxs)
+                    if idxs
+                    else 0.0
+                ),
                 # Per-option legal-mass logs (raw, T=1), keyed by the option
                 # string — the same keying as option_logit_pairs.
                 "legal_mass_logs": {
@@ -2234,6 +2264,14 @@ def _assemble(
                 ),
                 "rows": len(count_idxs),
                 "margin_nats": count_margin,
+                # W5-D finding 38: the count row's own legal mass was
+                # computed and discarded — now exposed. The count row's
+                # branch path is per-code, so report the winner's log mass
+                # and the min over codes (worst-case leakage on the row).
+                "legal_mass": math.exp(
+                    count_legal_mass_logs[count_display.index(count_choice)]
+                ),
+                "min_option_legal_mass": math.exp(min(count_legal_mass_logs)),
             }
             continue
 
@@ -2291,7 +2329,9 @@ def _assemble(
         def legal_mass_at_node(
             node: dict, _lookup=legal_mass_log_by_branch, _index=branch_index
         ) -> float:
-            return math.exp(_lookup[_index[id(node)]])
+            # W5-D finding 37: log mass straight through — no exp/log
+            # round-trip (underflows to log(0) below ~-745 nats).
+            return _lookup[_index[id(node)]]
 
         raw_scores, raw_legal_mass_logs = score_trie(
             field_trie, n_choices, logits_at_node, legal_mass_at_node
@@ -2347,7 +2387,9 @@ def _assemble(
             def legal_mass_at_node(
                 node: dict, _lookup=legal_mass_log_by_branch, _index=branch_index
             ) -> float:
-                return math.exp(_lookup[_index[id(node)]])
+                # W5-D finding 37: log mass straight through — no exp/log
+                # round-trip (underflows to log(0) below ~-745 nats).
+                return _lookup[_index[id(node)]]
 
             raw_scores, raw_legal_mass_logs = score_trie(
                 field_trie, n_choices, logits_at_node, legal_mass_at_node
@@ -2541,6 +2583,9 @@ def _assemble(
         "padded_token_positions": sum(width * c for width, c in chunk_shapes),
         "total_tokens_generated": 0,
         "peak_active_bytes": peak_active_bytes,
+        # W5-D finding 32: peak memory ATTRIBUTABLE to this request (peak
+        # minus the active memory at request start). Never negative.
+        "peak_incremental_bytes": peak_incremental_bytes,
         "sequential_forward_passes": passes,
         # W5-D finding 30: Metal allocation failures that halved their chunk
         # and retried — recorded separately, never counted as passes.
@@ -2714,6 +2759,10 @@ def run_parallel_generation_batched(
         groups.append(current)
 
     results: list[dict[str, Any]] = [None] * len(contexts)  # type: ignore[list-item]
+    # W5-D finding 32: reset the process-lifetime peak once for the whole
+    # call; every result in the call reports the same request-scoped pair.
+    active_start = int(mx.get_active_memory())
+    mx.reset_peak_memory()
     for group_idx in groups:
         group_pf = [(idx, _prefill_cached(idx, contexts[idx])) for idx in group_idx]
         n_group = len(group_pf)
@@ -2743,6 +2792,7 @@ def run_parallel_generation_batched(
                     t_suffix_eval=0.0,
                     constraints=constraints,
                     oracle_overrides=oracle_overrides,
+                    active_start=active_start,
                 )
                 res = results[idx]
                 group_wall_ms = (time.perf_counter() - t_group0) * 1000
@@ -2816,6 +2866,7 @@ def run_parallel_generation_batched(
                 t_suffix_eval=(t_scored_ms / n_group) + (time.perf_counter() - t0) * 1000,
                 constraints=constraints,
                 oracle_overrides=oracle_overrides,
+                active_start=active_start,
             )
             # W5-D finding 27: honest timing. The group's wall time covers
             # prefill + scoring + every assembly in this group;
