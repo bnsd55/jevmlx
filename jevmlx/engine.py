@@ -972,8 +972,13 @@ def _prior_cache_key(
     are not cached at all (same rule as schema.py's plan cache).
     """
     try:
-        model_ref = weakref.ref(model)
-        tok_ref = weakref.ref(tokenizer)
+        # Weak-referenceability gate only: the refs used at hit time are
+        # created at store time (see _get_or_compute_prior). W5-C fix: the
+        # refs must NOT go into the KEY — hash(ref) delegates to the
+        # referent and mlx models are unhashable, which crashed every
+        # prior-corrected run with TypeError.
+        weakref.ref(model)
+        weakref.ref(tokenizer)
     except TypeError:
         logger.debug(
             "model/tokenizer %s is not weak-referenceable; prior cache disabled "
@@ -984,8 +989,6 @@ def _prior_cache_key(
     return (
         id(model),
         id(tokenizer),
-        model_ref,
-        tok_ref,
         prompt_version,
         scoring,
         plan_hash,

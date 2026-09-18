@@ -580,9 +580,21 @@ def run_eval(
     if chat_template is not None:
         config["tokenizer_chat_template_sha256"] = _sha256_text(chat_template)
     if plan_provider is not None and selected:
-        plan_json = json.dumps(
-            plan_provider(StructuredSchema(selected[0]["schema"])), sort_keys=True
-        )
+        # W5b-1 (C7): compiled plans are read-only mappings; hash the CONTENT
+        # (thawed), never the frozen container — json.dumps would otherwise
+        # raise on MappingProxyType (or, with default=list, collapse every
+        # mapping to its key list and hash every plan identically).
+        plan = plan_provider(StructuredSchema(selected[0]["schema"]))
+        from types import MappingProxyType
+
+        def _thaw(value):
+            if isinstance(value, (dict, MappingProxyType)):
+                return {k: _thaw(v) for k, v in value.items()}
+            if isinstance(value, (list, tuple)):
+                return [_thaw(v) for v in value]
+            return value
+
+        plan_json = json.dumps(_thaw(plan), sort_keys=True)
         config["compiled_plan_sha256"] = hashlib.sha256(plan_json.encode()).hexdigest()
 
     # W4-A: per-model tokenizer metrics — quantified how the tokenizer
