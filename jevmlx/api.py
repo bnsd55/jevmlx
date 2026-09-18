@@ -30,15 +30,18 @@ from jevmlx.engine import (
     run_parallel_generation,
     run_parallel_generation_batched,
 )
-from jevmlx.models import DEFAULT_MODEL, MODEL_ALIASES, resolve_model
+from jevmlx.models import DEFAULT_MODEL
 from jevmlx.schema import StructuredSchema
 
-# Re-exports for backwards compatibility (external code may import these
-# from jevmlx.api). New code should import from jevmlx.models directly.
 __all__ = [
     "DEFAULT_MODEL",
-    "MODEL_ALIASES",
-    "resolve_model",
+    "NONE_OF_ABOVE",
+    "NONE_OF_ABOVE_DESCRIPTION",
+    "Decision",
+    "FieldResult",
+    "decide",
+    "decide_many",
+    "schema_from_model",
 ]
 
 _SUPPORTED = (

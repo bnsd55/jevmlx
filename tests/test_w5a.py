@@ -79,7 +79,7 @@ def test_prompt_shows_the_searched_codebook():
         {"direction": {"type": "enum", "description": "d", "choices": ["LEFT", "RIGHT"]}}
     )
     plan = schema.compile_slot_plan(tok)
-    assert plan["fields"]["direction"]["codebook"] == ["0", "1"]
+    assert list(plan["fields"]["direction"]["codebook"]) == ["0", "1"]
     block = schema.to_schema_str("slots", tokenizer=tok)
     assert '0) "LEFT"' in block and '1) "RIGHT"' in block
     assert 'A) "LEFT"' not in block and 'B) "RIGHT"' not in block
@@ -134,7 +134,7 @@ def test_backtracked_set_scores_cleanly():
         {"route": {"type": "enum", "description": "d", "choices": ["one", "two", "three"]}}
     )
     plan = schema.compile_slot_plan(tok)  # must not raise
-    assert plan["fields"]["route"]["codebook"] == ["B", "C", "D"]
+    assert list(plan["fields"]["route"]["codebook"]) == ["B", "C", "D"]
     # Distinguishability: no remainder is a token-prefix of another.
     remainders = plan["fields"]["route"]["remainders"]
     for i, r in enumerate(remainders):

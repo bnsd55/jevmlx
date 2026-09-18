@@ -147,7 +147,7 @@ def test_telemetry_in_plan():
     assert "codebook" in fp
     assert "single_branch" in fp
     assert "codebook_searched" not in fp  # F2 removed
-    assert isinstance(fp["codebook"], list)
+    assert isinstance(fp["codebook"], (list, tuple))  # frozen plan: tuple
     assert isinstance(fp["single_branch"], bool)
     assert len(fp["codebook"]) == 2
 

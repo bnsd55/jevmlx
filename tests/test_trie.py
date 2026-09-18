@@ -69,13 +69,13 @@ def test_plan_uses_full_sequence_tokenization():
     # Remainder = 'LOWER"}' -> [999, _QUOTE, }]
     # (LOWER is ONE token; the old character-prefix plan would have produced
     # token 8 (ER) somewhere and missed the terminator.)
-    assert remainders == [[7, _QUOTE, 125], [999, _QUOTE, 125]]
+    assert [list(r) for r in remainders] == [[7, _QUOTE, 125], [999, _QUOTE, 125]]
     flat = [t for remainder in remainders for t in remainder]
     assert 8 not in flat
     # The shared lead-in is the '{"action": "' structure, kept out of
     # shared_ids as the schema-wide prefix (the engine's prefill tail).
-    assert plan["lead_in_ids"] == tok.encode('{"action": "')
-    assert plan["fields"]["action"]["shared_ids"] == []
+    assert list(plan["lead_in_ids"]) == tok.encode('{"action": "')
+    assert list(plan["fields"]["action"]["shared_ids"]) == []
     assert 999 not in plan["lead_in_ids"]
 
 
@@ -90,8 +90,14 @@ def test_plan_cache_is_per_tokenizer():
     tok_b = OtherTokenizer()
     plan_a = schema.compile_labels_plan(tok_a)
     plan_b = schema.compile_labels_plan(tok_b)
-    assert plan_a["fields"]["action"]["remainders"] == [[7, _QUOTE, 125], [999, _QUOTE, 125]]
-    assert plan_b["fields"]["action"]["remainders"] == [[3, _QUOTE, 125], [555, _QUOTE, 125]]
+    assert [list(r) for r in plan_a["fields"]["action"]["remainders"]] == [
+        [7, _QUOTE, 125],
+        [999, _QUOTE, 125],
+    ]
+    assert [list(r) for r in plan_b["fields"]["action"]["remainders"]] == [
+        [3, _QUOTE, 125],
+        [555, _QUOTE, 125],
+    ]
     assert len(schema._plans) == 2
     assert schema.compile_labels_plan(tok_a) is plan_a
     assert schema.compile_labels_plan(tok_b) is plan_b
@@ -217,9 +223,9 @@ def test_choice_with_double_quote_is_json_escaped():
         }
     )
     plan = schema.compile_labels_plan(tok)
-    lead_in = plan["lead_in_ids"]
-    shared = plan["fields"]["quote"]["shared_ids"]
-    remainders = plan["fields"]["quote"]["remainders"]
+    lead_in = list(plan["lead_in_ids"])  # frozen plan: tuple -> list
+    shared = list(plan["fields"]["quote"]["shared_ids"])
+    remainders = [list(r) for r in plan["fields"]["quote"]["remainders"]]
 
     bs_quote = chr(92) + chr(34)  # backslash + double quote, the JSON escape
     candidate_text = (
@@ -351,19 +357,17 @@ def test_mixed_schema_rows_carry_lead_in_exactly_once():
         }
     )
     plan = schema.compile_labels_plan(tok)
-    lead_in = plan["lead_in_ids"]
+    lead_in = list(plan["lead_in_ids"])
     assert lead_in, "fake tokenizer must produce a shared lead-in"
 
     # Assemble the rows exactly like the engine does.
     rows: list[list[int]] = []
     for p in plan["fields"].values():
-        if not isinstance(p, dict):
-            continue
         if "options" in p:
-            rows.extend(lead_in + list(s) for s in p["suffix_ids_list"])
+            rows.extend(list(lead_in) + list(s) for s in p["suffix_ids_list"])
         elif "remainders" in p:
             trie_nodes = _bt(p["remainders"])
-            rows.extend(lead_in + list(p["shared_ids"]) + list(n["path"]) for n in trie_nodes)
+            rows.extend(list(lead_in) + list(p["shared_ids"]) + list(n["path"]) for n in trie_nodes)
 
     assert rows, "mixed schema must produce rows"
     for row in rows:
@@ -371,7 +375,7 @@ def test_mixed_schema_rows_carry_lead_in_exactly_once():
         assert row[len(lead_in) : len(lead_in) * 2] != lead_in  # not duplicated
     # And the enum candidate must still round-trip to its full text.
     p = plan["fields"]["action"]
-    full = lead_in + p["shared_ids"] + p["remainders"][0]
+    full = list(lead_in) + list(p["shared_ids"]) + list(p["remainders"][0])
     assert full == tok.encode('{"action": "LOW"}')
 
 
@@ -430,18 +434,18 @@ def test_mixed_enum_multi_lead_in_round_trip():
         chr(t) if 32 <= t < 127 else "?" for t in lead_in
     ) or lead_in == tok.encode('{\n  "')
 
+    lead_in = list(lead_in)  # frozen plan: tuple
+
     rows: list[tuple[str, list[int], str]] = []  # (kind, row, full candidate text)
     for _fname, p in plan["fields"].items():
-        if not isinstance(p, dict):
-            continue
         if "options" in p:
             for oi, ids in enumerate(p["suffix_ids_list"]):
                 option = p["options"][oi]
-                full = lead_in + list(ids)
+                full = list(lead_in) + list(ids)
                 rows.append(("multi", full, "{\n  " + '"flags.' + option + '": '))
         elif "remainders" in p:
             for node in build_trie(p["remainders"]):
-                full = lead_in + list(p["shared_ids"]) + list(node["path"])
+                full = list(lead_in) + list(p["shared_ids"]) + list(node["path"])
                 rows.append(("enum", full, '{\n  "action": "LOW"'))
 
     kinds = {kind for kind, _, _ in rows}
@@ -566,7 +570,7 @@ def test_field_named_lead_in_ids_does_not_collide():
     )
     plan = schema.compile_labels_plan(tok)
     # Metadata key present and correct.
-    assert plan["lead_in_ids"] == tok.encode('{"')
+    assert list(plan["lead_in_ids"]) == tok.encode('{"')
     # Both fields have their own untouched plans.
     assert "_lead_in_ids" in plan["fields"]
     assert "lead_in_ids" in plan["fields"]

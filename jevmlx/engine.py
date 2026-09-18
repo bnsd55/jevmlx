@@ -172,6 +172,13 @@ def _load_engine_resolved(model_id: str):
     at once is the fastest way to OOM. Loading a different model id evicts the
     previous one. Call :func:`clear_engine_cache` to release memory without
     loading anything else.
+
+    ``model_id`` may be an alias (``fast``, ``quality``, ``test``) — resolved
+    via :func:`jevmlx.models.resolve_model` before loading.
+
+    Raises RuntimeError on a non-Apple-Silicon machine (mlx unavailable) —
+    the only place the platform check lives, so `import jevmlx.engine`
+    succeeds on Linux for schema/plan/metrics tooling.
     """
     _require_mlx()
     logger.info("Loading %s into Apple Silicon unified memory...", model_id)
@@ -1405,7 +1412,7 @@ def _selective_second_pass(
         for bi, node in enumerate(trie):
             # Row: lead_in + shared + node path. The shared prefix already
             # includes the parent tokens (conditioned_text prepends parent_json).
-            conditioned_rows.append(lead_in + list(shared) + list(node["path"]))
+            conditioned_rows.append(list(lead_in) + list(shared) + list(node["path"]))
             row_child.append(fname)
             row_branch2[len(conditioned_rows) - 1] = bi
 
@@ -1643,7 +1650,7 @@ def _build_schema_rows(schema: StructuredSchema, tokenizer, scoring: str) -> dic
             # stored WITHOUT the schema-wide lead-in (one rule for every row
             # type), so the lead-in is prepended exactly once here.
             for oi, suffix_ids in enumerate(p["suffix_ids_list"]):
-                rows.append(lead_in + list(suffix_ids))
+                rows.append(list(lead_in) + list(suffix_ids))
                 row_field.append(fname)
                 row_option[len(rows) - 1] = oi
             # W2-E step 3: the count row — always present for a multi field
@@ -1653,14 +1660,14 @@ def _build_schema_rows(schema: StructuredSchema, tokenizer, scoring: str) -> dic
             field_trie = build_trie(count_plan["remainders"])
             tries[count_key(fname)] = field_trie
             for bi, node in enumerate(field_trie):
-                rows.append(lead_in + list(count_plan["shared_ids"]) + list(node["path"]))
+                rows.append(list(lead_in) + list(count_plan["shared_ids"]) + list(node["path"]))
                 row_field.append(fname)
                 row_count[len(rows) - 1] = bi
             continue
         field_trie = build_trie(p["remainders"])
         tries[fname] = field_trie
         for bi, node in enumerate(field_trie):
-            rows.append(lead_in + list(p["shared_ids"]) + list(node["path"]))
+            rows.append(list(lead_in) + list(p["shared_ids"]) + list(node["path"]))
             row_field.append(fname)
             row_branch[len(rows) - 1] = bi
 

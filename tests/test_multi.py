@@ -35,7 +35,7 @@ def test_compile_labels_plan_expands_multi_field():
     # One yes/no row per option, row key '<field>/<option>' (V4: the natural
     # question, not a synthetic 'field.option' JSON key), scored candidates
     # are the quoted aliases "Y"/"N".
-    assert p["options"] == ["billing", "technical"]
+    assert list(p["options"]) == ["billing", "technical"]
     assert len(p["suffix_ids_list"]) == 2
     assert p["suffix_ids_list"][0] != p["suffix_ids_list"][1]
     # The common row lead-in ('{\n  "categories/' with the slash) is lifted
