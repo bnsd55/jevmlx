@@ -5,18 +5,12 @@ import math
 from typing import Literal
 
 import pytest
+from conftest import _Mod97Tokenizer as FakeTokenizer
 from pydantic import BaseModel, Field
 
 from jevmlx.api import schema_from_model
 from jevmlx.engine import _fold_multi
 from jevmlx.schema import FieldDefinition, StructuredSchema
-
-
-class FakeTokenizer:
-    """Deterministic tokenizer: one id per character (offset so ids start at 1)."""
-
-    def encode(self, text: str, add_special_tokens: bool = True) -> list[int]:
-        return [ord(c) % 97 + 1 for c in text] or [1]
 
 
 def test_compile_labels_plan_expands_multi_field():
@@ -164,7 +158,7 @@ def test_multi_engine_result_semantics():
     probability), margin = min |p_yes - threshold|, alternatives = per-option
     list sorted by P(yes)."""
 
-    from tests.test_engine_fake import FakeModel, FakeTokenizer
+    from conftest import FakeModel, FakeTokenizer
 
     # Bias logits so option 0's "Y" token wins strongly and option 1's "N"
     # wins: model returns zeros, so probabilities are uniform at 0.5 — the
@@ -213,7 +207,7 @@ def test_multi_threshold_validation():
     raise; the fake model returns zero logits everywhere, so the uncalibrated
     rule selects everything (P(yes) = 0.5 >= 0.5) and a strongly negative
     intercept calibrates everything away."""
-    from tests.test_engine_fake import FakeModel, FakeTokenizer
+    from conftest import FakeModel, FakeTokenizer
 
     schema = StructuredSchema(
         {"flags": {"type": "multi", "description": "d", "choices": ["x", "y"]}}

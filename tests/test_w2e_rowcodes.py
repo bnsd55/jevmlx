@@ -99,8 +99,9 @@ def test_engine_telemetry_maps_codes_to_option_names():
     """Fake-model end-to-end: telemetry keys (per_option, option_logit_pairs,
     alternatives, top_choices) are OPTION NAMES in choices order, not codes —
     the engine maps '<field>/<code>' rows back through plan['codes']."""
+    from conftest import FakeModel, FakeTokenizer
+
     from jevmlx.engine import run_parallel_generation
-    from tests.test_engine_fake import FakeModel, FakeTokenizer
 
     schema = _multi_schema()
     result = run_parallel_generation(FakeModel(), FakeTokenizer(), "ctx", schema)

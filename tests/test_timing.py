@@ -11,6 +11,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from conftest import make_engine_result
+
 from benchmarks.timing import TIMING_KEYS, aggregate, extract_telemetry, run_timing
 
 
@@ -89,24 +91,19 @@ def test_run_timing_fake_model_three_presets_one_call():
         calls["n"] += 1
         n = preset_call["n"]
         # Drifting total_ms so median/p95 have something to bite on.
-        return {
-            "elapsed_ms": 10.0 + calls["n"],
-            "prior_ms": 0.0,
-            "prefill_ms": 5.0,
-            "plan_compile_ms": 0.1,
-            "cache_broadcast_ms": 0.2,
-            "suffix_eval_ms": 4.0,
-            "lm_head_gather_ms": 0.3,
-            "second_pass_ms": 0.0,
-            "total_ms": 10.0 + n,
-            "peak_active_bytes": 1000 + n,
-            "padded_token_positions": 12 * (n % 3 + 1),
-            "sequential_forward_passes": 2,
-            "rescored_fields": ["pick"] if n % 2 else [],
-            "rerun_fields": [],
-            "num_fields": 2,
-            "field_telemetry": {"pick": {"rows": 2}},
-        }
+        return make_engine_result(
+            elapsed_ms=10.0 + calls["n"],
+            prefill_ms=5.0,
+            suffix_eval_ms=4.0,
+            total_ms=10.0 + n,
+            peak_active_bytes=1000 + n,
+            padded_token_positions=12 * (n % 3 + 1),
+            sequential_forward_passes=2,
+            rescored_fields=["pick"] if n % 2 else [],
+            num_fields=2,
+            field_telemetry={"pick": {"rows": 2}},
+            parsed_json={},
+        )
 
     def fake_load_preset(rel):
         return {

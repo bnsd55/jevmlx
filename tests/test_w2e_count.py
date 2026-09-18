@@ -10,68 +10,11 @@ reconciled_by on the field entry, plus a '<field>#count' scalar entry.
 """
 
 import pytest
+from conftest import CountCodeModel as _BiasedModel
+from conftest import _Mod97Tokenizer as _CountTokenizer
 
 from jevmlx.engine import COUNT_MARGIN_MIN, run_parallel_generation
 from jevmlx.schema import StructuredSchema
-
-
-class _CountTokenizer:
-    """Char tokenizer, ids = ord(c) % 97 + 1."""
-
-    name_or_path = "fake-w2e3"
-    pad_token_id = 0
-
-    def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
-        return [ord(c) % 97 + 1 for c in text] or [1]
-
-    def apply_chat_template(self, messages, add_generation_prompt=True, tokenize=True):
-        assert tokenize
-        return self.encode("\n".join(m["content"] for m in messages))
-
-
-class _BiasedModel:
-    """Bias the count row and the option Y/N rows independently.
-
-    Logits are keyed by token id, so biases are set on the character ids of
-    the count codes ('0'..'4') and of Y/N. `count_bias` maps a count-code
-    character to a logit bump; `yes_logit`/`no_logit` set the option rows.
-    """
-
-    def __init__(
-        self,
-        count_bias: dict[str, float],
-        yes_logit: float,
-        no_logit: float,
-        vocab: int = 128,
-    ):
-        self.count_bias = count_bias
-        self.yes_logit = yes_logit
-        self.no_logit = no_logit
-        self.vocab_size = vocab
-        self.n_layers = 2
-        self.args = type("Args", (), {"vocab_size": vocab})()
-        self.layers = [None] * self.n_layers
-
-    def parameters(self):
-        return {}
-
-    def __call__(self, tokens, cache=None):
-        import mlx.core as mx
-
-        batch, seq_len = tokens.shape
-        if cache is not None:
-            for c in cache:
-                c.update_and_fetch(
-                    mx.zeros((batch, 2, seq_len, 8)), mx.zeros((batch, 2, seq_len, 8))
-                )
-        out = mx.zeros((batch, seq_len, self.vocab_size))
-        for ch, bump in self.count_bias.items():
-            # The count codes are read at their divergence tokens: '4' is a
-            # two-char code whose first token is '4' — bias that id.
-            out[:, :, ord(ch[0]) % 97 + 1] = bump
-        out[:, :, ord("Y") % 97 + 1] = self.yes_logit
-        out[:, :, ord("N") % 97 + 1] = self.no_logit
-        return out
 
 
 def _multi_schema():
@@ -185,8 +128,8 @@ def test_scalar_fields_unaffected_by_count_rows():
     sys.path.insert(0, "tests")
     from typing import Literal
 
+    from conftest import FakeModel, FakeTokenizer
     from pydantic import BaseModel, Field
-    from test_engine_fake import FakeModel, FakeTokenizer
 
     from jevmlx.api import schema_from_model
 

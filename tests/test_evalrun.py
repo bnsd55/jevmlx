@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+from conftest import make_engine_result, make_field_telemetry
+
 from jevmlx import evalrun
 
 
@@ -328,34 +330,16 @@ def test_parallel_log_scores_reads_finalized_dict(tmp_path, monkeypatch):
         oracle_overrides=None,
     ):
         calls["temperature"] = temperature
-        return {
-            "field_telemetry": {
-                "x": {
-                    "value": "A",
-                    "type": "enum",
-                    "probability": 0.9,
-                    "log_scores": {"A": -0.1, "B": -2.0},
-                }
-            },
-            "elapsed_ms": 5.0,
-            "rows": 2,
-            "passes": 1,
-            # W3-R review F2: parallel_decide_fn reads the timing split
-            # strictly — the fake must carry the engine's full result shape.
-            "prior_ms": 0.0,
-            "prefill_ms": 2.0,
-            "plan_compile_ms": 0.1,
-            "cache_broadcast_ms": 0.2,
-            "suffix_eval_ms": 2.5,
-            "lm_head_gather_ms": 0.3,
-            "second_pass_ms": 0.0,
-            "total_ms": 5.0,
-            "peak_active_bytes": 1024,
-            "padded_token_positions": 6,
-            "rescored_fields": [],
-            "rerun_fields": [],
-            "num_fields": 1,
-        }
+        return make_engine_result(
+            fields={
+                "x": make_field_telemetry(
+                    value="A",
+                    choices=["A", "B"],
+                    probability=0.9,
+                    log_scores={"A": -0.1, "B": -2.0},
+                )
+            }
+        )
 
     import jevmlx.engine as engine_mod
 

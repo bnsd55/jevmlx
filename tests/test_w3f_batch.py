@@ -12,7 +12,7 @@ Verifies:
 from __future__ import annotations
 
 import pydantic
-from test_engine_fake import FakeModel, FakeTokenizer
+from conftest import FakeModel, FakeTokenizer
 
 from jevmlx.engine import run_parallel_generation, run_parallel_generation_batched
 from jevmlx.schema import StructuredSchema
