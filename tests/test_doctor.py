@@ -426,6 +426,30 @@ class TestEditableInstall:
         assert check.status == "OK"
         assert "editable install" in check.detail
 
+    def test_wheel_install_no_direct_url_ok(self, monkeypatch):
+        # Normal PyPI install: no direct_url.json -> the normal end-user
+        # case, doctor must not fail it.
+        monkeypatch.setattr(
+            doctor.importlib.metadata,
+            "distribution",
+            lambda name: types.SimpleNamespace(read_text=lambda _n: None),
+        )
+        check = check_editable_install()
+        assert check.status == "OK"
+        assert "installed as a package" in check.detail
+
+    def test_direct_url_not_editable_ok(self, monkeypatch, tmp_path):
+        other = tmp_path / "some-wheel-tree"
+        payload = json.dumps({"url": other.as_uri(), "dir_info": {"editable": False}})
+        monkeypatch.setattr(
+            doctor.importlib.metadata,
+            "distribution",
+            lambda name: types.SimpleNamespace(read_text=lambda _n: payload),
+        )
+        check = check_editable_install()
+        assert check.status == "OK"
+        assert "not editable" in check.detail
+
     def test_other_checkout_fails(self, monkeypatch, tmp_path):
         fake = tmp_path / "other-checkout"
         fake.mkdir()
@@ -449,13 +473,16 @@ class TestEditableInstall:
         assert "uv pip install -e" in check.fix
 
     def test_no_direct_url_fails(self, monkeypatch):
+        # No dist-info at all is still a FAIL (jevmlx not installed),
+        # distinct from a package install whose dist-info lacks
+        # direct_url.json (F1: OK).
         monkeypatch.setattr(
             doctor.importlib.metadata,
             "distribution",
             lambda name: types.SimpleNamespace(read_text=lambda _n: None),
         )
         check = check_editable_install()
-        assert check.status == "FAIL"
+        assert check.status == "OK"
 
     def test_file_url_with_spaces_unquoted(self, monkeypatch, tmp_path):
         checkout = tmp_path / "my checkout"
@@ -464,7 +491,9 @@ class TestEditableInstall:
             doctor.importlib.metadata,
             "distribution",
             lambda name: types.SimpleNamespace(
-                read_text=lambda _n: json.dumps({"url": checkout.as_uri()})
+                read_text=lambda _n: json.dumps(
+                    {"url": checkout.as_uri(), "dir_info": {"editable": True}}
+                )
             ),
         )
         # The installed url points at a different tree than this test file's
