@@ -678,13 +678,19 @@ def _case_constraints(records: list[dict]) -> dict[str, list[dict]]:
     return by_case
 
 
-def _check_constraint(constraint: dict, preds: dict[str, object]) -> bool:
+def _check_constraint(constraint: dict | object, preds: dict[str, object]) -> bool:
     """Return True if the constraint is SATISFIED, False if VIOLATED.
 
-    Delegates to jevmlx.constraints.check_constraint (single source of truth).
+    W5b-11: accepts a COMPILED constraint object (CompiledImplication /
+    CompiledExclusion / CompiledExclusivity — ``satisfied`` by name-keyed
+    assignment) or, as the legacy path, a raw constraint dict delegating to
+    jevmlx.constraints.check_constraint. New callers compile once via
+    jevmlx.constraints.compile_constraints and pass the compiled objects.
     """
     from jevmlx.constraints import check_constraint
 
+    if hasattr(constraint, "satisfied"):
+        return constraint.satisfied(preds)
     return check_constraint(constraint, preds)
 
 

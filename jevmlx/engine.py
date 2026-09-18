@@ -22,11 +22,15 @@ from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from jinja2.exceptions import TemplateError
 
 from jevmlx.models import resolve_model
+
+if TYPE_CHECKING:
+    from jevmlx.constraints import CompiledConstraints
+
 from jevmlx.schema import StructuredSchema, _common_token_prefix, count_key, is_count_key
 from jevmlx.setcons import select_constrained_set
 from jevmlx.trie import build_trie, logsumexp, score_trie, softmax
@@ -1300,127 +1304,85 @@ def _score_rows(
 def _constrained_map(
     field_log_scores: dict[str, dict[str, float]],
     field_values: dict[str, dict],
-    constraints: list[dict],
+    compiled: "CompiledConstraints",
     schema: StructuredSchema,
 ) -> tuple[dict[str, object], list[str]]:
     """Choose the joint assignment maximizing the sum of per-field log
-    scores subject to case-level constraints (EV1 / W3-D Q1).
+    scores subject to case-level constraints (EV1 / W3-D Q1) — W5b-11:
+    evaluates the COMPILED constraint objects by field index (no dict
+    walking, no string-key constraint reads at decision time).
 
     Returns ``(reconciled_values, reconciled_field_names)`` where
     ``reconciled_values`` maps field name -> chosen value and
     ``reconciled_field_names`` lists the fields whose value changed from
     the independent argmax.
 
-    Constraint types (mirroring EV1):
-    - implies / requires_parent: parent -> child mapping
-    - excludes: field==value -> other must be empty/falsy
-    - exclusivity: at most one of the group options in a multi field
-
-    Enumerates valid assignments per connected component when the product
-    space is under 5000; raises NotImplementedError naming the component
-    size otherwise (no silent skip).
+    Enumerates valid assignments per compiled connected component when the
+    product space is under 5000; raises NotImplementedError naming the
+    component size otherwise (no silent skip).
     """
     import itertools
 
-    # Build the set of constrained fields.
-    constrained_fields: set[str] = set()
-    for c in constraints:
-        if c.get("type") in ("implies", "requires_parent"):
-            constrained_fields.add(c["parent"])
-            constrained_fields.add(c["child"])
-        elif c.get("type") == "excludes":
-            constrained_fields.add(c["field"])
-            constrained_fields.add(c["other"])
-        elif c.get("type") == "exclusivity":
-            constrained_fields.add(c["field"])
-
-    if not constrained_fields:
+    if not compiled.components:
         return {}, []
-
-    # Build adjacency for connected components.
-    adj: dict[str, set[str]] = {f: set() for f in constrained_fields}
-    for c in constraints:
-        if c.get("type") in ("implies", "requires_parent"):
-            adj.setdefault(c["parent"], set()).add(c["child"])
-            adj.setdefault(c["child"], set()).add(c["parent"])
-        elif c.get("type") == "excludes":
-            adj.setdefault(c["field"], set()).add(c["other"])
-            adj.setdefault(c["other"], set()).add(c["field"])
-
-    # Find connected components (BFS).
-    visited: set[str] = set()
-    components: list[set[str]] = []
-    for f in constrained_fields:
-        if f in visited:
-            continue
-        queue = [f]
-        component: set[str] = set()
-        while queue:
-            node = queue.pop()
-            if node in visited:
-                continue
-            visited.add(node)
-            component.add(node)
-            queue.extend(adj.get(node, set()) - visited)
-        components.append(component)
 
     reconciled: dict[str, object] = {}
     changed: list[str] = []
 
-    def _check_constraint(c: dict, assignment: dict[str, object]) -> bool:
-        """True if constraint is SATISFIED (delegates to jevmlx.constraints)."""
-        from jevmlx.constraints import check_constraint
+    # Index space -> names/domains (compiled once in CompiledConstraints).
+    name_of = compiled.field_names
 
-        return check_constraint(c, assignment)
-
-    for component in components:
+    for component in compiled.components:
         # W5-B (review 11): candidates are typed Candidate(value, score_key)
         # pairs — booleans score under the string keys "true"/"false" but
         # DECIDE as Python bools. The old code took the raw score keys as
         # values, so a boolean field reconciled to the STRING "true"/"false"
         # (and falsely recorded itself as changed, "true" != True).
-        field_candidates: dict[str, list[Candidate]] = {}
-        for fname in component:
+        field_candidates: dict[int, list[Candidate]] = {}
+        for fidx in sorted(component.field_idxes):
+            fname = name_of[fidx]
             if fname not in field_log_scores:
                 # No scored candidates (multi field, or a field whose rows
                 # produced no log_scores): the current value is the only
                 # candidate. Multi fields cannot be case-constrained
-                # (validate_constraints_for_schema rejects that) — they can
-                # only appear via exclusivity, which never reaches MAP.
+                # (compile rejects that) — they can only appear via
+                # exclusivity, which never reaches MAP.
                 current = field_values.get(fname, {}).get("value")
                 fdef = schema.fields.get(fname)
                 if fdef is not None and fdef.field_type == "boolean" and current is not None:
-                    field_candidates[fname] = [Candidate(current, _bool_score_key(current), 0.0)]
+                    field_candidates[fidx] = [Candidate(current, _bool_score_key(current), 0.0)]
                 else:
-                    field_candidates[fname] = [Candidate(current, _value_score_key(current), 0.0)]
+                    field_candidates[fidx] = [Candidate(current, _value_score_key(current), 0.0)]
             else:
-                field_candidates[fname] = [
+                field_candidates[fidx] = [
                     Candidate(_score_key_value(fname, key, schema), key, score)
                     for key, score in field_log_scores[fname].items()
                 ]
 
         # Check product space size.
         product = 1
-        for fname in component:
-            product *= len(field_candidates[fname])
+        for fidx in sorted(component.field_idxes):
+            product *= len(field_candidates[fidx])
         if product > 5000:
             raise NotImplementedError(
-                f"constrained MAP component too large: {len(component)} fields, "
-                f"{product} assignments (> 5000); fields={sorted(component)}"
+                f"constrained MAP component too large: {len(component.field_idxes)} fields, "
+                f"{product} assignments (> 5000); "
+                f"fields={sorted(name_of[i] for i in component.field_idxes)}"
             )
 
         # Enumerate valid assignments, pick the joint MAP. Constraints see
-        # TYPED values; score lookup uses score_key.
-        best_assignment: dict[str, Candidate] | None = None
+        # TYPED values (by index); score lookup uses score_key.
+        best_assignment: dict[int, Candidate] | None = None
         best_score = float("-inf")
-        fields_in_component = sorted(component)
-        for combo in itertools.product(*(field_candidates[f] for f in fields_in_component)):
-            cands = dict(zip(fields_in_component, combo, strict=True))
-            assignment = {fname: cand.value for fname, cand in cands.items()}
-            # Check all constraints that touch this component (typed values).
-            if not all(_check_constraint(c, assignment) for c in constraints):
+        fidx_in_component = sorted(component.field_idxes)
+        for combo in itertools.product(*(field_candidates[f] for f in fidx_in_component)):
+            cands = dict(zip(fidx_in_component, combo, strict=True))
+            values_by_idx = {fidx: cand.value for fidx, cand in cands.items()}
+            # Check all constraints touching this component (typed, by index).
+            if not all(
+                c.satisfied(values_by_idx) for c in (*compiled.implications, *compiled.exclusions)
+            ):
                 continue
-            # Sum per-field log scores via the typed candidate's score.
             score = sum(cand.score for cand in cands.values())
             if score > best_score:
                 best_score = score
@@ -1428,11 +1390,13 @@ def _constrained_map(
 
         if best_assignment is None:
             raise NotImplementedError(
-                f"no valid assignment exists for constrained component {sorted(component)}"
+                "no valid assignment exists for constrained component "
+                f"{sorted(name_of[i] for i in component.field_idxes)}"
             )
 
         # Record reconciled TYPED values and track changes.
-        for fname, cand in best_assignment.items():
+        for fidx, cand in best_assignment.items():
+            fname = name_of[fidx]
             old_val = field_values.get(fname, {}).get("value")
             if cand.value != old_val:
                 changed.append(fname)
@@ -1477,6 +1441,7 @@ def _selective_second_pass(
     temperature: float = 1.0,
     prior: dict[str, Any] | None = None,
     constraints: list[dict] | None = None,
+    compiled_constraints: "CompiledConstraints | None" = None,
     oracle_overrides: dict[str, object] | None = None,
 ) -> dict[str, Any]:
     """W3-D part 2, rebuilt on the shared finalizer (W5-B review 3-10).
@@ -1756,20 +1721,21 @@ def _selective_second_pass(
             fname: ft["log_scores"] for fname, ft in field_telemetry.items() if "log_scores" in ft
         }
         field_values = {fname: {"value": pj["value"]} for fname, pj in parsed_json.items()}
-        reconciled, _changed = _constrained_map(field_log_scores, field_values, constraints, schema)
+        reconciled, _changed = _constrained_map(
+            field_log_scores, field_values, compiled_constraints, schema
+        )
         for fname, val in reconciled.items():
             if fname in parsed_json and parsed_json[fname]["value"] != val:
                 parsed_json[fname]["value"] = val
                 field_telemetry[fname]["value"] = val
-        from jevmlx.constraints import check_constraint as _cc
-
         final_assignment = {fname: pj["value"] for fname, pj in parsed_json.items()}
-        for c in constraints:
-            if not _cc(c, final_assignment):
-                raise InternalConstraintViolationError(
-                    f"dependency second pass produced an assignment violating "
-                    f"constraint {c!r}; assignment={final_assignment!r}"
-                )
+        if compiled_constraints is not None and not compiled_constraints.satisfied(
+            final_assignment
+        ):
+            raise InternalConstraintViolationError(
+                "dependency second pass produced an assignment violating a "
+                f"compiled constraint; assignment={final_assignment!r}"
+            )
 
     elapsed_ms = (time.perf_counter() - t0) * 1000
     return {
@@ -2097,11 +2063,14 @@ def run_parallel_generation(
     # BEFORE any model work — unknown types, unknown fields, out-of-domain
     # values and multi-field case constraints all fail here, loudly. The
     # neutral prior pass (prior-mode recursion) runs with constraints=None,
-    # so this never fires twice.
+    # so this never fires twice. W5b-11: compile ONCE into frozen typed
+    # objects (field indices + value-index domains) — validation AND
+    # compilation are one step; the MAP evaluates by index.
+    compiled_constraints: CompiledConstraints | None = None
     if constraints:
-        from jevmlx.constraints import validate_constraints_for_schema
+        from jevmlx.constraints import compile_constraints
 
-        validate_constraints_for_schema(constraints, schema)
+        compiled_constraints = compile_constraints(constraints, schema)
     calib = _load_calibration(calibration)
     if max_rows is not None and max_rows < 1:
         raise ValueError(f"max_rows must be >= 1, got {max_rows!r}")
@@ -2192,6 +2161,7 @@ def run_parallel_generation(
         t_prefill=t_prefill,
         t_suffix_eval=t_suffix_eval,
         constraints=constraints,
+        compiled_constraints=compiled_constraints,
         oracle_overrides=oracle_overrides,
         active_start=active_start,
         _prior_mode=_prior_mode,
@@ -2218,7 +2188,8 @@ def _assemble(
     t_prefill: float,
     t_suffix_eval: float,
     constraints: list[dict] | None,
-    oracle_overrides: dict[str, object] | None,
+    compiled_constraints: "CompiledConstraints | None" = None,
+    oracle_overrides: dict[str, object] | None = None,
     active_start: int = 0,
     _prior_mode: bool = False,
 ) -> dict[str, Any]:
@@ -2826,7 +2797,7 @@ def _assemble(
         }
         field_values = {fname: {"value": pj["value"]} for fname, pj in parsed_json.items()}
         reconciled, reconciled_fields = _constrained_map(
-            field_log_scores, field_values, constraints, schema
+            field_log_scores, field_values, compiled_constraints, schema
         )
         for fname, val in reconciled.items():
             if fname in parsed_json:
@@ -2863,6 +2834,7 @@ def _assemble(
             temperature=temperature,
             prior=prior,
             constraints=constraints,
+            compiled_constraints=compiled_constraints,
             oracle_overrides=oracle_overrides,
         )
 
@@ -2981,6 +2953,7 @@ def run_parallel_generation_batched(
     calibration: str | dict | None = None,
     prior_correction: bool = False,
     constraints: list[dict] | None = None,
+    compiled_constraints: "CompiledConstraints | None" = None,
     oracle_overrides: dict[str, object] | None = None,
 ) -> list[dict[str, Any]]:
     """Decide N contexts with ONE merged suffix pass per context group (W3-F).
@@ -3098,6 +3071,13 @@ def run_parallel_generation_batched(
     if current:
         groups.append(current)
 
+    # W5b-11: compile ONCE for the whole call; every _assemble gets the
+    # same compiled object (no per-context dict walking).
+    if constraints and compiled_constraints is None:
+        from jevmlx.constraints import compile_constraints
+
+        compiled_constraints = compile_constraints(constraints, schema)
+
     results: list[dict[str, Any]] = [None] * len(contexts)  # type: ignore[list-item]
     # W5-D finding 32: reset the process-lifetime peak once for the whole
     # call; every result in the call reports the same request-scoped pair.
@@ -3131,6 +3111,7 @@ def run_parallel_generation_batched(
                     t_prefill=pf.t_prefill_ms,
                     t_suffix_eval=0.0,
                     constraints=constraints,
+                    compiled_constraints=compiled_constraints,
                     oracle_overrides=oracle_overrides,
                     active_start=active_start,
                 )
@@ -3205,6 +3186,7 @@ def run_parallel_generation_batched(
                 t_prefill=pf.t_prefill_ms,
                 t_suffix_eval=(t_scored_ms / n_group) + (time.perf_counter() - t0) * 1000,
                 constraints=constraints,
+                compiled_constraints=compiled_constraints,
                 oracle_overrides=oracle_overrides,
                 active_start=active_start,
             )

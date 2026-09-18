@@ -12,10 +12,18 @@ Constraint types (mirroring EV1's declarative shape):
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 __all__ = [
     "check_constraint",
     "validate_constraints",
     "validate_constraints_for_schema",
+    "compile_constraints",
+    "CompiledImplication",
+    "CompiledExclusion",
+    "CompiledExclusivity",
+    "CompiledConstraints",
+    "ConstraintComponent",
     "ConstraintError",
 ]
 
@@ -209,3 +217,230 @@ def _scalar_domain(fdef) -> list[object]:
     if fdef.field_type == "boolean":
         return [True, False]
     return list(fdef.choices or [])
+
+
+# --------------------------------------------------------------------------
+# W5b-11 (GPT-REVIEW-2 C6): compiled constraint objects.
+#
+# validate_constraints_for_schema walks the dict list on EVERY engine call
+# and _constrained_map does STRING-key lookups per candidate combination.
+# compile_constraints does all of that ONCE per (constraints, schema) into
+# frozen typed objects carrying FIELD INDICES and value-index sets; the MAP
+# evaluates by index with no dict lookups, and evalmetrics consumes the
+# compiled form.
+
+
+@dataclass(frozen=True)
+class CompiledImplication:
+    """implies/requires_parent: parent_idx -> child_idx value-index mapping.
+
+    ``mapping`` maps PARENT VALUE-INDEX -> frozenset of allowed CHILD
+    VALUE-INDEXes — indices into the compiled field domains, so evaluation
+    is integer set membership (no string-key dict lookups in the MAP).
+    """
+
+    parent_idx: int
+    child_idx: int
+    mapping: dict[int, frozenset[int]]
+
+    def satisfied(self, values_by_idx: dict[int, object]) -> bool:
+        parent_val = values_by_idx.get(self.parent_idx)
+        child_val = values_by_idx.get(self.child_idx)
+        if parent_val is None or child_val is None:
+            return True  # unmeasured field can't violate
+        domain = self._parent_domain
+        try:
+            parent_index = domain.index(parent_val)
+        except ValueError:
+            return True  # value outside the domain cannot drive the rule
+        allowed = self.mapping.get(parent_index, frozenset())
+        try:
+            child_index = self._child_domain.index(child_val)
+        except ValueError:
+            return True
+        return child_index in allowed
+
+
+@dataclass(frozen=True)
+class CompiledExclusion:
+    """excludes: when field_idx == value, other_idx must be empty/falsy."""
+
+    field_idx: int
+    value: object
+    other_idx: int
+
+    def satisfied(self, values_by_idx: dict[int, object]) -> bool:
+        field_val = values_by_idx.get(self.field_idx)
+        other_val = values_by_idx.get(self.other_idx)
+        if field_val is None or other_val is None:
+            return True
+        if field_val == self.value:
+            if isinstance(other_val, list):
+                return len(other_val) == 0
+            return other_val in (None, "", False)
+        return True
+
+
+@dataclass(frozen=True)
+class CompiledExclusivity:
+    """exclusivity: at most one of option_idxes selected in the multi field.
+
+    Options are compiled as CHOICE VALUE-INDICES; the multi value is a list
+    of the field's choice values, so intersection stays on values (a multi
+    selection is values, not indices).
+    """
+
+    field_idx: int
+    options: frozenset[object]
+
+    def satisfied(self, values_by_idx: dict[int, object]) -> bool:
+        field_val = values_by_idx.get(self.field_idx)
+        if field_val is None:
+            return True
+        if not isinstance(field_val, list):
+            field_val = [field_val] if field_val else []
+        selected = set(field_val) & set(self.options)
+        return len(selected) <= 1
+
+
+@dataclass(frozen=True)
+class ConstraintComponent:
+    """One connected component of constrained fields (by field index)."""
+
+    field_idxes: frozenset[int]
+    constraint_indices: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class CompiledConstraints:
+    """The compiled constraint set: frozen typed objects + component graph.
+
+    Index space: ``field_names[idx]`` is the schema field at that index
+    (schema field order); ``domain_of[idx]`` is the field's typed domain.
+    ``components`` precomputes the connected components the MAP enumerates
+    (adjacency from implies/excludes edges; exclusivity fields are
+    singletons the MAP never reconciles).
+    """
+
+    implications: tuple[CompiledImplication, ...]
+    exclusions: tuple[CompiledExclusion, ...]
+    exclusivities: tuple[CompiledExclusivity, ...]
+    field_names: tuple[str, ...]
+    domain_of: dict[int, tuple[object, ...]]  # field_idx -> typed domain
+    components: tuple[ConstraintComponent, ...]
+
+    @property
+    def constrained_field_idxes(self) -> frozenset[int]:
+        out: set[int] = set()
+        for c in self.implications:
+            out.add(c.parent_idx)
+            out.add(c.child_idx)
+        for c in self.exclusions:
+            out.add(c.field_idx)
+            out.add(c.other_idx)
+        for c in self.exclusivities:
+            out.add(c.field_idx)
+        return frozenset(out)
+
+    def idx_of(self, name: str) -> int:
+        return self.field_names.index(name)
+
+    def satisfied(self, assignment: dict[str, object]) -> bool:
+        """Every compiled constraint satisfied under a NAME-keyed
+        assignment (evalmetrics' view) — evaluates by index internally."""
+        values_by_idx = {idx: assignment.get(name) for name, idx in self.name_idx_pairs()}
+        return all(
+            c.satisfied(values_by_idx)
+            for c in (*self.implications, *self.exclusions, *self.exclusivities)
+        )
+
+    def name_idx_pairs(self) -> tuple[tuple[str, int], ...]:
+        return tuple((name, idx) for idx, name in enumerate(self.field_names))
+
+
+def compile_constraints(constraints: list[dict], schema) -> CompiledConstraints:
+    """Compile case-level constraints ONCE against a StructuredSchema.
+
+    The ONLY validation entry (W5b-11): shape validation, schema-field
+    existence, domain membership, multi-field support rules — everything
+    validate_constraints_for_schema checked — plus index compilation. All
+    failures raise ConstraintError here, before any model work.
+
+    Returns a frozen CompiledConstraints; the engine's _constrained_map
+    evaluates by index, and evalmetrics.constraint_violation_rate consumes
+    the compiled form.
+    """
+    validate_constraints_for_schema(constraints, schema)
+    field_names = tuple(schema.fields)
+    idx_of = {name: i for i, name in enumerate(field_names)}
+    domain_of: dict[int, tuple[object, ...]] = {
+        idx_of[name]: tuple(_scalar_domain(fdef)) for name, fdef in schema.fields.items()
+    }
+    # Multi fields: domain = choices (for exclusivity option indices).
+    for name, fdef in schema.fields.items():
+        if fdef.field_type == "multi" and idx_of[name] not in domain_of:
+            domain_of[idx_of[name]] = tuple(fdef.choices or ())
+
+    implications: list[CompiledImplication] = []
+    exclusions: list[CompiledExclusion] = []
+    exclusivities: list[CompiledExclusivity] = []
+
+    for c in constraints:
+        ctype = c["type"]
+        if ctype in ("implies", "requires_parent"):
+            parent_idx = idx_of[c["parent"]]
+            child_idx = idx_of[c["child"]]
+            parent_domain = domain_of[parent_idx]
+            child_domain = domain_of[child_idx]
+            p_domain_index = {v: i for i, v in enumerate(parent_domain)}
+            c_domain_index = {v: i for i, v in enumerate(child_domain)}
+            mapping: dict[int, frozenset[int]] = {}
+            for parent_val, child_vals in c["mapping"].items():
+                p_idx = p_domain_index[parent_val]
+                mapping[p_idx] = frozenset(c_domain_index[cv] for cv in child_vals)
+            implications.append(CompiledImplication(parent_idx, child_idx, mapping))
+        elif ctype == "excludes":
+            exclusions.append(CompiledExclusion(idx_of[c["field"]], c["value"], idx_of[c["other"]]))
+        elif ctype == "exclusivity":
+            exclusivities.append(CompiledExclusivity(idx_of[c["field"]], frozenset(c["options"])))
+
+    compiled = CompiledConstraints(
+        implications=tuple(implications),
+        exclusions=tuple(exclusions),
+        exclusivities=tuple(exclusivities),
+        field_names=field_names,
+        domain_of=domain_of,
+        components=(),  # filled below (frozen: build then replace)
+    )
+    # Wire the domain lookups the implication evaluator needs (frozen
+    # dataclass: assign through object.__setattr__).
+    for c in compiled.implications:
+        object.__setattr__(c, "_parent_domain", list(domain_of[c.parent_idx]))
+        object.__setattr__(c, "_child_domain", list(domain_of[c.child_idx]))
+
+    # Connected components over implies/excludes edges (field indices).
+    constrained = compiled.constrained_field_idxes
+    adj: dict[int, set[int]] = {i: set() for i in constrained}
+    for c in compiled.implications:
+        adj[c.parent_idx].add(c.child_idx)
+        adj[c.child_idx].add(c.parent_idx)
+    for c in compiled.exclusions:
+        adj[c.field_idx].add(c.other_idx)
+        adj[c.other_idx].add(c.field_idx)
+    visited: set[int] = set()
+    components: list[ConstraintComponent] = []
+    for start in sorted(constrained):
+        if start in visited:
+            continue
+        queue, comp = [start], set()
+        while queue:
+            node = queue.pop()
+            if node in visited:
+                continue
+            visited.add(node)
+            comp.add(node)
+            queue.extend(adj[node] - visited)
+        components.append(ConstraintComponent(frozenset(comp), ()))
+
+    object.__setattr__(compiled, "components", tuple(components))
+    return compiled

@@ -425,7 +425,10 @@ def test_constrained_map_keeps_booleans_typed():
     constraints = [
         {"type": "excludes", "field": "approved", "value": True, "other": "rejection_reason"}
     ]
-    reconciled, changed = _constrained_map(field_log_scores, field_values, constraints, schema)
+    from jevmlx.constraints import compile_constraints
+
+    compiled = compile_constraints(constraints, schema)
+    reconciled, changed = _constrained_map(field_log_scores, field_values, compiled, schema)
     got = reconciled["approved"]
     assert got is False, f"boolean reconciled to {got!r} ({type(got).__name__})"
     assert "approved" in changed
