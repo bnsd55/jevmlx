@@ -1008,7 +1008,6 @@ def run_parallel_generation(
             del out
             bucket_pos += len(chunk_rows)
 
-
     t_suffix_eval = (time.perf_counter() - t_suf0) * 1000
     peak_active_bytes = max(peak_active_bytes, int(mx.get_peak_memory()))
 

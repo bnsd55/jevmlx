@@ -8,7 +8,6 @@ from jevmlx.cli import load_preset
 from jevmlx.engine import load_engine, run_naive_generation, run_parallel_generation
 from jevmlx.schema import StructuredSchema
 from jevmlx.trie import build_trie
-from tests.conftest import PARITY_ATOL
 
 MODEL_ID = "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
 
@@ -481,7 +480,7 @@ def test_w1a_scoring_parity_batch_vs_chunked_real_model(engine):
     invariant that MATTERS is the decision: the same winner per field, and
     log_scores that agree to within FP tolerance. Exact equality is still
     asserted on the FakeModel path (test_engine_fake.py) where the model is
-    deterministic.
+    deterministic."""
     model, tokenizer = engine
     schema = StructuredSchema(
         {
@@ -516,15 +515,15 @@ def test_w1a_scoring_parity_batch_vs_chunked_real_model(engine):
             assert set(ls_full) == set(ls_again), f"max_rows={max_rows}, field={fname}"
             for choice in ls_full:
                 assert abs(ls_full[choice] - ls_again[choice]) < PARITY_ATOL, (
-
                     f"max_rows={max_rows}, field={fname}, choice={choice}"
                 )
         # Probabilities drift with batch shape (see the docstring): within
         # PARITY_ATOL, not bit-identical.
         for fname in full["parsed_json"]:
-            assert abs(
-                again["parsed_json"][fname]["prob"] - full["parsed_json"][fname]["prob"]
-            ) < PARITY_ATOL, f"max_rows={max_rows}, field={fname}"
+            assert (
+                abs(again["parsed_json"][fname]["prob"] - full["parsed_json"][fname]["prob"])
+                < PARITY_ATOL
+            ), f"max_rows={max_rows}, field={fname}"
 
 
 @pytest.mark.slow
@@ -565,4 +564,3 @@ def test_bug16_lead_in_prefill_breaks_parity(engine):
             assert abs(ls_full[choice] - ls_one[choice]) < 5e-2, (fname, choice)
     assert full["parsed_json"]["action"]["value"] == one["parsed_json"]["action"]["value"]
     assert full["parsed_json"]["flag"]["value"] == one["parsed_json"]["flag"]["value"]
-
