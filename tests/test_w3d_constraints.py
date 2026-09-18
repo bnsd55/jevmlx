@@ -104,8 +104,13 @@ def test_decide_passes_constraints_to_engine(monkeypatch):
             "num_fields": 1,
         }
 
-    monkeypatch.setattr(api, "load_engine", lambda model: (object(), object()))
-    monkeypatch.setattr(api, "run_parallel_generation", fake_run_parallel)
+    monkeypatch.setattr("jevmlx.api.load_engine", lambda model: (object(), object()))
+    monkeypatch.setattr("jevmlx.api.run_parallel_generation", fake_run_parallel)
+
+    def fake_batched(engine, tok, contexts, schema, **k):
+        return [fake_run_parallel(engine, tok, c, schema, **k) for c in contexts]
+
+    monkeypatch.setattr("jevmlx.api.run_parallel_generation_batched", fake_batched)
 
     from typing import Literal
 
@@ -163,8 +168,13 @@ def test_decide_many_passes_constraints_to_engine(monkeypatch):
             "num_fields": 1,
         }
 
-    monkeypatch.setattr(api, "load_engine", lambda model: (object(), object()))
-    monkeypatch.setattr(api, "run_parallel_generation", fake_run_parallel)
+    monkeypatch.setattr("jevmlx.api.load_engine", lambda model: (object(), object()))
+    monkeypatch.setattr("jevmlx.api.run_parallel_generation", fake_run_parallel)
+
+    def fake_batched(engine, tok, contexts, schema, **k):
+        return [fake_run_parallel(engine, tok, c, schema, **k) for c in contexts]
+
+    monkeypatch.setattr("jevmlx.api.run_parallel_generation_batched", fake_batched)
 
     from typing import Literal
 
