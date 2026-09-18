@@ -565,6 +565,14 @@ def _rows_per_chunk(budget_bytes: int, bytes_per_row: int, max_rows: int | None)
 # measured peak lands in the result telemetry.
 _CHUNK_TARGET_FRACTION = 0.75
 
+# W3-D part 2: minimum parent probability_margin to condition a child's
+# second pass on. Below this the parent is too uncertain to teacher-force.
+_PARENT_CONFIDENCE_MARGIN = 0.3
+
+# W3-D part 2: a child gets a second pass when its own top1-top2 margin is
+# below this (low confidence) OR the MAP reconciler changed its value.
+_CHILD_LOW_MARGIN = 0.15
+
 
 def _memory_budget_bytes(target_fraction: float) -> int:
     """Live suffix-pass budget: working-set limit headroom times target fraction.
@@ -836,6 +844,265 @@ def _constrained_map(
     return reconciled, changed
 
 
+def _selective_second_pass(
+    model,
+    tokenizer,
+    cache,
+    schema: StructuredSchema,
+    field_plans: dict,
+    lead_in: list[int],
+    field_telemetry: dict,
+    parsed_json: dict,
+    reconciled_fields: list[str],
+    scoring: str,
+    oracle_overrides: dict[str, object] | None = None,
+) -> dict[str, Any]:
+    """W3-D part 2: selective parent-conditioned second pass.
+
+    After the parallel pass + MAP, for each child whose parent is confident
+    (probability_margin above _PARENT_CONFIDENCE_MARGIN) AND whose own margin
+    is low OR which MAP changed, build a conditioned row: the child's
+    candidate prefixed by the parent's decided one-field JSON object. Batch
+    all such children in ONE extra suffix pass over the same prefill cache.
+    Replace the child's scores.
+
+    Never condition on a low-confidence parent.
+
+    Returns telemetry: rerun_fields, rerun_rows, second_pass_ms.
+    """
+    import json as _json
+
+    from jevmlx.schema import _common_token_prefix
+    from jevmlx.trie import build_trie, score_trie, softmax
+
+    t0 = time.perf_counter()
+    rerun_fields: list[str] = []
+
+    # Identify children that need a second pass.
+    is_oracle = oracle_overrides is not None
+    children_to_rerun: list[tuple[str, str]] = []  # (child, parent)
+    for fname, fdef in schema.fields.items():
+        if fdef.depends_on is None:
+            continue
+        parent = fdef.depends_on
+        if parent not in field_telemetry:
+            continue
+        if is_oracle:
+            # Oracle mode: force ALL children with depends_on to rerun,
+            # conditioned on the TRUE parent value (from oracle_overrides).
+            if parent not in oracle_overrides:
+                continue
+            children_to_rerun.append((fname, parent))
+            continue
+        parent_ft = field_telemetry[parent]
+        # Parent confidence: top1-top2 margin.
+        parent_scores = parent_ft.get("log_scores", {})
+        if not parent_scores:
+            continue
+        parent_probs = sorted(parent_scores.values(), reverse=True)
+        parent_margin = (parent_probs[0] - parent_probs[1]) if len(parent_probs) > 1 else 1.0
+        # Never condition on a low-confidence parent.
+        if parent_margin < _PARENT_CONFIDENCE_MARGIN:
+            continue
+        # Child needs rerun if its own margin is low OR MAP changed it.
+        child_ft = field_telemetry.get(fname, {})
+        child_scores = child_ft.get("log_scores", {})
+        child_probs = sorted(child_scores.values(), reverse=True)
+        child_margin = (child_probs[0] - child_probs[1]) if len(child_probs) > 1 else 1.0
+        was_reconciled = fname in reconciled_fields
+        if child_margin >= _CHILD_LOW_MARGIN and not was_reconciled:
+            continue
+        children_to_rerun.append((fname, parent))
+
+    if not children_to_rerun:
+        return {"rerun_fields": [], "rerun_rows": 0, "second_pass_ms": 0.0}
+
+    # Build conditioned rows for all qualifying children.
+    parent_decided: dict[str, object] = {}
+    for _fname, parent in children_to_rerun:
+        if parent not in parent_decided:
+            if is_oracle and oracle_overrides is not None:
+                parent_decided[parent] = oracle_overrides[parent]
+            else:
+                parent_decided[parent] = parsed_json[parent]["value"]
+
+    # For each child, build conditioned candidates and a trie.
+    conditioned_rows: list[list[int]] = []
+    row_child: list[str] = []
+    row_branch2: dict[int, int] = {}
+    child_plans: dict[str, dict] = {}
+    child_tries: dict[str, list[dict]] = {}
+
+    for fname, parent in children_to_rerun:
+        fdef = schema.fields[fname]
+        p = field_plans[fname]
+        parent_val = parent_decided[parent]
+        # Build the parent's decided one-field JSON object as a token prefix.
+        parent_json = _json.dumps({parent: parent_val}, ensure_ascii=False)
+        parent_ids = tokenizer.encode(parent_json, add_special_tokens=False)
+
+        # The conditioned candidate: parent_json + child's slot_candidate_text.
+        def conditioned_text(
+            alias: str,
+            _fname=fname,
+            _parent_json=parent_json,
+        ) -> str:
+            return _parent_json + _json.dumps({_fname: alias}, ensure_ascii=False)
+
+        aliases = p.get("aliases", p.get("choices", []))
+        alias_map = p.get("alias_map", dict(zip(aliases, fdef.choices, strict=True)))
+        candidates = [
+            tokenizer.encode(conditioned_text(alias), add_special_tokens=False) for alias in aliases
+        ]
+        shared = _common_token_prefix(candidates)
+        remainders = [full[len(shared) :] for full in candidates]
+        trie = build_trie(remainders)
+        child_plans[fname] = {
+            "shared_ids": shared,
+            "remainders": remainders,
+            "alias_map": alias_map,
+            "aliases": aliases,
+            "choices": fdef.choices,
+        }
+        child_tries[fname] = trie
+        for bi, node in enumerate(trie):
+            # Row: lead_in + parent_ids + shared + node path. The parent_ids
+            # are part of the suffix (they come after the prefill lead-in).
+            conditioned_rows.append(lead_in + parent_ids + list(shared) + list(node["path"]))
+            row_child.append(fname)
+            row_branch2[len(conditioned_rows) - 1] = bi
+
+    if not conditioned_rows:
+        return {"rerun_fields": [], "rerun_rows": 0, "second_pass_ms": 0.0}
+
+    # Build decision positions and allowed tokens for each conditioned row.
+    pad_id = tokenizer.pad_token_id or 0
+    vocab_size = (
+        model.args.vocab_size
+        if hasattr(model, "args") and hasattr(model.args, "vocab_size")
+        else model.model.embed_tokens.weight.shape[0]
+    )
+    row_decision2: list[tuple[int, list[int]]] = []
+    for ridx in range(len(conditioned_rows)):
+        fname = row_child[ridx]
+        p = child_plans[fname]
+        node = child_tries[fname][row_branch2[ridx]]
+        position = len(conditioned_rows[ridx]) - 1
+        allowed = list(node["children"])
+        row_decision2.append((position, allowed))
+
+    # Run ONE suffix pass over the same prefill cache.
+    node_logits2: dict[int, dict[int, list[float]]] = {}
+    chunk_len = len(conditioned_rows)
+    width = max(len(r) for r in conditioned_rows)
+    lengths = [len(r) for r in conditioned_rows]
+    padding = [width - length for length in lengths]
+    padded = mx.array([r + [pad_id] * (width - len(r)) for r in conditioned_rows], dtype=mx.int32)
+    b_cache = _broadcast_cache(cache, chunk_len)
+    max_padding = max(padding) if padding else 0
+    if max_padding > 0:
+        for c in b_cache:
+            if hasattr(c, "prepare"):
+                c.prepare(lengths=lengths, right_padding=padding)
+    _eval_cache_state(b_cache)
+    out = model(padded, cache=b_cache)
+    chunk_decisions = row_decision2
+    positions = mx.array([d[0] for d in chunk_decisions])
+    max_allowed = max(len(d[1]) for d in chunk_decisions)
+    rows_at_pos = out[mx.arange(chunk_len), positions]
+    flat_idx = mx.array(
+        [
+            i * vocab_size + tok
+            for i, d in enumerate(chunk_decisions)
+            for tok in (d[1] + [d[1][0]] * (max_allowed - len(d[1])))
+        ],
+        dtype=mx.int32,
+    )
+    gathered = mx.take(rows_at_pos.reshape(-1), flat_idx)
+    mx.eval(gathered)
+    gathered = gathered.tolist()
+    for i in range(chunk_len):
+        allowed = chunk_decisions[i][1]
+        base = i * max_allowed
+        values = [float(gathered[base + j]) for j in range(len(allowed))]
+        node_logits2[i] = {row_branch2[i]: values}
+    del out
+
+    # Re-score each child through its conditioned trie.
+    for fname, _parent in children_to_rerun:
+        p = child_plans[fname]
+        trie = child_tries[fname]
+        # Collect logits for this child's branch nodes.
+        child_branch_logits: dict[int, list[float]] = {}
+        child_branch_idx = {id(node): bi for bi, node in enumerate(trie)}
+        for ridx in range(len(conditioned_rows)):
+            if row_child[ridx] != fname:
+                continue
+            bi = row_branch2[ridx]
+            child_branch_logits[bi] = node_logits2[ridx][bi]
+
+        def logits_at_node2(
+            node: dict, _lookup=child_branch_logits, _index=child_branch_idx
+        ) -> list[float]:
+            return _lookup[_index[id(node)]]
+
+        def legal_mass_at_node2(
+            node: dict, _lookup=child_branch_logits, _index=child_branch_idx
+        ) -> float:
+            return 1.0  # legal_mass not recomputed in the second pass
+
+        raw_scores, _ = score_trie(trie, len(p["aliases"]), logits_at_node2, legal_mass_at_node2)
+        scores = raw_scores
+        probs_list = softmax(scores, temperature=1.0)
+        order = sorted(range(len(probs_list)), key=probs_list.__getitem__, reverse=True)
+        w_idx = order[0]
+        is_tie = len(scores) > 1 and (scores[order[0]] - scores[order[1]]) < 1e-6
+        if is_tie:
+            w_idx = next(i for i in range(len(probs_list)) if i in order[:2])
+        w_prob = probs_list[w_idx]
+
+        choices_list = p["aliases"]
+        raw = choices_list[w_idx]
+        alias_map = p["alias_map"]
+        if scoring == "slots":
+            val = alias_map[raw]
+            if fdef.field_type == "boolean":
+                val = val == "true"
+        elif fdef.field_type == "boolean":
+            val = raw.lower() == "true"
+        else:
+            val = raw
+
+        # Replace the child's scores (or store as oracle_prediction in
+        # oracle mode — don't touch the main predictions).
+        display_choices = (
+            [alias_map[c] for c in choices_list] if scoring == "slots" else list(choices_list)
+        )
+        if is_oracle:
+            field_telemetry[fname]["oracle_prediction"] = val
+            field_telemetry[fname]["oracle_log_scores"] = {
+                c: lp for c, lp in zip(display_choices, scores, strict=True)
+            }
+            rerun_fields.append(fname)
+        else:
+            parsed_json[fname] = {"value": val, "prob": w_prob}
+            field_telemetry[fname]["value"] = val
+            field_telemetry[fname]["probability"] = w_prob
+            field_telemetry[fname]["log_scores"] = {
+                c: lp for c, lp in zip(display_choices, scores, strict=True)
+            }
+            field_telemetry[fname]["tie"] = is_tie
+            field_telemetry[fname]["second_pass"] = True
+            rerun_fields.append(fname)
+
+    elapsed_ms = (time.perf_counter() - t0) * 1000
+    return {
+        "rerun_fields": rerun_fields,
+        "rerun_rows": len(conditioned_rows),
+        "second_pass_ms": round(elapsed_ms, 2),
+    }
+
+
 def run_parallel_generation(
     model,
     tokenizer,
@@ -847,6 +1114,7 @@ def run_parallel_generation(
     calibration: str | dict | None = None,
     prior_correction: bool = False,
     constraints: list[dict] | None = None,
+    oracle_overrides: dict[str, object] | None = None,
 ) -> dict[str, Any]:
     """Decide every schema field in one batched forward pass.
 
@@ -1501,6 +1769,27 @@ def run_parallel_generation(
                             field_log_scores[fname][str(val)]
                         )
 
+    # W3-D part 2: selective parent-conditioned second pass. After the
+    # parallel pass + MAP, for each child whose parent is confident AND
+    # whose own margin is low or which MAP changed, build a conditioned
+    # row and batch all such children in ONE extra suffix pass over the
+    # same prefill cache. No depends_on = bit-identical (no second pass).
+    second_pass_telemetry = {"rerun_fields": [], "rerun_rows": 0, "second_pass_ms": 0.0}
+    if any(f.depends_on is not None for f in schema.fields.values()):
+        second_pass_telemetry = _selective_second_pass(
+            model,
+            tokenizer,
+            cache,
+            schema,
+            field_plans,
+            lead_in,
+            field_telemetry,
+            parsed_json,
+            reconciled_fields,
+            scoring,
+            oracle_overrides=oracle_overrides,
+        )
+
     total_elapsed_ms = (time.perf_counter() - t0) * 1000
     confidence_model = scoring
 
@@ -1570,6 +1859,9 @@ def run_parallel_generation(
         "prior_correction": prior_correction,
         "constraints_applied": bool(constraints),
         "reconciled_fields": reconciled_fields,
+        "rerun_fields": second_pass_telemetry["rerun_fields"],
+        "rerun_rows": second_pass_telemetry["rerun_rows"],
+        "second_pass_ms": second_pass_telemetry["second_pass_ms"],
         "parsed_json": parsed_json,
         "field_telemetry": field_telemetry,
         "num_fields": len(schema),

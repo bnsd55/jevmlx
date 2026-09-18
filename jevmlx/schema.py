@@ -174,10 +174,15 @@ class FieldDefinition:
         description: str,
         choices: list[str] | None = None,
         choice_descriptions: dict[str, str] | None = None,
+        depends_on: str | None = None,
     ):
         self.name = name
         self.field_type = field_type.lower()
         self.description = description
+        # W3-D part 2: optional parent field name for the selective
+        # parent-conditioned second pass. When set, the child may get a
+        # second suffix pass conditioned on the parent's decided value.
+        self.depends_on: str | None = depends_on
         # Optional per-choice glosses keyed by choice string. Validated only
         # when choices exist: every key must be a declared choice. (coder1's
         # prompt v2 renders them; the engine never reads them.)
@@ -230,7 +235,7 @@ class FieldDefinition:
         return len(self.choices)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d = {
             "name": self.name,
             "type": self.field_type,
             "description": self.description,
@@ -238,6 +243,9 @@ class FieldDefinition:
             "cardinality": self.cardinality,
             "choice_descriptions": self.choice_descriptions,
         }
+        if self.depends_on is not None:
+            d["depends_on"] = self.depends_on
+        return d
 
 
 class StructuredSchema:
@@ -268,6 +276,7 @@ class StructuredSchema:
                 description=spec.get("description", ""),
                 choices=spec.get("choices", None),
                 choice_descriptions=spec.get("choice_descriptions", None),
+                depends_on=spec.get("depends_on", None),
             )
         # Compiled plans, keyed by tokenizer OBJECT IDENTITY (P2: a
         # WeakKeyDictionary keys by __eq__/__hash__, so two equal-but-distinct
