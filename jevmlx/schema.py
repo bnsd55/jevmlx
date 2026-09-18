@@ -333,6 +333,7 @@ class FieldDefinition:
         choices: Sequence[str] | None = None,
         choice_descriptions: Mapping[str, str] | None = None,
         depends_on: str | None = None,
+        set_constraints: tuple[Mapping[str, Any], ...] = (),
     ):
         # Frozen dataclass with a custom __init__: the validation logic is
         # the constructor's contract; freeze happens through object.__setattr__.
@@ -373,7 +374,7 @@ class FieldDefinition:
         object.__setattr__(self, "field_type", field_type)
         object.__setattr__(self, "description", description)
         object.__setattr__(self, "depends_on", depends_on)
-        object.__setattr__(self, "set_constraints", ())
+        object.__setattr__(self, "set_constraints", set_constraints)
         object.__setattr__(self, "choices", resolved_choices)
         object.__setattr__(self, "choice_descriptions", resolved_descriptions)
 
@@ -560,21 +561,11 @@ class FieldDefinition:
                         )
         # W5b-1 (C7): deep-freeze the output — one validated copy per
         # constraint, wrapped read-only, in an immutable tuple. Nothing
-        # reachable from the compiled field is caller-mutable. Bypass
-        # dataclasses.replace (the custom __init__ has no set_constraints
-        # parameter): clone through __new__ + object.__setattr__.
-        frozen: list[Mapping[str, Any]] = []
-        for c in constraints:
-            frozen.append(MappingProxyType(dict(c)))
-        clone = FieldDefinition.__new__(FieldDefinition)
-        object.__setattr__(clone, "name", self.name)
-        object.__setattr__(clone, "field_type", self.field_type)
-        object.__setattr__(clone, "description", self.description)
-        object.__setattr__(clone, "choices", self.choices)
-        object.__setattr__(clone, "choice_descriptions", self.choice_descriptions)
-        object.__setattr__(clone, "depends_on", self.depends_on)
-        object.__setattr__(clone, "set_constraints", tuple(frozen))
-        return clone
+        # reachable from the compiled field is caller-mutable. Idiomatic
+        # clone on a frozen dataclass: dataclasses.replace with the
+        # set_constraints field passed through the custom __init__.
+        frozen = tuple(MappingProxyType(dict(c)) for c in constraints)
+        return dataclasses.replace(self, set_constraints=frozen)
 
     def to_dict(self) -> dict[str, Any]:
         d = {
