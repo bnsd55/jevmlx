@@ -16,6 +16,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history so `git diff origin/<base>...HEAD` can resolve the
+          # base ref (shallow checkout leaves it unavailable, yielding an
+          # empty diff and a dirname error).
+          fetch-depth: 0
 
       - uses: astral-sh/setup-uv@v7
         with:
@@ -39,7 +44,7 @@ jobs:
             # One folder per changed predictions.jsonl, deduplicated, relative.
             dirs=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- 'benchmarks/results/**' \
               | grep -E 'predictions\.jsonl(\.gz)?$' \
-              | xargs -n1 dirname \
+              | xargs -r -n1 dirname \
               | sort -u \
               | tr '\n' ' ')
             echo "dirs=$dirs" >> "$GITHUB_OUTPUT"
@@ -48,8 +53,14 @@ jobs:
       - name: Run check_results + README freshness
         id: check
         run: |
-          .venv/bin/python -m benchmarks.check_results ${{ steps.dirs.outputs.dirs }} > summary.md
-          cat summary.md
+          dirs="${{ steps.dirs.outputs.dirs }}"
+          if [ -n "$dirs" ]; then
+            .venv/bin/python -m benchmarks.check_results $dirs > summary.md
+            cat summary.md
+          else
+            echo "No changed results folders." > summary.md
+            cat summary.md
+          fi
           .venv/bin/python -m benchmarks.check_results --check-readme README.md
         continue-on-error: true
 
