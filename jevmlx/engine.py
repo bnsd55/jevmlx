@@ -146,6 +146,7 @@ def load_engine(model_id: str):
     s_dummy = mx.zeros((28, 6), dtype=mx.int32)
     w_suf = model(s_dummy, cache=b_cache)
     mx.eval(w_suf)
+    _eval_cache_state(b_cache)
     logger.info("Metal shaders compiled & warmed up.")
     return model, tokenizer
 
@@ -216,16 +217,44 @@ def clear_engine_cache() -> None:
     load_engine.cache_clear()
 
 
+class UnsupportedCacheError(RuntimeError):
+    """A cache class cannot be merged across the batch dimension.
+
+    Raised instead of silently producing wrong logits: QuantizedKVCache,
+    ChunkedKVCache and ConcatenateKVCache (mlx_lm 0.31.x) expose no merge —
+    broadcasting them by copying keys/values would corrupt quantization
+    metadata or concatenated state.
+    """
+
+
+def _eval_cache_state(cache) -> None:
+    """mx.eval the COMPLETE state of every non-empty cache in the list.
+
+    Full state, not keys/values: some mlx_lm caches carry meaningful state
+    outside keys/values (ArraysCache arrays, BatchKVCache per-row offsets,
+    quantization scales/biases). Empty caches are skipped — a layer the model
+    never wrote has no state to evaluate and reading ``state`` may raise.
+    """
+    mx.eval([c.state for c in cache if not c.empty()])
+
+
 def _broadcast_cache(cache, batch: int):
-    """Repeat a prefill KV cache across the batch dimension."""
-    b_cache = []
-    for c in cache:
-        nc = copy.copy(c)
-        if hasattr(c, "keys") and c.keys is not None:
-            nc.keys = mx.repeat(c.keys, batch, axis=0)
-            nc.values = mx.repeat(c.values, batch, axis=0)
-        b_cache.append(nc)
-    return b_cache
+    """Broadcast a prefill KV cache across the batch dimension.
+
+    Uses each cache class's own ``merge`` (the mlx_lm-supported way to turn N
+    unbatched caches into one batched cache; identical copies get zero
+    padding). Cache types without ``merge`` raise :class:`UnsupportedCacheError`
+    rather than risking silent corruption from ad-hoc keys/values copying.
+    """
+    missing = [type(c).__name__ for c in cache if not hasattr(type(c), "merge")]
+    if missing:
+        raise UnsupportedCacheError(
+            "cannot broadcast cache layer type(s) "
+            f"{sorted(set(missing))}: no merge() — scoring requires a model "
+            "whose cache supports batched merge (KVCache, RotatingKVCache, "
+            "ArraysCache, CacheList, BatchKVCache, BatchRotatingKVCache)"
+        )
+    return [type(c).merge([copy.copy(c) for _ in range(batch)]) for c in cache]
 
 
 PROMPT_V2_SYSTEM = (
@@ -333,13 +362,9 @@ def _model_weight_bytes(model) -> int:
     return sum(int(p.nbytes) for _, p in tree_flatten(model.parameters()))
 
 
-def _cache_bytes_per_row(cache) -> int:
-    """KV-cache bytes a single batch row occupies across all layers."""
-    return sum(
-        int(c.keys.nbytes) + int(c.values.nbytes)
-        for c in cache
-        if hasattr(c, "keys") and c.keys is not None
-    )
+def _cache_nbytes(cache) -> int:
+    """KV-cache bytes across all layers, via each cache's own accounting."""
+    return sum(int(c.nbytes) for c in cache)
 
 
 def _max_recommended_working_set() -> int:
@@ -699,16 +724,18 @@ def run_parallel_generation(
     t_pre0 = time.perf_counter()
     cache = make_prompt_cache(model)
     model(base_arr, cache=cache)
-    mx.eval(
-        *[t for c in cache if hasattr(c, "keys") and c.keys is not None for t in (c.keys, c.values)]
-    )
+    # Evaluate the COMPLETE cache state (some mlx_lm caches carry meaningful
+    # state outside keys/values — ArraysCache arrays, BatchKVCache offsets,
+    # quantization scales): relying on the keys/values attributes would leave
+    # nested or nonstandard state unevaluated.
+    _eval_cache_state(cache)
     t_prefill = (time.perf_counter() - t_pre0) * 1000
 
     # 3. Memory guard: rows are broadcast copies of the prefill cache. The
     #    estimate includes the [rows, width, vocab] output logits for one chunk
     #    (float32 logits are the dominant activation). This is a chunking
     #    heuristic, not a hard bound on peak Metal memory.
-    bytes_per_row = _cache_bytes_per_row(cache)
+    bytes_per_row = _cache_nbytes(cache)
     width_max = max(len(r) for r in rows) if rows else 0
     vocab_size = (
         model.args.vocab_size
@@ -746,16 +773,22 @@ def run_parallel_generation(
         chunk = rows[chunk_start : chunk_start + auto_max_rows]
         chunk_len = len(chunk)
         width = max(len(r) for r in chunk)
+        lengths = [len(r) for r in chunk]
+        padding = [width - length for length in lengths]
         padded = mx.array([r + [pad_id] * (width - len(r)) for r in chunk], dtype=mx.int32)
         b_cache = _broadcast_cache(cache, chunk_len)
-        mx.eval(
-            *[
-                t
-                for c in b_cache
-                if hasattr(c, "keys") and c.keys is not None
-                for t in (c.keys, c.values)
-            ]
-        )
+        # Right-padded rows: tell the cache about per-row lengths so the
+        # attention mask excludes pad positions (mlx_lm batched-prompt
+        # pattern). No finalize() after the pass: b_cache is discarded when
+        # the chunk ends, nothing reads the rolled KV, and finalizing would
+        # only materialize state for nothing.
+        max_padding = max(padding) if padding else 0
+        if max_padding > 0:
+            for c in b_cache:
+                if hasattr(c, "prepare"):
+                    c.prepare(lengths=lengths, right_padding=padding)
+        # Evaluate the COMPLETE cache state (see the prefill eval note).
+        _eval_cache_state(b_cache)
         out = model(padded, cache=b_cache)
         mx.eval(out)
         for i, ridx in enumerate(range(chunk_start, chunk_start + chunk_len)):

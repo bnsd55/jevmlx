@@ -25,10 +25,12 @@ class FakeModel:
         batch, seq_len = tokens.shape
         if cache is not None:
             for c in cache:
-                if hasattr(c, "keys") and c.keys is not None:
-                    n_kv, seq_cached, head_dim = c.keys.shape[1], c.keys.shape[2], c.keys.shape[3]
-                    c.keys = mx.zeros((batch, n_kv, seq_cached + seq_len, head_dim))
-                    c.values = mx.zeros((batch, n_kv, seq_cached + seq_len, head_dim))
+                # Drive the cache like a real layer (update_and_fetch): the
+                # merge-based broadcast produces BatchKVCache whose offsets a
+                # direct keys/values stomp cannot maintain.
+                c.update_and_fetch(
+                    mx.zeros((batch, 2, seq_len, 8)), mx.zeros((batch, 2, seq_len, 8))
+                )
         return mx.zeros((batch, seq_len, self.vocab_size))
 
 

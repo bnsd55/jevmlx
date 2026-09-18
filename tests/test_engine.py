@@ -460,3 +460,37 @@ def test_api_field_margins_on_real_model(engine):
         else:
             assert fr.log_score_margin is None and fr.probability_margin is None
             assert fr.threshold_distance >= 0.0
+
+
+@pytest.mark.slow
+def test_w1a_scoring_parity_batch_vs_chunked_real_model(engine):
+    """W1-A (slow, M5): batch=1 vs batch=N vs chunked scoring must produce
+    identical parsed values and log_scores on a real model with the merge-
+    based broadcast and full-state evaluation. Exact equality on logits read
+    from the same model — any divergence means the broadcast or the eval
+    dropped state."""
+    model, tokenizer = engine
+    schema = StructuredSchema(
+        {
+            "action": {
+                "type": "enum",
+                "description": "The action to take on this payment request",
+                "choices": ["BLOCK_TRANSACTION", "BLOCK_USER", "APPROVE"],
+            },
+            "flag": {"type": "boolean", "description": "manually flagged"},
+        }
+    )
+    ctx = (
+        "Payment request from a verified long-time customer for a routine invoice. "
+        "All fraud checks passed, the device is recognized, and the amount matches "
+        "previous orders. Approve it and release the funds."
+    )
+    full = run_parallel_generation(model, tokenizer, ctx, schema)
+    for max_rows in (1, 2):
+        again = run_parallel_generation(model, tokenizer, ctx, schema, max_rows=max_rows)
+        assert again["parsed_json"] == full["parsed_json"], f"max_rows={max_rows}"
+        for fname in full["field_telemetry"]:
+            assert (
+                again["field_telemetry"][fname]["log_scores"]
+                == full["field_telemetry"][fname]["log_scores"]
+            ), f"max_rows={max_rows}, field={fname}"
