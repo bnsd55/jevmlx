@@ -4,7 +4,7 @@
 
 Typed decisions from a local model on Apple Silicon. One batched forward pass, every field at once, with a probability per field.
 
-Asking an LLM for JSON means parsing what it wrote, fixing what drifted, and retrying until it parses. jevmlx takes a schema of booleans, enums, and multi-selects, scores every allowed answer for every field in one forward pass, and assembles the JSON itself. Nothing is generated token by token: the output is valid by construction and every field carries a probability.
+Asking an LLM for JSON means parsing what it wrote and retrying until it parses. jevmlx takes a schema of booleans, enums, and multi-selects, scores every allowed answer for every field in one forward pass, and assembles the JSON itself — valid by construction, every field with a probability.
 
 ```bash
 pip install git+https://github.com/bnsd55/jevmlx
@@ -22,19 +22,14 @@ jevmlx decide --preset fintech_fraud --json
 ## Install
 
 ```bash
-# library into your project
-pip install git+https://github.com/bnsd55/jevmlx
-# CLI only
-uv tool install git+https://github.com/bnsd55/jevmlx
-# from a clone (dev)
-git clone https://github.com/bnsd55/jevmlx && cd jevmlx && ./setup.sh
+pip install git+https://github.com/bnsd55/jevmlx   # library
+uv tool install git+https://github.com/bnsd55/jevmlx   # CLI only
+git clone https://github.com/bnsd55/jevmlx && cd jevmlx && ./setup.sh   # dev
 ```
 
 Requires an Apple Silicon Mac (M1 or later) and Python 3.12+.
 
 ### Model aliases
-
-Instead of typing a full Hub id, use an alias:
 
 | Alias | Resolves to | Use |
 |---|---|---|
@@ -43,14 +38,10 @@ Instead of typing a full Hub id, use an alias:
 | `test` | `mlx-community/Qwen2.5-1.5B-Instruct-4bit` | tests only (too small for production) |
 
 ```bash
-jevmlx decide --model quality --schema ticket.json --context ticket.txt
-jevmlx decide --model fast --schema ticket.json --context ticket.txt
+jevmlx decide --model quality --schema ticket.json --context ticket.txt   # or --model fast
 ```
 
-A full Hub id also works (`--model mlx-community/Llama-3.2-3B-Instruct-4bit`).
-
-The default `quality` model downloads ~4.5 GB on first use; `fast` (~2 GB)
-is a lighter alternative if download size or latency matters.
+A full Hub id also works (`--model mlx-community/Llama-3.2-3B-Instruct-4bit`); first use downloads the weights (~4.5 GB `quality`, ~2 GB `fast`).
 
 ## Use it from Python
 
@@ -66,7 +57,7 @@ class Ticket(BaseModel):
         description="What the ticket is about",
         json_schema_extra={"choice_descriptions": {"BILLING": "invoices, charges, refunds"}},
     )
-    tags: list[Literal["refund", "login", "performance"]] = Field(default_factory=list)
+    tags: list[Literal["refund", "login", "performance"]] = []
 
 
 result = decide(Ticket, "Customer was charged twice and wants the duplicate refunded.")
@@ -74,13 +65,31 @@ for name, f in result.fields.items():
     print(f"{name}: {f.value} (p={f.probability})")
 ```
 
-- `decide_many(model, contexts)` decides many texts with one model load.
-- `allow_none_of_above=True` adds an explicit `NONE_OF_ABOVE` choice — the answer "none of the options apply" — and maps it to `None` (`FieldResult.reason` is `"none_of_above"`). Fields must be Optional.
-- `abstain_below_margin=X` is the confidence gate, separate from the opt-out: any field whose margin (`probability_margin` for scalar, `threshold_distance` for multi) sits below `X` is withheld from the model (`FieldResult.reason="abstain"`; the raw value stays on the FieldResult). A raw margin cut for now — calibrated abstention is a later milestone.
-- `alternatives` lists the other options with their probabilities.
-- Multi-select options are selected at P(yes) >= 0.5, or by fitted calibration: `calibration=<path-or-dict>` (what `jevmlx calibrate --out` writes) selects an option when `a * log_odds + b > 0` on its raw yes/no logits. A per-field count row (`<field>#count`, candidates `0..4+`, always runs) reconciles the set to top-k by calibrated log-odds when its own top-2 margin clears `COUNT_MARGIN_MIN` (0.7 nats); below the gate the per-option rule stands.
-- Margins are unit-split and nullable: `log_score_margin` (scalar fields, top1-top2 log-score gap at T=1), `probability_margin` (scalar fields, top1-top2 probability after temperature), `threshold_distance` (multi fields, min |P(yes) - 0.5| uncalibrated or min |calibrated log-odds| calibrated). A field carries exactly one of the three.
-- CLI equivalent: `jevmlx decide --help`.
+Read the result. `decide(...)` returns a `Decision`: `.value` (a validated
+`Ticket`), `.latency_ms`, `.fields` — one `FieldResult` per field:
+
+- `value`, `probability`, `alternatives` (top 3, winner first; multi: per-option
+  P(yes)), `score`, `model` (`"slots"`/`"labels"`), `calibrated`, `legal_mass`
+  (probability mass in allowed continuations at the branch points — a leakage
+  signal when low despite a confident decision).
+- Margins, one per field: `log_score_margin` / `probability_margin` (scalar,
+  top1-top2 gap in log/probability units), `threshold_distance` (multi, how
+  close the closest yes/no call sat to the cut). Multi fields carry
+  `probability=None` — only per-option decisions are claimed.
+- `reason`: None, `"none_of_above"` (`allow_none_of_above=True` adds an explicit
+  NONE_OF_ABOVE choice that maps to `None`; fields must be Optional), or
+  `"abstain"` (`abstain_below_margin=X` withholds fields whose margin falls
+  below the cut; the raw value stays on the FieldResult).
+- Options: `decide_many(model_cls, contexts)` for batches; `constraints=[...]`
+  reconciles the joint answer by constrained MAP (implies / excludes /
+  requires_parent / exclusivity; plus `depends_on` / `set_constraints` in the
+  schema); `calibration=<path-or-dict>` (from `jevmlx calibrate --out`) selects
+  multi options by fitted log-odds with the always-on count row reconciling to
+  top-k above `COUNT_MARGIN_MIN` (0.7 nats); `prior_correction=True` subtracts
+  the neutral-context prior; timing: `latency_ms` here, the full split
+  (prior / prefill / plan compile / cache broadcast / suffix eval / lm-head
+  gather / second pass) on the engine result, per-combo `timing.json` in bench
+  output.
 
 ## Use it from any OpenAI-compatible server
 
@@ -90,11 +99,11 @@ Instead of loading a model on this Mac, jevmlx can send the same prompts to a ch
 jevmlx decide --backend openai --base-url http://localhost:11434/v1 --api-model llama3.2 --schema ticket.json --context ticket.txt
 ```
 
-Two tradeoffs: one request per field instead of one pass (slower), and only the server's top-k logprobs are visible, so options missing from that list get a floor probability and the field's telemetry flags `truncated: true`.
+Two tradeoffs: one request per field (slower than one pass), and only the server's top-k logprobs are visible — options missing from that list get a floor probability and the telemetry flags `truncated: true`.
 
 ## Leaderboard
 
-Agreement with the TypeSafe public eval consensus (GPT-6 Astra + Claude Fable 5.1). Official rows are cited from TypeSafe's page; local rows are measured by contributors on the 20 public examples.
+Agreement with the TypeSafe public eval consensus. Official rows are cited from TypeSafe's page; local rows are measured by contributors on the 20 public examples.
 
 <!-- leaderboard:start -->
 | Model | Source | Scorer | Machine | Accuracy | Customer service | Agent trace | Security | Invoices | Time per case | Cost per case | Cases |
@@ -107,8 +116,7 @@ Agreement with the TypeSafe public eval consensus (GPT-6 Astra + Claude Fable 5.
 | GPT-5.6 Sol | official (cited) | — | — | 74.1% | — | — | — | — | 23.3s | $0.0836 | — |
 | Claude Haiku 4.5 | official (cited) | — | — | 53.6% | — | — | — | — | 12.5s | $0.0195 | — |
 
-_Official accuracies are on TypeSafe's full private eval; ours are on the 20 public example cases, so the numbers are indicative, not the same test._
-_Consensus label = the agreement of GPT-6 Astra + Claude Fable 5.1 (TypeSafe's reference)._
+_Official accuracies: TypeSafe's full private eval; ours: the 20 public examples — indicative, not the same test. Consensus = GPT-6 Astra + Claude Fable 5.1._
 
 No local results yet — contribute one with `jevmlx bench`.
 <!-- leaderboard:end -->
@@ -116,25 +124,22 @@ No local results yet — contribute one with `jevmlx bench`.
 ## Run the benchmark on your Mac
 
 ```bash
-git clone https://github.com/bnsd55/jevmlx && cd jevmlx
-./setup.sh
-.venv/bin/jevmlx bench --model quality
-# commit the results folder and open a PR
+git clone https://github.com/bnsd55/jevmlx && cd jevmlx && ./setup.sh
+.venv/bin/jevmlx bench --model quality   # commit the results folder, open a PR
 ```
-
 [BENCHMARKING.md](BENCHMARKING.md) has the model list, what the command does, and the PR checklist.
 
 ## CLI
 
 | Command | What it does |
 |---|---|
-| `decide` | Decide a preset or schema + context, print the JSON with probabilities |
+| `decide` | Decide a preset or schema + context, print the JSON with probabilities; `--model fast/quality/…`, `--scoring slots/labels`, `--constraints`, `--calibration`, `--prior-correction`, `--backend openai` |
 | `serve` | Serve decisions over HTTP (`POST /decide`, one Metal GPU, serial) |
 | `validate` | Lint a schema for engine-visible problems (no model download) |
-| `calibrate` | Fit a temperature on labeled JSONL cases and report ECE |
-| `eval` | Run labeled cases through a decision track; writes predictions + manifest |
+| `calibrate` | Fit a temperature + pooled multi calibrator on labeled JSONL, report ECE, `--out` writes what `decide --calibration` reads |
+| `eval` | Run labeled cases through a track (`parallel`/`naive_local`/`api_baseline`/`openai_slots`), with optional permutations; writes `predictions.jsonl` + `run.json` + per-combo `timing.json` |
 | `report` | Build a JSON + markdown eval report from `predictions.jsonl` (offline) |
-| `bench` | Full benchmark: all (track, scorer, dataset) combos, one `SUMMARY.md` |
+| `bench` | Full benchmark: all (track, scorer, dataset) combos for one or more models, parity gate + one `SUMMARY.md` |
 | `doctor` | Environment checks: run before filing an issue or a bench run |
 
 `-v` for progress logs; `JEVMLX_LOG=json` for machine-readable logs.
@@ -145,14 +150,10 @@ The prompt lists every field and its allowed options as neutral aliases. The mod
 
 ## Contributing
 
-Code and docs: [CONTRIBUTING.md](CONTRIBUTING.md). Benchmark results: [BENCHMARKING.md](BENCHMARKING.md).
+Code and docs: [CONTRIBUTING.md](CONTRIBUTING.md) · benchmark results: [BENCHMARKING.md](BENCHMARKING.md).
 
 ## Credits and license
 
-jevmlx started from [rorshopping/jev-on-a-laptop](https://github.com/rorshopping/jev-on-a-laptop), which reproduced the parallel constrained decoding technique on a laptop.
+jevmlx started from [rorshopping/jev-on-a-laptop](https://github.com/rorshopping/jev-on-a-laptop) (parallel constrained decoding on a laptop) and descends from [harshatheg/Qwen-2.5-1B-RLCD](https://huggingface.co/harshatheg/Qwen-2.5-1B-RLCD), an MLX demo of the technique. jevmlx is the maintained, generic version — any MLX instruct model or OpenAI-compatible server, multi-select, none-of-the-above and abstention, per-field probability, an eval harness.
 
-The engine descends from [harshatheg/Qwen-2.5-1B-RLCD](https://huggingface.co/harshatheg/Qwen-2.5-1B-RLCD), an MLX demo of parallel constrained decoding with one 1.5B checkpoint; jevmlx is the maintained, generic version: any MLX instruct model or OpenAI-compatible server, choices in the prompt, multi-select, explicit none-of-the-above and confidence abstention, per-field probability, an eval harness.
-
-Not affiliated with TypeSafe.
-
-MIT — see [LICENSE](LICENSE); third-party credits in [NOTICE](NOTICE).
+Not affiliated with TypeSafe. MIT — see [LICENSE](LICENSE); third-party credits in [NOTICE](NOTICE).

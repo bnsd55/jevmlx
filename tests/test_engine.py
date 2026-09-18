@@ -1,20 +1,13 @@
 import math
 
 import pytest
-from conftest import PARITY_ATOL
+from conftest import MODEL_ID, PARITY_ATOL
 
 from jevmlx.api import decide
 from jevmlx.cli import load_preset
-from jevmlx.engine import load_engine, run_naive_generation, run_parallel_generation
+from jevmlx.engine import run_naive_generation, run_parallel_generation
 from jevmlx.schema import StructuredSchema
 from jevmlx.trie import build_trie
-
-MODEL_ID = "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
-
-
-@pytest.fixture(scope="module")
-def engine():
-    return load_engine(MODEL_ID)
 
 
 @pytest.mark.slow

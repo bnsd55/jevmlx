@@ -17,8 +17,21 @@ tests and engine share exactly one number.
 The FakeModel path stays exact (deterministic zeros).
 """
 
+import pytest
+
 # Real-model log_score parity tolerance (nats) == engine.INSTABILITY_BAND;
 # re-exported under the tests' name for the parity suites.
 from jevmlx.engine import INSTABILITY_BAND
 
 PARITY_ATOL = INSTABILITY_BAND
+
+MODEL_ID = "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
+
+
+@pytest.fixture(scope="module")
+def engine():
+    """The real 0.5B model, loaded once per module. Shared by every slow
+    test that needs a live engine (test_engine, test_w4b_parity)."""
+    from jevmlx.engine import load_engine
+
+    return load_engine(MODEL_ID)
