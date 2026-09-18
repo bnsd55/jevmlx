@@ -119,7 +119,7 @@ class FieldSemantics:
     dependency_rescored: bool
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, kw_only=True)
 class FieldResult:
     """Provenance for one decided field.
 
@@ -159,10 +159,11 @@ class FieldResult:
             only values are None, "none_of_above" and "abstain"; a
             withheld decision is exactly ``reason == "abstain"``.
         semantics: HOW this field's reported probabilities were produced —
-            see :class:`FieldSemantics`. Required, never None: the engine
-            fills it in step 2 of W5b-13; until then constructing a
-            FieldResult without it fails loudly rather than implying a
-            default reading.
+            see :class:`FieldSemantics`. Required: the engine fills it in
+            W5b-13 step 2 (this draft's decide() passes
+            telemetry.get("semantics") through, which is None until then;
+            the PR does not leave draft until every decided field carries a
+            real record).
     """
 
     value: object
@@ -174,8 +175,8 @@ class FieldResult:
     calibrated: bool
     model: str
     alternatives: tuple[tuple[str, float], ...]
-    reason: str | None = None
-    semantics: FieldSemantics = dataclasses.field(kw_only=True)  # type: ignore[assignment]
+    reason: str | None
+    semantics: FieldSemantics
 
 
 @dataclasses.dataclass
@@ -413,9 +414,10 @@ def _build_field_results(
             model=confidence_model,
             alternatives=alternatives,
             reason=reason,
-            # W5b-13 step 2 fills this from the engine's per-stage records;
-            # until then the API surface REQUIRES the caller to have one —
-            # tests construct it explicitly (no silent default reading).
+            # W5b-13 step 2 fills this from the engine's per-stage records
+            # (telemetry.get('semantics') is None until then — acceptable
+            # ONLY inside the draft PR; decide() does not ship to ready
+            # state until the engine sets it).
             semantics=telemetry.get("semantics"),
         )
     return fields

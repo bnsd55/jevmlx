@@ -46,8 +46,8 @@ def test_field_semantics_frozen_and_field_names():
 
 
 def test_field_result_requires_semantics():
-    """FieldResult.semantics is REQUIRED (keyword-only, no default): a
-    construction without it is a TypeError, never a silent default."""
+    """FieldResult is kw_only-frozen and semantics is REQUIRED (no default):
+    a construction without it is a TypeError, never a silent default."""
     kwargs = dict(
         value="A",
         score=0.0,
@@ -58,6 +58,7 @@ def test_field_result_requires_semantics():
         calibrated=False,
         model="slots",
         alternatives=(),
+        reason=None,
     )
     with pytest.raises(TypeError, match="semantics"):
         FieldResult(**kwargs)
@@ -137,22 +138,23 @@ def test_engine_fills_semantics_per_field(monkeypatch):
     reason="W5b-13 step 2: probability_status stays the old global string until "
     "the stages set semantics and finalize_public_result builds the summary",
 )
-def test_probability_status_summarizes_semantics_groups(monkeypatch):
-    """PIN (step 2): the result-level probability_status is a SUMMARY over the
-    distinct (score_source, temperature, calibrator_id, prior_mode) groups —
-    it names the count of fields per group and never a per-field claim."""
+def test_probability_status_is_a_summary(monkeypatch):
+    """PIN (step 2, written cleanly against the then-existing behavior): the
+    result-level probability_status is a SUMMARY over the distinct
+    (score_source, temperature, calibrator_id, prior_mode) groups — field
+    counts per group, no per-field probability claims. Replaces the
+    placeholder draft deleted in review (F2)."""
     d = _run_pinned_decide(monkeypatch)
-    status = d.fields["risk_tier"].semantics  # placeholder to force attr use
-    result_status = _run_result_status(monkeypatch)
-    assert isinstance(status, FieldSemantics)
-    # One distinct group (scalar, T=1, uncalibrated, prior off) -> the
-    # summary must mention that group, with no per-field value claims.
-    assert "1 field" in result_status
-    assert "batched" in result_status
-    assert "T=1" in result_status
+    assert isinstance(d.fields["risk_tier"].semantics, FieldSemantics)
+    status = _engine_probability_status(monkeypatch)
+    # One distinct group (scalar, T=1, uncalibrated, prior off): the summary
+    # mentions that group with its field count and no per-field values.
+    assert "1 field" in status
+    assert "batched" in status
+    assert "T=1" in status
 
 
-def _run_result_status(monkeypatch) -> str:
+def _engine_probability_status(monkeypatch) -> str:
     """The raw engine result's probability_status through the fake path."""
     import jevmlx.api as api
     from tests.conftest import make_engine_result, make_field_telemetry
@@ -168,12 +170,8 @@ def _run_result_status(monkeypatch) -> str:
     monkeypatch.setattr(api, "run_parallel_generation", lambda *a, **k: res)
     monkeypatch.setattr(api, "load_engine", lambda model_id: ("engine", "tokenizer"))
 
-    from typing import Literal as L
-
-    from pydantic import BaseModel
-
     class Ticket(BaseModel):
-        risk_tier: L["HIGH", "LOW", "CRITICAL"] = Field(description="Risk tier")
+        risk_tier: Literal["HIGH", "LOW", "CRITICAL"] = Field(description="Risk tier")
 
     d = jevmlx.decide(Ticket, "ctx", model="fake/model")
     assert d.fields["risk_tier"].semantics is not None  # step-2 gate
