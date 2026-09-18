@@ -160,6 +160,68 @@
 - PEP 604 optionals accepted everywhere: `Literal[...] | None` and
   `EnumClass | None` now work like `Optional[...]` (pydantic keeps the enum
   form as a raw `types.UnionType`).
+- W5-B engine restructure (PR #45): every scalar scoring path — normal
+  batched pass, batch=1 rescore, dependency rescore, oracle rescore — now
+  produces a frozen `ScalarEvidence` (per-choice T=1 log-scores +
+  legal-mass logs, `source_shape` batch/batch1/dependency/oracle), and
+  every decision goes through the ONE finalizer
+  `finalize_scalar_evidence` (INSTABILITY_BAND rescore gate, prior
+  correction, confidence temperature, tie flag, margins, top_choices).
+  `ScalarDecision` carries the complete public telemetry (including
+  `evidence_source`, new on scalar `field_telemetry` entries);
+  `Candidate` separates the typed value from its score-key so booleans no
+  longer decide as "true"/"false" strings in reconciled assignments.
+  Case-level constraints are validated against the schema BEFORE any
+  model work (`constraints.validate_constraints_for_schema` — unknown
+  types/fields, out-of-domain values, and implies/requires_parent/excludes
+  on multi fields fail at call time; exclusivity remains the supported
+  multi shape). The dependency second pass runs in topological waves with
+  an explicit `Given: {"parent": …}` conditioning header per row family
+  and conditions depth-2 children on the UPDATED depth-1 decisions; after
+  the final MAP re-run a violating assignment raises
+  `InternalConstraintViolationError` instead of returning a decision.
+- W5b-8 timing ledger (PR #46): `jevmlx/timing.py` — a standalone event
+  ledger (`Ledger`, `Interval`, `SpanError`) for engine timing. Pure
+  Python, no mlx import, NOT yet wired into the engine: measured
+  non-overlapping spans in `prior`/`main` phases, `Ledger.derived_flat`
+  derives today's exact result keys (`suffix_eval_ms` as a marked
+  composite so old readers keep working), `Ledger.batched_views` produces
+  `group_wall` / `per_item_amortized` / `per_item_end_to_end`. Engine
+  adoption (deleting the ad-hoc `t_*_ms` accumulators) lands after W5-B.
+- W6-1 LM-head adapters (PR #42): `jevmlx/adapters.py` — a registry of
+  backbone/lm_head splits per installed mlx_lm model family
+  (`LMHeadAdapter` protocol, `adapter_for`, `UnsupportedModelError`
+  carrying the supported set, `list_supported_model_types`). Mirrors the
+  exact attribute paths and call orders of qwen2/qwen3/qwen3_moe/llama/
+  mixtral/phi3 (tied vs untied head), gemma3_text (always untied head),
+  phi (biased head), and mistral3 (delegation). Registry-only, NOT wired
+  into the engine yet — engine call sites adopt it in W6-2+.
+- M5 runbook (PR #43): `benchmarks/m5.py` — the one-command milestone-gate
+  sequence (doctor gate, slow parity per model, quality bench, invariance,
+  timing, remaining parity models, optional `--ab-branch` A/B against a
+  temp worktree) logged into `<out>/RUNBOOK.md` with a summary builder
+  comparing main vs A/B from produced JSON only. Idempotent steps
+  (`--fresh` reruns); the step planner and summary builder are pure
+  functions tested with fakes — no model loads in a unit test.
+- W6-2 prep probes (PR #47): `benchmarks/probe.py` — standalone `slope`
+  (per-row peak-memory slope per width bin under `mx.reset_peak_memory`,
+  B=1/2/4/8 at widths 4/8/16/32) and `adapters` (max abs diff + timing of
+  full-width head vs decision-position head). No engine wiring.
+- Results contract v2 in the results tooling (PR #48):
+  `check_results.py` requires `timing.json` on parallel-track combos with
+  the full timing-split median (incl. `peak_incremental_bytes` +
+  `failed_attempts`), requires the batched per-item keys
+  (`group_wall_ms`/`per_item_amortized_ms`/`per_item_end_to_end_ms`) to
+  land together when present, treats a pre-v2 `parity.json` (no
+  `max_raw_row_drift_nats`) as a FAIL with a regenerate hint, and names
+  failing parity stages via `_parity_failed_stages` (winners / final
+  log-score drift / raw pre-rescore row drift, shared with
+  `summarize_results`, whose `parity_failed` reason now carries stage +
+  max drifts + atol). `leaderboard.py` reads ONLY the per-item
+  end-to-end median for local time-per-case — a parallel combo without it
+  raises `ValueError` naming the folder (no pre-v2 results exist on
+  main; no fallback). `oracle_prediction` joins the optional prediction
+  keys.
 - Naive baseline honesty: `run_naive_generation` is greedy by definition —
   the never-applied `temperature` argument is removed — and its JSON-schema
   prompt now shows every choice instead of truncating enums over 50 options

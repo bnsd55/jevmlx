@@ -168,6 +168,19 @@ def _write_local_result(tmp_path: Path) -> Path:
     return root
 
 
+def _write_local_result_v2(root: Path) -> Path:
+    """Same fixture, but predictions carry the results-contract-v2 per-item
+    end-to-end timing (the only shape the leaderboard accepts now)."""
+    combo = next(p for p in (root / "m1-8gb-fake").iterdir() if p.is_dir())
+    records = []
+    for i, line in enumerate((combo / "predictions.jsonl").read_text().splitlines()):
+        rec = json.loads(line)
+        rec["per_item_end_to_end_ms"] = 700.0 + i * 100  # median 0.85s -> 0.8s at 1dp
+        records.append(json.dumps(rec))
+    (combo / "predictions.jsonl").write_text("\n".join(records) + "\n", encoding="utf-8")
+    return root
+
+
 def test_official_block_exact_text(tmp_path):
     """Official + published blocks render the exact expected rows."""
     official = _write_official(tmp_path)
@@ -214,11 +227,15 @@ def test_local_rows_render_when_results_present(tmp_path):
     official = _write_official(tmp_path)
     published = _write_published(tmp_path)
     results = _write_local_result(tmp_path)
+    _write_local_result_v2(results)
     table = build_table(results, published, official)
     assert "jevmlx, local (measured)" in table
     assert "fake-1b" in table
     assert "local" in table
-    # Accuracy 0.75 -> 75.0%, time per case = median(500,600,700,800)ms = 0.65s -> 0.7s (1dp).
+    # Accuracy 0.75 -> 75.0%, time per case = per-item end-to-end
+    # median(700,800,900,1000)ms = 0.85s -> 0.8s at 1dp (f-string rounding).
+    # The per-field latency_ms median (0.65s) must NOT be used — contract v2
+    # has no fallback.
     assert "75.0%" in table
     # Per-workflow agreement must land in its column (guards the by_workflow
     # key-name mapping: report uses full names customer_service /
@@ -226,7 +243,7 @@ def test_local_rows_render_when_results_present(tmp_path):
     local_line = next(line for line in table.splitlines() if line.startswith("| fake-1b |"))
     assert "80.0%" in local_line  # customer_service 0.8
     assert "70.0%" in local_line  # invoice_processing 0.7
-    assert "0.7s" in table
+    assert "0.8s" in table
     assert "$0 (local)" in table
     assert "| 4 |" in table  # cases
     # The "No local results" line must NOT appear when local rows exist.
@@ -237,6 +254,7 @@ def test_missing_published_file_local_rows_only(tmp_path):
     """No published file -> official + local only, no published group."""
     official = _write_official(tmp_path)
     results = _write_local_result(tmp_path)
+    _write_local_result_v2(results)
     table = build_table(results, None, official)
     assert "Published models on the public examples" not in table
     assert "official (cited)" in table
@@ -337,3 +355,15 @@ def test_main_check_readme_exits_0_when_fresh(tmp_path, capsys):
     )
     assert rc == 0
     assert "up to date" in capsys.readouterr().out.lower()
+
+
+def test_local_rows_fail_without_per_item_timing(tmp_path):
+    """Contract v2: a parallel combo whose predictions lack
+    per_item_end_to_end_ms FAILS loudly — no latency_ms fallback (there are
+    no pre-v2 folders on main)."""
+    import pytest as _pytest
+
+    official = _write_official(tmp_path)
+    results = _write_local_result(tmp_path)  # v1 lines: latency_ms only
+    with _pytest.raises(ValueError, match="per_item_end_to_end_ms"):
+        build_table(results, None, official)

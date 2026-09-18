@@ -11,7 +11,7 @@ trust the code over this document when they drift.
 | [`jevmlx/schema.py`](jevmlx/schema.py) | Immutable schema model (`StructuredSchema`, `FieldDefinition` — frozen dataclasses, derived via `dataclasses.replace`; compiled plans exposed as read-only mappings), slot/labels/multi plan compilation, tokenizer-specific bounded codebook search (`_search_codebook`: prefix-conflict graph + backtracking over an independent set), plan-driven prompt rendering (`to_schema_str` takes the tokenizer — the compiled plan owns the displayed aliases), count-row compilation, per-tokenizer plan cache, compile-time rejections, hard set-constraint validation (`FieldDefinition.compile_set_constraints` returns a NEW frozen field). |
 | [`jevmlx/trie.py`](jevmlx/trie.py) | Branch-point trie over candidate token remainders; `score_trie` (constrained-path log probs + legal-mass logs, callback in LOG space); softmax/logsumexp helpers. |
 | [`jevmlx/json_text.py`](jevmlx/json_text.py) | THE canonical JSON serializer (`json_text`, `ensure_ascii=False`) for every prompt and candidate path — never `json.dumps` directly (non-ASCII labels must tokenize as displayed). |
-| [`jevmlx/engine.py`](jevmlx/engine.py) | Model load (`load_engine`, lru_cached per RESOLVED model id, the only platform check), `PROMPT_VERSION`, `PromptProfile` (Qwen3 thinking-off, system-role probe), prompt rendering from the compiled plan (`_user_content`) with the nonce context delimiter (`_context_block`), prefill + broadcast KV, chunked batched passes (`_score_rows` with per-chunk halve-and-retry and `failed_attempts`), width-bin memory budget (`_width_bin_max_rows`, slope measured at load by `_measure_width_slope`), constrained-path trie scoring, multi count row + reconciliation (`COUNT_MARGIN_MIN`), constrained MAP (`_constrained_map`), selective parent-conditioned second pass (`_selective_second_pass`), near-tie batch=1 rescore, prior cache (`_prior_cache_key`: neutral-prompt sha + id(model)/id(tokenizer), LRU), multi calibration (`_load_calibration`), result dict. |
+| [`jevmlx/engine.py`](jevmlx/engine.py) | Model load (`load_engine`, lru_cached per RESOLVED model id, the only platform check), `PROMPT_VERSION`, `PromptProfile` (Qwen3 thinking-off, system-role probe), prompt rendering from the compiled plan (`_user_content`) with the nonce context delimiter (`_context_block`), prefill + broadcast KV, chunked batched passes (`_score_rows` with per-chunk halve-and-retry and `failed_attempts`), width-bin memory budget (`_width_bin_max_rows`, slope measured at load by `_measure_width_slope`), constrained-path trie scoring, multi count row + reconciliation (`COUNT_MARGIN_MIN`), constrained MAP (`_constrained_map`), constraint validation before model work (`constraints.validate_constraints_for_schema` at the top of `run_parallel_generation`), scalar finalization (`ScalarEvidence` / `ScalarDecision` / `Candidate`, `finalize_scalar_evidence` — the ONE scalar finalizer every scoring path goes through), dependency second pass rebuilt on it (`_selective_second_pass`: topological waves, `Given:` conditioning header, `InternalConstraintViolationError` on post-MAP violation), near-tie batch=1 rescore, prior cache (`_prior_cache_key`: neutral-prompt sha + id(model)/id(tokenizer), LRU), multi calibration (`_load_calibration`), result dict. |
 | [`jevmlx/setcons.py`](jevmlx/setcons.py) | Hard set-constraint selection for multi fields: exact DP over group components (mutually_exclusive, at_most_one, at_most_k, at_least_one, exact_k) plus implies propagation; score-maximizing feasible set. |
 | [`jevmlx/constraints.py`](jevmlx/constraints.py) | Case-level constraint checking (implies/requires_parent, excludes, exclusivity): single source of truth shared by the engine's MAP and `evalmetrics`' violation rate. |
 | [`jevmlx/parity.py`](jevmlx/parity.py) | Scoring parity (batch=1 vs batched vs chunked) over the bundled presets with their REAL contexts, plus `check_batched_parity` — the decide_many parity matrix (1/2/4 contexts, raw pre-rescore row logits + final decisions, prior on/off). ONE implementation shared by the slow parity test and the bench's `parity.json` producer. |
@@ -28,17 +28,21 @@ trust the code over this document when they drift.
 | [`jevmlx/openai_slots.py`](jevmlx/openai_slots.py) | OpenAI-compatible slot backend: one request per option, top-k logprobs with an explicit floor and a `truncated` flag. |
 | [`jevmlx/bench.py`](jevmlx/bench.py) | Dataset × scorer × track matrix runner writing results directories; writes `parity.json` per model folder right after the engine load. |
 | [`jevmlx/log.py`](jevmlx/log.py) | Logging configuration (`-v`, `JEVMLX_LOG=json`). |
+| [`jevmlx/timing.py`](jevmlx/timing.py) | W5b-8 event ledger for engine timing (`Ledger`, `Interval`, `SpanError`): non-overlapping named spans in two phases (`prior`, `main`), with `Ledger.derived_flat` deriving today's `*_ms` result keys (`plan_compile_ms`, `prefill_ms`, `cache_broadcast_ms`, composite `suffix_eval_ms`, `lm_head_gather_ms`, `second_pass_ms`, `prior_ms`, `elapsed_ms`, `total_ms`) and `Ledger.batched_views` producing `group_wall` / `per_item_amortized` / `per_item_end_to_end`. Standalone — pure Python, no mlx import, NO engine wiring yet: the engine's ad-hoc timers are untouched until W6 adoption. |
+| [`jevmlx/adapters.py`](jevmlx/adapters.py) | W6-1 LM-head adapters (`LMHeadAdapter` protocol, `adapter_for`, `UnsupportedModelError`, `list_supported_model_types`): backbone/lm_head split per installed mlx_lm family (untied `lm_head`, tied `embed_tokens.as_linear`, gemma3 always-head, biased phi head, mistral3 delegation). Registry-only — NO engine wiring yet; engine call sites adopt it in W6-2+. |
 | [`benchmarks/to_jsonl.py`](benchmarks/to_jsonl.py) | Bundled `cases.json` → eval JSONL (+ lock). |
 | [`benchmarks/typesafe/fetch.py`](benchmarks/typesafe/fetch.py) | TypeSafe public pages → eval JSONL (+ lock, `benchmark_only`). |
 | [`benchmarks/perturb.py`](benchmarks/perturb.py) | Deterministic label-preserving context perturbations. |
 | [`benchmarks/synthetic.py`](benchmarks/synthetic.py) | Synthetic labeled case generator. |
 | [`benchmarks/invariance.py`](benchmarks/invariance.py) | Irrelevant-field invariance benchmark (an invariance gate). |
-| [`benchmarks/check_results.py`](benchmarks/check_results.py) | Results-folder audit: recomputes metrics from `predictions.jsonl`, verifies committed `report.json` numbers, and `--check-readme` compares the README leaderboard block against a rebuilt table. |
+| [`benchmarks/check_results.py`](benchmarks/check_results.py) | Results-folder audit: recomputes metrics from `predictions.jsonl`, verifies committed `report.json` numbers, enforces the results contract v2 gates (timing.json median split incl. `peak_incremental_bytes`/`failed_attempts`; batched per-item keys together; pre-v2 parity.json fails with a regenerate hint), and `--check-readme` compares the README leaderboard block against a rebuilt table. |
 | [`benchmarks/summarize_results.py`](benchmarks/summarize_results.py) | Results directories → `SUMMARY.md` (marks `parity_failed` rows for models whose parity check failed). |
 | [`benchmarks/timing.py`](benchmarks/timing.py) | Timing report: decide() per bundled preset, N reps; the engine's full split (median/p95/min/max) plus rows, padded token positions, passes, rescored count, rerun rate; per-rep raw numbers alongside. |
-| [`benchmarks/leaderboard.py`](benchmarks/leaderboard.py) | README leaderboard table (TypeSafe agreement + local rows). |
+| [`benchmarks/leaderboard.py`](benchmarks/leaderboard.py) | README leaderboard table (TypeSafe agreement + local rows). Local time-per-case reads ONLY the per-item end-to-end median (contract v2) — a parallel combo without it raises `ValueError` naming the folder (no pre-v2 folders on main; no fallback). |
 | [`benchmarks/compat.py`](benchmarks/compat.py) | Model compatibility table (latency/memory) generator. |
 | [`benchmarks/naive_vs_parallel.py`](benchmarks/naive_vs_parallel.py) | Quick parallel-vs-naive side-by-side comparison. |
+| [`benchmarks/m5.py`](benchmarks/m5.py) | One-command M5 runbook: doctor gate → slow parity per model → quality bench → invariance → timing → remaining parity models → optional `--ab-branch` A/B worktree → `SUMMARY.md` comparison. Steps are subprocesses logged into `<out>/RUNBOOK.md`; idempotent via output markers (`--fresh` reruns); step planner and summary builder are pure functions. |
+| [`benchmarks/probe.py`](benchmarks/probe.py) | W6-2 prep probes, standalone (no engine wiring): `slope` fits the per-row peak-memory slope per width bin (B=1/2/4/8 at widths 4/8/16/32 under `mx.reset_peak_memory`) and `adapters` compares `adapter.lm_head(adapter.backbone(x)[:, pos])` vs `model(x)[:, pos]` on bundled preset rows. |
 
 ## Data flow
 
@@ -92,11 +96,21 @@ hard set constraints  (setcons.select_constrained_set: threshold/count
   │    applies LAST, after count reconciliation)
   ▼
 constrained MAP  (case-level constraints: _constrained_map maximizes summed
-  │    log scores over the joint assignment)
+  │    log scores over the joint assignment; constraints are validated
+  │    against the schema BEFORE any model work —
+  │    constraints.validate_constraints_for_schema, called at the top of
+  │    run_parallel_generation, rejects unknown types/fields, out-of-domain
+  │    values, and implies/requires_parent/excludes on multi fields)
   ▼
 selective second pass  (depends_on children whose parent is confident and
-  │    own margin low / MAP-changed: one conditioned batch=1 pass,
-  │    _selective_second_pass)
+  │    own margin low / MAP-changed: _selective_second_pass, rebuilt on the
+  │    shared scalar finalizer — rows run in TOPOLOGICAL WAVES, each row a
+  │    complete one-field JSON object prefixed by a `Given: {"parent": …}\n`
+  │    header; depth-2 children condition on the UPDATED depth-1 decisions;
+  │    after the last wave MAP re-runs over affected components and a
+  │    constraint violation after that raises
+  │    InternalConstraintViolationError — an internal error, never a
+  │    returned decision)
   ▼
 assembly  (winners → typed values via alias_map; multi = per-option Y/N
   │    codes at T=1; row codes '00','01',… map back to choices)
@@ -107,6 +121,17 @@ result dict  {parsed_json, field_telemetry, prompt_sha256, full timing
   │
   ├──► api.Decision / FieldResult        (Python)
   └──► evalrun predictions.jsonl lines   (eval) / CLI table       (decide)
+
+scalar decisions (W5-B, PR #45): every scoring path — normal batched pass,
+batch=1 rescore, dependency rescore, oracle rescore — produces a
+ScalarEvidence (per-choice T=1 log-scores + legal-mass logs, source_shape
+'batch' | 'batch1' | 'dependency' | 'oracle'), and every decision goes
+through finalize_scalar_evidence, the ONE finalizer (rescore gate, prior
+correction, temperature, tie flag, margins, top_choices). No scoring
+semantics live outside it. ScalarDecision carries the complete public
+telemetry (evidence_source included); Candidate is a typed value + its
+score-key ('true'/'false' for booleans — conflating the scored and typed
+representations turned True into "true" in reconciled assignments).
 
 batched (decide_many): run_parallel_generation_batched prefills each
 context, builds the rows ONCE, then processes context groups built
@@ -168,6 +193,7 @@ Batched-only keys (`run_parallel_generation_batched`, every result): `group_wall
 | `top_choices` | Top (choice, probability) pairs, most probable first (top 5). |
 | `rows` | Rows the field consumed (0 for cardinality-1 fields). |
 | `tie` / `rescored` | Scalar: whether the top-2 gap is inside `INSTABILITY_BAND` (subsumes exact-equality ties), and whether the batch=1 rescore replaced the batched result. Multi: `rescored` when any option's Y/N pair was rescored. |
+| `evidence_source` | Scalar only (W5-B, PR #45): which scoring path produced the final evidence — `batch` (batched pass), `batch1` (canonical rescore replaced it), `dependency` (second pass), `oracle` (forced re-score). Rides on scalar entries and on second-pass re-decides. |
 | `legal_mass` | Probability the model assigned to the union of allowed continuations at the winner's branch point(s), against the full vocabulary = sum(exp(z_allowed)) / sum(exp(z_vocab)). Per-branch leakage signal — the constrained distribution can confidently pick A over B even when almost all unconstrained mass is on a reasoning token/newline/label text. Product over the winner's branch path (scalar); per-option Y/N branches (multi); the count row has its own (`legal_mass` + `min_option_legal_mass` on the `<field>#count` entry). 1.0 for cardinality-1 fields (nothing branched). Always computed. Raw, pre-prior-correction logits. |
 | `legal_mass_logs` | Per-choice (scalar) / per-option (multi) natural-log legal-mass product along the branch path, keyed by the real choice/option string. Raw, T=1. Calibration feature for the abstention model. The legal-mass callback is LOG-space end to end (W5-D finding 37: `score_trie`'s `legal_mass_at_node` returns natural-log floats; the trie stays MLX-free). |
 | `min_option_legal_mass` / `mean_log_legal_mass` | Multi only (W5-D finding 38): cardinality-free field-level stats replacing the old underflowing, cardinality-confounded product as the headline numbers — the worst option's legal mass in probability space, and the mean per-option log mass (additive, stable). The per-option logs stay on `legal_mass_logs`. |
@@ -199,7 +225,17 @@ Batched-only keys (`run_parallel_generation_batched`, every result): `group_wall
 
 `check_constraint` is the one evaluator, shared by the
 engine's MAP reconciliation and `evalmetrics.constraint_violation_rate`;
-`validate_constraints` checks shapes up front.
+`validate_constraints` checks shapes up front. W5-B (PR #45) added
+`validate_constraints_for_schema`: the engine calls it at the top of
+`run_parallel_generation` — BEFORE any model work — so unknown constraint
+types, unknown fields, out-of-domain values, and implies/requires_parent/
+excludes on multi fields all fail loudly at call time (review 13:
+case-level constraints cannot be reconciled on multi fields today;
+exclusivity is the supported multi shape). The neutral prior pass runs
+with constraints=None, so validation never fires twice. After the
+dependency pass's final MAP re-run, a still-violating assignment raises
+`InternalConstraintViolationError` (engine.py) — an internal error, never
+a returned decision.
 
 ### Per-field set constraints — `FieldDefinition.compile_set_constraints`, solver `setcons.select_constrained_set`
 
@@ -245,7 +281,12 @@ One check, two consumers: the slow parity test and the bench share
 `check_scoring_parity`. A model without a passing `parity.json` gets
 `parity_failed` rows in SUMMARY.md (`summarize_results._model_parity_note`,
 which also gates a MISSING parity.json) and cannot enter the README compat
-table.
+table. W5 (PR #48) made the gate v2-aware: a parity.json without
+`max_raw_row_drift_nats` is pre-v2 and FAILS with a regenerate hint, and a
+failing payload names its stages via the shared
+`_parity_failed_stages` (winners flipped / final log-score drift ≥ atol /
+raw pre-rescore row-logit drift ≥ atol) plus the max drifts and atol;
+`check_results.check_parity` uses the same classifier.
 
 ### Batched parity matrix — `parity.check_batched_parity`
 
@@ -290,7 +331,7 @@ Frozen contract; `check_results.py` imports this list instead of retyping it.
 | `log_scores`, `probability`, `per_option` | Distribution evidence (multi uses per_option). |
 | `latency_ms`, `rows`, `passes` | Engine timing telemetry. |
 | `error`, `salvage_prediction` | Failure provenance. |
-| `perturbation`, `consensus` | Optional; present only with `carry_perturbation` / `carry_consensus`. |
+| `perturbation`, `consensus`, `oracle_prediction` | Optional; present only with `carry_perturbation` / `carry_consensus`, or on dependency/oracle re-decide lines (DAG evaluation). |
 
 ### `run.json` — written by `run_eval`
 
@@ -305,9 +346,13 @@ prediction_lines).
 `{"calls": <canonical decide calls>, "median": {<split key>: <median over
 cases>}}` — split keys ride the parallel `_meta` (`latency_ms`, the full
 engine split, `peak_active_bytes`, `padded_token_positions`,
-`rescored_fields_count`, `rerun_fields_count`, `num_fields`). Same calls the
-predictions came from — no second run. Naive/openai tracks write none (no
-engine split exists there).
+`rescored_fields_count`, `rerun_fields_count`, `num_fields`; results
+contract v2 adds `peak_incremental_bytes` + `failed_attempts` —
+check_results.REQUIRED `RUN_TIMING_KEYS`). Batched-path runs also land
+`group_wall_ms` / `per_item_amortized_ms` / `per_item_end_to_end_ms`
+(check_results `BATCHED_TIMING_KEYS`, required together when present).
+Same calls the predictions came from — no second run. Naive/openai tracks
+write none (no engine split exists there).
 
 ### `benchmarks/timing.py` report (standalone) — `run_timing` / `aggregate`
 
