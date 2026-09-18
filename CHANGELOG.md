@@ -2,6 +2,87 @@
 
 ## Unreleased
 
+- W5b-1 immutable schema and plans: `StructuredSchema` and
+  `FieldDefinition` are frozen dataclasses — mutation raises
+  `FrozenInstanceError`; derive with `dataclasses.replace`
+  (`compile_set_constraints` returns a NEW frozen field carrying a tuple of
+  read-only constraint views). Compiled plans are exposed as read-only
+  mappings (`_freeze_plan` over `MappingProxyType`). `jevmlx.api` no longer
+  re-exports `jevmlx.models.*` — `MODEL_ALIASES`/`DEFAULT_MODEL`/`resolve_model`
+  import from `jevmlx.models` directly.
+- W5b-2 shared test fakes: `tests/conftest.py` owns one tokenizer/model per
+  family (`FakeTokenizer`, `FakeModel`, `_Mod97Tokenizer`, `YNLogitModel`,
+  `CountCodeModel`) plus the engine-result factories `make_engine_result` /
+  `make_field_telemetry` (the full `run_parallel_generation` result shape,
+  per ARCHITECTURE.md). Contract tests pin the factory's key sets to the
+  engine's real output (top level + scalar/multi/count telemetry shapes) and
+  assert the per-file aliases stay the same objects — the per-file stub
+  copies are gone; a stub that only passed because it was wrong is now
+  visible.
+- W5-D decide_many semantics: the prior pass runs ONCE per
+  `run_parallel_generation_batched` call (every result reports the shared
+  `prior_ms`); context groups are built INCREMENTALLY from actual cumulative
+  cache bytes plus projected suffix cost over prompt-length-sorted contexts
+  (a short first context no longer sizes a group that admits 30K-token
+  prompts); honest per-result timing — `group_wall_ms`,
+  `per_item_amortized_ms`, `per_item_end_to_end_ms`, and `contexts_per_pass`
+  as the ACTUAL group size (the final partial group reports its own size).
+- W5-D per-chunk retry + measured memory budget: `_score_rows` halves and
+  retries a chunk on a Metal allocation failure (`_is_metal_allocation_error`
+  — resource exhaustion only, programming errors propagate) and records the
+  retries as `failed_attempts` on `ScoreRowsResult` and the result dict —
+  never folded into `sequential_forward_passes`; retry state is per chunk, so
+  a retried chunk does not stop later chunks in the same bucket. The chunk
+  cap moves to the width-bin budget `_width_bin_max_rows` (each row's cache
+  bytes + its logits slab at the row's OWN width bin, scaled by the tiling
+  slope); the slope is MEASURED at engine load (`_measure_width_slope`, the
+  B=1/B=2 peak-activation ratio inside the warmup, floor 1.0 on any failure)
+  instead of assumed. Peak memory is honest: absolute
+  `mx.reset_peak_memory()`-based `peak_active_bytes` plus
+  `peak_incremental_bytes` (peak minus the request's starting active
+  memory).
+- W5-D prior cache keys: the process-lifetime prior cache
+  (`_prior_cache_key`) is keyed by id(model)/id(tokenizer) with LIVE weakref
+  verification on every hit (an id can be reused after free), the neutral
+  prompt's full sha256 (the plan hash alone omits descriptions/glosses/field
+  order), prompt_version, and scoring mode; eviction is LRU
+  (`_PRIOR_CACHE_MAX`). Non-weak-referenceable tokenizers are not cached.
+- W5-D resolved-id engine cache: `load_engine`'s lru_cache sits on the
+  RESOLVED model id (`jevmlx.models.resolve_model`), so `load_engine("quality")`
+  and `load_engine("mlx-community/Qwen2.5-7B-Instruct-4bit")` share one entry
+  instead of loading the model twice.
+- W5-D log-space legal mass: `score_trie`'s `legal_mass_at_node` callback
+  returns natural-LOG masses (the trie stays MLX-free; log space end to
+  end). Multi fields replace the underflowing, cardinality-confounded
+  field-level product with cardinality-free stats: `min_option_legal_mass`
+  (worst option's leakage, probability space) and `mean_log_legal_mass`
+  (additive, stable); the per-option logs stay on `legal_mass_logs`. The
+  count row exposes its own `legal_mass` (winner) and `min_option_legal_mass`
+  (worst code) on the `<field>#count` entry.
+- W5-D parity matrix: `parity.check_batched_parity` exercises decide_many —
+  each case at 1/2/4 contexts, equal and mixed prompt lengths, comparing RAW
+  pre-rescore row logits (so a batch-1 rescore cannot mask raw batch drift),
+  final decisions, and prior on/off. Parity cases use the bundled presets'
+  REAL contexts (`_case_context`), not synthetic filler.
+- W5-A prompt/plan correctness (PR #38): the prompt renders FROM THE COMPILED
+  PLAN — `to_schema_str(mode, tokenizer=…)` shows the aliases the scorer
+  actually scores (`alias_for_index` survives only for the OpenAI adapter's
+  per-field requests); the codebook search is BOUNDED BACKTRACKING over a
+  prefix-conflict graph (`_search_codebook`), not greedy — an A-is-a-prefix-
+  of-B/C/D pool now finds the valid {B, C, D} set instead of raising. ONE
+  canonical JSON serializer (`jevmlx/json_text.py`, `ensure_ascii=False`) for
+  every prompt and candidate path — no more escaped-non-ASCII mismatch
+  between what is compiled and what is displayed. The context fence carries a
+  sha256-derived nonce (`_context_nonce`/`_context_block`), so a context
+  containing a fake `CONTEXT>>>` line can no longer close the block early.
+  `PROMPT_VERSION` is `jevmlx-parallel-v8`.
+- Doctor environment hardening (PR #39): `check_venv` fails a conda
+  interpreter (`sys.base_prefix` under miniconda/anaconda — conda Pythons
+  have been observed to hang at exec under endpoint-security load) and probes
+  a trivial subprocess within 2 s; `check_editable_install` fails an editable
+  install that points at a DIFFERENT checkout (`direct_url.json`), while
+  plain package installs stay OK.
+
 - W4-A named model defaults + compat metrics: `--model` accepts aliases
   `fast` (Qwen2.5-3B), `quality` (Qwen2.5-7B, **default**), `test` (1.5B,
   tests only). `resolve_model()` resolves aliases in `load_engine`, `doctor`,

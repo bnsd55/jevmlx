@@ -80,7 +80,7 @@ Read the result. `decide(...)` returns a `Decision`: `.value` (a validated
   NONE_OF_ABOVE choice that maps to `None`; fields must be Optional), or
   `"abstain"` (`abstain_below_margin=X` withholds fields whose margin falls
   below the cut; the raw value stays on the FieldResult).
-- Options: `decide_many(model_cls, contexts)` for batches; `constraints=[...]`
+- Options: `decide_many(model_cls, contexts)` for batches (one prior pass, one merged scoring pass per context group — results match separate `decide` calls within `PARITY_ATOL`); `constraints=[...]`
   reconciles the joint answer by constrained MAP (implies / excludes /
   requires_parent / exclusivity; plus `depends_on` / `set_constraints` in the
   schema); `calibration=<path-or-dict>` (from `jevmlx calibrate --out`) selects
@@ -88,7 +88,8 @@ Read the result. `decide(...)` returns a `Decision`: `.value` (a validated
   top-k above `COUNT_MARGIN_MIN` (0.7 nats); `prior_correction=True` subtracts
   the neutral-context prior; timing: `latency_ms` here, the full split
   (prior / prefill / plan compile / cache broadcast / suffix eval / lm-head
-  gather / second pass) on the engine result, per-combo `timing.json` in bench
+  gather / second pass) plus `peak_active_bytes`/`peak_incremental_bytes` and
+  `failed_attempts` on the engine result, per-combo `timing.json` in bench
   output.
 
 ## Use it from any OpenAI-compatible server
@@ -140,13 +141,15 @@ git clone https://github.com/bnsd55/jevmlx && cd jevmlx && ./setup.sh
 | `eval` | Run labeled cases through a track (`parallel`/`naive_local`/`api_baseline`/`openai_slots`), with optional permutations; writes `predictions.jsonl` + `run.json` + per-combo `timing.json` |
 | `report` | Build a JSON + markdown eval report from `predictions.jsonl` (offline) |
 | `bench` | Full benchmark: all (track, scorer, dataset) combos for one or more models, parity gate + one `SUMMARY.md` |
-| `doctor` | Environment checks: run before filing an issue or a bench run |
+| `doctor` | Environment checks (platform, versions, venv/conda + subprocess hang, editable-install checkout, memory, power, Metal, model cache, network): run before filing an issue or a bench run |
 
 `-v` for progress logs; `JEVMLX_LOG=json` for machine-readable logs.
 
 ## How it works
 
-The prompt lists every field and its allowed options as neutral aliases. The model prefills once and the KV cache is shared. One scoring row per field (extra trie rows for multi-token options), a restricted softmax over each field's allowed options, and the JSON is assembled from the winners — with a probability per field. Temperature is applied once at the end; ties resolve deterministically. [ARCHITECTURE.md](ARCHITECTURE.md) has the full picture.
+The schema compiles per tokenizer: a bounded codebook search picks the neutral alias codes whose candidate rows tokenize most cleanly, and the prompt renders FROM the compiled plan — the model is taught exactly the protocol the scorer judges. The context is fenced with a per-context nonce, so no interior line can impersonate the closing fence.
+
+The model prefills once and the KV cache is shared. One scoring row per field (extra trie rows for multi-token options), a restricted softmax over each field's allowed options, and the JSON is assembled from the winners — with a probability per field. Chunks are sized by a measured active-memory budget (the B=1/B=2 tiling slope is probed at engine load; Metal allocation failures halve the chunk and retry, counted in `failed_attempts`). Temperature is applied once at the end; ties resolve deterministically. Batched `decide_many` runs one prior pass and one merged scoring pass per context group. [ARCHITECTURE.md](ARCHITECTURE.md) has the full picture.
 
 ## Contributing
 

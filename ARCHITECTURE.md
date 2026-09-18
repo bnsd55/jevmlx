@@ -8,15 +8,17 @@ trust the code over this document when they drift.
 
 | Module | Role |
 |---|---|
-| [`jevmlx/schema.py`](jevmlx/schema.py) | Schema model (`StructuredSchema`, `FieldDefinition`), slot/labels/multi plan compilation, tokenizer-specific codebook search (`_search_codebook`), count-row compilation, per-tokenizer plan cache, compile-time rejections, hard set-constraint validation (`FieldDefinition.compile_set_constraints`). |
-| [`jevmlx/trie.py`](jevmlx/trie.py) | Branch-point trie over candidate token remainders; `score_trie` (constrained-path log probs + legal-mass logs); softmax/logsumexp helpers. |
-| [`jevmlx/engine.py`](jevmlx/engine.py) | Model load (lru_cached, the only platform check), `PROMPT_VERSION`, `PromptProfile` (Qwen3 thinking-off, system-role probe), prefill + broadcast KV, chunked batched passes (`_score_rows`), constrained-path trie scoring, multi count row + reconciliation (`COUNT_MARGIN_MIN`), constrained MAP (`_constrained_map`), selective parent-conditioned second pass (`_selective_second_pass`), near-tie batch=1 rescore, multi calibration (`_load_calibration`), result dict. |
+| [`jevmlx/schema.py`](jevmlx/schema.py) | Immutable schema model (`StructuredSchema`, `FieldDefinition` — frozen dataclasses, derived via `dataclasses.replace`; compiled plans exposed as read-only mappings), slot/labels/multi plan compilation, tokenizer-specific bounded codebook search (`_search_codebook`: prefix-conflict graph + backtracking over an independent set), plan-driven prompt rendering (`to_schema_str` takes the tokenizer — the compiled plan owns the displayed aliases), count-row compilation, per-tokenizer plan cache, compile-time rejections, hard set-constraint validation (`FieldDefinition.compile_set_constraints` returns a NEW frozen field). |
+| [`jevmlx/trie.py`](jevmlx/trie.py) | Branch-point trie over candidate token remainders; `score_trie` (constrained-path log probs + legal-mass logs, callback in LOG space); softmax/logsumexp helpers. |
+| [`jevmlx/json_text.py`](jevmlx/json_text.py) | THE canonical JSON serializer (`json_text`, `ensure_ascii=False`) for every prompt and candidate path — never `json.dumps` directly (non-ASCII labels must tokenize as displayed). |
+| [`jevmlx/engine.py`](jevmlx/engine.py) | Model load (`load_engine`, lru_cached per RESOLVED model id, the only platform check), `PROMPT_VERSION`, `PromptProfile` (Qwen3 thinking-off, system-role probe), prompt rendering from the compiled plan (`_user_content`) with the nonce context delimiter (`_context_block`), prefill + broadcast KV, chunked batched passes (`_score_rows` with per-chunk halve-and-retry and `failed_attempts`), width-bin memory budget (`_width_bin_max_rows`, slope measured at load by `_measure_width_slope`), constrained-path trie scoring, multi count row + reconciliation (`COUNT_MARGIN_MIN`), constrained MAP (`_constrained_map`), selective parent-conditioned second pass (`_selective_second_pass`), near-tie batch=1 rescore, prior cache (`_prior_cache_key`: neutral-prompt sha + id(model)/id(tokenizer), LRU), multi calibration (`_load_calibration`), result dict. |
 | [`jevmlx/setcons.py`](jevmlx/setcons.py) | Hard set-constraint selection for multi fields: exact DP over group components (mutually_exclusive, at_most_one, at_most_k, at_least_one, exact_k) plus implies propagation; score-maximizing feasible set. |
 | [`jevmlx/constraints.py`](jevmlx/constraints.py) | Case-level constraint checking (implies/requires_parent, excludes, exclusivity): single source of truth shared by the engine's MAP and `evalmetrics`' violation rate. |
-| [`jevmlx/parity.py`](jevmlx/parity.py) | Scoring parity (batch=1 vs batched vs chunked) over the bundled presets — ONE implementation shared by the slow parity test and the bench's `parity.json` producer. |
-| [`jevmlx/api.py`](jevmlx/api.py) | Public API: `decide`, `decide_many`, `Decision`/`FieldResult`, Pydantic → schema, NONE_OF_ABOVE + abstention handling, unit-split margins. |
+| [`jevmlx/parity.py`](jevmlx/parity.py) | Scoring parity (batch=1 vs batched vs chunked) over the bundled presets with their REAL contexts, plus `check_batched_parity` — the decide_many parity matrix (1/2/4 contexts, raw pre-rescore row logits + final decisions, prior on/off). ONE implementation shared by the slow parity test and the bench's `parity.json` producer. |
+| [`jevmlx/api.py`](jevmlx/api.py) | Public API: `decide`, `decide_many`, `Decision`/`FieldResult`, Pydantic → schema, NONE_OF_ABOVE + abstention handling, unit-split margins. No compat re-exports (model aliases live in `jevmlx.models`). |
 | [`jevmlx/cli.py`](jevmlx/cli.py) | Subcommands: decide, serve, validate, eval, report, calibrate, bench, doctor. |
 | [`jevmlx/serve.py`](jevmlx/serve.py) | HTTP server (`POST /decide`), one serial worker on the single Metal GPU. |
+| [`jevmlx/models.py`](jevmlx/models.py) | Model aliases (`MODEL_ALIASES`, `DEFAULT_MODEL`) and `resolve_model` — the leaf module every loader and CLI command resolves ids through. |
 | [`jevmlx/lint.py`](jevmlx/lint.py) | `lint_schema`: collision / duplicate / empty-choice findings from a compiled plan. |
 | [`jevmlx/calibrate.py`](jevmlx/calibrate.py) | `fit_temperature` by NLL over labeled JSONL and `fit_logistic` (pooled multi calibration); ECE before/after; one JSON output for both. |
 | [`jevmlx/evalrun.py`](jevmlx/evalrun.py) | Eval tracks (`parallel_decide_fn`, `naive_local_decide_fn`); `run_eval` writes `predictions.jsonl` + `run.json`. |
@@ -43,8 +45,10 @@ trust the code over this document when they drift.
 ```
 schema (Pydantic or JSON)
   │  StructuredSchema compile (slot / labels / multi plans, per tokenizer)
-  │    - codebook search per scalar field (_search_codebook: greedy over
-  │      A-Z, digits, 2-char pools; lexicographic objective on the final set)
+  │    - bounded codebook search per scalar field (_search_codebook:
+  │      pre-tokenized pool, prefix-conflict graph, bounded backtracking for
+  │      a size-n prefix-free independent set; lexicographic objective on
+  │      every complete set — never greedy)
   │    - multi fields: '<field>/<code>' option rows + '<field>#count' row
   │    - set constraints validated at construction (SchemaCompileError on
   │      contradictions: cycles, implies×exclusivity, k bounds)
@@ -52,21 +56,28 @@ schema (Pydantic or JSON)
 plan {lead_in_ids, fields: {shared_ids, remainders/trie, alias_map?, count?}}
   │  (identity-keyed plan cache per tokenizer; weakref-evicted)
   ▼
-prompt  (PROMPT_VERSION = "jevmlx-parallel-v7" from the engine;
-  │      PROMPT_V2_SYSTEM paragraph, user schema block + <<<CONTEXT …>>>
-  │      built inside run_parallel_generation; chat template via PromptProfile)
+prompt  (PROMPT_VERSION = "jevmlx-parallel-v8" from the engine;
+  │      PROMPT_V2_SYSTEM paragraph, user schema block + <<<CONTEXT:<nonce>
+  │      … CONTEXT:<nonce>>> built inside run_parallel_generation; the
+  │      schema block renders FROM THE COMPILED PLAN (to_alias_schema_str —
+  │      the prompt shows the codebook the scorer reads); the nonce is the
+  │      context's sha256-derived tag so a fake interior fence cannot close
+  │      the block; chat template via PromptProfile)
   │  prefill ONCE (make_prompt_cache + model(base_arr))  →  KV cache
   │    →  broadcast ×rows (prior pass runs first only with prior_correction)
   ▼
 batched suffix pass(es)  (_score_rows -> ScoreRowsResult(row_logits,
-  │    row_legal_mass_log, passes, gather_ms, broadcast_ms, chunk_shapes);
-  │    chunked by the memory heuristic _rows_per_chunk, halve-and-retry on
-  │    Metal allocation failure, width bucketing)
+  │    row_legal_mass_log, passes, gather_ms, broadcast_ms, chunk_shapes,
+  │    failed_attempts); chunked by the width-bin memory budget
+  │    _width_bin_max_rows (slope MEASURED at engine load by
+  │    _measure_width_slope, B=1/B=2 peak-activation ratio), halve-and-retry
+  │    PER CHUNK on Metal allocation failure — failed_attempts counts the
+  │    retries, never folded into passes)
   │  branch-point logits at each row's decision position (gather-only eval)
   ▼
 trie scoring  (score_trie: P(choice) = Π branch softmax factors, T applied
-  │    once downstream; legal-mass logs per branch from the full-vocab
-  │    logsumexp)
+  │    once downstream; legal-mass LOGS per branch from the full-vocab
+  │    logsumexp — log space end to end)
   ▼
 near-tie rescore  (scalar top candidates and multi Y/N pairs inside
   │    INSTABILITY_BAND (5e-2 nats) rescored at the canonical batch=1 shape,
@@ -91,15 +102,25 @@ assembly  (winners → typed values via alias_map; multi = per-option Y/N
   │    codes at T=1; row codes '00','01',… map back to choices)
   ▼
 result dict  {parsed_json, field_telemetry, prompt_sha256, full timing
-  │    split incl. plan_compile_ms / cache_broadcast_ms / padded_token_positions, …}
+  │    split incl. plan_compile_ms / cache_broadcast_ms / padded_token_positions,
+  │    peak_active_bytes + peak_incremental_bytes, failed_attempts, …}
   │
   ├──► api.Decision / FieldResult        (Python)
   └──► evalrun predictions.jsonl lines   (eval) / CLI table       (decide)
 
+batched (decide_many): run_parallel_generation_batched prefills each
+context, builds the rows ONCE, then processes context groups built
+INCREMENTALLY from actual cumulative cache bytes + projected suffix cost
+(contexts sorted by prompt length); ONE merged scoring pass per group with
+per-row cache slots; prior computed ONCE per call; per-result timing keys
+group_wall_ms / per_item_amortized_ms / per_item_end_to_end_ms /
+contexts_per_pass (the ACTUAL group size).
+
 bench: after the engine load, jevmlx/parity.py runs the batch=1 vs batched
-vs chunked parity check over the four bundled presets and writes
-<model folder>/parity.json BEFORE any eval combo (bench._run_model_parity,
-called in run_bench_models right after the engine load).
+vs chunked parity check over the four bundled presets (their real contexts)
+and writes <model folder>/parity.json BEFORE any eval combo
+(bench._run_model_parity, called in run_bench_models right after the engine
+load).
 ```
 
 ## Contracts
@@ -114,17 +135,20 @@ called in run_bench_models right after the engine load).
 | `padded_token_positions` | W3-R: total suffix token positions including right padding — sum of (chunk width x chunk rows), the tiling shape the forwards actually ran at. |
 | `rescored_fields` | Fields whose batched result was replaced by the batch=1 canonical rescore. |
 | `total_tokens_generated` | Always 0: no text is generated. |
-| `peak_active_bytes` | Peak Metal active memory from `mx.get_peak_memory()`. |
-| `sequential_forward_passes` | 1, or the chunk count from the memory heuristic. |
+| `peak_active_bytes` / `peak_incremental_bytes` | W5-D finding 32: absolute Metal peak since the last `mx.reset_peak_memory()`, and the INCREMENTAL peak over the request's starting active memory (the old single number could describe an earlier request or the warmup). |
+| `sequential_forward_passes` | 1, or the chunk count from the width-bin memory budget. |
+| `failed_attempts` | W5-D finding 30: Metal allocation failures that were retried at a smaller chunk size (`ScoreRowsResult.failed_attempts`). Never folded into `sequential_forward_passes` — a pass is a forward that produced rows. |
 | `schema_match` | Always True (keys/enums guaranteed by construction). |
 | `confidence_model` | `"slots"` or `"labels"`. |
-| `prompt_sha256` / `prompt_version` | SHA-256 over the full prompt token ids; the version is read from `engine.PROMPT_VERSION` (v7) — never a literal elsewhere. |
+| `prompt_sha256` / `prompt_version` | SHA-256 over the full prompt token ids; the version is read from `engine.PROMPT_VERSION` (v8) — never a literal elsewhere. |
 | `probability_status` | How to read the probabilities. |
 | `prior_correction` / `constraints_applied` | Whether the prior pass ran / case-level constraints were applied. |
 | `reconciled_fields` | Fields whose value changed under constrained MAP. |
 | `parsed_json` | `{field: {"value": …, "prob": …}}`. |
 | `field_telemetry` | `{field: entry}` — see next table. |
 | `num_fields` | Field count. |
+
+Batched-only keys (`run_parallel_generation_batched`, every result): `group_wall_ms` (the group's wall time incl. prefill+scoring+assembly), `per_item_amortized_ms` (group wall / group size), `per_item_end_to_end_ms` (this context's own prefill + its share), `contexts_per_pass` (the ACTUAL group size — the final partial group reports its own smaller size). With `prior_correction=True` the neutral pass is computed ONCE per call and every result reports the shared `prior_ms`. |
 
 ### `field_telemetry` entry — built in `run_parallel_generation`'s field loop (multi), scalar branch, and the `<field>#count` branch
 
@@ -144,9 +168,11 @@ called in run_bench_models right after the engine load).
 | `top_choices` | Top (choice, probability) pairs, most probable first (top 5). |
 | `rows` | Rows the field consumed (0 for cardinality-1 fields). |
 | `tie` / `rescored` | Scalar: whether the top-2 gap is inside `INSTABILITY_BAND` (subsumes exact-equality ties), and whether the batch=1 rescore replaced the batched result. Multi: `rescored` when any option's Y/N pair was rescored. |
-| `legal_mass` | Probability the model assigned to the union of allowed continuations at the winner's branch point(s), against the full vocabulary = sum(exp(z_allowed)) / sum(exp(z_vocab)). Per-branch leakage signal — the constrained distribution can confidently pick A over B even when almost all unconstrained mass is on a reasoning token/newline/label text. Product over the winner's branch path (scalar); per-option Y/N branches (multi); count row has its own. 1.0 for cardinality-1 fields (nothing branched). Always computed. Raw, pre-prior-correction logits. |
-| `legal_mass_logs` | Per-choice (scalar) / per-option (multi) natural-log legal-mass product along the branch path, keyed by the real choice/option string. Raw, T=1. Calibration feature for the abstention model. |
+| `legal_mass` | Probability the model assigned to the union of allowed continuations at the winner's branch point(s), against the full vocabulary = sum(exp(z_allowed)) / sum(exp(z_vocab)). Per-branch leakage signal — the constrained distribution can confidently pick A over B even when almost all unconstrained mass is on a reasoning token/newline/label text. Product over the winner's branch path (scalar); per-option Y/N branches (multi); the count row has its own (`legal_mass` + `min_option_legal_mass` on the `<field>#count` entry). 1.0 for cardinality-1 fields (nothing branched). Always computed. Raw, pre-prior-correction logits. |
+| `legal_mass_logs` | Per-choice (scalar) / per-option (multi) natural-log legal-mass product along the branch path, keyed by the real choice/option string. Raw, T=1. Calibration feature for the abstention model. The legal-mass callback is LOG-space end to end (W5-D finding 37: `score_trie`'s `legal_mass_at_node` returns natural-log floats; the trie stays MLX-free). |
+| `min_option_legal_mass` / `mean_log_legal_mass` | Multi only (W5-D finding 38): cardinality-free field-level stats replacing the old underflowing, cardinality-confounded product as the headline numbers — the worst option's legal mass in probability space, and the mean per-option log mass (additive, stable). The per-option logs stay on `legal_mass_logs`. |
 | `oracle_prediction` / `oracle_log_scores` | Present only under `oracle_overrides` (DAG evaluation): the field was forced to the given value and re-scored conditioned on it. |
+| `prior_log_scores` / `prior_corrected` (scalar) / `prior_option_pairs` / `prior_corrected` (multi) | Present only under `prior_correction`: the neutral-context prior the field's scores were corrected against. |
 
 ### `FieldResult` — `api.FieldResult` (built by `_build_field_results`)
 
@@ -179,7 +205,11 @@ engine's MAP reconciliation and `evalmetrics.constraint_violation_rate`;
 
 Schema-dict key `set_constraints` on a multi field; validated at
 construction, so contradictory sets raise `SchemaCompileError` before any
-model load. Types: `mutually_exclusive` / `at_most_one` / `at_most_k` (k),
+model load. The field is a frozen dataclass, so "attaching" constraints
+means deriving: `compile_set_constraints` returns a NEW `FieldDefinition`
+via `dataclasses.replace` (a bare reference to the old field keeps the empty
+tuple), and the stored constraints are a tuple of read-only views.
+Types: `mutually_exclusive` / `at_most_one` / `at_most_k` (k),
 `at_least_one`, `exact_k` (k), `implies` (`if_option` → `then_option`).
 Compile-time contradictions: implies cycles, an implies pair inside an
 at-most-one group, implies into an `exact_k=0` group, k above group size,
@@ -195,7 +225,7 @@ Written by the bench into each model folder right after the engine load
 ```json
 {
   "model": "mlx-community/Qwen2.5-7B-Instruct-4bit",
-  "prompt_version": "jevmlx-parallel-v7",
+  "prompt_version": "jevmlx-parallel-v8",
   "max_abs_drift_nats": 0.027,
   "winners_identical": true,
   "atol": 0.05,
@@ -216,6 +246,22 @@ One check, two consumers: the slow parity test and the bench share
 `parity_failed` rows in SUMMARY.md (`summarize_results._model_parity_note`,
 which also gates a MISSING parity.json) and cannot enter the README compat
 table.
+
+### Batched parity matrix — `parity.check_batched_parity`
+
+The W1-A gate only exercised `run_parallel_generation`, so a `decide_many`
+bug passed it. `check_batched_parity` runs each case at 1/2/4 contexts,
+equal and mixed prompt lengths, and compares RAW row logits BEFORE the
+near-tie rescore (W5-D finding 42: one scoring pass per context through the
+shared `_score_rows` at identical chunk shapes vs the batched group's rows —
+so a batch-1 rescore cannot mask raw batch drift), final decisions (parsed
+values + log_scores), and prior on/off (`prior_correction=True` computes the
+shared prior and must still match decide-per-context). Returns the
+`check_scoring_parity` shape plus `max_raw_row_drift_nats` and a
+per-case `max_raw_row_drift_nats`. Parity cases use the bundled presets'
+REAL contexts (W5-D finding 41: `bundled_preset_specs` returns the whole
+preset; `_case_context` falls back to a stable filler only for bare test
+schemas).
 
 ### Eval `cases.jsonl` line — writers: `to_jsonl.py`, `typesafe/fetch.py`
 
@@ -312,20 +358,59 @@ conversion: same shape with empty `sources` plus `fetched_at`.
   parity and tested parity cannot drift apart.
 - **No dual paths.** The multi threshold knob is deleted (calibrated
   log-odds > 0 or the fixed P(yes) >= 0.5 rule); `set_constraints` is a real
-  attribute read directly (no getattr fallback); `summarize` lives in
+  frozen attribute read directly (no getattr fallback); `summarize` lives in
   `benchmarks/summarize_results.py` and bench calls it directly.
+- **Schemas and plans are immutable.** `StructuredSchema` and
+  `FieldDefinition` are frozen dataclasses; mutation raises
+  `FrozenInstanceError` (derive with `dataclasses.replace`). Compiled plans
+  and `set_constraints` are exposed as read-only mappings/tuples
+  (`_freeze_plan` / `MappingProxyType`). A schema is compiled once and
+  shared across engines, threads, and plan caches — in-place mutation would
+  silently invalidate every cached plan keyed to it. `api` no longer
+  re-exports `models.*`: aliases resolve via `jevmlx.models.resolve_model`
+  (imported by the engine) and `jevmlx.models` is the public home of
+  `MODEL_ALIASES`/`DEFAULT_MODEL`.
 - **Prompt version read, never written.** `PROMPT_VERSION` lives once in
   `jevmlx.engine`; every consumer (result dict, prior cache key, parity
   payload) reads it.
+- **One serializer.** `jevmlx.json_text.json_text` (`ensure_ascii=False`) is
+  the only sanctioned JSON rendering for prompt and candidate text (W5-A
+  finding 39): the stdlib default escaped non-ASCII labels in candidate
+  compilation while prompts showed the real characters, so the scorer judged
+  tokenizations the model never saw.
+- **The compiled plan owns the prompt.** `to_schema_str(mode, tokenizer=…)`
+  renders the aliases THE COMPILED PLAN scored for this tokenizer (W5-A
+  finding 1) — prompt and scorer can never disagree about the protocol.
+  `alias_for_index` survives only for the OpenAI adapter's per-field
+  requests, which bypass the plan.
+- **The context cannot impersonate its own fence.** `_context_block` fences
+  the context with a sha256-derived nonce tag (`_context_nonce`): open and
+  close fences match per context, and an interior `CONTEXT>>>` line cannot
+  close the block early (W5-A finding 44).
+- **The prior cache is identity-keyed.** `_prior_cache_key` carries
+  id(model)/id(tokenizer) with live weakref verification on every hit (an id
+  can be reused after free), plus the neutral prompt's full sha256 (the plan
+  hash alone omits descriptions/glosses/order), prompt_version, and scoring
+  mode; eviction is LRU (`_PRIOR_CACHE`, `_PRIOR_CACHE_MAX`), and
+  non-weak-referenceable tokenizers are simply not cached.
+- **Retry is per chunk and honest.** A Metal allocation failure halves that
+  chunk and retries; later chunks in the same bucket still run
+  (`_score_rows`, W5-D finding 30). Retries surface as `failed_attempts`,
+  never as `sequential_forward_passes`.
 - **No backward compatibility.** Changes replace: old paths, keys, flags and
   names are deleted with their callers and tests in the same change. No
   aliases, no shims, no deprecation periods.
 
 ## Testing
 
-- Fast tests (`pytest -m "not slow" -q`) never touch a model: the engine is
-  exercised through `tests/test_engine_fake.py` (`FakeModel` +
-  `FakeTokenizer`), a fake tokenizer mapping words to crc32 ids in
+- Fast tests (`pytest -m "not slow" -q`) never touch a model: the shared
+  fakes live in `tests/conftest.py` (`FakeModel`, `FakeTokenizer`, the
+  %97+1 tokenizer, `YNLogitModel`, `CountCodeModel`) — one class per
+  behaviour, re-exported by the per-file aliases — plus the engine-result
+  factories `make_engine_result` / `make_field_telemetry`, whose key sets
+  are pinned to `run_parallel_generation`'s real output by contract tests
+  in that file (a stub that drifts from the engine contract fails loudly).
+  A fake tokenizer mapping words to crc32 ids lives in
   `tests/test_lint.py`, and `decide_fn` seams in `tests/test_evalrun.py`.
 - Slow tests (marker `slow`) load
   `mlx-community/Qwen2.5-0.5B-Instruct-4bit`. Run one locally with
@@ -342,10 +427,13 @@ conversion: same shape with empty `sources` plus `fetched_at`.
 1. **Trie over first tokens.** Scoring whole choices as branch paths gives a
    proper distribution and lets shared token prefixes be paid for once.
 2. **Codebook search, not pinned letters.** The compiler searches alias
-   codes per field and tokenizer (`_search_codebook`) and picks the set whose
-   complete rows tokenize most cleanly (branch nodes, trie depth, length
-   variance); a pinned index-based mapping survives only as a documented
-   fallback for index-based callers.
+   codes per field and tokenizer (`_search_codebook`) and picks the best
+   size-n prefix-free INDEPENDENT set over the pre-tokenized pool's
+   prefix-conflict graph — bounded backtracking, scored by the lexicographic
+   objective (branch nodes, trie depth, length variance, code length) on
+   every complete set; greedy committed to a prefix-colliding code and
+   rejected valid sets. The pinned index-based mapping survives only for
+   index-based callers (the OpenAI adapter).
 3. **Slots default over labels.** Neutral aliases decouple the scored
    vocabulary from choice text — no tokenization collisions by construction;
    labels mode stays for schemas where spelling is the signal.
@@ -358,10 +446,14 @@ conversion: same shape with empty `sources` plus `fetched_at`.
    decision at its own divergence point; subset probability semantics would
    not be additive. The count row is a reconciliation signal gated on its
    own confidence, never a hard answer.
-6. **Chunking heuristic, not hard bounds.** Rows per chunk come from a
-   working-set estimate (cache bytes + one float32 logits slab); a warning
-   logs when a pass is split, and a Metal allocation failure halves the
-   chunk once and still scores every row.
+6. **Measured budget, not hard bounds.** Rows per chunk come from an
+   active-memory budget charged per width bin (`_width_bin_max_rows`: one
+   row's cache bytes + the logits slab at the row's OWN width bin, scaled by
+   the tiling slope); the B=1/B=2 slope is MEASURED at engine load
+   (`_measure_width_slope`, one probe inside the warmup, floor 1.0 on any
+   failure) instead of assumed; a warning logs when a pass is split, and a
+   Metal allocation failure halves the chunk and retries (counted in
+   `failed_attempts`) while still scoring every row.
 7. **Identity-keyed plan cache.** Compiled plans are cached per tokenizer
    object identity (weakref, evicted on death) so repeated decisions skip
    recompilation without leaking tokenizers — and two equal-but-distinct
