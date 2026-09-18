@@ -19,13 +19,13 @@ import re
 import time
 import weakref
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NamedTuple
 
 from jinja2.exceptions import TemplateError
 
-from jevmlx.json_text import json_text
 from jevmlx.models import resolve_model
 from jevmlx.schema import StructuredSchema, _common_token_prefix, count_key, is_count_key
 from jevmlx.setcons import select_constrained_set
@@ -586,6 +586,141 @@ def _fold_multi(probs_true: dict[str, float]) -> tuple[list[str], float | None, 
     return selected, None, margin
 
 
+class InternalConstraintViolationError(RuntimeError):
+    """A post-dependency-pass assignment violates a declared hard constraint
+    (W5-B review 8). After MAP re-reconciliation this is an internal error —
+    never a returned decision."""
+
+
+@dataclass(frozen=True)
+class ScalarEvidence:
+    """Raw per-choice evidence for ONE scalar field (W5-B review C.2).
+
+    What a forward pass measures — nothing else: the per-choice T=1
+    constrained-path log-scores and per-choice legal-mass logs, in the
+    field's REAL choice representation (post alias hop), schema order.
+    Every scoring path (normal batched pass, batch=1 rescore, dependency
+    rescore, oracle rescore) produces one of these; every decision goes
+    through :func:`finalize_scalar_evidence`. No scoring semantics may live
+    outside it.
+    """
+
+    choices: tuple[str, ...]  # real choice strings, schema order
+    log_scores_raw: tuple[float, ...]  # T=1 constrained-path log-probs per choice
+    legal_mass_logs: tuple[float, ...]  # per-choice raw legal-mass logs (T=1)
+    source_shape: str = "batch"  # "batch" | "batch1" | "dependency" | "oracle"
+
+
+@dataclass(frozen=True)
+class ScalarDecision:
+    """One scalar field's finalized decision + complete public telemetry."""
+
+    value: object  # typed value (bool for booleans, str for enums)
+    probability: float  # P(choice) post temperature
+    log_scores: dict[str, float]  # final per-choice scores (post prior-correction)
+    top_choices: list[dict]  # sorted [{choice, probability}], best first
+    margin_nats: float  # top1-top2 log-score margin (post prior-correction)
+    tie: bool  # top1-top2 still inside INSTABILITY_BAND after any rescore
+    rescored: bool  # a batch=1 canonical rescore replaced the batched result
+    legal_mass: float  # exp(legal_mass_logs[winner])
+    legal_mass_logs: dict[str, float]  # per-choice raw legal-mass logs
+    prior_log_scores: dict[str, float] | None  # neutral pass log_scores, when used
+    prior_corrected: bool
+    evidence_source: str  # "batch" | "batch1" | "dependency" | "oracle"
+
+
+@dataclass(frozen=True)
+class Candidate:
+    """One typed candidate value with its score lookup key (W5-B rev 11).
+
+    Booleans score under the string keys "true"/"false" (the trie's scored
+    representation) but must DECIDE as Python bools. Conflating the two
+    turned ``True`` into ``"true"`` in reconciled assignments.
+    """
+
+    value: object  # the typed value (bool/str)
+    score_key: str  # the key in field_log_scores (scored representation)
+    score: float
+
+
+def finalize_scalar_evidence(
+    evidence: ScalarEvidence,
+    *,
+    prior_entry: dict | None,
+    temperature: float,
+    rescore: "Callable[[list[int]], ScalarEvidence] | None" = None,
+    rescore_idxs: list[int] | None = None,
+) -> tuple[ScalarDecision, bool]:
+    """THE one scalar finalizer (W5-B review C.2 / finding 7).
+
+    Consumes raw :class:`ScalarEvidence` and produces the complete finalized
+    decision — INSTABILITY_BAND canonical rescore, prior correction,
+    confidence temperature, tie flag, legal mass, top_choices and margins —
+    in ONE place. The normal pass, the batch=1 rescore, the dependency
+    rescore and the oracle rescore all call this; no scoring semantics may
+    be re-derived anywhere else.
+
+    ``rescore`` + ``rescore_idxs``: only the normal batched pass supplies a
+    rescore callback (it owns the engine row set); a batch=1, dependency or
+    oracle evidence is already at the canonical shape.
+
+    Returns (ScalarDecision, rescored_flag).
+    """
+    choices = list(evidence.choices)
+    n = len(choices)
+    raw_scores = list(evidence.log_scores_raw)
+    legal_logs = list(evidence.legal_mass_logs)
+
+    # W3-E near-tie canonical rescore: only meaningful when the evidence came
+    # from a multi-row batched pass (source_shape == "batch"); a batch=1 /
+    # dependency / oracle re-measure is already the canonical shape.
+    rescored = False
+    if n > 0:
+        order = sorted(range(n), key=raw_scores.__getitem__, reverse=True)
+        band_candidates = [
+            i for i in order if raw_scores[order[0]] - raw_scores[i] < INSTABILITY_BAND
+        ]
+        if len(band_candidates) > 1 and evidence.source_shape == "batch" and rescore is not None:
+            rescored_evidence = rescore(rescore_idxs or [])
+            raw_scores = list(rescored_evidence.log_scores_raw)
+            legal_logs = list(rescored_evidence.legal_mass_logs)
+            rescored = True
+
+    # Prior correction (V2): subtract the neutral-context prior per choice,
+    # then log-softmax renormalise — the ONE _apply_prior implementation.
+    scores = _apply_prior(raw_scores, choices, prior_entry)
+
+    # Confidence temperature applied once to the final per-choice scores
+    # (softmax(scores / T)): ranking is invariant; calibrate.py fits this T.
+    probs_list = softmax(scores, temperature=temperature)
+    order = sorted(range(n), key=probs_list.__getitem__, reverse=True)
+    w_idx = order[0]
+    # W3-E tie flag: top1-top2 still inside INSTABILITY_BAND after any
+    # canonical rescore — the model genuinely cannot separate them.
+    is_tie = n > 1 and (scores[order[0]] - scores[order[1]]) < INSTABILITY_BAND
+    w_prob = probs_list[w_idx]
+
+    decision = ScalarDecision(
+        value=choices[w_idx],
+        probability=w_prob,
+        log_scores={c: lp for c, lp in zip(choices, scores, strict=True)},
+        top_choices=sorted(
+            ({"choice": c, "probability": p} for c, p in zip(choices, probs_list, strict=True)),
+            key=lambda x: x["probability"],
+            reverse=True,
+        ),
+        margin_nats=scores[order[0]] - scores[order[1]] if n > 1 else float("inf"),
+        tie=is_tie,
+        rescored=rescored,
+        legal_mass=math.exp(legal_logs[w_idx]),
+        legal_mass_logs={c: lm for c, lm in zip(choices, legal_logs, strict=True)},
+        prior_log_scores=dict(prior_entry["log_scores"]) if prior_entry is not None else None,
+        prior_corrected=prior_entry is not None,
+        evidence_source="batch1" if rescored else evidence.source_shape,
+    )
+    return decision, rescored
+
+
 # W3-E (GPT-REVIEW Q4 'Near-tie nondeterminism', bug 13): the measured
 # batch-shape instability band on Metal (see the W3-C measurement in
 # tests/conftest.py — worst 0.0293 nats on main itself, identical with the
@@ -916,6 +1051,12 @@ def _get_or_compute_prior(
 
     # Bug 8: the neutral pass runs at temperature=1.0 ALWAYS — the prior is
     # defined at T=1 and must not inherit the caller's temperature.
+    # W5-B (review 43): the neutral pass runs in PRIOR MODE — it stops after
+    # first-pass field finalization. No constraints, no dependency second
+    # pass, no abstention or other decision-dependent postprocessing: a
+    # dependency-conditioned neutral score must never enter the prior cache
+    # (the evidence pass may take a different first/second-pass path, which
+    # would make the subtraction between different factorizations).
     result = run_parallel_generation(
         model,
         tokenizer,
@@ -925,6 +1066,7 @@ def _get_or_compute_prior(
         max_rows=max_rows,
         scoring=scoring,
         prior_correction=False,
+        _prior_mode=True,
     )
     model_ref = weakref.ref(model)
     tok_ref = weakref.ref(tokenizer)
@@ -1232,20 +1374,30 @@ def _constrained_map(
         return check_constraint(c, assignment)
 
     for component in components:
-        # Get the candidate values for each field in this component.
-        field_candidates: dict[str, list[object]] = {}
+        # W5-B (review 11): candidates are typed Candidate(value, score_key)
+        # pairs — booleans score under the string keys "true"/"false" but
+        # DECIDE as Python bools. The old code took the raw score keys as
+        # values, so a boolean field reconciled to the STRING "true"/"false"
+        # (and falsely recorded itself as changed, "true" != True).
+        field_candidates: dict[str, list[Candidate]] = {}
         for fname in component:
             if fname not in field_log_scores:
-                # Multi field: candidates are the options (each on/off).
-                # For enumeration, use the current value as the only candidate
-                # (multi fields are handled via exclusivity, not implies).
+                # No scored candidates (multi field, or a field whose rows
+                # produced no log_scores): the current value is the only
+                # candidate. Multi fields cannot be case-constrained
+                # (validate_constraints_for_schema rejects that) — they can
+                # only appear via exclusivity, which never reaches MAP.
+                current = field_values.get(fname, {}).get("value")
                 fdef = schema.fields.get(fname)
-                if fdef and fdef.field_type == "multi":
-                    field_candidates[fname] = [field_values.get(fname, {}).get("value", [])]
+                if fdef is not None and fdef.field_type == "boolean" and current is not None:
+                    field_candidates[fname] = [Candidate(current, _bool_score_key(current), 0.0)]
                 else:
-                    field_candidates[fname] = [field_values.get(fname, {}).get("value")]
+                    field_candidates[fname] = [Candidate(current, _value_score_key(current), 0.0)]
             else:
-                field_candidates[fname] = list(field_log_scores[fname].keys())
+                field_candidates[fname] = [
+                    Candidate(_score_key_value(fname, key, schema), key, score)
+                    for key, score in field_log_scores[fname].items()
+                ]
 
         # Check product space size.
         product = 1
@@ -1257,39 +1409,58 @@ def _constrained_map(
                 f"{product} assignments (> 5000); fields={sorted(component)}"
             )
 
-        # Enumerate valid assignments, pick the joint MAP.
-        best_assignment: dict[str, object] | None = None
+        # Enumerate valid assignments, pick the joint MAP. Constraints see
+        # TYPED values; score lookup uses score_key.
+        best_assignment: dict[str, Candidate] | None = None
         best_score = float("-inf")
         fields_in_component = sorted(component)
         for combo in itertools.product(*(field_candidates[f] for f in fields_in_component)):
-            assignment = dict(zip(fields_in_component, combo, strict=True))
-            # Check all constraints that touch this component.
+            cands = dict(zip(fields_in_component, combo, strict=True))
+            assignment = {fname: cand.value for fname, cand in cands.items()}
+            # Check all constraints that touch this component (typed values).
             if not all(_check_constraint(c, assignment) for c in constraints):
                 continue
-            # Sum per-field log scores.
-            score = 0.0
-            for fname, val in assignment.items():
-                if fname in field_log_scores:
-                    score += field_log_scores[fname].get(str(val), float("-inf"))
-                # Multi fields don't contribute to the MAP score (their
-                # per-option yes/no is independent under the current engine).
+            # Sum per-field log scores via the typed candidate's score.
+            score = sum(cand.score for cand in cands.values())
             if score > best_score:
                 best_score = score
-                best_assignment = assignment
+                best_assignment = cands
 
         if best_assignment is None:
             raise NotImplementedError(
                 f"no valid assignment exists for constrained component {sorted(component)}"
             )
 
-        # Record reconciled values and track changes.
-        for fname, val in best_assignment.items():
+        # Record reconciled TYPED values and track changes.
+        for fname, cand in best_assignment.items():
             old_val = field_values.get(fname, {}).get("value")
-            if val != old_val:
+            if cand.value != old_val:
                 changed.append(fname)
-            reconciled[fname] = val
+            reconciled[fname] = cand.value
 
     return reconciled, changed
+
+
+def _bool_score_key(value: object) -> str:
+    """The scored representation of a boolean value ("true"/"false")."""
+    return "true" if value else "false"
+
+
+def _value_score_key(value: object) -> str:
+    """The scored representation of a non-boolean value (str(value))."""
+    return str(value)
+
+
+def _score_key_value(fname: str, key: str, schema: StructuredSchema) -> object:
+    """The typed value for a score key (W5-B rev 11).
+
+    Boolean fields decide as Python bools — their score keys are the
+    strings "true"/"false". Everything else decides as the key itself.
+    """
+    fdef = schema.fields.get(fname)
+    if fdef is not None and fdef.field_type == "boolean":
+        return key.lower() == "true"
+    return key
 
 
 def _selective_second_pass(
@@ -1303,225 +1474,307 @@ def _selective_second_pass(
     parsed_json: dict,
     reconciled_fields: list[str],
     scoring: str,
+    temperature: float = 1.0,
+    prior: dict[str, Any] | None = None,
+    constraints: list[dict] | None = None,
     oracle_overrides: dict[str, object] | None = None,
 ) -> dict[str, Any]:
-    """W3-D part 2: selective parent-conditioned second pass.
+    """W3-D part 2, rebuilt on the shared finalizer (W5-B review 3-10).
 
-    After the parallel pass + MAP, for each child whose parent is confident
-    (parent top1-top2 margin above _PARENT_MIN_MARGIN_NATS) AND whose own margin
-    is low OR which MAP changed, build a conditioned row: the child's
-    candidate prefixed by the parent's decided one-field JSON object. Batch
-    all such children in ONE extra suffix pass over the same prefill cache.
-    Replace the child's scores.
+    After the parallel pass + MAP, children whose parent decision is
+    confident AND whose own margin is low (or which MAP changed) are
+    re-scored with the parent's decided value in an explicit conditioning
+    header. Rows run in topological waves (review 10): depth-1 children
+    first, finalized + MAP-reconciled, then depth-2 rows built from the
+    UPDATED assignments. After the last wave, MAP re-runs over every
+    affected component and every constraint is asserted before assembly
+    (review 8) — a violation is an internal error, never a returned
+    decision.
 
-    Never condition on a low-confidence parent.
+    All scoring semantics live in finalize_scalar_evidence: prior
+    correction, caller temperature, INSTABILITY_BAND ties, legal mass,
+    top_choices, margins. This function carries none of them (review 7).
+
+    Parent gate (review 9): confidence is measured for the value actually
+    conditioned on — chosen_score - max(other scores) — positive and above
+    _PARENT_MIN_MARGIN_NATS. A MAP-forced non-argmax parent never
+    conditions here.
 
     Returns telemetry: rerun_fields, rerun_rows, second_pass_ms.
     """
     t0 = time.perf_counter()
+    is_oracle = oracle_overrides is not None
     rerun_fields: list[str] = []
 
-    # Identify children that need a second pass.
-    is_oracle = oracle_overrides is not None
-    children_to_rerun: list[tuple[str, str]] = []  # (child, parent)
+    # ---- 1. Select children, wave by wave (topological, review 10). ----
+    # Children grouped by dependency depth: depth(child) = 1 + max(depth of
+    # parents among depends_on fields, default 0). All depends_on parents
+    # are schema-validated (exist, non-multi, acyclic).
+    depth: dict[str, int] = {}
     for fname, fdef in schema.fields.items():
         if fdef.depends_on is None:
             continue
         parent = fdef.depends_on
-        if parent not in field_telemetry:
-            continue
-        if is_oracle:
-            # Oracle mode: force ALL children with depends_on to rerun,
-            # conditioned on the TRUE parent value (from oracle_overrides).
-            if parent not in oracle_overrides:
-                continue
-            children_to_rerun.append((fname, parent))
-            continue
-        parent_ft = field_telemetry[parent]
-        # Parent confidence: top1-top2 margin.
-        parent_scores = parent_ft.get("log_scores", {})
-        if not parent_scores:
-            continue
-        parent_probs = sorted(parent_scores.values(), reverse=True)
-        parent_margin = (parent_probs[0] - parent_probs[1]) if len(parent_probs) > 1 else 1.0
-        # Never condition on a low-confidence parent.
-        if parent_margin < _PARENT_MIN_MARGIN_NATS:
-            continue
-        # Child needs rerun if its own margin is low OR MAP changed it.
-        child_ft = field_telemetry.get(fname, {})
-        child_scores = child_ft.get("log_scores", {})
-        child_probs = sorted(child_scores.values(), reverse=True)
-        child_margin = (child_probs[0] - child_probs[1]) if len(child_probs) > 1 else 1.0
-        was_reconciled = fname in reconciled_fields
-        if child_margin >= _CHILD_LOW_MARGIN_NATS and not was_reconciled:
-            continue
-        children_to_rerun.append((fname, parent))
+        depth[fname] = max(depth.get(parent, 0) + 1, depth.get(fname, 1))
+    max_depth = max(depth.values(), default=0)
 
-    if not children_to_rerun:
-        return {"rerun_fields": [], "rerun_rows": 0, "second_pass_ms": 0.0}
+    # State shared across waves. parent_assignments holds the CURRENT
+    # decided value of every field (updated between waves so depth-2 rows
+    # condition on the fresh parent, never a stale snapshot).
+    assignments: dict[str, object] = {k: v["value"] for k, v in parsed_json.items()}
 
-    # Build conditioned rows for all qualifying children.
-    parent_decided: dict[str, object] = {}
-    for _fname, parent in children_to_rerun:
-        if parent not in parent_decided:
-            if is_oracle and oracle_overrides is not None:
-                parent_decided[parent] = oracle_overrides[parent]
-            else:
-                parent_decided[parent] = parsed_json[parent]["value"]
+    def _chosen_parent_margin(parent: str) -> float:
+        ft = field_telemetry.get(parent)
+        if ft is None:
+            return float("-inf")
+        scores = ft.get("log_scores") or {}
+        chosen = assignments.get(parent)
+        # Score lookup by the scored representation of the typed value.
+        key = (
+            _bool_score_key(chosen)
+            if isinstance(chosen, bool)
+            else (str(chosen) if chosen is not None else None)
+        )
+        if key is None or key not in scores:
+            return float("-inf")
+        chosen_score = scores[key]
+        others = [v for k, v in scores.items() if k != key]
+        return chosen_score - max(others) if others else float("inf")
 
-    # For each child, build conditioned candidates and a trie.
-    conditioned_rows: list[list[int]] = []
-    row_child: list[str] = []
-    row_branch2: dict[int, int] = {}
-    child_plans: dict[str, dict] = {}
-    child_tries: dict[str, list[dict]] = {}
-
-    for fname, parent in children_to_rerun:
-        fdef = schema.fields[fname]
-        p = field_plans[fname]
-        parent_val = parent_decided[parent]
-        # Build the parent's decided one-field JSON object as a token prefix.
-        parent_json = json_text({parent: parent_val})
-
-        # The conditioned candidate: parent_json + child's slot_candidate_text.
-        # parent_json is part of the candidate text, so it flows into
-        # shared/remainders naturally — no separate parent_ids needed in rows.
-        def conditioned_text(
-            alias: str,
-            _fname=fname,
-            _parent_json=parent_json,
-        ) -> str:
-            return _parent_json + json_text({_fname: alias})
-
-        aliases = p.get("aliases", p.get("choices", []))
-        alias_map = p.get("alias_map", dict(zip(aliases, fdef.choices, strict=True)))
-        candidates = [
-            tokenizer.encode(conditioned_text(alias), add_special_tokens=False) for alias in aliases
-        ]
-        shared = _common_token_prefix(candidates)
-        remainders = [full[len(shared) :] for full in candidates]
-        trie = build_trie(remainders)
-        child_plans[fname] = {
-            "shared_ids": shared,
-            "remainders": remainders,
-            "alias_map": alias_map,
-            "aliases": aliases,
-            "choices": fdef.choices,
-        }
-        child_tries[fname] = trie
-        for bi, node in enumerate(trie):
-            # Row: lead_in + shared + node path. The shared prefix already
-            # includes the parent tokens (conditioned_text prepends parent_json).
-            conditioned_rows.append(list(lead_in) + list(shared) + list(node["path"]))
-            row_child.append(fname)
-            row_branch2[len(conditioned_rows) - 1] = bi
-
-    if not conditioned_rows:
-        return {"rerun_fields": [], "rerun_rows": 0, "second_pass_ms": 0.0}
-
-    # Build decision positions and allowed tokens for each conditioned row.
     pad_id = tokenizer.pad_token_id or 0
     vocab_size = (
         model.args.vocab_size
         if hasattr(model, "args") and hasattr(model.args, "vocab_size")
         else model.model.embed_tokens.weight.shape[0]
     )
-    row_decision2: list[tuple[int, list[int]]] = []
-    for ridx in range(len(conditioned_rows)):
-        fname = row_child[ridx]
-        p = child_plans[fname]
-        node = child_tries[fname][row_branch2[ridx]]
-        position = len(conditioned_rows[ridx]) - 1
-        allowed = list(node["children"])
-        row_decision2.append((position, allowed))
+    all_conditioned_rows = 0
+    affected: set[str] = set()  # fields whose values changed during waves
 
-    # Run ONE suffix pass over the same prefill cache via _score_rows (F3:
-    # the ONE copy of the padded/broadcast/gather scoring loop).
-    scored = _score_rows(
-        model,
-        cache,
-        conditioned_rows,
-        row_decision2,
-        vocab_size,
-        pad_id,
-        max(1, len(conditioned_rows)),
-    )
-    # Map per-row logits back to branch-node logits for trie scoring.
-    node_logits2: dict[int, dict[int, list[float]]] = {}
-    for ridx in range(len(conditioned_rows)):
-        node_logits2[ridx] = {row_branch2[ridx]: scored.row_logits[ridx]}
-
-    # Re-score each child through its conditioned trie.
-    for fname, _parent in children_to_rerun:
-        p = child_plans[fname]
-        trie = child_tries[fname]
-        # Collect logits for this child's branch nodes.
-        child_branch_logits: dict[int, list[float]] = {}
-        child_branch_idx = {id(node): bi for bi, node in enumerate(trie)}
-        for ridx in range(len(conditioned_rows)):
-            if row_child[ridx] != fname:
+    for wave in range(1, max_depth + 1):
+        # ---- 1a. Pick this wave's children under the CURRENT parent values.
+        children_to_rerun: list[tuple[str, str]] = []
+        for fname, fdef in schema.fields.items():
+            if fdef.depends_on is None or depth.get(fname) != wave:
                 continue
-            bi = row_branch2[ridx]
-            child_branch_logits[bi] = node_logits2[ridx][bi]
+            parent = fdef.depends_on
+            if is_oracle:
+                if oracle_overrides is not None and parent in oracle_overrides:
+                    children_to_rerun.append((fname, parent))
+                continue
+            parent_margin = _chosen_parent_margin(parent)
+            # Never condition on a low-confidence parent (review 9: the
+            # margin of the CHOSEN value, positive and above the gate).
+            if parent_margin < _PARENT_MIN_MARGIN_NATS:
+                continue
+            child_ft = field_telemetry.get(fname, {})
+            child_scores = child_ft.get("log_scores", {})
+            ranked = sorted(child_scores.values(), reverse=True)
+            child_margin = ranked[0] - ranked[1] if len(ranked) > 1 else float("inf")
+            was_reconciled = fname in reconciled_fields
+            if child_margin >= _CHILD_LOW_MARGIN_NATS and not was_reconciled:
+                continue
+            children_to_rerun.append((fname, parent))
 
-        def logits_at_node2(
-            node: dict, _lookup=child_branch_logits, _index=child_branch_idx
-        ) -> list[float]:
-            return _lookup[_index[id(node)]]
+        if not children_to_rerun:
+            continue
 
-        def legal_mass_at_node2(
-            node: dict, _lookup=child_branch_logits, _index=child_branch_idx
-        ) -> float:
-            return 0.0  # legal_mass not recomputed in the second pass (log 1.0)
+        # ---- 2. Build conditioned row families for this wave. ----
+        # The conditioned candidate family per child: header + child object
+        # with the child's OWN plan codebook (slots: the plan's aliases;
+        # labels: the real choice texts). Rows are shared + path — the
+        # schema-wide lead_in is NOT prepended (review 3): the header + JSON
+        # opening is this family's own shared prefix.
+        parent_decided: dict[str, object] = {}
+        for _fname, parent in children_to_rerun:
+            if parent not in parent_decided:
+                if is_oracle and oracle_overrides is not None:
+                    parent_decided[parent] = oracle_overrides[parent]
+                else:
+                    parent_decided[parent] = assignments[parent]
 
-        raw_scores, _ = score_trie(trie, len(p["aliases"]), logits_at_node2, legal_mass_at_node2)
-        scores = raw_scores
-        probs_list = softmax(scores, temperature=1.0)
-        order = sorted(range(len(probs_list)), key=probs_list.__getitem__, reverse=True)
-        w_idx = order[0]
-        is_tie = len(scores) > 1 and (scores[order[0]] - scores[order[1]]) < 1e-6
-        if is_tie:
-            w_idx = next(i for i in range(len(probs_list)) if i in order[:2])
-        w_prob = probs_list[w_idx]
+        conditioned_rows: list[list[int]] = []
+        row_child: list[str] = []
+        row_branch2: dict[int, int] = {}
+        child_plans: dict[str, dict] = {}
+        child_tries: dict[str, list[dict]] = {}
+        child_choices: dict[str, list[str]] = {}
 
-        choices_list = p["aliases"]
-        raw = choices_list[w_idx]
-        alias_map = p["alias_map"]
-        if scoring == "slots":
-            val = alias_map[raw]
-            if fdef.field_type == "boolean":
-                val = val == "true"
-        elif fdef.field_type == "boolean":
-            val = raw.lower() == "true"
-        else:
-            val = raw
+        for fname, _parent in children_to_rerun:
+            fdef = schema.fields[fname]
+            p = field_plans[fname]
+            parent_val = parent_decided[fdef.depends_on]
+            parent_json = json.dumps({fdef.depends_on: parent_val}, ensure_ascii=False)
+            header = f"Given: {parent_json}\n"
 
-        # Replace the child's scores (or store as oracle_prediction in
-        # oracle mode — don't touch the main predictions).
-        display_choices = (
-            [alias_map[c] for c in choices_list] if scoring == "slots" else list(choices_list)
-        )
-        if is_oracle:
-            field_telemetry[fname]["oracle_prediction"] = val
-            field_telemetry[fname]["oracle_log_scores"] = {
-                c: lp for c, lp in zip(display_choices, scores, strict=True)
+            if scoring == "slots":
+                # Slots: score the SAME alias codebook the plan compiled and
+                # the prompt taught; the winner maps back via alias_map.
+                aliases = list(p["aliases"])
+                alias_map = dict(p["alias_map"])
+            else:
+                # Labels: the scored representation IS the real choice text.
+                aliases = ["true", "false"] if fdef.field_type == "boolean" else list(fdef.choices)
+                alias_map = {c: c for c in aliases}
+            child_choices[fname] = aliases
+
+            def conditioned_text(alias: str, _fname=fname, _header=header) -> str:
+                # ONE complete one-field JSON object per candidate; the
+                # conditioning header is its prefix (review 4: never two
+                # adjacent JSON objects; the assistant answer stays in the
+                # child object's protocol — alias in slots mode).
+                return _header + json.dumps({_fname: alias}, ensure_ascii=False)
+
+            candidates = [
+                tokenizer.encode(conditioned_text(alias), add_special_tokens=False)
+                for alias in aliases
+            ]
+            shared = _common_token_prefix(candidates)
+            remainders = [full[len(shared) :] for full in candidates]
+            trie = build_trie(remainders)
+            child_plans[fname] = {
+                "shared_ids": shared,
+                "remainders": remainders,
+                "alias_map": alias_map,
+                "aliases": aliases,
+                "choices": aliases,
+                "header": header,
             }
-            rerun_fields.append(fname)
-        else:
+            child_tries[fname] = trie
+            for bi, node in enumerate(trie):
+                # Row = shared + path (review 3: NO original lead_in — the
+                # shared prefix of THIS family already carries the header
+                # and the JSON opening; prepending the unrelated schema
+                # lead-in would duplicate tokens that never occur in any
+                # conditioned candidate).
+                conditioned_rows.append(list(shared) + list(node["path"]))
+                row_child.append(fname)
+                row_branch2[len(conditioned_rows) - 1] = bi
+
+        if not conditioned_rows:
+            continue
+
+        # Decision positions: each conditioned row reads its node's children
+        # at the row's last position.
+        row_decision2: list[tuple[int, list[int]]] = []
+        for ridx, row in enumerate(conditioned_rows):
+            fname = row_child[ridx]
+            node = child_tries[fname][row_branch2[ridx]]
+            row_decision2.append((len(row) - 1, list(node["children"])))
+
+        # ---- 3. ONE suffix pass for the wave (shared _score_rows copy).
+        scored = _score_rows(
+            model,
+            cache,
+            conditioned_rows,
+            row_decision2,
+            vocab_size,
+            pad_id,
+            max(1, len(conditioned_rows)),
+        )
+        all_conditioned_rows += len(conditioned_rows)
+
+        # ---- 4. Finalize each child through THE finalizer (review 7).
+        for fname, _parent in children_to_rerun:
+            fdef = schema.fields[fname]
+            p = child_plans[fname]
+            trie = child_tries[fname]
+            branch_logits: dict[int, list[float]] = {}
+            branch_mass: dict[int, float] = {}
+            for ridx in range(len(conditioned_rows)):
+                if row_child[ridx] != fname:
+                    continue
+                bi = row_branch2[ridx]
+                branch_logits[bi] = scored.row_logits[ridx]
+                branch_mass[bi] = scored.row_legal_mass_log[ridx]
+            branch_index = {id(node): bi for bi, node in enumerate(trie)}
+
+            def logits_at_node(node: dict, _l=branch_logits, _i=branch_index) -> list[float]:
+                return _l[_i[id(node)]]
+
+            def mass_at_node(node: dict, _l=branch_mass, _i=branch_index) -> float:
+                # W5-D finding 37: log mass straight through.
+                return _l[_i[id(node)]]
+
+            raw_scores, raw_mass_logs = score_trie(
+                trie, len(p["aliases"]), logits_at_node, mass_at_node
+            )
+            # The dependency evidence finalizes through the ONE finalizer:
+            # prior correction (the SAME prior entry the evidence pass
+            # used), caller temperature, band ties, legal mass, margins.
+            prior_entry = prior.get(fname) if prior is not None else None
+            aliases = p["aliases"]
+            if scoring == "slots":
+                real_choices = [p["alias_map"][a] for a in aliases]
+            else:
+                real_choices = list(aliases)
+
+            evidence = ScalarEvidence(
+                choices=tuple(real_choices),
+                log_scores_raw=tuple(raw_scores),
+                legal_mass_logs=tuple(raw_mass_logs),
+                source_shape="oracle" if is_oracle else "dependency",
+            )
+            decision, _rescored = finalize_scalar_evidence(
+                evidence,
+                prior_entry=prior_entry,
+                temperature=temperature,
+                rescore=None,
+            )
+            w_prob = decision.probability
+
+            # Typed winner (bool for booleans).
+            val = decision.value
+            if fdef.field_type == "boolean" and isinstance(val, str):
+                val = val.lower() == "true"
+
+            if is_oracle:
+                # Oracle mode: record, don't touch the main predictions.
+                field_telemetry[fname]["oracle_prediction"] = val
+                field_telemetry[fname]["oracle_log_scores"] = dict(decision.log_scores)
+                rerun_fields.append(fname)
+                continue
+
             parsed_json[fname] = {"value": val, "prob": w_prob}
             field_telemetry[fname]["value"] = val
             field_telemetry[fname]["probability"] = w_prob
-            field_telemetry[fname]["log_scores"] = {
-                c: lp for c, lp in zip(display_choices, scores, strict=True)
-            }
-            field_telemetry[fname]["tie"] = is_tie
+            field_telemetry[fname]["log_scores"] = dict(decision.log_scores)
+            field_telemetry[fname]["top_choices"] = decision.top_choices[:5]
+            field_telemetry[fname]["tie"] = decision.tie
+            field_telemetry[fname]["rescored"] = False
+            field_telemetry[fname]["legal_mass"] = decision.legal_mass
+            field_telemetry[fname]["legal_mass_logs"] = dict(decision.legal_mass_logs)
             field_telemetry[fname]["second_pass"] = True
+            field_telemetry[fname]["evidence_source"] = decision.evidence_source
             rerun_fields.append(fname)
+            assignments[fname] = val
+            affected.add(fname)
+
+    # ---- 5. MAP re-run over affected components + assert every constraint
+    # (review 8): the dependency pass must never undo a hard constraint.
+    if not is_oracle and constraints:
+        field_log_scores = {
+            fname: ft["log_scores"] for fname, ft in field_telemetry.items() if "log_scores" in ft
+        }
+        field_values = {fname: {"value": pj["value"]} for fname, pj in parsed_json.items()}
+        reconciled, _changed = _constrained_map(field_log_scores, field_values, constraints, schema)
+        for fname, val in reconciled.items():
+            if fname in parsed_json and parsed_json[fname]["value"] != val:
+                parsed_json[fname]["value"] = val
+                field_telemetry[fname]["value"] = val
+        from jevmlx.constraints import check_constraint as _cc
+
+        final_assignment = {fname: pj["value"] for fname, pj in parsed_json.items()}
+        for c in constraints:
+            if not _cc(c, final_assignment):
+                raise InternalConstraintViolationError(
+                    f"dependency second pass produced an assignment violating "
+                    f"constraint {c!r}; assignment={final_assignment!r}"
+                )
 
     elapsed_ms = (time.perf_counter() - t0) * 1000
     return {
         "rerun_fields": rerun_fields,
-        "rerun_rows": len(conditioned_rows),
+        "rerun_rows": all_conditioned_rows,
         "second_pass_ms": round(elapsed_ms, 2),
     }
 
@@ -1796,6 +2049,8 @@ def run_parallel_generation(
     prior_correction: bool = False,
     constraints: list[dict] | None = None,
     oracle_overrides: dict[str, object] | None = None,
+    *,
+    _prior_mode: bool = False,
 ) -> dict[str, Any]:
     """Decide every schema field in one batched forward pass.
 
@@ -1838,6 +2093,15 @@ def run_parallel_generation(
         raise ValueError(f"scoring must be 'slots' or 'labels', got {scoring!r}")
     if not math.isfinite(temperature) or temperature <= 0:
         raise ValueError(f"temperature must be a finite number > 0, got {temperature!r}")
+    # W5-B (review 12): compile the case-level constraints against the schema
+    # BEFORE any model work — unknown types, unknown fields, out-of-domain
+    # values and multi-field case constraints all fail here, loudly. The
+    # neutral prior pass (prior-mode recursion) runs with constraints=None,
+    # so this never fires twice.
+    if constraints:
+        from jevmlx.constraints import validate_constraints_for_schema
+
+        validate_constraints_for_schema(constraints, schema)
     calib = _load_calibration(calibration)
     if max_rows is not None and max_rows < 1:
         raise ValueError(f"max_rows must be >= 1, got {max_rows!r}")
@@ -1930,6 +2194,7 @@ def run_parallel_generation(
         constraints=constraints,
         oracle_overrides=oracle_overrides,
         active_start=active_start,
+        _prior_mode=_prior_mode,
     )
 
 
@@ -1955,6 +2220,7 @@ def _assemble(
     constraints: list[dict] | None,
     oracle_overrides: dict[str, object] | None,
     active_start: int = 0,
+    _prior_mode: bool = False,
 ) -> dict[str, Any]:
     """Assemble per-field decisions from the scored rows (W3-F stage 3).
 
@@ -2416,89 +2682,85 @@ def _assemble(
         raw_scores, raw_legal_mass_logs = score_trie(
             field_trie, n_choices, logits_at_node, legal_mass_at_node
         )
-        # Prior correction (V2): subtract the neutral-context prior per
-        # choice, then renormalise (log-softmax) over the choices. The
-        # winner, probability, margin, tie policy and telemetry all use the
-        # corrected values.
+        # W5-B (review C.2/7): the evidence goes through THE one scalar
+        # finalizer — rescore-when-band, prior correction, temperature, tie
+        # flag, legal mass, top_choices, margins in one place.
         prior_entry = prior.get(fname) if prior is not None else None
         real_choices = (
             [p["alias_map"][raw] for raw in choices_list]
             if scoring == "slots"
             else list(choices_list)
         )
-        scores = _apply_prior(raw_scores, real_choices, prior_entry)
-        # Confidence temperature applied once to the final per-choice scores
-        # (softmax(scores / T)): ranking is invariant, calibrate.py fits this T.
-        probs_list = softmax(scores, temperature=temperature)
-        order = sorted(range(n_choices), key=probs_list.__getitem__, reverse=True)
-        w_idx = order[0]
-        # W3-E near-tie rescore (GPT-REVIEW Q4, bug 13): log-score gaps inside
-        # INSTABILITY_BAND are Metal batch-shape noise, not model signal — the
-        # old 1e-6 threshold mislabelled real noise as exact ties. Every
-        # candidate within the band of the leader competes; when the field's
-        # top candidates sit inside the band, the field's rows are rescored at
-        # batch=1 (the canonical shape: one row per forward pass) and THAT
-        # result replaces the batched one. tie=True only if the rescored
-        # scores are STILL within the band — i.e. the model genuinely cannot
-        # separate the candidates even at the canonical shape.
-        rescored = False
-        band_candidates = [i for i in order if scores[order[0]] - scores[i] < INSTABILITY_BAND]
-        if len(band_candidates) > 1:
+
+        def _rescore_evidence(
+            rescore_idxs: list[int],
+            _field_trie: list[dict] = field_trie,
+            _n_choices: int = n_choices,
+            _real_choices: list[str] = real_choices,
+        ) -> ScalarEvidence:
+            """Batch=1 canonical re-measure of this field's rows (W3-E)."""
             rescored_raw = _rescore_rows_batch1(
-                model, cache, rows, idxs, row_decision, row_branch, row_option, vocab_size, pad_id
+                model,
+                cache,
+                rows,
+                rescore_idxs,
+                row_decision,
+                row_branch,
+                row_option,
+                vocab_size,
+                pad_id,
             )
-            rescored = True
+            rs_logits: dict[int, list[float]] = {}
+            rs_mass: dict[int, float] = {}
+            for ridx in rescore_idxs:
+                rs_logits.update(rescored_raw["node_logits"][ridx])
+                rs_mass.update(rescored_raw["node_legal_mass_log"].get(ridx, {}))
+            rs_branch_index = {id(node): bi for bi, node in enumerate(_field_trie)}
+
+            def _rs_logits_at(node: dict) -> list[float]:
+                return rs_logits[rs_branch_index[id(node)]]
+
+            def _rs_mass_at(node: dict) -> float:
+                # W5-D finding 37: the callback returns LOG mass; pass it
+                # straight through (no exp/log round-trip).
+                return rs_mass[rs_branch_index[id(node)]]
+
+            rs_scores, rs_mass_logs = score_trie(
+                _field_trie, _n_choices, _rs_logits_at, _rs_mass_at
+            )
+            return ScalarEvidence(
+                choices=tuple(_real_choices),
+                log_scores_raw=tuple(rs_scores),
+                legal_mass_logs=tuple(rs_mass_logs),
+                source_shape="batch1",
+            )
+
+        evidence = ScalarEvidence(
+            choices=tuple(real_choices),
+            log_scores_raw=tuple(raw_scores),
+            legal_mass_logs=tuple(raw_legal_mass_logs),
+            source_shape="batch",
+        )
+        decision, rescored = finalize_scalar_evidence(
+            evidence,
+            prior_entry=prior_entry,
+            temperature=temperature,
+            rescore=_rescore_evidence,
+            rescore_idxs=idxs,
+        )
+        if rescored:
             rescored_fields.append(fname)
-            # Rebuild this field's score inputs from the canonical-shape
-            # logits: same score_trie path as the batched pass, batch-1
-            # logits_by_branch instead.
-            logits_by_branch = {}
-            legal_mass_log_by_branch = {}
-            for ridx in idxs:
-                logits_by_branch.update(rescored_raw["node_logits"][ridx])
-                legal_mass_log_by_branch.update(rescored_raw["node_legal_mass_log"].get(ridx, {}))
-            branch_index = {id(node): bi for bi, node in enumerate(field_trie)}
+        w_prob = decision.probability
+        is_tie = decision.tie
 
-            def logits_at_node(
-                node: dict, _lookup=logits_by_branch, _index=branch_index
-            ) -> list[float]:
-                return _lookup[_index[id(node)]]
-
-            def legal_mass_at_node(
-                node: dict, _lookup=legal_mass_log_by_branch, _index=branch_index
-            ) -> float:
-                # W5-D finding 37: log mass straight through — no exp/log
-                # round-trip (underflows to log(0) below ~-745 nats).
-                return _lookup[_index[id(node)]]
-
-            raw_scores, raw_legal_mass_logs = score_trie(
-                field_trie, n_choices, logits_at_node, legal_mass_at_node
-            )
-            # Re-run the prior correction + temperature exactly as above so
-            # the rescored result is the canonical answer end to end —
-            # through the SAME _apply_prior helper (no re-derivation).
-            scores = _apply_prior(raw_scores, real_choices, prior.get(fname) if prior else None)
-            probs_list = softmax(scores, temperature=temperature)
-            order = sorted(range(n_choices), key=probs_list.__getitem__, reverse=True)
-            w_idx = order[0]
-        # The rescore already ran the canonical-shape decision; the 1e-6 check
-        # below applies ONLY to the unrescored path (an exact-equality tie is
-        # still inside the band, so unrescored means the band check passed
-        # with a single candidate — the 1e-6 branch is then unreachable; kept
-        # for cardinality-1 and degenerate safety).
-        is_tie = len(scores) > 1 and (scores[order[0]] - scores[order[1]]) < INSTABILITY_BAND
-        w_prob = probs_list[w_idx]
-
-        raw = choices_list[w_idx]
-        if scoring == "slots":
-            # Alias hop: map the winning quoted alias back to the real choice.
-            val = p["alias_map"][raw]
-            if fdef.field_type == "boolean":
-                val = val == "true"
-        elif fdef.field_type == "boolean":
-            val = raw.lower() == "true"
-        else:
-            val = raw
+        # The finalizer's evidence is already in the REAL choice
+        # representation (alias hop applied when building the evidence) —
+        # decision.value is the typed winner (boolean fields carry a Python
+        # bool). No second alias hop here (W5-B: the old code mapped the
+        # alias twice).
+        val = decision.value
+        if fdef.field_type == "boolean" and isinstance(val, str):
+            val = val.lower() == "true"
 
         parsed_json[fname] = {
             "value": val,
@@ -2506,18 +2768,9 @@ def _assemble(
         }
 
         # Telemetry/log_scores are keyed by the REAL choice string in both
-        # modes (the contract calibrate.collect reads); in slots mode the
-        # alias winners map back through the plan's alias_map.
-        display_choices = (
-            [p["alias_map"][raw] for raw in choices_list]
-            if scoring == "slots"
-            else list(choices_list)
-        )
-        scored_choices = [
-            {"choice": c, "probability": pr}
-            for c, pr in zip(display_choices, probs_list, strict=True)
-        ]
-        scored_choices.sort(key=lambda x: x["probability"], reverse=True)
+        # modes (the contract calibrate.collect reads) — the finalizer
+        # already keys them by real_choices.
+        scored_choices = list(decision.top_choices)
 
         field_telemetry[fname] = {
             "value": val,
@@ -2528,7 +2781,7 @@ def _assemble(
             # choice string. Temperature is applied once downstream, to the
             # final distribution. With prior_correction these are the
             # CORRECTED (prior-subtracted, renormalised) scores.
-            "log_scores": {choice: lp for choice, lp in zip(display_choices, scores, strict=True)},
+            "log_scores": dict(decision.log_scores),
             "top_choices": scored_choices[:5],
             "rows": len(field_trie),
             # W3-E: True only when the top candidates are STILL within
@@ -2550,22 +2803,24 @@ def _assemble(
             # Product over the winner's branch path (raw, pre-prior-
             # correction logits: legal mass is a property of the model's
             # branch output, not of the corrected distribution).
-            "legal_mass": math.exp(raw_legal_mass_logs[w_idx]),
+            "legal_mass": decision.legal_mass,
             # Per-choice legal-mass logs (raw, T=1) for calibration feature
             # extraction; keyed by the real choice string like log_scores.
-            "legal_mass_logs": {
-                choice: lm for choice, lm in zip(display_choices, raw_legal_mass_logs, strict=True)
-            },
+            "legal_mass_logs": dict(decision.legal_mass_logs),
         }
-        if prior_entry is not None:
-            field_telemetry[fname]["prior_log_scores"] = dict(prior_entry["log_scores"])
+        if decision.prior_corrected:
+            field_telemetry[fname]["prior_log_scores"] = dict(decision.prior_log_scores)
             field_telemetry[fname]["prior_corrected"] = True
 
     # W3-D: constrained MAP. After every field has log_scores and before
     # assembly, choose the joint assignment maximizing the sum of per-field
     # log scores subject to the case-level constraints (EV1 shape).
+    # W5-B (review 43): PRIOR MODE STOPS HERE — the neutral prior pass must
+    # not run constraints, the dependency second pass, or any
+    # decision-dependent postprocessing. Its field finalization (the scalar
+    # finalizer above) is the last step the prior cache consumes.
     reconciled_fields: list[str] = []
-    if constraints:
+    if constraints and not _prior_mode:
         field_log_scores = {
             fname: ft["log_scores"] for fname, ft in field_telemetry.items() if "log_scores" in ft
         }
@@ -2590,8 +2845,10 @@ def _assemble(
     # whose own margin is low or which MAP changed, build a conditioned
     # row and batch all such children in ONE extra suffix pass over the
     # same prefill cache. No depends_on = bit-identical (no second pass).
+    # Review 43: never in prior mode (the prior cache must hold only
+    # first-pass finalization scores).
     second_pass_telemetry = {"rerun_fields": [], "rerun_rows": 0, "second_pass_ms": 0.0}
-    if any(f.depends_on is not None for f in schema.fields.values()):
+    if not _prior_mode and any(f.depends_on is not None for f in schema.fields.values()):
         second_pass_telemetry = _selective_second_pass(
             model,
             tokenizer,
@@ -2603,6 +2860,9 @@ def _assemble(
             parsed_json,
             reconciled_fields,
             scoring,
+            temperature=temperature,
+            prior=prior,
+            constraints=constraints,
             oracle_overrides=oracle_overrides,
         )
 
