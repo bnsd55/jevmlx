@@ -589,7 +589,9 @@ def _load_calibration(
 
     # Provenance checks (finding 21/22): reject a bundle that does not
     # describe this request.
-    from jevmlx.engine import PROMPT_VERSION as _PV  # noqa: PLC0415 — avoids import cycle at module load
+    from jevmlx.engine import (
+        PROMPT_VERSION as _PV,  # noqa: PLC0415 — avoids import cycle at module load
+    )
 
     if bundle.prompt_version is not None and bundle.prompt_version != _PV:
         raise ValueError(
@@ -898,8 +900,13 @@ def _prior_cache_key(
     are not cached at all (same rule as schema.py's plan cache).
     """
     try:
-        model_ref = weakref.ref(model)
-        tok_ref = weakref.ref(tokenizer)
+        # Weak-referenceability gate only: the refs used at hit time are
+        # created at store time (see _get_or_compute_prior). W5-C fix: the
+        # refs must NOT go into the KEY — hash(ref) delegates to the
+        # referent and mlx models are unhashable, which crashed every
+        # prior-corrected run with TypeError.
+        weakref.ref(model)
+        weakref.ref(tokenizer)
     except TypeError:
         logger.debug(
             "model/tokenizer %s is not weak-referenceable; prior cache disabled "
@@ -910,8 +917,6 @@ def _prior_cache_key(
     return (
         id(model),
         id(tokenizer),
-        model_ref,
-        tok_ref,
         prompt_version,
         scoring,
         plan_hash,

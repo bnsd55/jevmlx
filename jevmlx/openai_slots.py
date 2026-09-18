@@ -248,9 +248,14 @@ def _decide_multi_field(
     # (log p - log(1-p)), calibrated a*log_odds + b, and selected when > 0;
     # without it the fixed P(yes) >= 0.5 rule stands. The raw probabilities
     # stay in per_option either way.
-    multi_ab = calibration.get("multi") if calibration else None
+    # W5-C finding 22: calibration is a typed CalibrationBundle now.
+    multi_ab = (
+        (calibration.multi_a, calibration.multi_b)
+        if calibration is not None and getattr(calibration, "has_multi", False)
+        else None
+    )
     if multi_ab is not None:
-        a_coef, b_coef = multi_ab["a"], multi_ab["b"]
+        a_coef, b_coef = multi_ab
         calibrated = {}
         for option, p in per_option.items():
             p_clamped = min(max(p, 1e-12), 1.0 - 1e-12)
@@ -271,7 +276,7 @@ def _decide_multi_field(
         "alternatives": tuple(ranked),
         "rows": len(field.choices),
         "truncated": truncated_any,
-        "calibrated": {"a": multi_ab["a"], "b": multi_ab["b"]} if multi_ab else None,
+        "calibrated": {"a": multi_ab[0], "b": multi_ab[1]} if multi_ab else None,
     }
     return parsed, telemetry, n_requests
 
@@ -300,7 +305,7 @@ def decide_openai(
     """
     from jevmlx.engine import _load_calibration
 
-    calib = _load_calibration(calibration)
+    calib, _temp = _load_calibration(calibration)
     t0 = time.perf_counter()
     parsed_json: dict[str, Any] = {}
     field_telemetry: dict[str, Any] = {}
