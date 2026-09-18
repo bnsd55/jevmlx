@@ -97,18 +97,37 @@ def _probe_system_role(tokenizer, profile: PromptProfile) -> PromptProfile:
     return profile
 
 
-# Run before any mlx import: on a non-Apple-Silicon machine the mlx import
-# itself fails with a low-level error, and the platform message is the useful one.
-if platform.system() != "Darwin" or platform.machine() != "arm64":
-    raise RuntimeError(
-        "jevmlx requires Apple Silicon (macOS + arm64) with mlx-lm installed. "
-        "The PyTorch/CUDA backend was removed."
-    )
+# mlx imports are deferred so this module imports cleanly on a machine
+# without MLX (Linux CI runs schema/plan/metrics tooling). The platform/
+# mlx check runs once in load_engine, the only place that actually needs
+# a loaded model — that's where the clear RuntimeError belongs.
+try:
+    import mlx.core as mx  # noqa: E402
+    from mlx.utils import tree_flatten  # noqa: E402
+    from mlx_lm import load  # noqa: E402
+    from mlx_lm.models.cache import make_prompt_cache  # noqa: E402
+except ModuleNotFoundError:
+    mx = None  # type: ignore[assignment]
+    tree_flatten = None  # type: ignore[assignment]
+    load = None  # type: ignore[assignment]
+    make_prompt_cache = None  # type: ignore[assignment]
 
-import mlx.core as mx  # noqa: E402  (must follow the platform check, see above)
-from mlx.utils import tree_flatten  # noqa: E402
-from mlx_lm import load  # noqa: E402
-from mlx_lm.models.cache import make_prompt_cache  # noqa: E402
+
+_APPLE_SILICON_MSG = (
+    "jevmlx requires Apple Silicon (macOS + arm64) with mlx-lm installed. "
+    "The PyTorch/CUDA backend was removed."
+)
+
+
+def _require_mlx() -> None:
+    """Raise the clear error when mlx is unavailable (non-Apple-Silicon).
+
+    Called by load_engine (and any path that needs the backend) so that
+    `import jevmlx.engine` and schema/plan tooling work on Linux, while an
+    actual model load fails with the actionable platform message.
+    """
+    if mx is None or platform.system() != "Darwin" or platform.machine() != "arm64":
+        raise RuntimeError(_APPLE_SILICON_MSG)
 
 
 @functools.lru_cache(maxsize=1)
@@ -120,7 +139,12 @@ def load_engine(model_id: str):
     at once is the fastest way to OOM. Loading a different model id evicts the
     previous one. Call :func:`clear_engine_cache` to release memory without
     loading anything else.
+
+    Raises RuntimeError on a non-Apple-Silicon machine (mlx unavailable) —
+    the only place the platform check lives, so `import jevmlx.engine`
+    succeeds on Linux for schema/plan/metrics tooling.
     """
+    _require_mlx()
     logger.info("Loading %s into Apple Silicon unified memory...", model_id)
     t0 = time.perf_counter()
     model, tokenizer = load(model_id)
@@ -160,7 +184,10 @@ def engine_metadata(model_id: str) -> dict[str, Any]:
     ``quantization`` block from its config.json (None when unquantized).
     Reads only files already in the cache — no download, no reload.
     """
-    mlx_lm_version = importlib.metadata.version("mlx-lm")
+    try:
+        mlx_lm_version = importlib.metadata.version("mlx-lm")
+    except importlib.metadata.PackageNotFoundError:
+        mlx_lm_version = None
     revision = None
     quantization = None
     try:
@@ -200,10 +227,14 @@ def engine_metadata(model_id: str) -> dict[str, Any]:
             except (OSError, json.JSONDecodeError):
                 quantization = None
 
+    try:
+        mlx_version = importlib.metadata.version("mlx")
+    except importlib.metadata.PackageNotFoundError:
+        mlx_version = None
     return {
         "model_id": model_id,
         "revision": revision,
-        "mlx_version": importlib.metadata.version("mlx"),
+        "mlx_version": mlx_version,
         "mlx_lm_version": mlx_lm_version,
         "quantization": quantization,
     }

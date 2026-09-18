@@ -10,7 +10,7 @@ over this document when they drift.
 |---|---|
 | [`jevmlx/schema.py`](jevmlx/schema.py) | Schema model (`StructuredSchema`), slot/labels plan compilation, per-tokenizer plan cache, compile-time rejections. |
 | [`jevmlx/trie.py`](jevmlx/trie.py) | Branch-point trie over candidate token remainders; softmax/logsumexp helpers; `score_trie`. |
-| [`jevmlx/engine.py`](jevmlx/engine.py) | Model load (lru_cached), prompt v2, prefill + broadcast KV, chunked batched passes, trie scoring, result dict. |
+| [`jevmlx/engine.py`](jevmlx/engine.py) | Model load (lru_cached), prompt v5, PromptProfile (Qwen3 thinking-off, system-role probe), prefill + broadcast KV, chunked batched passes, trie scoring, result dict. |
 | [`jevmlx/api.py`](jevmlx/api.py) | Public API: `decide`, `decide_many`, `Decision`/`FieldResult`, Pydantic → schema, NONE_OF_ABOVE + abstention handling. |
 | [`jevmlx/cli.py`](jevmlx/cli.py) | Subcommands: decide, serve, validate, eval, report, calibrate, bench. |
 | [`jevmlx/serve.py`](jevmlx/serve.py) | HTTP server, one serial worker on the single Metal GPU. |
@@ -40,15 +40,15 @@ schema (Pydantic or JSON)
 plan {lead_in_ids, fields: {shared_ids, remainders, alias_map?}}
   │  rows = lead_in + shared_ids + branch path   (one row per branch point)
   ▼
-prompt v2  (engine.py:156 system, :463-466 user: schema block + <<<CONTEXT …>>>)
+prompt v5  (engine.py:291 system, :428 user: schema block + <<<CONTEXT …>>>)
   │  prefill ONCE  →  KV cache  →  broadcast ×rows
   ▼
-batched suffix pass(es)  (chunked by the memory heuristic, engine.py:471-483)
+batched suffix pass(es)  (chunked by the memory heuristic, engine.py:506-514)
   │  branch-point logits at each row's decision position
   ▼
 trie scoring  (trie.py: P(choice) = Π branch softmax factors; T applied once)
   ▼
-assembly  (winners → typed values via alias_map; multi = per-option yes/no)
+assembly  (winners → typed values via alias_map; multi = per-option Y/N codes at T=1)
   ▼
 result dict  {parsed_json, field_telemetry, prompt_sha256, …}
   │
@@ -58,7 +58,7 @@ result dict  {parsed_json, field_telemetry, prompt_sha256, …}
 
 ## Contracts
 
-### Engine result dict — `engine.py:711-729`
+### Engine result dict — `engine.py:469-488`
 
 | Key | Meaning |
 |---|---|
@@ -67,13 +67,13 @@ result dict  {parsed_json, field_telemetry, prompt_sha256, …}
 | `sequential_forward_passes` | 1, or the chunk count from the memory heuristic. |
 | `schema_match` | Always True (keys/enums guaranteed by construction). |
 | `confidence_model` | `"slots"` or `"labels"`. |
-| `prompt_sha256` / `prompt_version` | SHA-256 over the full prompt token ids; `jevmlx-parallel-v2`. |
+| `prompt_sha256` / `prompt_version` | SHA-256 over the full prompt token ids; `jevmlx-parallel-v5`. |
 | `probability_status` | How to read the probabilities. |
 | `parsed_json` | `{field: {"value": …, "prob": …}}`. |
 | `field_telemetry` | `{field: entry}` — see next table. |
 | `num_fields` | Field count. |
 
-### `field_telemetry` entry — `engine.py:586-600, 678-690`
+### `field_telemetry` entry — `engine.py:619-627`
 
 | Key | Meaning |
 |---|---|
@@ -86,6 +86,22 @@ result dict  {parsed_json, field_telemetry, prompt_sha256, …}
 | `option_logit_pairs` | multi only: raw [yes, no] logits per option at T=1 (what the prior cache stores). |
 | `top_choices` | Top (choice, probability) pairs, most probable first (top 5). |
 | `rows` | Rows the field consumed (0 for cardinality-1 fields). |
+| `margin` | Multi only: min |P(yes) - threshold| (engine-side name; the API exposes it as `threshold_distance`). |
+
+### `FieldResult` — `api.py` (built by `_build_field_results`)
+
+| Field | Meaning |
+|---|---|
+| `value` | Decided value (engine-side). |
+| `score` | Log P of the winner; 0.0 for multi (no field-level log score). |
+| `log_score_margin` | Scalar only: top1-top2 log score at T=1. None for multi. |
+| `probability_margin` | Scalar only: top1-top2 probability (post-temperature). None for multi. |
+| `threshold_distance` | Multi only: min |P(yes) - threshold|. None for scalar. |
+| `probability` | P of the winner; None for multi. |
+| `calibrated` | False until a fitted calibrator is applied (engine never calibrates). |
+| `model` | `"slots"` or `"labels"`. |
+| `alternatives` | Top 3 (choice, probability) pairs; multi: per-option (option, P(yes)) sorted desc. |
+| `reason` | None, `"none_of_above"` (caller opted in, model picked the explicit opt-out → None), or `"abstain"` (margin below `abstain_below_margin`; value withheld, raw kept for provenance). The single source of truth — no separate `abstain` flag. |
 
 ### Eval `cases.jsonl` line — writers: `to_jsonl.py`, `typesafe/fetch.py`
 

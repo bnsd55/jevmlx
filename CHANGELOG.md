@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Apple Silicon platform check moved from engine.py import time into
+  `load_engine` (via `_require_mlx`): `import jevmlx`, `import jevmlx.engine`,
+  and schema/plan/metrics tooling now work on Linux (ubuntu-latest CI);
+  the clear RuntimeError fires only when a model is actually loaded.
+  `engine_metadata` returns `mlx_version`/`mlx_lm_version` as None when mlx
+  isn't installed (best-effort provenance, no raise).
+- Doc sweep: ARCHITECTURE updated to the current contracts — prompt v5,
+  corrected line citations (engine.py:293/430/471-490/508-516/621-629),
+  PromptProfile in the engine module-map row, a new FieldResult contract
+  table (margins unit-split, reason as the single source of truth), Y/N
+  codes in the assembly line. Stale `prompt v2` / `jevmlx-parallel-v2`
+  mentions fixed; no UNKNOWN/allow_unknown/prompt-v2 references remain.
 - UNKNOWN split into two concepts (was one conflated kwarg):
   `allow_none_of_above=True` adds an explicit `NONE_OF_ABOVE` choice
   ("none of the options apply") mapped to `None` with
@@ -9,7 +21,7 @@
   separate confidence gate — fields whose margin falls below the cut are
   withheld from the model (`FieldResult.reason="abstain"`; the raw value
   stays for provenance). `allow_unknown` is removed with no alias. The
-  calibrated correctness model is W2.
+  calibrated correctness model is a later milestone.
 - Prompt profiles: a frozen `PromptProfile` (template kwargs + system-role
   support) is resolved once at engine load. Qwen3-family models get
   `enable_thinking=False` so answers land in the direct channel; the

@@ -100,8 +100,8 @@ class FieldResult:
             "abstain": the caller set ``abstain_below_margin`` and the
             field's confidence sat below that cut — the value is withheld
             even though the engine produced one. The two are deliberately
-            separate: one is a schema-level answer, the other a calibrated
-            confidence gate (the calibrated correctness model is W2). The
+            separate: one is a schema-level answer, the other a confidence
+            gate (calibrated abstention is a later milestone). The
             only values are None, "none_of_above" and "abstain"; a
             withheld decision is exactly ``reason == "abstain"``.
     """
@@ -479,7 +479,7 @@ def decide[T: BaseModel](
     abstained: the validated model maps it to None, the FieldResult keeps
     the engine's raw value for provenance and carries ``abstain=True`` /
     ``reason="abstain"``. The threshold is a raw margin cut for now; the
-    calibrated correctness model arrives with W2.
+    calibrated correctness model is a later milestone.
 
     ``prior_correction`` subtracts the model's neutral-context prior (one
     batched pass with "(no context provided)" in the delimiters) from the

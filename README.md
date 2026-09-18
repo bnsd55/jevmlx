@@ -56,7 +56,7 @@ for name, f in result.fields.items():
 
 - `decide_many(model, contexts)` decides many texts with one model load.
 - `allow_none_of_above=True` adds an explicit `NONE_OF_ABOVE` choice — the answer "none of the options apply" — and maps it to `None` (`FieldResult.reason` is `"none_of_above"`). Fields must be Optional.
-- `abstain_below_margin=X` is the confidence gate, separate from the opt-out: any field whose margin (`probability_margin` for scalar, `threshold_distance` for multi) sits below `X` is withheld from the model (`FieldResult.reason="abstain"`; the raw value stays on the FieldResult). Calibrated correctness arrives with W2.
+- `abstain_below_margin=X` is the confidence gate, separate from the opt-out: any field whose margin (`probability_margin` for scalar, `threshold_distance` for multi) sits below `X` is withheld from the model (`FieldResult.reason="abstain"`; the raw value stays on the FieldResult). A raw margin cut for now — calibrated abstention is a later milestone.
 - `alternatives` lists the other options with their probabilities.
 - `multi_threshold=0.5` sets the P(yes) cut for multi-select options.
 - Margins are unit-split and nullable: `log_score_margin` (scalar fields, top1-top2 log-score gap at T=1), `probability_margin` (scalar fields, top1-top2 probability after temperature), `threshold_distance` (multi fields, min |P(yes) - threshold|). A field carries exactly one of the three.
