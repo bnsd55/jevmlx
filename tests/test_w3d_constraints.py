@@ -349,6 +349,21 @@ def test_evalrun_constraint_violation_without_map(monkeypatch):
             "elapsed_ms": 5.0,
             "rows": 2,
             "passes": 1,
+            # W3-R review F2: parallel_decide_fn reads the timing split
+            # strictly — the fake carries the engine's full result shape.
+            "prior_ms": 0.0,
+            "prefill_ms": 2.0,
+            "plan_compile_ms": 0.1,
+            "cache_broadcast_ms": 0.2,
+            "suffix_eval_ms": 2.5,
+            "lm_head_gather_ms": 0.3,
+            "second_pass_ms": 0.0,
+            "total_ms": 5.0,
+            "peak_active_bytes": 1024,
+            "padded_token_positions": 6,
+            "rescored_fields": [],
+            "rerun_fields": [],
+            "num_fields": 1,
             "constraints_applied": False,
             "reconciled_fields": [],
         }
