@@ -683,13 +683,15 @@ def run_parallel_generation(
         else schema.compile_labels_plan(tokenizer)
     )
 
-    rows: list[list[int]] = []  # token ids per row
+    rows: list[list[int]] = []  # token ids per row (WITHOUT the lead-in —
+    # the lead-in lives in the prefill cache, bug 16)
     row_field: list[str] = []  # field each row belongs to
     row_branch: dict[int, int] = {}  # row idx -> branch-node index within its field
     row_option: dict[int, int] = {}  # row idx -> option index (multi fields only)
     tries: dict[str, list[dict]] = {}
     lead_in = plan["lead_in_ids"]
     field_plans = plan["fields"]
+    pad_id = tokenizer.pad_token_id or 0
     for fname in schema.fields:
         p = field_plans[fname]
         if "options" in p:
@@ -719,6 +721,13 @@ def run_parallel_generation(
         f"Classify the following fields.\n\n{schema_str}\n\n<<<CONTEXT\n{context}\nCONTEXT>>>"
     )
     base_ids = _chat_ids(tokenizer, user_content, PROMPT_V2_SYSTEM, _resolve_profile(tokenizer))
+    # Bug 16 explored and REJECTED here: moving the schema-wide lead-in from
+    # the rows into the prefill passes the W1-A parity suite only when the
+    # decision read happens at the same kernel shape — the shortened rows
+    # (3-wide instead of lead_in+shared) change Metal matmul tiling and break
+    # BIT-identical batch=1 vs batch=N parity (measured: 0.005-nat drift on
+    # the action row). Keep the lead-in in the rows; the gather change below
+    # is the memory win this PR ships.
     base_arr = mx.array(base_ids)[None]
 
     t_pre0 = time.perf_counter()
@@ -759,10 +768,32 @@ def run_parallel_generation(
     #    Rows in a chunk are right-padded to a common length; scoring reads
     #    positions from real lengths, and right-padding cannot affect logits at
     #    earlier (real) positions under causal attention.
-    #    Per chunk only the needed per-token floats are extracted; the full
-    #    [rows, width, vocab] output is dropped immediately (F3).
-    pad_id = tokenizer.pad_token_id or 0
+    #    Only the DECISION logits are ever materialized (Q4/bug 15): each row's
+    #    decision position and allowed token ids are resolved from the plan +
+    #    tries BEFORE the loop; per chunk the model output is lazily indexed at
+    #    [arange(chunk_len), positions] and the allowed columns, and only that
+    #    [rows, allowed] gather is evaluated — never the full
+    #    [rows, width, vocab] output (F3).
     t_suf0 = time.perf_counter()
+    t_gather_ms = 0.0
+    # Per row: (decision position within the row, allowed token ids in read
+    # order). Option rows read the Y/N remainder heads at the row's last
+    # position; branch-node rows read the node's children at the node's last
+    # position.
+    row_decision: list[tuple[int, list[int]]] = []
+    for ridx in range(len(rows)):
+        p = field_plans[row_field[ridx]]
+        if ridx in row_option:
+            # multi option row: RAW Y/N logits at the option row's last
+            # position (the row ends right before the Y/N divergence),
+            # in remainder order ["Y", "N"].
+            position = len(lead_in) + len(p["suffix_ids_list"][row_option[ridx]]) - 1
+            allowed = [t[0] for t in p["remainders"][row_option[ridx]]]
+        else:
+            node = tries[row_field[ridx]][row_branch[ridx]]
+            position = len(lead_in) + len(p["shared_ids"]) + len(node["path"]) - 1
+            allowed = list(node["children"])
+        row_decision.append((position, allowed))
     # Row idx -> {branch-node index: [child logits in node["children"] order]}.
     node_logits: dict[int, dict[int, list[float]]] = {}
     # Multi option rows: RAW [yes_logit, no_logit] at the suffix end (the
@@ -790,30 +821,44 @@ def run_parallel_generation(
         # Evaluate the COMPLETE cache state (see the prefill eval note).
         _eval_cache_state(b_cache)
         out = model(padded, cache=b_cache)
-        mx.eval(out)
+        # Gather BEFORE eval: [chunk_len, width, vocab] is never materialized;
+        # only the [chunk_len, max_allowed] decision slice is.
+        chunk_decisions = [
+            row_decision[ridx] for ridx in range(chunk_start, chunk_start + chunk_len)
+        ]
+        positions = mx.array([d[0] for d in chunk_decisions])
+        max_allowed = max(len(d[1]) for d in chunk_decisions)
+        t_gather0 = time.perf_counter()
+        rows_at_pos = out[mx.arange(chunk_len), positions]  # [chunk_len, vocab]
+        # Flat-index gather: row-major index of (row, allowed_id) in the
+        # [chunk_len, vocab] matrix, resolved in one take. Ragged rows pad
+        # their allowed list with its first id (a real, evaluated logit);
+        # the tail slots are discarded per row below.
+        flat_idx = mx.array(
+            [
+                i * vocab_size + tok
+                for i, d in enumerate(chunk_decisions)
+                for tok in (d[1] + [d[1][0]] * (max_allowed - len(d[1])))
+            ],
+            dtype=mx.int32,
+        )
+        gathered = mx.take(rows_at_pos.reshape(-1), flat_idx)  # [chunk_len * max_allowed]
+        mx.eval(gathered)
+        t_gather_ms += (time.perf_counter() - t_gather0) * 1000
+        gathered = gathered.tolist()
         for i, ridx in enumerate(range(chunk_start, chunk_start + chunk_len)):
             p = field_plans[row_field[ridx]]
+            allowed = chunk_decisions[i][1]
+            base = i * max_allowed
+            values = [float(gathered[base + j]) for j in range(len(allowed))]
             if ridx in row_option:
-                # multi option row: RAW Y/N logits at the option row's last
-                # position (the row ends right before the Y/N divergence),
-                # in remainder order ["Y", "N"]. Bug 8: these raw logits are
-                # what the prior cache stores (option_logit_pairs in the
-                # telemetry) — no reconstruction from scaled probabilities.
-                lg = out[i, len(lead_in) + len(p["suffix_ids_list"][row_option[ridx]]) - 1, :]
-                option_pair[ridx] = [
-                    float(lg[t[0]].astype(mx.float32)) for t in p["remainders"][row_option[ridx]]
-                ]
+                # RAW Y/N logits in remainder order ["Y", "N"]. Bug 8: these
+                # raw logits are what the prior cache stores
+                # (option_logit_pairs in the telemetry) — no reconstruction
+                # from scaled probabilities.
+                option_pair[ridx] = values
             else:
-                # Branch-node row: child logits at the node's last position,
-                # in node["children"] order.
-                node = tries[row_field[ridx]][row_branch[ridx]]
-                position = len(lead_in) + len(p["shared_ids"]) + len(node["path"]) - 1
-                lg = out[i, position, :]
-                node_logits[ridx] = {
-                    row_branch[ridx]: [
-                        float(lg[tok].astype(mx.float32)) for tok in node["children"]
-                    ]
-                }
+                node_logits[ridx] = {row_branch[ridx]: values}
         del out
 
     t_suffix_eval = (time.perf_counter() - t_suf0) * 1000
@@ -1056,6 +1101,7 @@ def run_parallel_generation(
         extra={
             "prefill_ms": round(t_prefill, 2),
             "suffix_eval_ms": round(t_suffix_eval, 2),
+            "lm_head_gather_ms": round(t_gather_ms, 2),
             "rows": len(rows),
             "passes": num_passes,
             "num_fields": len(schema),
@@ -1066,12 +1112,14 @@ def run_parallel_generation(
         "elapsed_ms": round(total_elapsed_ms, 2),
         # Bug 9: the timing split is honest about the whole request wall time:
         # prior_ms (the neutral pass, 0.0 when prior_correction is off),
-        # prefill_ms, suffix_eval_ms, and total_ms (everything, prior
+        # prefill_ms, suffix_eval_ms, lm_head_gather_ms (the decision-gather
+        # + eval inside the suffix window), and total_ms (everything, prior
         # included). The pre-existing keys (elapsed_ms/prefill_ms/
         # suffix_eval_ms) keep their meaning; total_ms == elapsed_ms.
         "prior_ms": round(prior_ms, 2),
         "prefill_ms": round(t_prefill, 2),
         "suffix_eval_ms": round(t_suffix_eval, 2),
+        "lm_head_gather_ms": round(t_gather_ms, 2),
         "total_ms": round(prior_ms + total_elapsed_ms, 2),
         "total_tokens_generated": 0,
         "sequential_forward_passes": num_passes,
