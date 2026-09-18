@@ -178,17 +178,18 @@ def collect_multi(model, tokenizer, cases: Sequence[dict]) -> list[MultiSample]:
 
 
 def fit_logistic(
-    samples: Sequence[MultiSample], *, iters: int = 300, lr: float = 0.5, l2: float = 0.0
+    samples: Sequence[MultiSample], *, iters: int = 300, lr: float = 0.5, l2: float = 1e-3
 ) -> tuple[float, float]:
     """Pooled logistic calibration: maximize the Bernoulli log-likelihood of
     the labels under sigmoid(a * log_odds + b) with plain gradient descent
     (stdlib only). Returns (a, b).
 
-    ``l2`` is an optional L2 penalty weight on ``(a, b)`` (b is penalized
-    too — the fit is meant to be data-driven, not shrunk toward a prior).
-    Degenerate pools (all-yes / all-no labels) still fit: a climbs and the
-    intercept moves so the calibrated sign matches the label side — exactly
-    the right behavior for a separable set.
+    ``l2`` is an L2 penalty weight on ``(a, b)`` (b is penalized too — the
+    fit is data-driven, not shrunk toward a prior). It defaults to 1e-3, not
+    0: on a perfectly separable pool the unregularized MLE diverges (the
+    coefficients grow without bound as iterations climb), so the default
+    keeps the fit finite and bounded while leaving the decision boundary
+    (the calibrated sign) untouched.
     """
     if not samples:
         raise ValueError("fit_logistic needs at least one (log_odds, label) sample")

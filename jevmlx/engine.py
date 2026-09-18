@@ -527,19 +527,18 @@ def _load_calibration(calibration: str | dict | None) -> dict | None:
     return {"multi": {"a": a, "b": b}}
 
 
-def _fold_multi(
-    probs_true: dict[str, float], threshold: float
-) -> tuple[list[str], float | None, float]:
+def _fold_multi(probs_true: dict[str, float]) -> tuple[list[str], float | None, float]:
     """Fold per-option P(yes) into a multi field's decision.
 
     Returns (selected options, field probability, margin): an option is
-    selected when its p_yes >= threshold. No field-level probability is
-    claimed (an exact-set probability would need a separate calibrator);
-    the margin is min |p_yes - threshold| over ALL options — how close the
-    closest yes/no decision was.
+    selected when its p_yes >= 0.5 (the fixed uncalibrated rule). No
+    field-level probability is claimed (an exact-set probability would need
+    a separate calibrator); the margin is min |p_yes - 0.5| over ALL options
+    — how close the closest yes/no decision was (probability units, same
+    scale the abstention gate consumes).
     """
-    selected = [option for option, p_yes in probs_true.items() if p_yes >= threshold]
-    margin = min((abs(p_yes - threshold) for p_yes in probs_true.values()), default=0.0)
+    selected = [option for option, p_yes in probs_true.items() if p_yes >= 0.5]
+    margin = min((abs(p_yes - 0.5) for p_yes in probs_true.values()), default=0.0)
     return selected, None, margin
 
 
@@ -1012,10 +1011,11 @@ def run_parallel_generation(
                 (p_yes, _p_no) = softmax(pair, temperature=temperature)
                 probs_yes[option_name] = p_yes
             # W2-E step 2 selection: with calibration, calibrated log-odds
-            # (a * (yes - no) + b) > 0 picks the option — the margin is the
-            # smallest |calibrated| gap (same nats scale, 0 means an option
-            # sits exactly on the decision boundary). Without calibration
-            # the fixed P(yes) >= 0.5 rule stands.
+            # (a * (yes - no) + b) > 0 picks the option. The margin stays in
+            # PROBABILITY units on both paths (F1: the abstention gate
+            # compares it to a [0, 1) cut) — min |sigmoid(c) - 0.5|; the raw
+            # calibrated log-odds ride telemetry as calibrated_log_odds.
+            # Without calibration the fixed P(yes) >= 0.5 rule stands.
             multi_ab = calib["multi"] if calib is not None else None
             if multi_ab is not None:
                 a_coef, b_coef = multi_ab["a"], multi_ab["b"]
@@ -1023,11 +1023,13 @@ def run_parallel_generation(
                     option: a_coef * (pair[0] - pair[1]) + b_coef
                     for option, pair in raw_pairs.items()
                 }
-                selected = [option for option, c in calibrated.items() if c > 0]
-                margin = min((abs(c) for c in calibrated.values()), default=0.0)
                 probs_yes = {option: 1.0 / (1.0 + math.exp(-c)) for option, c in calibrated.items()}
+                selected = [option for option, c in calibrated.items() if c > 0]
+                margin = min((abs(p - 0.5) for p in probs_yes.values()), default=0.0)
+                calibrated_log_odds = calibrated
             else:
-                selected, _prob, margin = _fold_multi(probs_yes, threshold=0.5)
+                selected, _prob, margin = _fold_multi(probs_yes)
+                calibrated_log_odds = None
             ranked = sorted(probs_yes.items(), key=lambda kv: -kv[1])
             parsed_json[fname] = {
                 "value": selected,

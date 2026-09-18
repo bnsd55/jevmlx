@@ -127,6 +127,26 @@ def test_fit_logistic_flipped_labels_give_negative_slope():
     assert a < -0.5
 
 
+def test_fit_logistic_separable_pool_stays_bounded():
+    """F2: on a perfectly separable pool the unregularized MLE diverges, so
+    the default l2=1e-3 must keep (a, b) finite and bounded while the
+    calibrated sign still separates the classes."""
+    rng = random.Random(7)
+    samples = []
+    for _ in range(400):
+        y = rng.randrange(2)
+        x = rng.gauss(4.0, 1.0) if y else rng.gauss(-4.0, 1.0)
+        samples.append((x, y))
+    a, b = fit_logistic(samples)  # default l2
+    assert math.isfinite(a) and math.isfinite(b)
+    assert abs(a) < 100 and abs(b) < 100  # bounded, not diverging
+    # Decision boundary still separates: sign of calibrated log-odds.
+    pos = [x for x, y in samples if y]
+    neg = [x for x, y in samples if not y]
+    assert all(calibrated_log_odds(a, b, x) > 0 for x in pos)
+    assert all(calibrated_log_odds(a, b, x) < 0 for x in neg)
+
+
 def test_fit_logistic_validation():
     with pytest.raises(ValueError, match="at least one"):
         fit_logistic([])
@@ -165,9 +185,16 @@ def test_engine_with_calibration_dict_selects_by_sign():
     )
     assert drop["parsed_json"]["flags"]["value"] == []
     assert drop["field_telemetry"]["flags"]["calibrated"] == {"a": 1.0, "b": -3.0}
-    # Margin: min |calibrated| = 1.0 in both directions (|2-3| and |0-3|... all
-    # options identical: |1*2 + (-3)| = 1).
-    assert drop["field_telemetry"]["flags"]["margin"] == pytest.approx(1.0)
+    # Margin in probability units (F1): calibrated c = -1 per option ->
+    # |sigmoid(-1) - 0.5|; raw log-odds ride calibrated_log_odds.
+    assert drop["field_telemetry"]["flags"]["margin"] == pytest.approx(
+        abs(1.0 / (1.0 + math.exp(1.0)) - 0.5)
+    )
+    assert drop["field_telemetry"]["flags"]["calibrated_log_odds"] == {
+        "x": -1.0,
+        "y": -1.0,
+        "z": -1.0,
+    }
 
 
 def test_engine_calibration_from_file(tmp_path):
