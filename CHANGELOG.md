@@ -117,7 +117,7 @@
   never a real invariant on Metal (GPT Q4 confirms); the W1-A parity test
   now asserts winners identical + log_scores within tests/conftest.py's
   PARITY_ATOL = 1e-2 (measured Metal batch-shape drift ~0.004 nats, winners
-  stable; coder1's PR #21 imports the same constant post-merge; exact
+  stable; PR #21 imports the same constant post-merge; exact
   equality still holds on the deterministic FakeModel path). trie.py:
   score_trie returns (log_probs, legal_mass_logs) — one function, the
   legal_mass_at_node callback optional (None = mass 1.0, for the MLX-free

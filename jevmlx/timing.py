@@ -2,7 +2,7 @@
 
 Standalone module — pure Python, NO mlx import, NO engine wiring yet.
 Engine adoption (deleting the t_gather_ms/t_broadcast_ms/t_scored_ms
-accumulators) lands after W5-B with coder2 informed.
+accumulators) lands after W5-B.
 
 Why: the current ``*_ms`` keys overlap (``suffix_eval_ms`` includes
 broadcast + gather, which are ALSO reported separately), ``elapsed_ms``
@@ -10,7 +10,7 @@ excludes the prior pass, and decide_many divides group timers per context.
 One ledger measures each interval ONCE, non-overlapping; every reported
 key is a derivation of the same interval set.
 
-Phases (per coder6's note): ``prior`` (the neutral pass) and ``main``
+Phases: ``prior`` (the neutral pass) and ``main``
 (everything else). Names: plan, prompt_render, prefill, cache_merge,
 transformer, lm_head, gather, rescore, dependency, reconciliation,
 assembly — plus the batched wrappers group_wall / per-context assembly.
