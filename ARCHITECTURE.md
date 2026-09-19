@@ -84,7 +84,7 @@ schema (Pydantic or JSON)
 plan {lead_in_ids, fields: {shared_ids, remainders/trie, alias_map?, count?}}
   │  (identity-keyed plan cache per tokenizer; weakref-evicted)
   ▼
-prompt  (PROMPT_VERSION = "jevmlx-parallel-v8" from the engine;
+prompt  (PROMPT_VERSION = "jevmlx-parallel-v9" from the engine;
   │      PROMPT_V2_SYSTEM paragraph, user schema block + <<<CONTEXT:<nonce>
   │      … CONTEXT:<nonce>>> built inside run_parallel_generation; the
   │      schema block renders FROM THE COMPILED PLAN (to_alias_schema_str —
@@ -287,12 +287,73 @@ means deriving: `compile_set_constraints` returns a NEW `FieldDefinition`
 via `dataclasses.replace` (a bare reference to the old field keeps the empty
 tuple), and the stored constraints are a tuple of read-only views.
 Types: `mutually_exclusive` / `at_most_one` / `at_most_k` (k),
-`at_least_one`, `exact_k` (k), `implies` (`if_option` → `then_option`).
-Compile-time contradictions: implies cycles, an implies pair inside an
-at-most-one group, implies into an `exact_k=0` group, k above group size,
-unknown options, self-implication. The solver selects the score-maximizing
-feasible set (calibrated log-odds, else raw yes/no log-odds); non-binding
-constraint sets reproduce the proposal exactly.
+`at_least_one`, `at_least_k` (k), `exact_k` (k), `implies` (`if_option` →
+`then_option`).
+
+**W5-C**: there are NO syntactic contradiction rules. Satisfiability is
+decided by running the SAME feasibility solver the engine uses
+(`setcons.is_feasible`, no scores, empty proposal); a constraint set with no
+feasible selection raises `SchemaCompileError` at compile time. Sets that
+were previously rejected are now accepted — `A→B + B→A` (both absent),
+`A→B + at_most_one(A,B)` (A forbidden), `A→B + exact_k([B], 0)` (A not
+selected), even an implies 2-cycle (both absent). Genuinely unsatisfiable
+sets (e.g. `at_least_one + exact_k=0` over the same pair) still raise.
+
+The solver builds connected components from BOTH group-overlap edges AND
+implication edges (splitting them is what made the old versions unsound —
+an implication crossing two group components was checked at assembly,
+too late). Per component: one bitmask enumeration with implication closure
+applied per candidate; the score-maximizing feasible set wins under a
+lexicographic objective (score, then proposal overlap, then schema order).
+A single component above `MAX_COMPONENT_OPTIONS` (20) raises — 2^20 is
+already a multi-second Python loop; the compiler surfaces it as a
+`SchemaCompileError` naming the cap, never a mid-inference hang. The cap is
+per component: a 64-option field whose largest component has 12 options is
+fine.
+
+**Count + set precedence (W5-C)**: a trusted count enters the SAME solver
+run as the schema's set constraints — bucket 0–3 as `exact_k`, bucket 4
+(`"4"` means four or more) as `at_least_k(k=4)`, never a separate
+reconciler that the set solver can erase. Schema constraints are HARD
+(user-declared); a count jointly infeasible with them drops as unreliable
+evidence (`count_dropped_reason = "infeasible_with_set_constraints"`, logged
+at WARNING) and the per-option threshold rule decides. The count row lives
+in `internal_telemetry` keyed `<field>#count` — never `field_telemetry`, so
+`Decision.fields` cannot see internal rows.
+
+**Calibration bundle (W5-C)**: `CalibrationBundle` is the one typed object
+
+```python
+{
+    "model_revision": "...",
+    "prompt_version": "jevmlx-parallel-v9",
+    "scoring": "slots",
+    "prior_mode": "off",  # or "neutral_v1" — what the multi (a,b) was fitted on
+    "scalar": {"temperature": 1.37},
+    "multi": {"a": 0.82, "b": -0.14},
+}
+```
+
+`jevmlx calibrate --out` writes it; `CalibrationBundle.load(path)` reads it
+at the PUBLIC boundary (`decide`/`decide_many`/CLI take `str |
+CalibrationBundle | None`; the engine takes `CalibrationBundle | None`
+ONLY — no file I/O, no dict payloads, plain isinstance). The engine derives
+the scalar temperature from the bundle and REJECTS a request the bundle
+does not describe (wrong `prompt_version`, `scoring`, `prior_mode`, or a
+conflicting explicit `temperature`). `prior_mode` records the input the
+multi calibrator was fitted on (`"off"` = raw evidence log-odds,
+`"neutral_v1"` = prior-corrected log-odds); fit and apply must use the same
+input.
+
+**Abstention contract (W5-C)**: `abstain_below_margin` requires every field
+of the target model to be Optional (`X | None`); enforced at `decide()`
+START with a `TypeError` naming the first offending field — a withheld
+field maps to `None`, so a non-Optional field would otherwise fail Pydantic
+validation AFTER inference. `decision_margin` is the min over ALL options of
+the per-option distance from its threshold side, floored at 0, recomputed
+after every reconciler (an option forced against its threshold side —
+selected with `p_yes < 0.5` or excluded with `p_yes > 0.5` — contributes 0,
+the truth-telling signal).
 
 ### `parity.json` — producer `parity.write_parity_json`, gate `summarize_results`
 
@@ -302,7 +363,7 @@ Written by the bench into each model folder right after the engine load
 ```json
 {
   "model": "mlx-community/Qwen2.5-7B-Instruct-4bit",
-  "prompt_version": "jevmlx-parallel-v8",
+  "prompt_version": "jevmlx-parallel-v9",
   "max_abs_drift_nats": 0.027,
   "winners_identical": true,
   "atol": 0.05,

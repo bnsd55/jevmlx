@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+- **W5-C** — set constraints, joint count + set optimization, typed
+  calibration, internal telemetry, abstention contract (PROMPT_VERSION
+  `jevmlx-parallel-v9`). The set-constraint solver is exact: connected
+  components from group-overlap AND implication edges, one bitmask
+  enumeration per component with implication closure applied per
+  candidate, score-maximizing under (score, proposal overlap, schema
+  order). A single component above 20 options raises at COMPILE time
+  (`SchemaCompileError`); the cap is per component, not per field. The
+  compiler has NO syntactic contradiction rules — satisfiability is
+  decided by running the same solver unscored (`setcons.is_feasible`),
+  so `A→B + B→A`, `A→B + at_most_one(A,B)`, `A→B + exact_k([B],0)`, and
+  implies cycles are accepted (both absent / A forbidden / A not
+  selected); genuinely unsatisfiable sets still raise. A trusted count
+  enters the SAME solver run as the schema's set constraints (bucket
+  0–3 `exact_k`, bucket 4 `at_least_k(k=4)` — `"4"` means four or
+  more); schema constraints are HARD and a jointly-infeasible count drops
+  as unreliable evidence (logged). `CalibrationBundle` is the one typed
+  object (model_revision, prompt_version, scoring, prior_mode,
+  scalar.temperature, multi.a/b); `jevmlx calibrate --out` writes it,
+  `CalibrationBundle.load` reads it at the public boundary
+  (`str | CalibrationBundle | None`), the engine takes `CalibrationBundle
+  | None` only — no file I/O, no dict, no duck typing. `prior_mode`
+  records what the multi (a,b) was fitted on; the engine rejects
+  fit/apply mismatches. Count rows live in `internal_telemetry` keyed
+  `<field>#count` (never `field_telemetry`, so `Decision.fields` is
+  clean). `FieldResult.calibrated` reflects the applied calibrator per
+  field (telemetry carries `calibration_id`). `abstain_below_margin`
+  requires every model field to be Optional — `TypeError` at `decide()`
+  start naming the first offender, not a Pydantic failure after
+  inference. `decision_margin` is the min over ALL options of the
+  per-option distance from its threshold side, floored at 0, recomputed
+  after every reconciler.
+
+## Released
+
 - The engine is an object: `load_engine` returns a frozen `Engine`
   dataclass carrying `model`, `tokenizer`, `model_id` (resolved),
   `revision`, `profile`, `vocab_size`, `weight_bytes`,

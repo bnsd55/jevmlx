@@ -644,28 +644,14 @@ def _load_calibration(
     """
     if calibration is None:
         return None, temperature
-    if not isinstance(calibration, CalibrationBundle) and not (
-        type(calibration).__name__ == "CalibrationBundle"
-        and all(
-            hasattr(calibration, attr)
-            for attr in (
-                "temperature",
-                "multi_a",
-                "multi_b",
-                "prompt_version",
-                "scoring",
-                "prior_mode",
-                "has_scalar",
-                "has_multi",
-                "identity",
-            )
-        )
-    ):
+    # W5-C-fix: plain isinstance — no duck-typing shim. The shim existed for
+    # module-reload isolation, but nothing reloads jevmlx.calibrate while
+    # jevmlx.engine survives (test_check_results evicts everything EXCEPT
+    # jevmlx.engine and its reload target never touches calibration); a
+    # caller who re-imports the module owns re-constructing its objects.
+    if not isinstance(calibration, CalibrationBundle):
         # F3: strict typing — construct the bundle at the boundary (from a
-        # path: CalibrationBundle.load; from a dict: from_payload). The
-        # shape clause keeps a valid bundle valid across module-reload
-        # isolation (nominal isinstance alone goes stale when
-        # jevmlx.calibrate is re-imported while this module survives).
+        # path: CalibrationBundle.load; from a dict: from_payload).
         raise TypeError(
             "calibration must be a CalibrationBundle or None; load the file "
             "with CalibrationBundle.load(path) (or from_payload) before calling "
@@ -2237,7 +2223,7 @@ def run_parallel_generation(
     temperature: float = 1.0,
     max_rows: int | None = None,
     scoring: str = "slots",
-    calibration: str | dict | None = None,
+    calibration: CalibrationBundle | None = None,
     prior_correction: bool = False,
     constraints: list[dict] | None = None,
     oracle_overrides: dict[str, object] | None = None,
@@ -3712,7 +3698,7 @@ def run_parallel_generation_batched(
     temperature: float = 1.0,
     max_rows: int | None = None,
     scoring: str = "slots",
-    calibration: str | dict | None = None,
+    calibration: CalibrationBundle | None = None,
     prior_correction: bool = False,
     constraints: list[dict] | None = None,
     compiled_constraints: "CompiledConstraints | None" = None,
