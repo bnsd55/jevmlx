@@ -802,6 +802,205 @@ def followup_cache_and_mask_info(
 
 
 # ---------------------------------------------------------------------------
+# W5c-10: in-situ vs recomputed op isolation (L00-L05)
+# ---------------------------------------------------------------------------
+
+
+def _capture_in_situ_full(model, padded, cache, n_layers: int):
+    """Run the REAL forward, capturing at each layer the FULL (not sliced)
+    tensors: the block input x (residual_in), the attention output (pre-
+    residual), the MLP output (pre-residual), and the block output.
+
+    Returns a list of dicts (one per layer) with keys:
+      x_in, norm_out, attn_out, h_mid, mlp_norm_out, mlp_out, x_out, mask, cache_l
+    where mask/cache_l are the objects the real forward used.
+    """
+    m = model.model
+    h = m.embed_tokens(padded)
+    mask = _create_attention_mask(h, cache[0])
+    if cache is None:
+        cache = [None] * len(m.layers)
+    captures = []
+    for li in range(n_layers):
+        layer = m.layers[li]
+        c = cache[li]
+        x = h
+        norm_out = layer.input_layernorm(x)
+        r = layer.self_attn(norm_out, mask, c)
+        h_mid = x + r
+        mlp_norm_out = layer.post_attention_layernorm(h_mid)
+        mlp_out = layer.mlp(mlp_norm_out)
+        x_out = h_mid + mlp_out
+        # Materialize.
+        mx.eval(x, norm_out, r, h_mid, mlp_norm_out, mlp_out, x_out)
+        captures.append(
+            {
+                "x_in": x,
+                "norm_out": norm_out,
+                "attn_out": r,
+                "h_mid": h_mid,
+                "mlp_norm_out": mlp_norm_out,
+                "mlp_out": mlp_out,
+                "x_out": x_out,
+                "mask": mask,
+                "cache_l": c,
+            }
+        )
+        h = x_out
+    return captures, h
+
+
+def followup_insitu_vs_recomputed(
+    model,
+    built: dict,
+    pf_cache_list: list,
+    pad_id: int,
+    ref_captures: list,
+    n_layers: int = 6,
+) -> dict[str, Any]:
+    """(1) Capture residual_in/attn_out/mlp_out for L00..L05 at M=112 (fp32
+    body) and find the first (layer, op) where max abs diff vs M=1 reference
+    > 1e-4. (2) At that layer, IN-SITU vs RECOMPUTED: take the captured
+    input from the real M=112 forward, recompute the op on that exact
+    tensor (full batch), compare to the real forward's output.
+
+    Also confirm decision-position token id per row matches M=1 vs M=112.
+    """
+    from jevmlx.engine import _broadcast_cache, _eval_cache_state
+
+    m = model.model
+    # --- (1) Capture in-situ for M=112 ---
+    n = 112
+    rows_n, decisions_n = _rows_for_width(built, n)
+    widths_r = [len(r) for r in rows_n]
+    width = max(widths_r)
+    padded = mx.array([r + [pad_id] * (width - len(r)) for r in rows_n], dtype=mx.int32)
+    positions = mx.array([d[0] for d in decisions_n], dtype=mx.int32)
+    b_cache = _broadcast_cache(pf_cache_list, n)
+    max_padding = max(width - w for w in widths_r) if widths_r else 0
+    if max_padding > 0:
+        for c in b_cache:
+            if hasattr(c, "prepare"):
+                c.prepare(lengths=widths_r, right_padding=[width - w for w in widths_r])
+    _eval_cache_state(b_cache)
+
+    insitu, _ = _capture_in_situ_full(model, padded, b_cache, n_layers)
+
+    # Decision-position token ids: check M=1 vs M=112 match.
+    # M=1 token ids: ref_captures were from _capture_reference_batch1 which
+    # ran each schema row individually. We compare the padded token at the
+    # decision position.
+    dec_tokens_112 = [padded[i, positions[i].item()].item() for i in range(n)]
+    # For M=1 reference, the decision token is built["rows"][ridx][dec[0]].
+    dec_tokens_1 = [
+        built["rows"][j % len(built["rows"])][built["row_decision"][j % len(built["rows"])][0]]
+        for j in range(n)
+    ]
+    token_match = dec_tokens_112 == dec_tokens_1
+
+    # Per-layer diff vs M=1 reference (decision positions).
+    # ref_captures is a list of (caps_dict, schema_keys) from
+    # _capture_reference_batch1. The ref caps are (n_schema, hidden) per layer.
+    ref_caps, ref_keys = ref_captures
+    pos_list = positions.tolist()
+    schema_keys_112 = [j % len(built["rows"]) for j in range(n)]
+
+    per_layer = []
+    first_above = None
+    for li in range(n_layers):
+        row = {"layer": li}
+        for op in ("x_in", "norm_out", "attn_out", "mlp_out"):
+            # Map in-situ op names to reference capture names.
+            ref_op = "residual_in" if op == "x_in" else op
+            # In-situ decision-position vectors: (n, width, D) -> (n, D).
+            insitu_t = insitu[li][op][mx.arange(n), pos_list, :].astype(mx.float32)
+            # Reference: ref_caps[ref_op][li] is (n_schema, D); map each row.
+            ref_t = mx.stack(
+                [ref_caps[ref_op][li][ref_keys.index(sk)] for sk in schema_keys_112],
+                axis=0,
+            ).astype(mx.float32)
+            diff = float(mx.max(mx.abs(insitu_t - ref_t)).item())
+            mag = float(mx.max(mx.abs(insitu_t)).item())
+            row[f"{op}_diff"] = diff
+            row[f"{op}_mag"] = mag
+            row[f"{op}_rel"] = diff / mag if mag > 0 else 0.0
+            if first_above is None and diff > 1e-4:
+                first_above = (li, op, diff)
+        per_layer.append(row)
+
+    # --- (2) In-situ vs recomputed at the first layer above 1e-4 ---
+    recompute = {"first_above": None, "comparison": None}
+    if first_above is not None:
+        li, op, diff = first_above
+        recompute["first_above"] = {"layer": li, "op": op, "diff": diff}
+        cap = insitu[li]
+        # Recompute the op on the captured input.
+        layer = m.layers[li]
+        mask = cap["mask"]
+        cache_l = cap["cache_l"]
+        if op == "norm_out":
+            recomputed = layer.input_layernorm(cap["x_in"])
+        elif op == "attn_out":
+            recomputed = layer.self_attn(cap["norm_out"], mask, cache_l)
+        elif op == "mlp_out":
+            recomputed = layer.mlp(cap["mlp_norm_out"])
+        else:
+            recomputed = cap[op]  # x_in: nothing to recompute
+        insitu_t = cap[op].astype(mx.float32)
+        recomputed_t = recomputed.astype(mx.float32)
+        mx.eval(recomputed_t)
+        r_diff = float(mx.max(mx.abs(insitu_t - recomputed_t)).item())
+        r_mag = float(mx.max(mx.abs(insitu_t)).item())
+        # Dump call arguments.
+        call_args = {}
+        if op in ("attn_out",):
+            call_args = {
+                "input_dtype": str(cap["norm_out"].dtype),
+                "input_shape": tuple(int(s) for s in cap["norm_out"].shape),
+                "mask_type": type(mask).__name__,
+                "mask_dtype": str(mask.dtype) if mask is not None else "None",
+                "mask_shape": tuple(int(s) for s in mask.shape) if mask is not None else None,
+                "cache_type": type(cache_l).__name__,
+                "cache_keys_dtype": str(cache_l.keys.dtype) if hasattr(cache_l, "keys") else "n/a",
+                "cache_values_dtype": str(cache_l.values.dtype)
+                if hasattr(cache_l, "values")
+                else "n/a",
+                "cache_offset": [int(x) for x in cache_l.offset.tolist()]
+                if hasattr(cache_l.offset, "tolist")
+                else int(cache_l.offset),
+            }
+        elif op in ("mlp_out",):
+            call_args = {
+                "input_dtype": str(cap["mlp_norm_out"].dtype),
+                "input_shape": tuple(int(s) for s in cap["mlp_norm_out"].shape),
+            }
+        recompute["comparison"] = {
+            "insitu_vs_recomputed_diff": r_diff,
+            "max_abs_activation": r_mag,
+            "relative_diff": r_diff / r_mag if r_mag > 0 else 0.0,
+            "call_args": call_args,
+        }
+        print(
+            f"  first >1e-4: L{li:02d} {op} diff={diff:.6f}; "
+            f"in-situ vs recomputed: {r_diff:.6f} (rel {r_diff / r_mag if r_mag > 0 else 0:.6f})",
+            flush=True,
+        )
+        if call_args:
+            print(f"    call_args: {call_args}", flush=True)
+    else:
+        print("  no layer above 1e-4 in L00-L05", flush=True)
+
+    print(f"  decision token match M=1 vs M=112: {token_match}", flush=True)
+
+    return {
+        "per_layer_diff": per_layer,
+        "first_above_1e-4": recompute["first_above"],
+        "insitu_vs_recomputed": recompute["comparison"],
+        "decision_token_match": token_match,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Reporting
 # ---------------------------------------------------------------------------
 
@@ -915,6 +1114,16 @@ def main() -> int:
         engine.model, built, pf_cache_list, pad_id, (16, 32, 112)
     )
 
+    print("  (3.6) in-situ vs recomputed op isolation (L00-L05)...", flush=True)
+    insitu_result = followup_insitu_vs_recomputed(
+        engine.model,
+        built,
+        pf_cache_list,
+        pad_id,
+        (fp32_ref_caps, fp32_ref_keys),
+        n_layers=6,
+    )
+
     print()
     print("## Table 1: drift by layer (fp16 body)")
     print()
@@ -1015,6 +1224,37 @@ def main() -> int:
             f"{pm['cache_offset']} |"
         )
 
+    # --- In-situ vs recomputed table ---
+    print()
+    print("## Table 8: in-situ vs recomputed (L00-L05, M=112 vs M=1 ref)")
+    print()
+    print("| layer | op | max_abs_diff | max_abs_activation | relative_diff |")
+    print("|---|---|---|---|---|")
+    for row in insitu_result["per_layer_diff"]:
+        li = row["layer"]
+        for op in ("x_in", "norm_out", "attn_out", "mlp_out"):
+            print(
+                f"| L{li:02d} | {op} | {row[f'{op}_diff']:.6f} | "
+                f"{row[f'{op}_mag']:.6f} | {row[f'{op}_rel']:.6f} |"
+            )
+    fa = insitu_result["first_above_1e-4"]
+    print()
+    print(f"first >1e-4: {fa}")
+    comp = insitu_result["insitu_vs_recomputed"]
+    if comp:
+        print()
+        print("| in-situ_vs_recomputed_diff | max_abs_activation | relative_diff |")
+        print("|---|---|---|")
+        print(
+            f"| {comp['insitu_vs_recomputed_diff']:.6f} | "
+            f"{comp['max_abs_activation']:.6f} | "
+            f"{comp['relative_diff']:.6f} |"
+        )
+        print()
+        print(f"call_args: {comp['call_args']}")
+    print()
+    print(f"decision token match M=1 vs M=112: {insitu_result['decision_token_match']}")
+
     # Write JSON.
     out_dir = Path(args.out) if args.out else Path("benchmarks/probes") / _probe_dir(args.model)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1033,6 +1273,7 @@ def main() -> int:
                 "fp32_gemm_isolation": gemm_iso,
                 "fp32_attention_isolation": attn_iso,
                 "fp32_cache_mask_info": cache_info,
+                "fp32_insitu_vs_recomputed": insitu_result,
             },
             indent=2,
         )
