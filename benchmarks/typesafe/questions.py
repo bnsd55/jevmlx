@@ -40,12 +40,11 @@ def field_schema(question: dict, *, score_choices=None) -> dict | None:
 
     ``noul`` -> boolean; ``choice`` -> enum over the criteria keys (published
     order); ``score`` -> enum over the score scale with the level texts
-    folded into the description, ORDERED (W6-B1: the level order is the
-    scale order, so the engine derives ordinal telemetry). The scale is
-    SCORE_CHOICES ("0".."3") by default; ``score_choices`` overrides it for
-    datasets with a different ordinal range (e.g. SST-5's 0..4) — still ONE
-    mapping owner, no local copy. Unknown types (free text) are not
-    decidable by the engine and are skipped.
+    folded into the description. The scale is SCORE_CHOICES ("0".."3") by
+    default; ``score_choices`` overrides it for datasets with a different
+    ordinal range (e.g. SST-5's 0..4) — still ONE mapping owner, no local
+    copy. Unknown types (free text) are not decidable by the engine and are
+    skipped.
     """
     instructions = question["instructions"]
     criteria = question.get("criteria")
@@ -60,9 +59,6 @@ def field_schema(question: dict, *, score_choices=None) -> dict | None:
             "type": "enum",
             "description": f"{instructions} Scale: {levels}.",
             "choices": list(score_choices or SCORE_CHOICES),
-            # W6-B1: a score question IS an ordinal scale — the level order
-            # is the scale order, so the engine derives ordinal telemetry.
-            "ordered": True,
         }
     return None
 
