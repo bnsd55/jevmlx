@@ -55,6 +55,7 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.pytest.ini_options]
 markers = [
     "slow: loads a real model via mlx-lm (deselect with -m 'not slow')",
+    "network: reaches the Hugging Face Hub (deselect with -m 'not network')",
 ]
 
 [tool.hatch.build.targets.wheel]

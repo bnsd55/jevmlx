@@ -73,12 +73,28 @@ class FakeTokenizer:
 
     pad_token_id = 0
 
-    def apply_chat_template(self, messages, add_generation_prompt=True, tokenize=True):
+    def apply_chat_template(self, messages, add_generation_prompt=True, tokenize=True, **kwargs):
+        # **kwargs: prompt profiles pass template kwargs (e.g. Qwen3's
+        # enable_thinking); the fake ignores them but must accept them.
         assert tokenize
         return self.encode("\n".join(m["content"] for m in messages))
 
     def __len__(self) -> int:
         return 64
+
+
+class FakeTokenizerNoSystem(FakeTokenizer):
+    """Fake tokenizer whose chat template rejects a system role
+    (Gemma-style). Used by golden-prompt vectors and the merge tests."""
+
+    name_or_path = "gemma-fake"
+
+    def apply_chat_template(self, messages, add_generation_prompt=True, tokenize=True, **kwargs):
+        if any(m["role"] == "system" for m in messages):
+            from jinja2.exceptions import TemplateError
+
+            raise TemplateError("system role not supported")
+        return super().apply_chat_template(messages, add_generation_prompt, tokenize, **kwargs)
 
 
 class FakeModel:

@@ -13,21 +13,35 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 import benchmarks.golden_prompts as gp
 from jevmlx.engine import PROMPT_VERSION
 
 VECTORS = sorted((Path(__file__).parent / "golden" / "prompts").glob("*.json"))
 
+# F3: the real-tokenizer vectors (qwen2.5, gemma) load PINNED tokenizer
+# files from the HF cache — the network marker keeps the fast CI suite
+# offline-clean; CI verifies them via the golden-prompt --check step (which
+# runs with an actions/cache on the hub dir). Fake-tokenizer vectors run
+# everywhere.
+network = pytest.mark.network
 
+
+@network
 def test_vectors_exist():
     """One vector per (profile, tokenizer revision, representative case):
-    qwen2.5 + gemma on the real tokenizer, qwen3 on the fake (profile-only).
+    3 profiles (qwen2.5 + gemma on the real tokenizer, qwen3 on the fake)
+    x 3 cases (slots, labels, multi) = 9 vectors.
     """
     names = {p.stem for p in VECTORS}
     assert any(n.startswith("qwen2.5__a5339a41") for n in names), names
     assert any(n.startswith("gemma__") for n in names), names
     assert any(n.startswith("qwen3__fake__") for n in names), names
-    assert len(names) == len(VECTORS) == 3
+    cases = ("risk_enum_bool", "risk_enum_bool_labels", "tags_multi")
+    for case in cases:
+        assert sum(1 for n in names if n.endswith(f"__{case}")) == 3, (case, names)
+    assert len(names) == len(VECTORS) == 9
 
 
 def test_every_vector_pins_version_profile_revision():
@@ -44,12 +58,14 @@ def test_every_vector_pins_version_profile_revision():
         assert "template_kwargs" in vector["input"] and "supports_system" in vector["input"]
 
 
+@network
 def test_committed_vectors_match_the_renderer():
     """NOT circular: the committed file is the only expected; re-render and
     diff bytes."""
     assert gp.check_vectors() == []
 
 
+@network
 def test_gemma_vector_merges_system_into_user_turn():
     """supports_system=false profile: the rendered text is a single user
     turn whose content starts with the system text + blank line."""
@@ -65,6 +81,7 @@ def test_gemma_vector_merges_system_into_user_turn():
     assert "<|im_start|>system" not in rendered  # no dedicated system turn
 
 
+@network
 def test_qwen25_vector_has_dedicated_system_turn():
     vector = next(
         json.loads(p.read_text(encoding="utf-8")) for p in VECTORS if p.stem.startswith("qwen2.5__")
@@ -82,6 +99,40 @@ def test_qwen3_vector_pins_thinking_off():
         if p.stem.startswith("qwen3__fake__")
     )
     assert vector["input"]["template_kwargs"] == {"enable_thinking": False}
+
+
+@network
+def test_labels_vector_shows_real_choices_no_aliases():
+    vector = next(
+        json.loads(p.read_text(encoding="utf-8"))
+        for p in VECTORS
+        if "__risk_enum_bool_labels" in p.stem and p.stem.startswith("qwen2.5__")
+    )
+    assert vector["input"]["scoring"] == "labels"
+    rendered = vector["rendered_text"]
+    assert '"LOW" — "stable income"' in rendered
+    assert "A)" not in rendered  # labels mode shows no aliases
+
+
+def test_multi_vector_renders_count_and_yn_menu():
+    vector = next(
+        json.loads(p.read_text(encoding="utf-8"))
+        for p in VECTORS
+        if "__tags_multi" in p.stem and p.stem.startswith("qwen3__")
+    )
+    rendered = vector["rendered_text"]
+    assert "select all that apply" in rendered
+    assert "Y" in rendered and "N" in rendered
+
+
+def test_cold_offline_cache_miss_is_a_clear_error(capsys):
+    """F3: a cache miss exits with a clear message (and the local remedy),
+    never a raw traceback."""
+    with pytest.raises(SystemExit) as excinfo:
+        gp._real_tokenizer("mlx-community/Qwen2.5-0.5B-Instruct-4bit", "0" * 40)
+    message = str(excinfo.value)
+    assert "tokenizer not available" in message
+    assert "huggingface-cli download" in message
 
 
 def test_vector_detects_a_renderer_change(tmp_path, monkeypatch):

@@ -49,9 +49,11 @@ from jevmlx.engine import (
 from jevmlx.schema import StructuredSchema
 
 GOLDEN_DIR = Path(__file__).resolve().parent.parent / "tests" / "golden" / "prompts"
+PROTOCOL_PATH = Path(__file__).resolve().parent.parent / "PROMPT_PROTOCOL.md"
 
-# The representative request every profile renders (one schema x one context;
-# covers enum with gloss, boolean, and the nonce-fenced context).
+# The representative requests every profile renders: the enum+boolean
+# slots case, the same schema in labels mode (real choice strings, no
+# aliases), and a multi-field case (count question + per-option Y/N menu).
 CASES: dict[str, dict] = {
     "risk_enum_bool": {
         "schema": {
@@ -69,6 +71,33 @@ CASES: dict[str, dict] = {
         "context": "The applicant pays late sometimes.",
         "scoring": "slots",
     },
+    "risk_enum_bool_labels": {
+        "schema": {
+            "risk_tier": {
+                "type": "enum",
+                "description": "Credit risk tier",
+                "choices": ["LOW", "MEDIUM", "HIGH"],
+                "choice_descriptions": {
+                    "LOW": "stable income",
+                    "HIGH": "many missed payments",
+                },
+            },
+            "flag": {"type": "boolean", "description": "manually flagged"},
+        },
+        "context": "The applicant pays late sometimes.",
+        "scoring": "labels",
+    },
+    "tags_multi": {
+        "schema": {
+            "tags": {
+                "type": "multi",
+                "description": "observed tags",
+                "choices": ["late_payment", "dispute"],
+            },
+        },
+        "context": "The applicant disputes one charge.",
+        "scoring": "slots",
+    },
 }
 
 # The profiles: engine-resolved from a representative model id. qwen2.5 =
@@ -76,9 +105,21 @@ CASES: dict[str, dict] = {
 # off; gemma = system merged into the user turn. Tokenizer revisions come
 # from the HF snapshot the vector was written against ("" for the fake).
 PROFILES: dict[str, dict] = {
-    "qwen2.5": {"model_id": "mlx-community/Qwen2.5-0.5B-Instruct-4bit", "real": True},
-    "qwen3": {"model_id": "mlx-community/Qwen3-4B-Instruct-2507-4bit", "real": False},
-    "gemma": {"model_id": "mlx-community/gemma-2-2b-it-4bit", "real": True},
+    "qwen2.5": {
+        "model_id": "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
+        "real": True,
+        "revision": "a5339a4131f135d0fdc6a5c8b5bbed2753bbe0f3",
+    },
+    "qwen3": {
+        "model_id": "mlx-community/Qwen3-4B-Instruct-2507-4bit",
+        "real": False,
+        "revision": "fake",
+    },
+    "gemma": {
+        "model_id": "mlx-community/gemma-2-2b-it-4bit",
+        "real": True,
+        "revision": "2c715097ff9c081a6ac1e5cd239e2ac756b5bd99",
+    },
 }
 
 FAKE_REV = "fake"
@@ -88,77 +129,37 @@ def _token_ids_sha256(ids: list[int]) -> str:
     return hashlib.sha256(json.dumps(list(ids)).encode("utf-8")).hexdigest()
 
 
-class _KwargsTokenizer:
-    """Fake tokenizer that accepts (and records) profile template kwargs.
+def _conftest_fake(profile: str):
+    """The fake tokenizer from tests/conftest (extended for **kwargs and the
+    Gemma-style no-system rejection) — one fake, no duplicate here."""
+    import sys
 
-    Same character encoding as tests.conftest.FakeTokenizer; records the
-    kwargs it was handed so the committed vector shows what the profile
-    passed to apply_chat_template.
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tests"))
+    import conftest
+
+    return conftest.FakeTokenizerNoSystem() if profile == "gemma" else conftest.FakeTokenizer()
+
+
+def _real_tokenizer(model_id: str, revision: str):
+    """The pinned-revision tokenizer (F1): the sha comes from PROFILES, so an
+    upstream repo push can never silently change a committed vector.
+
+    A cold-offline cache miss is a CLEAR error (F3), not a traceback: the
+    vector cannot be verified without the pinned tokenizer files.
     """
-
-    name_or_path = "fake-engine"
-    pad_token_id = 0
-
-    def __init__(self):
-        self.last_kwargs: dict = {}
-
-    def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
-        return [ord(c) % 60 for c in text]
-
-    def apply_chat_template(self, messages, add_generation_prompt=True, tokenize=True, **kwargs):
-        self.last_kwargs = dict(kwargs)
-        return self.encode("\n".join(m["content"] for m in messages))
-
-    def __len__(self) -> int:
-        return 64
-
-
-class _NoSystemTokenizer(_KwargsTokenizer):
-    """Fake tokenizer whose template rejects a system role (Gemma-style)."""
-
-    def apply_chat_template(self, messages, add_generation_prompt=True, tokenize=True, **kwargs):
-        if any(m["role"] == "system" for m in messages):
-            from jinja2.exceptions import TemplateError
-
-            raise TemplateError("system role not supported")
-        return super().apply_chat_template(messages, add_generation_prompt, tokenize, **kwargs)
-
-
-def _fake_tokenizer_for(profile: str) -> _KwargsTokenizer:
-    return _NoSystemTokenizer() if profile == "gemma" else _KwargsTokenizer()
-
-
-def _real_tokenizer(model_id: str):
     from transformers import AutoTokenizer
 
-    tok = AutoTokenizer.from_pretrained(model_id)
-    revision = _revision_of(model_id)
-    if revision is None:
-        raise SystemExit(
-            f"{model_id}: no HF snapshot in the local cache — run the model "
-            "once (or `huggingface-cli download`) before writing real vectors"
-        )
-    return tok, revision
-
-
-def _revision_of(model_id: str) -> str | None:
-    """The HF snapshot sha from the local cache (mirrors engine._revision_of)."""
     try:
-        from huggingface_hub import constants
-
-        cache_dir = Path(constants.HF_HUB_CACHE)
-    except Exception:  # noqa: BLE001 — provenance is best-effort
-        return None
-    repo_dir = cache_dir / f"models--{model_id.replace('/', '--')}"
-    main_ref = repo_dir / "refs" / "main"
-    snapshot_dir = repo_dir / "snapshots"
-    if main_ref.exists():
-        return main_ref.read_text(encoding="utf-8").strip()
-    if snapshot_dir.is_dir():
-        snapshots = [p for p in snapshot_dir.iterdir() if p.is_dir()]
-        if len(snapshots) == 1:
-            return snapshots[0].name
-    return None
+        tok = AutoTokenizer.from_pretrained(model_id, revision=revision)
+    except Exception as exc:  # noqa: BLE001 — one clear message for any cause
+        raise SystemExit(
+            f"{model_id}@{revision}: tokenizer not available ({exc.__class__.__name__}). "
+            "The golden-prompt check needs the PINNED tokenizer files in the local "
+            "HF cache — CI populates them via actions/cache; locally run: "
+            f"huggingface-cli download {model_id} --revision {revision} "
+            "(tokenizer files only; no model weights are ever loaded)"
+        ) from exc
+    return tok, revision
 
 
 def build_vector(profile: str, case: str, tok, tokenizer_revision: str) -> dict:
@@ -180,6 +181,19 @@ def build_vector(profile: str, case: str, tok, tokenizer_revision: str) -> dict:
     if hasattr(ids, "keys"):  # transformers BatchEncoding
         ids = list(ids["input_ids"])
     ids = [int(i) for i in ids]
+    # rendered_text must be HUMAN-READABLE in every committed vector. For a
+    # tokenizer with decode() (the real ones) that is the decode; for the
+    # fake (a reversible character cipher with no decode) it is the exact
+    # message text _chat_ids rendered from — the same bytes the ids encode.
+    messages = (
+        [{"role": "system", "content": PROMPT_V2_SYSTEM}, {"role": "user", "content": user_content}]
+        if engine_profile.supports_system
+        else [{"role": "user", "content": f"{PROMPT_V2_SYSTEM}\n\n{user_content}"}]
+    )
+    if hasattr(tok, "decode"):
+        rendered = tok.decode(ids)
+    else:
+        rendered = "\n".join(m["content"] for m in messages)
     return {
         "prompt_version": PROMPT_VERSION,
         "profile": profile,
@@ -193,9 +207,7 @@ def build_vector(profile: str, case: str, tok, tokenizer_revision: str) -> dict:
             "template_kwargs": engine_profile.template_kwargs,
             "supports_system": engine_profile.supports_system,
         },
-        "rendered_text": tok.decode(ids)
-        if hasattr(tok, "decode")
-        else "".join(chr(35 + (i % 60)) for i in ids),
+        "rendered_text": rendered,
         "token_ids_sha256": _token_ids_sha256(ids),
         "prompt_sha256": _prompt_sha256(ids),
         "plan_hash": schema.plan_hash(tok, scoring),
@@ -206,15 +218,97 @@ def vector_path(profile: str, tokenizer_revision: str, case: str) -> Path:
     return GOLDEN_DIR / f"{profile}__{tokenizer_revision}__{case}.json"
 
 
+# ---- PROMPT_PROTOCOL.md generated sections (F2) --------------------------
+# The doc's EXAMPLE blocks are rendered by this module between HTML comments
+# (the doc's prose lives in the file; the bytes that claim to come from the
+# renderer DO come from the renderer). --write refreshes them; --check
+# diffs them like a vector.
+PROTOCOL_MARKERS = {
+    "system_block": ("<!-- generated:system_block -->", "<!-- /generated:system_block -->"),
+    "user_content": ("<!-- generated:user_content -->", "<!-- /generated:user_content -->"),
+    "rendered_vectors": (
+        "<!-- generated:rendered_vectors -->",
+        "<!-- /generated:rendered_vectors -->",
+    ),
+}
+
+
+def _protocol_sections() -> dict[str, str]:
+    """The generated doc sections, from the REAL renderer."""
+    from jevmlx.engine import _context_nonce
+
+    tok = _conftest_fake("qwen2.5")
+    case = CASES["risk_enum_bool"]
+    schema = StructuredSchema(case["schema"])
+    user_content = _user_content(case["context"], schema, tok, "slots")
+
+    system_block = PROMPT_V2_SYSTEM  # the exact engine-owned constant
+
+    # One rendered vector per profile, fenced code block, filename-labeled.
+    # Guarded reads: a half-written or foreign file must not crash the doc
+    # render (check_vectors reports it separately as a stale vector).
+    rendered = []
+    for path in sorted(GOLDEN_DIR.glob("*.json")):
+        try:
+            vector = json.loads(path.read_text(encoding="utf-8"))
+            label = f"{vector['profile']} / {vector['case']} ({vector['input']['scoring']})"
+            text = vector["rendered_text"]
+        except (OSError, json.JSONDecodeError, KeyError):
+            continue
+        rendered.append(f"**{label}** — `{path.name}`:\n\n```text\n{text}```")
+
+    return {
+        "system_block": f"```text\n{system_block}\n```",
+        "user_content": f"```text\n{user_content}\n```",
+        "rendered_vectors": "\n\n".join(rendered),
+        "nonce_example": _context_nonce(case["context"]),
+    }
+
+
+def write_protocol() -> None:
+    """(Re)write PROMPT_PROTOCOL.md's generated sections in place."""
+    sections = _protocol_sections()
+    doc = PROTOCOL_PATH.read_text(encoding="utf-8")
+    for name, (begin, end) in PROTOCOL_MARKERS.items():
+        i = doc.find(begin)
+        j = doc.find(end)
+        if i == -1 or j == -1 or j < i:
+            raise SystemExit(f"PROMPT_PROTOCOL.md: markers for {name} missing — add {begin!r}")
+        doc = doc[: i + len(begin)] + "\n" + sections[name] + "\n" + doc[j:]
+    PROTOCOL_PATH.write_text(doc, encoding="utf-8")
+
+
+def check_protocol() -> list[str]:
+    """Diff the committed doc's generated sections against a fresh render."""
+    sections = _protocol_sections()
+    problems: list[str] = []
+    try:
+        doc = PROTOCOL_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        return [f"PROMPT_PROTOCOL.md unreadable: {exc}"]
+    for name, (begin, end) in PROTOCOL_MARKERS.items():
+        i = doc.find(begin)
+        j = doc.find(end)
+        if i == -1 or j == -1 or j < i:
+            problems.append(f"PROMPT_PROTOCOL.md: markers for {name} missing")
+            continue
+        committed = doc[i + len(begin) : j].strip()
+        fresh = sections[name]
+        if committed != fresh:
+            problems.append(f"PROMPT_PROTOCOL.md[{name}]: stale — regenerate with --write")
+    return problems
+
+
 def write_vectors() -> list[Path]:
-    """(Re)write every committed vector; return the paths written."""
+    """(Re)write every committed vector and the doc's generated sections."""
     GOLDEN_DIR.mkdir(parents=True, exist_ok=True)
+    write_protocol()
     written = []
     for profile, spec in sorted(PROFILES.items()):
         tok, revision = (
-            _real_tokenizer(spec["model_id"])
+            _real_tokenizer(spec["model_id"], spec["revision"])
             if spec["real"]
-            else (_fake_tokenizer_for(profile), FAKE_REV)
+            else (_conftest_fake(profile), FAKE_REV)
         )
         for case in sorted(CASES):
             path = vector_path(profile, revision, case)
@@ -228,15 +322,16 @@ def check_vectors() -> list[str]:
     """Re-render every vector and diff against the committed bytes.
 
     Returns a list of stale/missing-vector problems (empty = fresh).
+    Also diffs PROMPT_PROTOCOL.md's generated sections (F2).
     """
-    problems: list[str] = []
+    problems: list[str] = check_protocol()
     expected_names = set()
     for profile, spec in sorted(PROFILES.items()):
         try:
             tok, revision = (
-                _real_tokenizer(spec["model_id"])
+                _real_tokenizer(spec["model_id"], spec["revision"])
                 if spec["real"]
-                else (_fake_tokenizer_for(profile), FAKE_REV)
+                else (_conftest_fake(profile), FAKE_REV)
             )
         except SystemExit as exc:
             problems.append(f"{profile}: {exc}")
