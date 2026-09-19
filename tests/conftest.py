@@ -24,6 +24,7 @@ test_make_engine_result_keys_match_engine in this file.
 """
 
 import math
+import os
 
 import pytest
 
@@ -33,7 +34,11 @@ from jevmlx.engine import INSTABILITY_BAND
 
 PARITY_ATOL = INSTABILITY_BAND
 
-MODEL_ID = "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
+# The slow-suite model. ONE place reads the env: benchmarks/m5.py's parity
+# step runs `pytest -m slow` with MODEL_ID=<parity model>, so every slow
+# test exercises THAT model (the default is the 0.5B dev model). Tests read
+# this constant — never a hardcoded id or a 0.5B-only expectation.
+MODEL_ID = os.environ.get("MODEL_ID", "mlx-community/Qwen2.5-0.5B-Instruct-4bit")
 
 
 # %97+1 tokenizer: ids = ord(c) % 97 + 1 (so ids start at 1), the shape
@@ -430,8 +435,9 @@ def make_engine(
 
 @pytest.fixture(scope="module")
 def engine():
-    """The real 0.5B model's Engine, loaded once per module. Shared by every
-    slow test that needs a live engine (test_engine, test_w4b_parity)."""
+    """The slow-suite model's Engine (conftest.MODEL_ID — the 0.5B default,
+    or whatever MODEL_ID env the M5 parity step injected), loaded once per
+    module. Shared by every slow test that needs a live engine."""
     from jevmlx.engine import load_engine
 
     return load_engine(MODEL_ID)

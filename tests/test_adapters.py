@@ -1,5 +1,5 @@
 """W6-1 tests: jevmlx/adapters.py — fake models for every attribute layout,
-plus one slow 0.5B equivalence test.
+plus one slow real-model equivalence test.
 
 The fakes mirror the REAL mlx_lm attribute layouts the adapters navigate:
 
@@ -232,8 +232,8 @@ def test_list_supported_model_types():
 @pytest.mark.slow
 def test_real_0_5b_adapter_split_equals_call(engine):
     """The adapter split reproduces the model's own __call__ bit-for-bit
-    within 1e-4 on the real 0.5B model (Qwen2.5-0.5B, TIED embeddings —
-    exercises the as_linear path end to end)."""
+    within 1e-4 on the slow-suite model (conftest.MODEL_ID — TIED
+    embeddings exercise the as_linear path end to end)."""
     model, tokenizer = engine.model, engine.tokenizer
     adapter = adapter_for(model)
     tokens = mx.array([tokenizer.encode("Decide now")])

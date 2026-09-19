@@ -13,7 +13,8 @@ from jevmlx.trie import build_trie
 @pytest.mark.slow
 def test_collision_field_scores_mechanically(engine):
     """T2 (round 2): a first-token-collision field scores mechanically on the
-    0.5B model — valid values, normalized probabilities, full log_scores, and
+    the slow-suite model (conftest.MODEL_ID; the 0.5B default) — valid
+    values, normalized probabilities, full log_scores, and
     per-choice rows for the colliding choices. The model's actual winner is
     asserted against fakes in test_engine_fake.py, not against a live
     model's opinion.
@@ -238,7 +239,7 @@ def test_naive_generation_returns_parseable_text(engine):
 
 @pytest.mark.slow
 def test_slots_scoring_fintech_fraud(engine):
-    """Slots mode on the 0.5B model: one pass, all values valid.
+    """Slots mode on the slow-suite model: one pass, all values valid.
 
     Every enum/boolean field gets exactly one alias row; the winning alias
     maps back to a valid choice string; multi fields keep their per-option
@@ -274,7 +275,7 @@ def test_slots_scoring_fintech_fraud(engine):
 
 @pytest.mark.slow
 def test_labels_scoring_fintech_fraud_valid(engine):
-    """Labels mode on the 0.5B model: every value valid, log_scores keyed by
+    """Labels mode on the slow-suite model: every value valid, log_scores keyed by
     the real choice strings (same contract as slots, no alias hop)."""
     preset = load_preset("fintech_fraud")
     schema = StructuredSchema(preset["schema"])
@@ -301,10 +302,10 @@ def test_labels_scoring_fintech_fraud_valid(engine):
 
 @pytest.mark.slow
 def test_prior_correction_neutral_pass_runs_and_corrects(engine):
-    """V2 slow: the neutral-context prior pass runs on the 0.5B model,
+    """V2 slow: the neutral-context prior pass runs on the slow-suite model,
     telemetry carries prior keys, and the corrected log_scores differ from
     raw ones somewhere (exact equality would mean the prior is uniform-zero,
-    which the 0.5B model never produces)."""
+    which a real model never produces)."""
     preset = load_preset("support_triage")
     schema = StructuredSchema(preset["schema"])
 

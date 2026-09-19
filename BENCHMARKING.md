@@ -125,3 +125,24 @@ Idempotent: steps whose output markers already exist are skipped (`--fresh`
 reruns everything). Per-step logs land in `<out>/<step-id>.log`. Interrupted
 runs resume; the gate step keeps a half-finished evening from wasting GPU time
 on a broken environment.
+
+### MODEL_ID env: the slow suite's model selector
+
+`tests/conftest.py` reads `MODEL_ID` from the environment in ONE place
+(`os.environ.get("MODEL_ID", "mlx-community/Qwen2.5-0.5B-Instruct-4bit")`)
+and exposes it as the `MODEL_ID` constant. Every slow test that loads a real
+model reads that constant (or the `engine` fixture, which does); no test
+hardcodes a model id. So when the M5 parity step runs `pytest -m slow` with
+`MODEL_ID=<parity model>`, every slow test exercises THAT model — not the
+0.5B dev default.
+
+Tolerances are model-sensitive: `PARITY_ATOL` (== `INSTABILITY_BAND = 5e-2`)
+is the batch-vs-chunked log_score drift measured on the 0.5B dev model.
+Larger models (1.5B, 7B) see higher raw drift from Metal batch-shape matmul
+variation, so `test_w4b_parity.py::test_parity_real_model_twin` (which runs
+all four bundled presets and asserts `< PARITY_ATOL`) is **default-model-
+only** — it skips when `MODEL_ID` is not the 0.5B default. The W1-A / T4
+batch-vs-chunked parity tests use the same tolerance but only on the two
+`fintech_fraud` / `support_triage` presets (smaller drift), so they stay on
+all models; if a parity model ever drifts past `PARITY_ATOL` there, raise
+the constant in `jevmlx/engine.py` (it is shared by the engine's tie flag).
