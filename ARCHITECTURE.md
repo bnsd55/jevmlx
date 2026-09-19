@@ -210,7 +210,7 @@ load).
 | `failed_attempts` | W5-D finding 30: Metal allocation failures that were retried at a smaller chunk size (`ScoreRowsResult.failed_attempts`). Never folded into `sequential_forward_passes` — a pass is a forward that produced rows. |
 | `schema_match` | Always True (keys/enums guaranteed by construction). |
 | `confidence_model` | `"slots"` or `"labels"`. |
-| `prompt_sha256` / `prompt_version` | SHA-256 over the full prompt token ids; the version is read from `engine.PROMPT_VERSION` (v8) — never a literal elsewhere. |
+| `prompt_sha256` / `prompt_version` | SHA-256 over the full prompt token ids; the version is `jevmlx-parallel-v9` (string form) or `jevmlx-parallel-v10-messages` (messages form, W6-B2) — read from the engine, never a literal elsewhere. |
 | `probability_status` | W5b-13: a SUMMARY over the per-field semantics records — one clause per distinct (score_source, temperature, calibrator_id, prior_mode) group with its field count. Not authoritative for any single field; the per-field truth is `field_telemetry[..]['semantics']`. An empty group set raises (every engine path sets records). |
 | `prior_correction` / `constraints_applied` | Whether the prior pass ran / case-level constraints were applied. |
 | `reconciled_fields` | Fields whose value changed under constrained MAP. |
@@ -262,6 +262,9 @@ Batched-only keys (`run_parallel_generation_batched`, every result): `group_wall
 | `alternatives` | Top 3 (choice, probability) pairs; multi: per-option (option, P(yes)) sorted desc. |
 | `reason` | None, `"none_of_above"` (caller opted in via `allow_none_of_above=True`, model picked the explicit opt-out → None), or `"abstain"` (`abstain_below_margin` set and the field's margin — `probability_margin` scalar / `threshold_distance` multi — fell below the cut; value withheld from the validated instance, raw kept for provenance). The single source of truth — no separate abstain flag. |
 | `semantics` | Frozen `api.FieldSemantics` (W5b-13): how THIS field's reported probabilities were produced — score_source, the temperature actually applied, the calibrator bundle id, prior_mode, constraint_changed, dependency_rescored. Required, kw-only; coerced from the telemetry record, never None. |
+
+| `ordinal` | Ordered enums only (W6-B1), else None. Frozen `api.OrdinalFieldRecord`: `argmax_level` (winning index in the declared scale order), `expected_index` (Σ pᵢ·i on the parallel track; on non-parallel tracks — naive_local / api_baseline / openai_slots — equals `argmax_level`, the hard pick being the entire mass), `variance` (0.0 on hard tracks), `expected_score_normalized` (E/(n−1)). Carries a `source` tag: `"parallel"` (distribution-derived) or `"hard"` (no distribution). Derived in `finalize_scalar_evidence` from the finalized distribution (after prior correction and temperature) — no extra model call, decided value untouched; hard records are derived in the track's decide_fn. Eval metrics: `ordinal_mae` + `ordinal_confusion` run on EVERY track; `ordinal_mae_expected` is PARALLEL-TRACK-ONLY (skips `source=="hard"` explicitly — the soft metric is undefined on a hard-only record). Additive keys `ordinal_choices`/`ordinal` on prediction lines (results contract v2). |
+
 
 ### Case-level constraints — `constraints.py`, applied by `_constrained_map`
 

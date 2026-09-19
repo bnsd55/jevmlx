@@ -40,11 +40,15 @@ from pathlib import Path
 from jevmlx.engine import (
     PROMPT_V2_SYSTEM,
     PROMPT_VERSION,
+    PROMPT_VERSION_MESSAGES,
     _chat_ids,
+    _chat_ids_messages,
     _probe_system_role,
     _profile_for,
     _prompt_sha256,
+    _protocol_messages,
     _user_content,
+    validate_messages,
 )
 from jevmlx.schema import StructuredSchema
 
@@ -96,6 +100,28 @@ CASES: dict[str, dict] = {
             },
         },
         "context": "The applicant disputes one charge.",
+        "scoring": "slots",
+    },
+    # W6-B2: the messages form (v10-messages). Same schemas as the string
+    # cases, but the input is an OpenAI-style message list — the library
+    # protocol block is a system turn, the nonce fence is absent.
+    "risk_enum_bool_messages": {
+        "schema": {
+            "risk_tier": {
+                "type": "enum",
+                "description": "Credit risk tier",
+                "choices": ["LOW", "MEDIUM", "HIGH"],
+                "choice_descriptions": {
+                    "LOW": "stable income",
+                    "HIGH": "many missed payments",
+                },
+            },
+            "flag": {"type": "boolean", "description": "manually flagged"},
+        },
+        "messages": [
+            {"role": "system", "content": "Be terse."},
+            {"role": "user", "content": "The applicant pays late sometimes."},
+        ],
         "scoring": "slots",
     },
 }
@@ -182,37 +208,70 @@ def build_vector(profile: str, case: str, tok, tokenizer_revision: str) -> dict:
         # The engine probes at load; a fake tokenizer here needs the probe
         # too (the real Gemma tokenizer is probed the same way).
         engine_profile = _probe_system_role(tok, engine_profile)
-    user_content = _user_content(spec["context"], schema, tok, scoring)
-    ids = _chat_ids(tok, user_content, PROMPT_V2_SYSTEM, engine_profile)
-    if hasattr(ids, "keys"):  # transformers BatchEncoding
-        ids = list(ids["input_ids"])
-    ids = [int(i) for i in ids]
+    # W6-B2: the messages form is its own vector — the protocol block is a
+    # library-owned system turn, the nonce fence is absent, and the prompt
+    # version is v10-messages.
+    is_messages = "messages" in spec
+    if is_messages:
+        messages = _protocol_messages(
+            validate_messages(spec["messages"]), schema, tok, scoring, engine_profile
+        )
+        ids = _chat_ids_messages(tok, messages, engine_profile)
+        if hasattr(ids, "keys"):
+            ids = list(ids["input_ids"])
+        ids = [int(i) for i in ids]
+        prompt_version = PROMPT_VERSION_MESSAGES
+        system_content = (
+            messages[0]["content"]
+            if engine_profile.supports_system
+            else (f"{messages[0]['content']}\n\n{messages[1]['content']}")
+        )
+        rendered_messages = (
+            messages
+            if engine_profile.supports_system
+            else [{"role": "user", "content": system_content}, *messages[2:]]
+        )
+    else:
+        user_content = _user_content(spec["context"], schema, tok, scoring)
+        ids = _chat_ids(tok, user_content, PROMPT_V2_SYSTEM, engine_profile)
+        if hasattr(ids, "keys"):  # transformers BatchEncoding
+            ids = list(ids["input_ids"])
+        ids = [int(i) for i in ids]
+        prompt_version = PROMPT_VERSION
+        rendered_messages = (
+            [
+                {"role": "system", "content": PROMPT_V2_SYSTEM},
+                {"role": "user", "content": user_content},
+            ]
+            if engine_profile.supports_system
+            else [{"role": "user", "content": f"{PROMPT_V2_SYSTEM}\n\n{user_content}"}]
+        )
+        system_content = PROMPT_V2_SYSTEM
     # rendered_text must be HUMAN-READABLE in every committed vector. For a
     # tokenizer with decode() (the real ones) that is the decode; for the
     # fake (a reversible character cipher with no decode) it is the exact
     # message text _chat_ids rendered from — the same bytes the ids encode.
-    messages = (
-        [{"role": "system", "content": PROMPT_V2_SYSTEM}, {"role": "user", "content": user_content}]
-        if engine_profile.supports_system
-        else [{"role": "user", "content": f"{PROMPT_V2_SYSTEM}\n\n{user_content}"}]
-    )
     if hasattr(tok, "decode"):
         rendered = tok.decode(ids)
     else:
-        rendered = "\n".join(m["content"] for m in messages)
+        rendered = "\n".join(m["content"] for m in rendered_messages)
+    input_record = {
+        "schema": spec["schema"],
+        "scoring": scoring,
+        "system": system_content,
+        "template_kwargs": engine_profile.template_kwargs,
+        "supports_system": engine_profile.supports_system,
+    }
+    if is_messages:
+        input_record["messages"] = spec["messages"]
+    else:
+        input_record["context"] = spec["context"]
     return {
-        "prompt_version": PROMPT_VERSION,
+        "prompt_version": prompt_version,
         "profile": profile,
         "tokenizer_revision": tokenizer_revision,
         "case": case,
-        "input": {
-            "schema": spec["schema"],
-            "context": spec["context"],
-            "scoring": scoring,
-            "system": PROMPT_V2_SYSTEM,
-            "template_kwargs": engine_profile.template_kwargs,
-            "supports_system": engine_profile.supports_system,
-        },
+        "input": input_record,
         "rendered_text": rendered,
         "token_ids_sha256": _token_ids_sha256(ids),
         "prompt_sha256": _prompt_sha256(ids),
@@ -235,6 +294,10 @@ PROTOCOL_MARKERS = {
     "rendered_vectors": (
         "<!-- generated:rendered_vectors -->",
         "<!-- /generated:rendered_vectors -->",
+    ),
+    "messages_protocol": (
+        "<!-- generated:messages_protocol -->",
+        "<!-- /generated:messages_protocol -->",
     ),
 }
 
@@ -268,11 +331,22 @@ def _protocol_sections() -> dict[str, str]:
         # before closing the fence.
         rendered.append(f"**{label}** — `{path.name}`:\n\n```text\n{text.rstrip(chr(10))}\n```")
 
+    # W6-B2: the messages-form protocol block — the SAME risk_enum_bool
+    # schema, input as an OpenAI-style message list (the v10-messages render:
+    # library-owned system turn + caller user turn, no nonce fence).
+    msg_case = CASES["risk_enum_bool_messages"]
+    msg_schema = StructuredSchema(msg_case["schema"])
+    msg_messages = _protocol_messages(
+        validate_messages(msg_case["messages"]), msg_schema, tok, "slots", _profile_for("qwen2.5")
+    )
+    # rendered_messages for the no-decode fake = the message contents joined.
+    messages_rendered = "\n\n".join(m["content"] for m in msg_messages)
     return {
         "system_block": f"```text\n{system_block}\n```",
         "user_content": f"```text\n{user_content}\n```",
         "rendered_vectors": "\n\n".join(rendered),
         "nonce_example": _context_nonce(case["context"]),
+        "messages_protocol": (f"```text\n{messages_rendered}\n```"),
     }
 
 
