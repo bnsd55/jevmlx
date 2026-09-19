@@ -15,8 +15,8 @@ from conftest import YNLogitModel as _BiasedMultiModel
 from conftest import _Mod97Tokenizer as FakeTokenizer
 from conftest import make_engine
 
-from jevmlx.calibrate import calibrated_log_odds, fit_logistic
-from jevmlx.engine import run_parallel_generation
+from jevmlx.calibrate import CalibrationBundle, calibrated_log_odds, fit_logistic
+from jevmlx.engine import PROMPT_VERSION, run_parallel_generation
 from jevmlx.schema import StructuredSchema
 
 
@@ -111,13 +111,16 @@ def test_engine_without_calibration_fixed_half_rule():
     assert telemetry["per_option"]["x"] == pytest.approx(1.0 / (1.0 + math.exp(-2.0)), rel=1e-6)
 
 
-def test_engine_with_calibration_dict_selects_by_sign():
+def test_engine_with_calibration_bundle_selects_by_sign():
     """a=1, b=0: calibrated log-odds = raw log-odds = 2 > 0 -> all selected
     (same as uncalibrated here); a=1, b=-3: calibrated = -1 < 0 -> none."""
     model = _BiasedMultiModel(yes_logit=1.0, no_logit=-1.0)
     tok = FakeTokenizer()
     keep = run_parallel_generation(
-        make_engine(model, tok), "ctx", _multi_schema(), calibration={"multi": {"a": 1.0, "b": 0.0}}
+        make_engine(model, tok),
+        "ctx",
+        _multi_schema(),
+        calibration=CalibrationBundle.from_payload({"multi": {"a": 1.0, "b": 0.0}}),
     )
     assert keep["parsed_json"]["flags"]["value"] == ["x", "y", "z"]
     assert keep["field_telemetry"]["flags"]["calibrated"] == {"a": 1.0, "b": 0.0}
@@ -125,7 +128,7 @@ def test_engine_with_calibration_dict_selects_by_sign():
         make_engine(model, tok),
         "ctx",
         _multi_schema(),
-        calibration={"multi": {"a": 1.0, "b": -3.0}},
+        calibration=CalibrationBundle.from_payload({"multi": {"a": 1.0, "b": -3.0}}),
     )
     assert drop["parsed_json"]["flags"]["value"] == []
     assert drop["field_telemetry"]["flags"]["calibrated"] == {"a": 1.0, "b": -3.0}
@@ -142,11 +145,28 @@ def test_engine_with_calibration_dict_selects_by_sign():
 
 
 def test_engine_calibration_from_file(tmp_path):
+    """F3: run_parallel_generation ALSO takes the bundle only — the file is
+    loaded at the boundary (CalibrationBundle.load), then passed in."""
     model = _BiasedMultiModel(yes_logit=1.0, no_logit=-1.0)
     path = tmp_path / "calib.json"
-    path.write_text(json.dumps({"temperature": 1.0, "multi": {"a": 2.0, "b": -5.0}}))
+    # W5-C finding 22: ONE bundle shape — the same one the CLI writes.
+    path.write_text(
+        json.dumps(
+            {
+                "model_revision": "test",
+                "prompt_version": PROMPT_VERSION,
+                "scoring": "slots",
+                "prior_mode": "off",
+                "scalar": {"temperature": 1.0},
+                "multi": {"a": 2.0, "b": -5.0},
+            }
+        )
+    )
     result = run_parallel_generation(
-        make_engine(model, FakeTokenizer()), "ctx", _multi_schema(), calibration=str(path)
+        make_engine(model, FakeTokenizer()),
+        "ctx",
+        _multi_schema(),
+        calibration=CalibrationBundle.load(str(path)),
     )
     # calibrated = 2*2 - 5 = -1 < 0 -> nothing selected
     assert result["parsed_json"]["flags"]["value"] == []
@@ -154,21 +174,30 @@ def test_engine_calibration_from_file(tmp_path):
 
 
 def test_engine_calibration_payload_validation():
+    """F3: the engine takes CalibrationBundle | None ONLY.
+
+    A path is loaded at the public boundary (api._resolve_calibration) —
+    the engine-level run_parallel_generation raises TypeError for a str.
+    The boundary behaviors (missing file, bad dict) are asserted in
+    tests/test_api.py against decide(); here we assert the engine-level
+    contract: wrong types -> TypeError naming the rule, a bad bundle's
+    provenance/payload -> ValueError from from_payload before the engine.
+    """
+    from jevmlx.calibrate import CalibrationBundle
+
     model = _BiasedMultiModel()
     tok = FakeTokenizer()
     schema = _multi_schema()
-    with pytest.raises(ValueError, match="calibration file not found"):
+    with pytest.raises(TypeError, match="calibration must be a CalibrationBundle or None"):
         run_parallel_generation(
             make_engine(model, tok), "ctx", schema, calibration="/nope/missing.json"
         )
-    with pytest.raises(ValueError, match='must carry numeric "a" and "b"'):
+    with pytest.raises(TypeError, match="calibration must be a CalibrationBundle or None"):
         run_parallel_generation(
             make_engine(model, tok), "ctx", schema, calibration={"multi": {"a": 1}}
         )
-    with pytest.raises(ValueError, match="must be finite"):
-        run_parallel_generation(
-            make_engine(model, tok), "ctx", schema, calibration={"multi": {"a": 1e999, "b": 0}}
-        )
+    with pytest.raises(ValueError, match='must carry numeric "a" and "b"'):
+        CalibrationBundle.from_payload({"multi": {"a": "x", "b": 0}})
 
 
 # ------------------------------------------------------------- API surface
@@ -253,7 +282,17 @@ def test_openai_multi_calibrated_selection_and_no_threshold_key():
             "flags",
             field,
             5.0,
-            {"multi": {"a": 1.0, "b": 0.0}},
+            # W5-C finding 22: the typed CalibrationBundle (the ONE shape
+            # from_payload parses; fields the CLI does not set stay None).
+            CalibrationBundle.from_payload(
+                {
+                    "model_revision": "test",
+                    "prompt_version": PROMPT_VERSION,
+                    "scoring": "slots",
+                    "prior_mode": "off",
+                    "multi": {"a": 1.0, "b": 0.0},
+                }
+            ),
             FakeTokenizer(),
         )
     assert "threshold" not in telemetry

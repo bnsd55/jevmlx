@@ -104,14 +104,16 @@ def test_multi_legal_mass_stats_cardinality_free():
 
 def test_count_row_legal_mass_exposed():
     """Finding 38: the count row's legal mass is computed and EXPOSED
-    (it was computed and discarded before)."""
+    (it was computed and discarded before). W5-C finding 24: count rows
+    live under internal_telemetry, not field_telemetry."""
     schema = StructuredSchema(
         {"tags": {"type": "multi", "description": "d", "choices": ["A", "B", "C"]}}
     )
     result = run_parallel_generation(
         make_engine(FakeModel(vocab_size=64), FakeTokenizer()), "ctx", schema
     )
-    count_tel = result["field_telemetry"].get("tags#count")
+    # W5-C finding 24: count rows live under internal_telemetry.
+    count_tel = result["internal_telemetry"].get("tags#count")
     assert count_tel is not None
     assert "legal_mass" in count_tel
     assert 0.0 < count_tel["legal_mass"] <= 1.0

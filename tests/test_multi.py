@@ -181,7 +181,7 @@ def test_multi_engine_result_semantics():
     # Calibrated: b = -1 shifts every calibrated log-odds below 0 -> nothing
     # selected; margin stays in PROBABILITY units (F1): |sigmoid(-1) - 0.5|,
     # and the raw calibrated log-odds ride telemetry.
-    above = run_generation(schema, model, tokenizer, {"multi": {"a": 1.0, "b": -1.0}})
+    above = run_generation(schema, model, tokenizer, _calib(-1.0))
     assert above["parsed_json"]["flags"]["value"] == []
     assert above["field_telemetry"]["flags"]["calibrated"] == {"a": 1.0, "b": -1.0}
     assert above["field_telemetry"]["flags"]["calibrated_log_odds"] == {"x": -1.0, "y": -1.0}
@@ -189,7 +189,7 @@ def test_multi_engine_result_semantics():
         abs(1.0 / (1.0 + math.exp(1.0)) - 0.5)
     )
     # b = +1 shifts everything above 0 -> all selected; same probability-unit margin.
-    below = run_generation(schema, model, tokenizer, {"multi": {"a": 1.0, "b": 1.0}})
+    below = run_generation(schema, model, tokenizer, _calib(1.0))
     assert below["parsed_json"]["flags"]["value"] == ["x", "y"]
     assert below["field_telemetry"]["flags"]["margin"] == pytest.approx(
         abs(1.0 / (1.0 + math.exp(-1.0)) - 0.5)
@@ -197,27 +197,65 @@ def test_multi_engine_result_semantics():
     assert "log_scores" not in telemetry  # calibrate skips multi fields
 
 
+def _calib(b: float):
+    """W5-C finding 22: the typed CalibrationBundle (the ONE shape)."""
+    from jevmlx.calibrate import CalibrationBundle
+
+    return CalibrationBundle.from_payload(
+        {
+            "model_revision": "test",
+            "prompt_version": "jevmlx-parallel-v9",
+            "scoring": "slots",
+            "prior_mode": "off",
+            "multi": {"a": 1.0, "b": b},
+        }
+    )
+
+
 def run_generation(schema, model, tokenizer, calibration=None):
+    from jevmlx.calibrate import CalibrationBundle
     from jevmlx.engine import run_parallel_generation
 
+    # F3 boundary: dict -> from_payload, path -> load, engine gets a bundle.
+    if isinstance(calibration, dict):
+        calibration = CalibrationBundle.from_payload(calibration)
+    elif isinstance(calibration, str):
+        calibration = CalibrationBundle.load(calibration)
     return run_parallel_generation(
         make_engine(model, tokenizer), "ctx", schema, calibration=calibration
     )
 
 
 def test_multi_threshold_validation():
-    """W2-E step 2: the threshold knob is DELETED. Bad calibration payloads
-    raise; the fake model returns zero logits everywhere, so the uncalibrated
-    rule selects everything (P(yes) = 0.5 >= 0.5) and a strongly negative
-    intercept calibrates everything away."""
+    """W2-E step 2: the threshold knob is DELETED. Bad calibration shapes
+    raise at the boundary BEFORE the engine; the fake model returns zero
+    logits everywhere, so the uncalibrated rule selects everything
+    (P(yes) = 0.5 >= 0.5) and a strongly negative intercept calibrates
+    everything away."""
     from conftest import FakeModel, FakeTokenizer
+
+    from jevmlx.calibrate import CalibrationBundle
 
     schema = StructuredSchema(
         {"flags": {"type": "multi", "description": "d", "choices": ["x", "y"]}}
     )
-    for bad in (0.5, "nope", {"multi": {}}, {"multi": {"a": "x", "b": 0}}, 3.2):
-        with pytest.raises(ValueError, match="calibration"):
+    # F3: the engine takes CalibrationBundle | None only — a wrong-typed
+    # object (a float) is a TypeError from the engine's strict check.
+    for bad in (0.5, 3.2):
+        with pytest.raises(TypeError, match="calibration"):
             run_generation(schema, FakeModel(), FakeTokenizer(), bad)
+    # Bad payloads raise ValueError when CONSTRUCTED (from_payload is the
+    # boundary for dicts; the retired top-level-temperature shape included).
+    for bad_payload in (
+        {"multi": {}},
+        {"multi": {"a": "x", "b": 0}},
+        {"temperature": 1.0, "multi": {"a": 1.0, "b": 0.0}},
+    ):
+        with pytest.raises(ValueError, match="calibration"):
+            CalibrationBundle.from_payload(bad_payload)
+    # A non-existent path raises at the boundary load.
+    with pytest.raises(ValueError, match="calibration"):
+        run_generation(schema, FakeModel(), FakeTokenizer(), "/nope/missing.json")
 
 
 def test_field_name_with_slash_rejected():

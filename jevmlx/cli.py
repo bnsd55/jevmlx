@@ -16,6 +16,7 @@ import sys
 from importlib import resources
 
 from jevmlx import __version__
+from jevmlx.calibrate import CalibrationBundle
 from jevmlx.lint import lint_schema
 from jevmlx.log import configure
 from jevmlx.models import DEFAULT_MODEL
@@ -247,8 +248,10 @@ def _dispatch(argv) -> None:
     calib.add_argument(
         "--out",
         default=None,
-        help='write the fitted calibrators to this JSON file ({"temperature": .., '
-        '"multi": {"a": .., "b": ..}}); pass it to jevmlx decide --calibration',
+        help="write the fitted CalibrationBundle to this JSON file (ONE shape: "
+        '{"model_revision", "prompt_version", "scoring", "prior_mode", '
+        '"scalar": {"temperature"}, "multi": {"a", "b"}}); pass it to '
+        "jevmlx decide --calibration",
     )
 
     serve_p = sub.add_parser("serve", help="Serve decisions over HTTP (one Metal GPU, serial)")
@@ -475,13 +478,16 @@ def _dispatch(argv) -> None:
             engine = load_engine(args.model)
 
             schema = StructuredSchema(schema_dict)
+            # F3 boundary: the CLI resolves the calibration HERE — path ->
+            # CalibrationBundle.load — and hands the engine a bundle.
+            _calibration = CalibrationBundle.load(args.calibration) if args.calibration else None
             result = run_parallel_generation(
                 engine,
                 context,
                 schema,
                 temperature=args.temperature,
                 scoring=args.scoring,
-                calibration=args.calibration,
+                calibration=_calibration,
                 prior_correction=args.prior_correction,
                 constraints=_load_constraints(args.constraints) if args.constraints else None,
             )
@@ -502,13 +508,26 @@ def _dispatch(argv) -> None:
         print(f"collecting scores from {len(cases)} labeled cases ...", flush=True)
         samples = calibrate.collect(engine, cases)
 
-        calibrators: dict = {}
+        # W5-C finding 22: ONE bundle shape — the CLI writes it, the engine
+        # reads it. Provenance is captured here at fit time so a bundle can
+        # never be applied to a request it does not describe.
+        from jevmlx.engine import PROMPT_VERSION as _pv
+
+        payload: dict = {
+            "model_revision": engine.model_id,
+            "prompt_version": _pv,
+            "scoring": "slots",
+            # Finding 21: the neutral pass runs with prior_correction=False
+            # by construction, so a multi (a, b) fitted from these samples
+            # is fitted on RAW evidence log-odds.
+            "prior_mode": "off",
+        }
         if samples:
             t_fit = calibrate.fit_temperature(samples)
             ece_before = calibrate.ece(samples, 1.0, bins=args.bins)
             ece_after = calibrate.ece(samples, t_fit, bins=args.bins)
             acc = calibrate.accuracy(samples)
-            calibrators["temperature"] = t_fit
+            payload["scalar"] = {"temperature": t_fit}
             print(f"n samples      : {len(samples)}")
             print(f"fitted T       : {t_fit}")
             print(f"ECE before     : {ece_before:.4f}  (T=1.0)")
@@ -522,7 +541,7 @@ def _dispatch(argv) -> None:
         multi_samples = calibrate.collect_multi(engine, cases)
         if multi_samples:
             a_fit, b_fit = calibrate.fit_logistic(multi_samples)
-            calibrators["multi"] = {"a": a_fit, "b": b_fit}
+            payload["multi"] = {"a": a_fit, "b": b_fit}
             n_yes = sum(y for _, y in multi_samples)
             print(
                 f"n multi pairs  : {len(multi_samples)}  ({n_yes} yes / "
@@ -533,13 +552,13 @@ def _dispatch(argv) -> None:
             print("no multi labels; skipping pooled logistic fit")
 
         if args.out:
-            if not calibrators:
+            if not ("scalar" in payload or "multi" in payload):
                 print("nothing fitted; no --out file written")
             else:
                 with open(args.out, "w", encoding="utf-8") as f:
-                    json.dump(calibrators, f, indent=2, sort_keys=True)
+                    json.dump(payload, f, indent=2, sort_keys=True)
                     f.write("\n")
-                print(f"calibrators -> {args.out}")
+                print(f"calibration bundle -> {args.out}")
 
     elif args.command == "serve":
         from jevmlx.serve import serve

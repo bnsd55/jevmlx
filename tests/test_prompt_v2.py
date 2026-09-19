@@ -1,4 +1,4 @@
-"""Prompt v2 (jevmlx-parallel-v8) contract tests: system + user messages,
+"""Prompt v2 (jevmlx-parallel-v9) contract tests: system + user messages,
 hard-delimited context, and the neutral alias schema block."""
 
 import pytest
@@ -76,10 +76,10 @@ def test_prompt_v2_sends_system_and_user():
     assert "Classify" in user
 
 
-def test_prompt_version_is_v2():
+def test_prompt_version_is_v9():
     tok = FakeTokenizer()
     result = run_parallel_generation(make_engine(FakeModel(), tok), "ctx", SCHEMA)
-    assert result["prompt_version"] == PROMPT_VERSION == "jevmlx-parallel-v8"
+    assert result["prompt_version"] == PROMPT_VERSION == "jevmlx-parallel-v9"
 
 
 def test_slot_plan_maps_aliases_to_values():
@@ -127,7 +127,7 @@ def test_gemma_style_template_rejects_system_role():
     ]
 
     result = run_parallel_generation(make_engine(FakeModel(), tok), "ctx", SCHEMA)
-    assert result["prompt_version"] == "jevmlx-parallel-v8"
+    assert result["prompt_version"] == "jevmlx-parallel-v9"
     # The scoring prompt is a single user turn with the merged system text.
     assert all(m["role"] != "system" for m in seen[-1])
     assert PROMPT_V2_SYSTEM in seen[-1][0]["content"]

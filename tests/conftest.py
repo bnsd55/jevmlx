@@ -341,7 +341,7 @@ def make_engine_result(
         "schema_match": True,
         "confidence_model": "slots",
         "prompt_sha256": "abc",
-        "prompt_version": "jevmlx-parallel-v8",
+        "prompt_version": "jevmlx-parallel-v9",
         "probability_status": (
             "constrained-path probability at T=1; uncalibrated as decision confidence"
         ),

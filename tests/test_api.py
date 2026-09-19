@@ -756,3 +756,23 @@ def test_decision_has_no_confidence_attribute():
     from jevmlx.api import Decision
 
     assert not any(f.name == "confidence" for f in dataclasses.fields(Decision))
+
+
+def test_abstain_requires_optional_fields_before_inference(monkeypatch):
+    """W5-C finding 25 (review F4): abstain_below_margin with a NON-Optional
+    field is a usage error at decide() START — TypeError naming the first
+    offending field, before any inference. run_parallel_generation is
+    monkeypatched to RAISE if called: the check must fire first."""
+
+    class StrictModel(BaseModel):
+        risk_tier: Literal["LOW", "HIGH"] = Field(description="not optional")
+        note: str | None = None
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("inference must not run — the schema check fires first")
+
+    monkeypatch.setattr("jevmlx.api.load_engine", lambda model_id: ("engine", "tokenizer"))
+    monkeypatch.setattr("jevmlx.api.run_parallel_generation", _boom)
+    monkeypatch.setattr("jevmlx.api.run_parallel_generation_batched", _boom)
+    with pytest.raises(TypeError, match="risk_tier.*Optional"):
+        jevmlx.decide(StrictModel, "ctx", model="fake/model", abstain_below_margin=0.1)

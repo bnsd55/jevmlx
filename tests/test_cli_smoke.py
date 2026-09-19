@@ -148,7 +148,19 @@ def test_decide_native_json_shape(fake_engine, preset_files, capsys, tmp_path):
     """`decide --json` prints the parsed_json payload; the engine received
     the alias model id; flags all wire through."""
     calib = tmp_path / "cal.json"
-    calib.write_text(json.dumps({"temperature": 1.0, "multi": {"a": 1.0, "b": 0.0}}))
+    # W5-C finding 22: the ONE bundle shape (scalar under "scalar").
+    calib.write_text(
+        json.dumps(
+            {
+                "model_revision": "test",
+                "prompt_version": "jevmlx-parallel-v9",
+                "scoring": "slots",
+                "prior_mode": "off",
+                "scalar": {"temperature": 1.0},
+                "multi": {"a": 1.0, "b": 0.0},
+            }
+        )
+    )
     code, out, err = _run(
         [
             "decide",
@@ -332,7 +344,11 @@ def test_calibrate_end_to_end_writes_out(fake_engine, preset_files, tmp_path):
     code, out, err = _run(["calibrate", "--data", preset_files["jsonl"], "--out", str(out_path)])
     assert code == 0, err
     payload = json.loads(out_path.read_text())
-    assert "temperature" in payload
+    # W5-C: ONE bundle shape — the scalar temperature lives under
+    # "scalar", with provenance alongside.
+    assert payload["scalar"]["temperature"] > 0
+    assert payload["prompt_version"].startswith("jevmlx-parallel-")
+    assert payload["prior_mode"] == "off"
     assert "Traceback" not in err
 
 

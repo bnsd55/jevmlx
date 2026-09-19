@@ -63,7 +63,7 @@ def test_prompt_sha256_stable_and_input_sensitive():
     assert r1["prompt_sha256"] != r3["prompt_sha256"]
     assert len(r1["prompt_sha256"]) == 64
     # Independent of the schema contents swap? No: same schema, so identical.
-    assert r1["prompt_version"] == "jevmlx-parallel-v8"
+    assert r1["prompt_version"] == "jevmlx-parallel-v9"
     assert (
         r1["probability_status"]
         == "constrained-path probability at T=1; uncalibrated as decision confidence"
@@ -468,7 +468,9 @@ def test_prior_pass_always_runs_at_temperature_one(monkeypatch):
                     "option_logit_pairs": {"x": [0.3, -0.7]},
                     "log_scores": {},
                 }
-            }
+            },
+            # W5-C finding 24: count rows live here.
+            "internal_telemetry": {},
         }
 
     monkeypatch.setattr(eng, "run_parallel_generation", fake_rpg)
@@ -503,7 +505,9 @@ def test_prior_multi_option_pairs_are_raw_logits_not_reconstructed(monkeypatch):
                     "option_logit_pairs": {"x": [2.5, -1.5]},  # raw logits
                     "log_scores": {},
                 }
-            }
+            },
+            # W5-C finding 24: count rows live here.
+            "internal_telemetry": {},
         }
 
     monkeypatch.setattr(eng, "run_parallel_generation", fake_rpg)
