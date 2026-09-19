@@ -2260,7 +2260,6 @@ def run_parallel_generation(
             prior = _get_or_compute_prior(engine, schema, scoring, max_rows, NEUTRAL_CONTEXT)
         prior_ms = ledger.derived_flat()["prior_ms"]
 
-
     # W5b-14 review F10: ONE top-level request span — elapsed_ms is true
     # wall time (plan/prefill/scoring/assembly are its children). The
     # memory guard below stays INSIDE it (it is part of the wall).
@@ -2280,7 +2279,7 @@ def run_parallel_generation(
 
         # 2. Prefill once (prompt v2: system paragraph + user schema block and
         #    delimited context) — W3-F stage split.
-        pf = _prefill(model, tokenizer, context, schema, ledger, scoring)
+        pf = _prefill(model, tokenizer, context, schema, ledger, scoring, engine.profile)
         base_ids = pf.base_ids
         cache = pf.cache
 
@@ -3620,7 +3619,6 @@ def run_parallel_generation_batched(
             NEUTRAL_CONTEXT = "(no context provided)"
             prior = _get_or_compute_prior(engine, schema, scoring, max_rows, NEUTRAL_CONTEXT)
         prior_ms = request_ledger.derived_flat()["prior_ms"]
-
 
     # 1. Shared row set (context-independent).
     with request_ledger.span("plan"):
