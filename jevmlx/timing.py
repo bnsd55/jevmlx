@@ -92,12 +92,22 @@ class _SpanContext:
 
     def __exit__(self, exc_type, exc, tb) -> None:
         if exc_type is not None:
-            # An exception unwinds through the span: drop it from the stack
-            # WITHOUT recording a (fake) completed interval — and the same
-            # for any spans it was nested inside that close here.
+            # An exception unwinds through THIS span: drop it and any spans
+            # nested INSIDE it (they cannot outlive their parent) WITHOUT
+            # recording fake completed intervals. Spans ABOVE it on the
+            # stack — its ancestors — stay open: the caller may catch the
+            # exception and continue, and the parents close normally later.
+            # (Dropping the whole stack broke parents that outlive a caught
+            # child failure — e.g. a Metal retry inside a group span.)
             stack = self._ledger._stack
+            if self not in stack:
+                # Already dropped by an inner __exit__ with exc_info — a
+                # double unwind is a no-op.
+                return
             while stack:
-                stack.pop()
+                span = stack.pop()
+                if span is self:
+                    break
             return
         self._ledger._close()
 
@@ -198,9 +208,15 @@ class Ledger:
             return sum(iv.ms for iv in self._intervals if iv.name == name)
 
         prior_ms = sum(iv.ms for iv in self._top_level_intervals(phase="prior"))
-        # elapsed_ms = top-level MAIN spans only (the prior phase is
-        # separately prior_ms; total = both).
-        elapsed_ms = sum(iv.ms for iv in top_level if iv.phase == "main")
+        # elapsed_ms = the ONE top-level ``request`` span when present
+        # (W5b-14 review F10: true wall time — the stage spans are children
+        # of it and never double-count). Older paths without a request span
+        # fall back to the top-level MAIN-span sum (the partition).
+        request_ivs = [iv for iv in top_level if iv.name == "request" and iv.phase == "main"]
+        if request_ivs:
+            elapsed_ms = sum(iv.ms for iv in request_ivs)
+        else:
+            elapsed_ms = sum(iv.ms for iv in top_level if iv.phase == "main")
         cache_merge = name_ms("cache_merge")
         gather = name_ms("gather")
         return {

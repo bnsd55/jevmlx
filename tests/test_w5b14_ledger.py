@@ -104,11 +104,97 @@ class TestNoDualFields:
     def test_score_rows_result_has_no_timing_fields(self):
         """ScoreRowsResult carries NO timing fields — the ledger spans are
         the measurement of record."""
-        import inspect
-
         from jevmlx.engine import ScoreRowsResult
 
-        fields = inspect.annotation_fields if hasattr(inspect, "annotation_fields") else None
-        hints = fields or __import__("typing").get_type_hints(ScoreRowsResult)
-        assert "gather_ms" not in hints
-        assert "broadcast_ms" not in hints
+        assert "gather_ms" not in ScoreRowsResult._fields
+        assert "broadcast_ms" not in ScoreRowsResult._fields
+
+
+class TestReviewFixes:
+    """The 2026-09-19 review: F3/F4/F5/F6 regressions covered."""
+
+    def test_each_batched_context_has_own_prefill_ms(self):
+        """GAP A / F4: per-context ledgers — every result's prefill_ms is
+        ITS OWN prefill span, NOT the batch-wide sum (they differ when the
+        prompts differ in length)."""
+        schema = _schema()
+        results = run_parallel_generation_batched(
+            FakeModel(vocab_size=64),
+            FakeTokenizer(),
+            ["context one with more text", "short"],
+            schema,
+        )
+        pf = [r["prefill_ms"] for r in results]
+        # The prompts render to different lengths -> different prefill walls.
+        assert pf[0] != pf[1]
+        # And no context reports the SUM of both (the old shared-ledger bug).
+        total = sum(pf)
+        assert all(0 < r["prefill_ms"] < total for r in results)
+
+    def test_second_pass_ms_is_dependency_interval(self):
+        """F3: second_pass_ms == the dependency span (not the old
+        telemetry accumulator — they would diverge if the dependency pass
+        re-used a cached prior)."""
+        schema = StructuredSchema(
+            {
+                "intent": {"type": "enum", "description": "d", "choices": ["billing", "technical"]},
+                "subtype": {
+                    "type": "enum",
+                    "description": "d",
+                    "choices": ["refund", "bug"],
+                    "depends_on": "intent",
+                },
+            }
+        )
+        res = run_parallel_generation(FakeModel(vocab_size=64), FakeTokenizer(), "ctx", schema)
+        assert res["second_pass_ms"] > 0.0
+        # The dependency span is INSIDE the request wall.
+        assert res["second_pass_ms"] <= res["elapsed_ms"] + 1e-6
+
+    def test_forced_metal_retry_under_group_wall(self):
+        """F5 / GAP B: a Metal allocation failure that retries must not
+        break the parents' __exit__ (one forced [metal::malloc] failure)."""
+
+        from conftest import FakeModel
+
+        class FlakyModel(FakeModel):
+            _failed = False
+
+            def __call__(self, tokens, cache=None):
+
+                # Force the failure on a BATCHED (multi-row) forward only —
+                # the retry path lives in _score_rows; prefill (width 1)
+                # must stay clean.
+                if tokens.shape[0] > 1 and not getattr(self, "_failed", False):
+                    self._failed = True
+                    raise RuntimeError("[metal::malloc] forced failure")
+                return super().__call__(tokens, cache=cache)
+
+        schema = _schema()
+        results = run_parallel_generation_batched(
+            FlakyModel(vocab_size=64), FakeTokenizer(), ["a", "b"], schema
+        )
+        assert len(results) == 2
+        for res in results:
+            assert res["group_wall_ms"] > 0.0
+            assert res["failed_attempts"] >= 1 or res["sequential_forward_passes"] >= 1
+
+    def test_unpadded_chunks_eval_their_cache(self):
+        """F6: _eval_cache_state runs UNCONDITIONALLY — an unpadded merge
+        still evaluates (cache_merge spans the whole broadcast region)."""
+        # Structural: the call sits outside the max_padding guard.
+        import inspect
+
+        from jevmlx import engine
+
+        src = inspect.getsource(engine._score_rows)
+        pad_idx = src.index("if max_padding > 0:")
+        eval_idx = src.index("_eval_cache_state(b_cache)", pad_idx)
+        # _eval_cache_state must be OUTDENTED relative to the if (same level).
+        pad_indent = len(src[:pad_idx].rsplit("\n", 1)[-1]) - len(
+            src[:pad_idx].rsplit("\n", 1)[-1].lstrip()
+        )
+        eval_indent = len(src[:eval_idx].rsplit("\n", 1)[-1]) - len(
+            src[:eval_idx].rsplit("\n", 1)[-1].lstrip()
+        )
+        assert eval_indent == pad_indent  # unconditional, not inside the if

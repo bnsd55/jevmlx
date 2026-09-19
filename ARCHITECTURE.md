@@ -141,7 +141,13 @@ INCREMENTALLY from actual cumulative cache bytes + projected suffix cost
 (contexts sorted by prompt length); ONE merged scoring pass per group with
 per-row cache slots; prior computed ONCE per call; per-result timing keys
 group_wall_ms / per_item_amortized_ms / per_item_end_to_end_ms /
-contexts_per_pass (the ACTUAL group size).
+contexts_per_pass (the ACTUAL group size). W5b-14 GAP A: one Ledger PER
+CONTEXT — each result's flat `*_ms` keys derive from that context's own
+ledger (its prefill span + its assembly-side spans + the amortized share
+of the group's merged scoring pass), so prefill_ms is never the
+batch-wide sum; `per_item_end_to_end_ms` is the context's own prefill
+span start -> its assembly span end PLUS the shared `prior_ms` (the
+neutral pass ran once for the whole call).
 
 bench: after the engine load, jevmlx/parity.py runs the batch=1 vs batched
 vs chunked parity check over the four bundled presets (their real contexts)
@@ -156,8 +162,8 @@ load).
 
 | Key | Meaning |
 |---|---|
-| `elapsed_ms` | Wall clock for the decision (excludes the prior pass). |
-| `prior_ms` / `prefill_ms` / `plan_compile_ms` / `cache_broadcast_ms` / `suffix_eval_ms` / `lm_head_gather_ms` / `total_ms` | The honest timing split (W5b-14: ledger-derived — one measurement per interval, no overlapping accumulators): neutral prior pass (0.0 when `prior_correction` is off), prefill, plan compilation (plan cache makes it ~0 warm), the per-chunk cache merge/broadcast spans (distinct from the forwards), the batched suffix (`suffix_eval_ms` = the cache_merge + transformer + gather composite, marked derived), the decision gather inside the suffix window, and everything (`total_ms == elapsed_ms + prior_ms`). |
+| `elapsed_ms` | W5b-14: the top-level `request` ledger span — true wall time for the decision (excludes the prior pass; plan/prefill/scoring/assembly are its children, so nothing double-counts). |
+| `prior_ms` / `prefill_ms` / `plan_compile_ms` / `cache_broadcast_ms` / `suffix_eval_ms` / `lm_head_gather_ms` / `total_ms` | The honest timing split (W5b-14: ledger-derived — one measurement per interval, no overlapping accumulators): the neutral prior pass (a `prior`-phase `prior_pass` span; ~0 when the prior cache hits, 0.0 when `prior_correction` is off), prefill, plan compilation (plan cache makes it ~0 warm), the per-chunk cache merge/broadcast spans (distinct from the forwards; `cache_broadcast_ms`), the batched suffix (`suffix_eval_ms` = the cache_merge + transformer + gather composite, marked derived), the decision gather inside the suffix window (`lm_head_gather_ms`), and everything (`total_ms == elapsed_ms + prior_ms`). A failed forward/gather (Metal retry, W5-D finding 30) records NO interval — the ledger drops the span the exception unwinds through; the parents survive (only spans nested INSIDE the failing span are dropped). |
 | `second_pass_ms` / `rerun_fields` / `rerun_rows` | The `depends_on` second pass: wall time, which fields were re-decided, how many conditioned rows ran (0.0/[] when no `depends_on`). |
 | `padded_token_positions` | W3-R: total suffix token positions including right padding — sum of (chunk width x chunk rows), the tiling shape the forwards actually ran at. |
 | `rescored_fields` | Fields whose batched result was replaced by the batch=1 canonical rescore. |
