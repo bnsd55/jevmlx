@@ -100,22 +100,14 @@ def _rounded_json_payload(result: dict) -> dict:
     return parsed
 
 
-class CliError(Exception):
-    """A user-facing CLI failure: printed one-line to stderr, exit 1.
-
-    Wraps the predictable failure modes (missing file, bad JSON, schema
-    rejection, engine environment errors) so `jevmlx` never dumps a
-    traceback on a user-input problem. Programming errors
-    (AssertionError, TypeError, ...) are NOT wrapped — a traceback is the
-    right output for a bug.
-    """
-
-
 def _one_line(exc: BaseException) -> str:
-    """The failure message: exception type + first line of its message."""
-    first = str(exc).strip().splitlines()
-    detail = first[0] if first else exc.__class__.__name__
-    return f"{type(exc).__name__}: {detail}"
+    """The failure message: exception type + full message (multi-line
+    validation errors keep their detail; the whole block is indented under
+    the header)."""
+    message = str(exc).rstrip("\n")
+    if not message:
+        return type(exc).__name__
+    return f"{type(exc).__name__}: {message}"
 
 
 def main(argv=None) -> None:
@@ -124,32 +116,34 @@ def main(argv=None) -> None:
     Errors:
     - argument/usage errors: argparse exits 2 with one line on stderr.
     - user-input failures (missing file, invalid JSON, schema/constraint
-      rejection, engine environment errors): exit 1, one line on stderr —
-      no traceback.
+      rejection, engine environment errors): exit 1 with the full error
+      message on stderr — no traceback. With -v/--verbose the exception
+      re-raises instead (full traceback for debugging).
     - anything else propagates (a traceback is the right output for a bug).
     """
     try:
         _dispatch(argv)
-    except CliError as exc:
-        print(f"jevmlx: {exc}", file=sys.stderr)
-        raise SystemExit(1) from None
-    except (
-        OSError,
-        FileNotFoundError,
-        IsADirectoryError,
-        PermissionError,
-        json.JSONDecodeError,
-        ValueError,
-        RuntimeError,
-        ModuleNotFoundError,
-    ) as exc:
+    except (OSError, json.JSONDecodeError, ValueError, RuntimeError, ModuleNotFoundError) as exc:
         # ModuleNotFoundError from optional imports (transformers behind
         # mlx-lm) is an environment problem, not a bug.
+        if _last_verbose(argv):
+            raise
         print(f"jevmlx: {_one_line(exc)}", file=sys.stderr)
         raise SystemExit(1) from None
     except KeyboardInterrupt:
         print("jevmlx: interrupted", file=sys.stderr)
         raise SystemExit(130) from None
+
+
+def _last_verbose(argv) -> bool:
+    """Whether the invocation asked for -v/--verbose (traceback on error).
+
+    Cheap pre-parse: dispatch already parsed the real args; this re-scan only
+    decides the error path. `jevmlx -v <cmd> ...` or a global flag after the
+    subcommand both count.
+    """
+    tokens = list(argv) if argv is not None else sys.argv[1:]
+    return any(t in ("-v", "--verbose") for t in tokens)
 
 
 def _dispatch(argv) -> None:

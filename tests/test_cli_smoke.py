@@ -59,11 +59,18 @@ def fake_engine(monkeypatch):
         )
 
     monkeypatch.setattr(cli, "_engine", lambda: (fake_load_engine, fake_rpg))
+    # serve() imports engine.load_engine directly (F6: no cli dependency);
+    # patch the engine module's names so the serve test fakes the same way.
+    import jevmlx.engine as engine_mod
+
+    monkeypatch.setattr(engine_mod, "load_engine", fake_load_engine)
+    monkeypatch.setattr(engine_mod, "run_parallel_generation", fake_rpg)
     # Some tests purge jevmlx.* submodules from sys.modules
-    # (test_imports_without_mlx); pin the patched module so a later
-    # `from jevmlx.cli import _engine` (jevmlx.serve) resolves to IT, not a
-    # freshly re-imported module with the real engine.
+    # (test_imports_without_mlx); pin the patched modules so later
+    # `from jevmlx.engine import ...` resolves to IT, not a freshly
+    # re-imported module with the real engine.
     monkeypatch.setitem(sys.modules, "jevmlx.cli", cli)
+    monkeypatch.setitem(sys.modules, "jevmlx.engine", engine_mod)
     return calls
 
 
@@ -342,11 +349,9 @@ def test_calibrate_error_missing_data(fake_engine):
 
 def test_validate_ok_schema(fake_engine, preset_files, monkeypatch):
     """`validate` on a clean schema prints OK and exits 0."""
-    import tests.test_cli as tc
-
     monkeypatch.setattr(
         "transformers.AutoTokenizer.from_pretrained",
-        lambda _m: tc.FakeTok() if hasattr(tc, "FakeTok") else FakeTokenizer(),
+        lambda _m: FakeTokenizer(),
     )
     code, out, err = _run(["validate", preset_files["schema"]])
     assert code == 0, err
@@ -358,28 +363,30 @@ def test_validate_ok_schema(fake_engine, preset_files, monkeypatch):
 
 def test_serve_decides_over_http(fake_engine, preset_files, monkeypatch):
     """`serve` boots through cli._dispatch and answers one POST /decide with
-    the fake engine; the thread is a daemon, so it dies with the test."""
-    import gc
+    the fake engine (jevmlx.engine.load_engine monkeypatched); the thread is
+    a daemon, so it dies with the test."""
     import urllib.request
 
     import jevmlx.serve as serve_mod
 
-    # serve() binds --port verbatim; patch HTTPServer.__init__ to force
-    # port 0 so the OS picks a free port (no collision risk).
-    orig_init = serve_mod.HTTPServer.__init__
+    captured: dict = {}
 
-    def zero_port_init(self, addr, *a, **k):
-        orig_init(self, (addr[0], 0), *a, **k)
+    class _CapturingServer(serve_mod.HTTPServer):
+        """Force port 0 (OS free-port) and capture the bound address."""
 
-    monkeypatch.setattr(serve_mod.HTTPServer, "__init__", zero_port_init)
-    real_serve_forever = serve_mod.HTTPServer.serve_forever
+        def __init__(self, addr, *a, **k):
+            super().__init__((addr[0], 0), *a, **k)
+            captured["server"] = self
+
+    monkeypatch.setattr(serve_mod, "HTTPServer", _CapturingServer)
+    real_serve_forever = _CapturingServer.serve_forever
     started = threading.Event()
 
     def signal_then_serve(self, *a, **k):
         started.set()
         real_serve_forever(self, *a, **k)
 
-    monkeypatch.setattr(serve_mod.HTTPServer, "serve_forever", signal_then_serve)
+    monkeypatch.setattr(_CapturingServer, "serve_forever", signal_then_serve)
 
     thread = threading.Thread(
         target=lambda: cli._dispatch(["serve", "--host", "127.0.0.1", "--port", "0"]),
@@ -388,11 +395,7 @@ def test_serve_decides_over_http(fake_engine, preset_files, monkeypatch):
     thread.start()
     assert started.wait(timeout=10), "serve did not start"
 
-    port = None
-    for obj in gc.get_objects():
-        if isinstance(obj, serve_mod.HTTPServer):
-            port = obj.server_port
-    assert port, "no HTTPServer instance found"
+    port = captured["server"].server_port
 
     payload = json.dumps(
         {
@@ -540,3 +543,27 @@ def test_engine_runtime_error_is_one_line(monkeypatch):
     assert code == 1
     assert err.count("\n") == 1, err
     assert "Apple Silicon" in err
+
+
+def test_verbose_reraises_instead_of_one_line(monkeypatch):
+    """F1: with -v the error re-raises (full traceback) instead of being
+    swallowed into a one-liner — the debug path for programming errors."""
+
+    def boom(model_id):
+        raise RuntimeError("engine blew up internally")
+
+    monkeypatch.setattr(cli, "_engine", lambda: (boom, lambda *a, **k: None))
+    with pytest.raises(RuntimeError, match="engine blew up internally"):
+        _run(["-v", "decide", "--preset", "fintech_fraud"])
+
+
+def test_multiline_error_keeps_full_detail(fake_engine, tmp_path):
+    """F2: multi-line validation errors keep their detail — the full
+    message is printed, not just the first line."""
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps({"multi": {"a": "x"}}), encoding="utf-8")
+    code, out, err = _run(
+        ["decide", "--preset", "fintech_fraud", "--calibration", str(bad), "--json"]
+    )
+    assert code == 1
+    assert "could not convert string to float: 'x'" in err

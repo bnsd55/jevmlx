@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- W5b-9 CLI error contract: user-input failures (missing file, bad JSON,
+  schema/constraint rejection, engine environment errors) exit 1 with the
+  full error message on stderr — no traceback (`-v` re-raises for debug);
+  Ctrl-C exits 130. `decide --json` no longer prints the `Loading ...`
+  line to stdout (stdout is pure JSON). `doctor --model quality` resolves
+  aliases before the tokenizer check. `serve` logs the bound port after
+  binding.
 - W5b-1 immutable schema and plans: `StructuredSchema` and
   `FieldDefinition` are frozen dataclasses — mutation raises
   `FrozenInstanceError`; derive with `dataclasses.replace`

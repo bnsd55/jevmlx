@@ -107,10 +107,9 @@ def make_handler(
 
 def serve(model_id: str, host: str = "127.0.0.1", port: int = 8000) -> None:
     """Load the model once, then serve decisions until interrupted."""
-    from jevmlx.cli import _engine
+    from jevmlx.engine import load_engine, run_parallel_generation
     from jevmlx.schema import StructuredSchema
 
-    load_engine, run_parallel_generation = _engine()
     logger.info("Loading %s ...", model_id)
     model, tokenizer = load_engine(model_id)
 
@@ -118,13 +117,6 @@ def serve(model_id: str, host: str = "127.0.0.1", port: int = 8000) -> None:
         schema = StructuredSchema(schema_dict)
         return run_parallel_generation(model, tokenizer, context, schema, temperature=temperature)
 
-    _serve_handler(decide_fn, model_id, host, port)
-
-
-def _serve_handler(decide_fn, model_id: str, host: str, port: int) -> None:
-    """Bind + serve forever (the engine-free seam: tests inject decide_fn)."""
     server = HTTPServer((host, port), make_handler(decide_fn, model_id, _ServerStats()))
-    logger.info(
-        "jevmlx serving %s on http://%s:%s", model_id, host or "127.0.0.1", server.server_port
-    )
+    logger.info("jevmlx serving %s on http://%s:%s", model_id, host, server.server_port)
     server.serve_forever()
