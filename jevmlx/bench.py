@@ -773,7 +773,12 @@ def _set_metal_cache_limit(cache_gb: float) -> int | None:
         limit_bytes = int(float(cache_gb) * 2**30)
         mx.metal.set_cache_limit(limit_bytes)
         return limit_bytes
-    except Exception:  # noqa: BLE001 - telemetry must never break the run
+    except Exception as exc:  # noqa: BLE001 - telemetry must never break the run
+        print(
+            f"[memory] Metal buffer cache cap NOT set ({exc!r}); "
+            "the allocator may hoard",
+            flush=True,
+        )
         return None
 
 

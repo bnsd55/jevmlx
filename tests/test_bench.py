@@ -1106,8 +1106,9 @@ def test_w5c14_set_cache_limit_called_once_with_configured_bytes(tmp_path, monke
     assert run["memory"]["metal_cache_limit_bytes"] == int(4.0 * 2**30)
 
 
-def test_w5c14_set_cache_limit_returns_none_on_failure(monkeypatch):
-    """_set_metal_cache_limit returns None when mx.metal raises (best-effort)."""
+def test_w5c14_set_cache_limit_returns_none_on_failure(monkeypatch, capsys):
+    """_set_metal_cache_limit returns None when mx.metal raises (best-effort)
+    and prints a 'NOT set' warning so the silent-failure path is visible."""
     import mlx.core as mx
 
     from jevmlx.bench import _set_metal_cache_limit
@@ -1116,3 +1117,5 @@ def test_w5c14_set_cache_limit_returns_none_on_failure(monkeypatch):
         mx.metal, "set_cache_limit", lambda b: (_ for _ in ()).throw(RuntimeError("no metal"))
     )
     assert _set_metal_cache_limit(8.0) is None
+    captured = capsys.readouterr()
+    assert "NOT set" in captured.out
