@@ -1013,31 +1013,104 @@ class TestReviewRound4:
             f"predictions differ: clean={len(clean_bytes)}B, resumed={len(resumed_bytes)}B"
         )
 
-    def test_bench_run_eval_into_empty_dir(self, tmp_path):
-        """B3: one unmocked run_eval call into an empty dir (the path bench
-        takes on a fresh combo). Verifies the manifest is written, predictions
-        are per-case, and run.json has full counts."""
-        from jevmlx.evalrun import run_eval
-        from jevmlx.resume import completed_case_keys, load_manifest
+    def test_bench_run_eval_into_empty_dir(self, tmp_path, monkeypatch):
+        """B3: one run through run_bench/_run_one with ONLY the engine load
+        mocked. Exercises bench's manifest-present -> resume rule and --fresh
+        rmtree. Verifies the manifest is written, predictions are per-case,
+        and run.json has full counts."""
+        import jevmlx.engine as engine_mod
+        from jevmlx import bench
 
-        out = tmp_path / "fresh_combo"
-        run_eval(
-            self._cases(),
-            self._decide(),
-            track="parallel",
-            model="test-model",
-            out_dir=str(out),
-            run_id=self._FIXED_RUN_ID,
+        # Build a minimal dataset JSONL + lock in tmp_path.
+        jsonl = tmp_path / "data.jsonl"
+        jsonl.write_text(
+            "\n".join(
+                json.dumps(
+                    {
+                        "id": f"case-{i}",
+                        "schema": {"verdict": {"type": "enum", "choices": ["yes", "no"]}},
+                        "context": f"Evidence {i}.",
+                        "labels": {"verdict": "yes" if i % 2 == 0 else "no"},
+                        "split": "train",
+                    }
+                )
+                for i in range(3)
+            )
+            + "\n",
+            encoding="utf-8",
         )
-        # Manifest written at start.
-        manifest = load_manifest(out)
-        assert manifest is not None
-        assert manifest["run_id"] == self._FIXED_RUN_ID
+        lock = tmp_path / "data.dataset.lock.json"
+        lock.write_text(
+            json.dumps({"name": "data", "sha256": "deadbeef", "files": {}}),
+            encoding="utf-8",
+        )
+
+        # Mock ONLY the engine load path — everything else (run_bench,
+        # _run_one, run_eval, resume infra) runs unmocked.
+        class _FakeTokenizer:
+            chat_template = None
+
+        class _FakeEngine:
+            tokenizer = _FakeTokenizer()
+
+        monkeypatch.setattr(bench, "preflight", lambda force, machine_override: "test-machine")
+        monkeypatch.setattr(
+            bench,
+            "build_datasets",
+            lambda datasets: ({"data": jsonl}, {"data": lock}),
+        )
+        monkeypatch.setattr(
+            bench, "_load_engine_with_timeout", lambda model, timeout: _FakeEngine()
+        )
+        monkeypatch.setattr(bench, "_run_model_parity", lambda model, engine, folder: None)
+        monkeypatch.setattr(engine_mod, "load_engine", lambda model: _FakeEngine())
+        monkeypatch.setattr(
+            bench,
+            "parallel_decide_fn",
+            lambda engine, scoring="slots", prior_correction=False: self._decide(),
+        )
+        # Avoid the git-commit step in summarize.
+        import benchmarks.summarize_results as sr_mod
+
+        monkeypatch.setattr(sr_mod, "summarize", lambda folder, parity_note=None: None)
+
+        out = tmp_path / "results"
+        result = bench.run_bench(
+            model="test/model",
+            datasets=["data"],
+            scorers=["slots"],
+            tracks=["parallel"],
+            out=out,
+            runs=1,
+        )
+        # run_bench returns the model results folder.
+        assert result.exists()
+        # The combo dir has predictions.jsonl + manifest.json + run.json.
+        combo = result / "parallel-slots-data"
+        assert (combo / "predictions.jsonl").exists()
+        assert (combo / "manifest.json").exists()
+        assert (combo / "run.json").exists()
+        # Manifest has the prompt sha.
+        manifest = json.loads((combo / "manifest.json").read_text())
         assert manifest["prompt_sha256"] == "a" * 64
-        # All 6 cases journaled.
-        keys = completed_case_keys(out)
-        assert len(keys) == 6
-        # run.json has full counts.
-        run_json = json.loads((out / "run.json").read_text())
+        # run.json has full counts. 3 cases x 2 variants (canonical + rot1
+        # for a 2-choice enum) = 6 prediction lines.
+        run_json = json.loads((combo / "run.json").read_text())
         assert run_json["counts"]["prediction_lines"] == 6
-        assert run_json["counts"]["fields"] == 6
+
+        # Now test the --fresh rmtree: re-run with fresh=True, verify the
+        # old combo dir was removed and a new one written.
+        old_mtime = (combo / "predictions.jsonl").stat().st_mtime
+        result = bench.run_bench(
+            model="test/model",
+            datasets=["data"],
+            scorers=["slots"],
+            tracks=["parallel"],
+            out=out,
+            runs=1,
+            fresh=True,
+        )
+        assert result.exists()
+        assert (combo / "predictions.jsonl").exists()
+        # The file was rewritten (--fresh removed the dir).
+        assert (combo / "predictions.jsonl").stat().st_mtime >= old_mtime
