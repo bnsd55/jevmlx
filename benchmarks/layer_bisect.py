@@ -331,6 +331,196 @@ def run_bisect(
 
 
 # ---------------------------------------------------------------------------
+# W5c-10 follow-ups (fp32 body): width curve, relative diff, GEMM isolation
+# ---------------------------------------------------------------------------
+
+WIDTH_CURVE = (16, 24, 32, 48, 56, 64, 84, 112, 128)
+
+
+def _capture_with_magnitude(
+    model,
+    built: dict,
+    pf_cache_list: list,
+    n: int,
+    pad_id: int,
+) -> tuple[dict[str, list], dict[str, list], list[int]]:
+    """Like _capture_at_width but also returns max |activation| per layer.
+
+    Returns (caps, magnitudes, schema_keys) where magnitudes[cap][li] is the
+    max abs value over the decision-position hidden vectors for that layer.
+    """
+    from jevmlx.engine import _broadcast_cache, _eval_cache_state
+
+    rows_n, decisions_n = _rows_for_width(built, n)
+    widths = [len(r) for r in rows_n]
+    width = max(widths)
+    padded = mx.array([r + [pad_id] * (width - len(r)) for r in rows_n], dtype=mx.int32)
+    positions = mx.array([d[0] for d in decisions_n], dtype=mx.int32)
+    b_cache = _broadcast_cache(pf_cache_list, n)
+    max_padding = max(width - w for w in widths) if widths else 0
+    if max_padding > 0:
+        for c in b_cache:
+            if hasattr(c, "prepare"):
+                c.prepare(lengths=widths, right_padding=[width - w for w in widths])
+    _eval_cache_state(b_cache)
+    caps = _run_layer_captures(model, padded, b_cache, positions)
+    names = ["residual_in", "norm_out", "attn_out", "mlp_out", "final_norm_out"]
+    mags: dict[str, list] = {n: [] for n in names}
+    for name in names:
+        for arr in caps[name]:
+            mags[name].append(float(mx.max(mx.abs(arr.astype(mx.float32))).item()))
+    schema_keys = [j % len(built["rows"]) for j in range(n)]
+    return caps, mags, schema_keys
+
+
+def followup_width_curve(
+    model,
+    built: dict,
+    pf_cache_list: list,
+    pad_id: int,
+    ref_caps: dict[str, list],
+    ref_keys: list[int],
+) -> dict[str, Any]:
+    """(1) Width curve on the fp32 body: final_norm_out + L03 mlp_out diff
+    at M = 16,24,32,48,56,64,84,112,128 — find the exact jump M and whether
+    it is a step or a ramp."""
+    rows: list[dict] = []
+    for n in WIDTH_CURVE:
+        caps, _mags, got_keys = _capture_with_magnitude(model, built, pf_cache_list, n, pad_id)
+        diffs = _per_layer_diffs(ref_caps, caps, ref_keys, got_keys)
+        rows.append(
+            {
+                "M": n,
+                "final_norm_out": diffs["final_norm_out"][0],
+                "L03_mlp_out": diffs["mlp_out"][3],
+            }
+        )
+        print(
+            f"  M={n:3d}: final_norm_out={rows[-1]['final_norm_out']:.6f}  "
+            f"L03_mlp_out={rows[-1]['L03_mlp_out']:.6f}",
+            flush=True,
+        )
+    return {"widths": list(WIDTH_CURVE), "rows": rows}
+
+
+def followup_relative_diff(
+    model,
+    built: dict,
+    pf_cache_list: list,
+    pad_id: int,
+    ref_caps: dict[str, list],
+    ref_keys: list[int],
+) -> dict[str, Any]:
+    """(2) Relative diff = max_abs_diff / max|activation| per layer for
+    M=16 and M=112. Tests the outlier-magnitude hypothesis (Qwen2 has
+    activation outliers of 1e3-1e4)."""
+    out = {}
+    for n in (16, 112):
+        caps, mags, got_keys = _capture_with_magnitude(model, built, pf_cache_list, n, pad_id)
+        diffs = _per_layer_diffs(ref_caps, caps, ref_keys, got_keys)
+        names = ["residual_in", "norm_out", "attn_out", "mlp_out", "final_norm_out"]
+        rel: dict[str, list[float]] = {nm: [] for nm in names}
+        abs_mags: dict[str, list[float]] = {nm: [] for nm in names}
+        abs_diffs: dict[str, list[float]] = {nm: [] for nm in names}
+        for nm in names:
+            for li in range(len(diffs[nm])):
+                d = diffs[nm][li]
+                m = mags[nm][li]
+                abs_diffs[nm].append(d)
+                abs_mags[nm].append(m)
+                rel[nm].append(d / m if m > 0 else 0.0)
+        out[f"M={n}"] = {
+            "abs_diff": abs_diffs,
+            "max_abs_activation": abs_mags,
+            "relative_diff": rel,
+        }
+    return out
+
+
+def followup_gemm_isolation(
+    model,
+    built: dict,
+    pf_cache_list: list,
+    pad_id: int,
+    jump_m: int,
+) -> dict[str, Any]:
+    """(3) At the jump M, isolate the MLP op: compare
+    mlp(post_attention_layernorm(h)) computed (a) on the full batch vs
+    (b) row by row on the same h, in fp32. If (a) != (b) the GEMM path
+    changes with M; if equal, look at the attention output feeding h.
+
+    We re-run the forward to L03 capturing h (the residual after attention,
+    i.e. the input to the MLP block) for the full batch, then recompute the
+    MLP both ways on that SAME h."""
+    from jevmlx.engine import _broadcast_cache, _eval_cache_state
+
+    m = model.model
+    rows_n, decisions_n = _rows_for_width(built, jump_m)
+    widths = [len(r) for r in rows_n]
+    width = max(widths)
+    padded = mx.array([r + [pad_id] * (width - len(r)) for r in rows_n], dtype=mx.int32)
+    positions = mx.array([d[0] for d in decisions_n], dtype=mx.int32)
+    b_cache = _broadcast_cache(pf_cache_list, jump_m)
+    max_padding = max(width - w for w in widths) if widths else 0
+    if max_padding > 0:
+        for c in b_cache:
+            if hasattr(c, "prepare"):
+                c.prepare(lengths=widths, right_padding=[width - w for w in widths])
+    _eval_cache_state(b_cache)
+
+    # Forward to the START of L03's MLP: embed + layers 0,1,2 (full attention).
+    h = m.embed_tokens(padded)
+    mask = _create_attention_mask(h, b_cache[0])
+    for li in range(3):
+        layer = m.layers[li]
+        x = h
+        r = layer.self_attn(layer.input_layernorm(x), mask, b_cache[li])
+        h = x + r
+        # (we do NOT run the MLP of layers 0-2 here; we need the residual
+        #  h AFTER attention but BEFORE MLP — but the block applies both.
+        #  Actually the block is h = x + attn(x); then h2 = h + mlp(h).
+        #  We need the h that feeds L03's MLP, which is the block OUTPUT of
+        #  L02, i.e. after L02's MLP too. So run the full block for 0,1,2.)
+        h = h + layer.mlp(layer.post_attention_layernorm(h))
+
+    # h is now the input to L03 (residual_in for L03). Compute L03's MLP
+    # input norm.
+    layer3 = m.layers[3]
+    mlp_in = layer3.post_attention_layernorm(h)  # (M, width, D)
+    # Decision-position vectors.
+    chunk_len = padded.shape[0]
+
+    # (a) full-batch MLP: run the MLP on the full (M, width, D) tensor.
+    mlp_full = layer3.mlp(mlp_in)  # (M, width, D)
+    mlp_full_pos = mlp_full[mx.arange(chunk_len), positions]  # (M, D)
+    mx.eval(mlp_full_pos)
+
+    # (b) row-by-row MLP on the SAME h: run the MLP one row at a time.
+    mlp_row_pos = []
+    for i in range(chunk_len):
+        one = mlp_in[i : i + 1]  # (1, width, D)
+        out = layer3.mlp(one)  # (1, width, D)
+        mlp_row_pos.append(out[0, positions[i].item()])  # (D,)
+    mlp_row_pos = mx.stack(mlp_row_pos, axis=0)  # (M, D)
+    mx.eval(mlp_row_pos)
+
+    diff = mx.max(mx.abs(mlp_full_pos.astype(mx.float32) - mlp_row_pos.astype(mx.float32))).item()
+    mag = float(mx.max(mx.abs(mlp_full_pos.astype(mx.float32))).item())
+    print(
+        f"  GEMM isolation @ M={jump_m}: full-vs-row max abs diff = {diff:.6f}, "
+        f"max |activation| = {mag:.6f}, relative = {diff / mag if mag > 0 else 0:.6f}",
+        flush=True,
+    )
+    return {
+        "jump_M": jump_m,
+        "full_vs_row_max_abs_diff": diff,
+        "max_abs_activation": mag,
+        "relative_diff": diff / mag if mag > 0 else 0.0,
+        "gemm_path_changes_with_M": diff > 1e-6,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Reporting
 # ---------------------------------------------------------------------------
 
@@ -410,6 +600,30 @@ def main() -> int:
     mx.eval(_w)
     fp32_result = run_bisect(engine, built, pf_cache_list, pad_id, label="fp32")
 
+    # The fp32 batch=1 reference (for the follow-ups).
+    print("=== (3) fp32 follow-ups ===", flush=True)
+    fp32_ref_caps, fp32_ref_keys = _capture_reference_batch1(
+        engine.model, built, pf_cache_list, pad_id
+    )
+
+    print("  (3.1) width curve (final_norm_out + L03 mlp_out)...", flush=True)
+    width_curve = followup_width_curve(
+        engine.model, built, pf_cache_list, pad_id, fp32_ref_caps, fp32_ref_keys
+    )
+
+    print("  (3.2) relative diff (max_abs_diff / max|activation|)...", flush=True)
+    rel_diff = followup_relative_diff(
+        engine.model, built, pf_cache_list, pad_id, fp32_ref_caps, fp32_ref_keys
+    )
+
+    # Find the jump M: the first M where L03_mlp_out > 0.01.
+    jump_m = next(
+        (r["M"] for r in width_curve["rows"] if r["L03_mlp_out"] > 0.01),
+        width_curve["rows"][-1]["M"] if width_curve["rows"] else 112,
+    )
+    print(f"  (3.3) GEMM isolation at jump M={jump_m}...", flush=True)
+    gemm_iso = followup_gemm_isolation(engine.model, built, pf_cache_list, pad_id, jump_m)
+
     print()
     print("## Table 1: drift by layer (fp16 body)")
     print()
@@ -418,6 +632,51 @@ def main() -> int:
     print("## Table 2: drift by layer (fp32 body)")
     print()
     print(_fmt_table(fp32_result["tables"], n_layers))
+
+    # --- Follow-up tables (fp32 body) ---
+    print()
+    print("## Table 3: fp32 width curve (final_norm_out + L03 mlp_out)")
+    print()
+    print("| M | final_norm_out | L03_mlp_out |")
+    print("|---|---|---|")
+    for r in width_curve["rows"]:
+        print(f"| {r['M']} | {r['final_norm_out']:.6f} | {r['L03_mlp_out']:.6f} |")
+
+    print()
+    print("## Table 4: fp32 relative diff (max_abs_diff / max|activation|)")
+    print()
+    for mkey in ("M=16", "M=112"):
+        rd = rel_diff[mkey]
+        print(f"### {mkey}")
+        print()
+        print("| layer / capture | abs_diff | max_abs_activation | relative_diff |")
+        print("|---|---|---|---|")
+        names = ["residual_in", "norm_out", "attn_out", "mlp_out", "final_norm_out"]
+        n_caps = len(rd["abs_diff"]["residual_in"])
+        for li in range(n_caps):
+            for nm in names:
+                if nm == "final_norm_out" and li != n_caps - 1:
+                    continue
+                idx = 0 if nm == "final_norm_out" else li
+                print(
+                    f"| L{li:02d} {nm} | {rd['abs_diff'][nm][idx]:.6f} | "
+                    f"{rd['max_abs_activation'][nm][idx]:.6f} | "
+                    f"{rd['relative_diff'][nm][idx]:.6f} |"
+                )
+        print()
+
+    print("## Table 5: GEMM isolation (full-batch vs row-by-row MLP at L03)")
+    print()
+    print(
+        "| jump_M | full_vs_row_max_abs_diff | max_abs_activation |"
+        " relative_diff | gemm_path_changes |"
+    )
+    print("|---|---|---|---|---|")
+    print(
+        f"| {gemm_iso['jump_M']} | {gemm_iso['full_vs_row_max_abs_diff']:.6f} | "
+        f"{gemm_iso['max_abs_activation']:.6f} | {gemm_iso['relative_diff']:.6f} | "
+        f"{gemm_iso['gemm_path_changes_with_M']} |"
+    )
 
     # Write JSON.
     out_dir = Path(args.out) if args.out else Path("benchmarks/probes") / _probe_dir(args.model)
@@ -432,6 +691,9 @@ def main() -> int:
                 "widths": list(WIDTHS),
                 "fp16_body": fp16_result,
                 "fp32_body": fp32_result,
+                "fp32_width_curve": width_curve,
+                "fp32_relative_diff": rel_diff,
+                "fp32_gemm_isolation": gemm_iso,
             },
             indent=2,
         )
