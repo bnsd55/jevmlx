@@ -28,7 +28,7 @@ trust the code over this document when they drift.
 | [`jevmlx/openai_slots.py`](jevmlx/openai_slots.py) | OpenAI-compatible slot backend: one request per option, top-k logprobs with an explicit floor and a `truncated` flag. |
 | [`jevmlx/bench.py`](jevmlx/bench.py) | Dataset × scorer × track matrix runner writing results directories; writes `parity.json` per model folder right after the engine load. |
 | [`jevmlx/log.py`](jevmlx/log.py) | Logging configuration (`-v`, `JEVMLX_LOG=json`). |
-| [`jevmlx/timing.py`](jevmlx/timing.py) | W5b-8 event ledger for engine timing (`Ledger`, `Interval`, `SpanError`): non-overlapping named spans in two phases (`prior`, `main`), with `Ledger.derived_flat` deriving today's `*_ms` result keys (`plan_compile_ms`, `prefill_ms`, `cache_broadcast_ms`, composite `suffix_eval_ms`, `lm_head_gather_ms`, `second_pass_ms`, `prior_ms`, `elapsed_ms`, `total_ms`) and `Ledger.batched_views` producing `group_wall` / `per_item_amortized` / `per_item_end_to_end`. Standalone — pure Python, no mlx import, NO engine wiring yet: the engine's ad-hoc timers are untouched until W6 adoption. |
+| [`jevmlx/timing.py`](jevmlx/timing.py) | W5b-8 event ledger for engine timing (`Ledger`, `Interval`, `SpanError`): non-overlapping named spans in two phases (`prior`, `main`), with `Ledger.derived_flat` deriving today's `*_ms` result keys (`plan_compile_ms`, `prefill_ms`, `cache_broadcast_ms`, composite `suffix_eval_ms`, `lm_head_gather_ms`, `second_pass_ms`, `prior_ms`, `elapsed_ms`, `total_ms`) and `Ledger.batched_views` producing `group_wall` / `per_item_amortized` / `per_item_end_to_end`. Pure Python, no mlx import. W5b-14: ADOPTED by the engine — every stage records ledger spans and the result dict's `*_ms` keys are pure `derived_flat()` derivations; the ad-hoc `*_ms` accumulators are gone. |
 | [`jevmlx/adapters.py`](jevmlx/adapters.py) | W6-1 LM-head adapters (`LMHeadAdapter` protocol, `adapter_for`, `UnsupportedModelError`, `list_supported_model_types`): backbone/lm_head split per installed mlx_lm family (untied `lm_head`, tied `embed_tokens.as_linear`, gemma3 always-head, biased phi head, mistral3 delegation). Registry-only — NO engine wiring yet; engine call sites adopt it in W6-2+. |
 | [`benchmarks/to_jsonl.py`](benchmarks/to_jsonl.py) | Bundled `cases.json` → eval JSONL (+ lock). |
 | [`benchmarks/typesafe/fetch.py`](benchmarks/typesafe/fetch.py) | TypeSafe public pages → eval JSONL (+ lock, `benchmark_only`). |
@@ -116,8 +116,10 @@ assembly  (winners → typed values via alias_map; multi = per-option Y/N
   │    codes at T=1; row codes '00','01',… map back to choices)
   ▼
 result dict  {parsed_json, field_telemetry, prompt_sha256, full timing
-  │    split incl. plan_compile_ms / cache_broadcast_ms / padded_token_positions,
-  │    peak_active_bytes + peak_incremental_bytes, failed_attempts, …}
+  │    split derived from the request's timing.Ledger (one measurement per
+  │    interval; suffix_eval_ms = the cache_merge+transformer+gather
+  │    composite), padded_token_positions, peak_active_bytes +
+  │    peak_incremental_bytes, failed_attempts, …}
   │
   ├──► api.Decision / FieldResult        (Python)
   └──► evalrun predictions.jsonl lines   (eval) / CLI table       (decide)
@@ -139,7 +141,22 @@ INCREMENTALLY from actual cumulative cache bytes + projected suffix cost
 (contexts sorted by prompt length); ONE merged scoring pass per group with
 per-row cache slots; prior computed ONCE per call; per-result timing keys
 group_wall_ms / per_item_amortized_ms / per_item_end_to_end_ms /
-contexts_per_pass (the ACTUAL group size).
+contexts_per_pass (the ACTUAL group size). W5b-14 GAP A: one Ledger PER
+CONTEXT — each result's flat `*_ms` keys derive from that context's own
+ledger (its prefill span + its assembly-side spans), so prefill_ms is
+never the batch-wide sum; the group's merged scoring pass lives on the
+per-GROUP ledger ONLY (no fabricated per-context spans) and the amortized
+share is the ONE derived number `per_item_amortized_ms`, computed once
+from the group ledger via `Ledger.batched_views`.
+`per_item_end_to_end_ms` = the context's own prefill span + the
+amortized group share + its own assembly span (sum of intervals, N6 — a
+context in group k never carries other groups' wall time; the shared
+`prior_ms` is reported separately, not added). Because the per-context ledgers carry no
+request span, their flat `elapsed_ms` is the top-level main-span sum of
+that context's own spans (single-context requests have a `request` span
+and report true wall); the shared `prior_ms` (request ledger, finding 26)
+is passed into `derived_flat(prior_ms=...)` so every result reports it
+and `total_ms == elapsed_ms + prior_ms` holds everywhere.
 
 bench: after the engine load, jevmlx/parity.py runs the batch=1 vs batched
 vs chunked parity check over the four bundled presets (their real contexts)
@@ -154,8 +171,8 @@ load).
 
 | Key | Meaning |
 |---|---|
-| `elapsed_ms` | Wall clock for the decision (excludes the prior pass). |
-| `prior_ms` / `prefill_ms` / `plan_compile_ms` / `cache_broadcast_ms` / `suffix_eval_ms` / `lm_head_gather_ms` / `total_ms` | The honest timing split: neutral prior pass (0.0 when `prior_correction` is off), prefill, plan compilation (plan cache makes it ~0 warm), broadcast+prepare+eval of the per-chunk cache copies (distinct from the forwards), batched suffix, decision gather inside the suffix window, and everything (`total_ms == elapsed_ms + prior_ms`). |
+| `elapsed_ms` | W5b-14: the top-level `request` ledger span — true wall time for the decision (excludes the prior pass; plan/prefill/scoring/assembly are its children, so nothing double-counts). |
+| `prior_ms` / `prefill_ms` / `plan_compile_ms` / `cache_broadcast_ms` / `suffix_eval_ms` / `lm_head_gather_ms` / `total_ms` | The honest timing split (W5b-14: ledger-derived — one measurement per interval, no overlapping accumulators): the neutral prior pass (a `prior`-phase `prior_pass` span; ~0 when the prior cache hits, 0.0 when `prior_correction` is off), prefill, plan compilation (plan cache makes it ~0 warm), the per-chunk cache merge/broadcast spans (distinct from the forwards; `cache_broadcast_ms`), the batched suffix (`suffix_eval_ms` = the cache_merge + transformer + gather composite, marked derived), the decision gather inside the suffix window (`lm_head_gather_ms`), and everything (`total_ms == elapsed_ms + prior_ms`). A failed forward/gather (Metal retry, W5-D finding 30) records NO interval — the ledger drops the span the exception unwinds through; the parents survive (only spans nested INSIDE the failing span are dropped). |
 | `second_pass_ms` / `rerun_fields` / `rerun_rows` | The `depends_on` second pass: wall time, which fields were re-decided, how many conditioned rows ran (0.0/[] when no `depends_on`). |
 | `padded_token_positions` | W3-R: total suffix token positions including right padding — sum of (chunk width x chunk rows), the tiling shape the forwards actually ran at. |
 | `rescored_fields` | Fields whose batched result was replaced by the batch=1 canonical rescore. |
@@ -173,7 +190,7 @@ load).
 | `field_telemetry` | `{field: entry}` — see next table. |
 | `num_fields` | Field count. |
 
-Batched-only keys (`run_parallel_generation_batched`, every result): `group_wall_ms` (the group's wall time incl. prefill+scoring+assembly), `per_item_amortized_ms` (group wall / group size), `per_item_end_to_end_ms` (this context's own prefill + its share), `contexts_per_pass` (the ACTUAL group size — the final partial group reports its own smaller size). With `prior_correction=True` the neutral pass is computed ONCE per call and every result reports the shared `prior_ms`. |
+Batched-only keys (`run_parallel_generation_batched`, every result): `group_wall_ms` (merged scoring + assembly of the group — prefill is per context in `prefill_ms`, since the grouping loop needs the prefill sizes BEFORE it can form groups), `per_item_amortized_ms` (group wall / group size — the ONE amortized number, from `Ledger.batched_views`), `per_item_end_to_end_ms` (the context's OWN prefill span + the amortized group share + its OWN assembly span — a sum of intervals, so a context in group k never carries other groups' wall time; the shared `prior_ms` is reported separately, not added), `contexts_per_pass` (the ACTUAL group size — the final partial group reports its own smaller size). With `prior_correction=True` the neutral pass is computed ONCE per call on the request ledger and every result reports the shared `prior_ms` (`total_ms` includes it). Batched per-context ledgers carry no `request` span, so their flat `elapsed_ms` is the top-level main-span sum of that context's own spans (single-context requests have the `request` span and report true wall). |
 
 ### `field_telemetry` entry — built in `run_parallel_generation`'s field loop (multi), scalar branch, and the `<field>#count` branch
 

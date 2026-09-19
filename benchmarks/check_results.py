@@ -54,6 +54,9 @@ _NUMERIC_TOLERANCE = 1e-9
 # must carry in timing.json's ``median`` block (ride the parallel _meta).
 # Batched decide_many keys land there only when the run used the batched
 # path; the single-context split below is required either way.
+# W5b-14: the keys are UNCHANGED but their provenance changed — every one
+# is a derivation of the request's timing.Ledger (derived_flat), measured
+# once per interval; suffix_eval_ms stays the documented composite.
 TIMING_SPLIT_KEYS = (
     "prior_ms",
     "prefill_ms",

@@ -153,8 +153,8 @@ def test_batched_views_amortized():
             with ledger.span("transformer"):
                 pass
     group_int = [iv for iv in ledger.intervals if iv.name == "group_wall"][0]
-    views = ledger.batched_views(group_int, list(range(4)))
-    assert views["per_item_amortized_ms"] == [pytest.approx(views["group_wall_ms"][0] / 4)]
+    views = ledger.batched_views(group_int, 4)
+    assert views["per_item_amortized_ms"] == [pytest.approx(views["group_wall_ms"][0] / 4)] * 4
     # Honest per-item end-to-end: own prefill start -> own assembly end.
     ivals = {iv.name: iv for iv in ledger.intervals}
     e2e = ledger.per_item_end_to_end(ivals["prefill"], ivals["transformer"])
