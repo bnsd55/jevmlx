@@ -56,6 +56,10 @@ existing output dir — the manifest is verified (config/code/model/tokenizer/
 prompt/machine must match), `predictions.jsonl` is truncated to the last
 committed byte offset (discarding any half-written trailing data), and
 completed cases are skipped. Pass `--fresh` to force reruns.
+With `--runs N > 1`, the first run resumes if a manifest is present, and
+each subsequent run starts from a clean combo dir (the prior run's output
+is removed) so only the last run's predictions are kept — 'last one kept'
+semantics, no cross-run contamination.
 
 ## 3. Commit the results folder
 

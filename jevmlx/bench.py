@@ -573,6 +573,17 @@ def run_bench(
                         print(f"parity check error: {parity_note}", flush=True)
                 result = None
                 for run_index in range(runs):
+                    if run_index > 0:
+                        # W5c-12: repeat runs start from a clean combo dir.
+                        # 'last one kept' semantics: run 1's output is
+                        # discarded (rmtree + recreate), then run 2+ runs
+                        # fresh (resume=False). --resume applies to the FIRST
+                        # run only (manifest present -> resume run 1).
+                        import shutil as _shutil
+
+                        print(f"=== {combo}: run {run_index + 1}/{runs}, cleaning combo dir ===")
+                        _shutil.rmtree(combo_dir)
+                        combo_dir.mkdir(parents=True, exist_ok=True)
                     result = _run_one(
                         model,
                         track,
@@ -580,7 +591,9 @@ def run_bench(
                         dataset_paths[dataset],
                         combo_dir,
                         dataset_lock_path=dataset_locks.get(dataset),
-                        resume=_has_manifest,
+                        # --resume applies to the first run only (manifest
+                        # present -> resume). Repeat runs are always fresh.
+                        resume=_has_manifest and run_index == 0,
                     )
                     print(f"  run {run_index + 1}/{runs} done")
                 assert result is not None
