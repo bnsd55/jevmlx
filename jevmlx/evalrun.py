@@ -102,6 +102,65 @@ def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _full_line_skeleton(
+    run_id: str,
+    case: dict,
+    tag: str | None,
+    track: str,
+    model: str,
+    *,
+    field: str = "_error",
+    error: str | None = None,
+) -> dict[str, Any]:
+    """A prediction-line-shaped dict for error/marker lines.
+
+    Every key in PREDICTION_LINE_KEYS is present (None for irrelevant),
+    so error/marker lines pass the frozen-contract check in check_results.
+    Written to errors.jsonl (NOT predictions.jsonl) so they do not survive
+    resume (R2).
+    """
+    return {
+        "run_id": run_id,
+        "case_id": case.get("id"),
+        "group_id": case.get("group_id"),
+        "source": case.get("source"),
+        "workflow": case.get("workflow"),
+        "field": field,
+        "type": None,
+        "track": track,
+        "model": model,
+        "permutation": tag or "canonical",
+        "label": case.get("labels", {}).get(field),
+        "prediction": None,
+        "valid": False,
+        "correct": None,
+        "log_scores": None,
+        "probability": None,
+        "per_option": None,
+        "latency_ms": None,
+        "per_item_end_to_end_ms": None,
+        "rows": None,
+        "passes": None,
+        "error": error,
+        "salvage_prediction": None,
+        "oracle_prediction": None,
+    }
+
+
+def _next_timing_segment(out_dir: str) -> int:
+    """Glob timing.segment-*.json and return max+1, or 0 if none exist."""
+    import glob
+
+    segments = []
+    for p in glob.glob(os.path.join(out_dir, "timing.segment-*.json")):
+        try:
+            n = int(os.path.basename(p).split("-")[1].split(".")[0])
+            segments.append(n)
+        except (ValueError, IndexError):
+            continue
+    return (max(segments) + 1) if segments else 0
+
+
 def _sha256_file(path: str | None) -> str | None:
     if not path or not os.path.exists(path):
         return None
@@ -492,6 +551,7 @@ def run_eval(
     dataset_path: str | None = None,
     carry_perturbation: bool = False,
     carry_consensus: bool = False,
+    resume: bool = False,
 ) -> dict:
     """Run the batch and write ``predictions.jsonl`` + ``run.json`` into out_dir.
 
@@ -514,138 +574,318 @@ def run_eval(
     run_id = run_id or make_run_id()
     os.makedirs(out_dir, exist_ok=True)
 
+    # W5c-7: crash-safe resumable eval infrastructure.
+    from datetime import UTC, datetime
+
+    from jevmlx.resume import (
+        CircuitBreaker,
+        ManifestMismatchError,
+        ResultsLock,
+        build_manifest,
+        completed_case_keys,
+        failure_signature,
+        load_manifest,
+        machine_probe,
+        truncate_to_last_commit,
+        verify_manifest_matches,
+        write_case_blob,
+        write_manifest,
+    )
+    from jevmlx.resume import (
+        case_key as _case_key,
+    )
+
+    _code_hash = {
+        "jevmlx_evalrun": _sha256_text(open(__file__, encoding="utf-8").read()),
+    }
+    _machine = machine_probe()
+    _model_revision = None
+    _tokenizer_revision = None
+    _prompt_version = None
+    if track == "parallel":
+        try:
+            from jevmlx.engine import PROMPT_VERSION, engine_metadata
+
+            _metadata = engine_metadata(model)
+            _model_revision = _metadata["revision"]
+            _tokenizer_revision = _metadata.get("revision")
+            _prompt_version = PROMPT_VERSION
+        except Exception:  # noqa: BLE001
+            pass
+    manifest = build_manifest(
+        config={
+            "model": model,
+            "temperature": 1.0,
+            "track": track,
+            "permutations": permutations if track == "parallel" else "none",
+            "split": split,
+            "prompt_version": _prompt_version,
+        },
+        dataset_lock_sha256=_sha256_file(dataset_lock_path),
+        prompt_version=_prompt_version,
+        prompt_sha256=None,
+        model_id=model,
+        model_revision=_model_revision,
+        tokenizer_revision=_tokenizer_revision,
+        tokenizer_chat_template_sha256=(_sha256_text(chat_template) if chat_template else None),
+        machine=_machine,
+        code_hash=_code_hash,
+        run_id=run_id,
+    )
+    # N2: sessions list — durable per-session record for the segment counter.
+    manifest["sessions"] = [
+        {"segment": 0, "started_utc": datetime.now(UTC).isoformat(timespec="seconds")}
+    ]
+    _resume_keys: set[str] = set()
+    _segment = 0
+    _run_id_for_run = run_id
+    _stored_prompt_sha: str | None = None
+    if resume:
+        existing_manifest = load_manifest(out_dir)
+        if existing_manifest is None:
+            raise RuntimeError(
+                f"--resume requested but no manifest.json in {out_dir} "
+                "(the run was never started). Re-run without --resume."
+            )
+        verify_manifest_matches(
+            existing_manifest, manifest, skip_fields=("prompt_sha256", "sessions")
+        )
+        _stored_prompt_sha = existing_manifest.get("prompt_sha256")
+        _resume_keys = completed_case_keys(out_dir)
+        _run_id_for_run = existing_manifest.get("run_id", run_id)
+        with ResultsLock(out_dir):
+            truncate_to_last_commit(out_dir)
+            # R1: mutate the EXISTING manifest (which has the stored
+            # prompt_sha256) — never write the new manifest on resume
+            # (it has prompt_sha256=None and would overwrite the sha).
+            _sessions = existing_manifest.get("sessions", [])
+            _segment = len(_sessions)
+            existing_manifest["sessions"] = _sessions + [
+                {
+                    "segment": _segment,
+                    "started_utc": datetime.now(UTC).isoformat(timespec="seconds"),
+                }
+            ]
+            write_manifest(out_dir, existing_manifest)
+            manifest = existing_manifest
+    else:
+        # S4: refuse to start fresh into a folder that already has
+        # predictions.jsonl (would double the file). Use --resume.
+        _pred_path = os.path.join(out_dir, "predictions.jsonl")
+        if os.path.exists(_pred_path):
+            raise RuntimeError(
+                f"{out_dir}/predictions.jsonl already exists. "
+                "Use --resume to continue, or remove the directory."
+            )
+        write_manifest(out_dir, manifest)
+
     selected = [c for c in cases if split == "all" or c.get("split", "train") == split]
 
     timing_meta: list[dict[str, Any]] = []  # W3-R: parallel _meta timings
     lines: list[dict] = []
     n_canonical = 0
-    # Capture the first parallel result's field_telemetry for tokenizer metrics
-    # (legal_mass, rows). Only the first case is needed — the schema is the
-    # same across cases in a run; later cases would add noise, not signal.
     first_field_telemetry: dict[str, Any] | None = None
-    for case in selected:
-        schema = StructuredSchema(case["schema"])
-        variants = (
-            _schema_variants(case, schema, permutations)
-            if track == "parallel" and permutations != "none"
-            else [(None, case["schema"])]
-        )
-        for tag, schema_dict in variants:
-            try:
-                results = decide_fn(
-                    schema_dict, case["context"], constraints=case.get("constraints")
-                )
-            except TypeError:
-                # decide_fn doesn't accept constraints (mock/baseline) —
-                # call without it (constraints only apply to the parallel track).
-                results = decide_fn(schema_dict, case["context"])
-            meta = results.pop("_meta", {})
-            # W3-R: parallel-track _meta carries the engine's timing split —
-            # collect per-case for the combo timing.json (median over cases).
-            if track == "parallel" and tag is None and meta:
-                timing_meta.append(meta)
-            if tag is None and first_field_telemetry is None and meta.get("field_telemetry"):
-                first_field_telemetry = meta["field_telemetry"]
-            if tag is None:
-                n_canonical += len(results)
-
-            # W3-D part 2: oracle pass — teacher-force the TRUE parent for
-            # fields with depends_on, so oracle_parent_gap can be computed.
-            oracle_results: dict[str, Any] = {}
-            if track == "parallel" and tag is None:
-                labels = case.get("labels", {})
-                has_depends = any(
-                    isinstance(spec, dict) and spec.get("depends_on")
-                    for spec in schema_dict.values()
-                )
-                if has_depends and labels:
-                    # Build oracle overrides: for each field with depends_on,
-                    # set the parent to its TRUE label value.
-                    oracle_parents: dict[str, object] = {}
-                    for spec in schema_dict.values():
-                        if isinstance(spec, dict) and spec.get("depends_on"):
-                            parent = spec["depends_on"]
-                            if parent in labels:
-                                oracle_parents[parent] = labels[parent]
-                    if oracle_parents:
-                        try:
-                            oracle_out = decide_fn(
-                                schema_dict,
-                                case["context"],
-                                constraints=case.get("constraints"),
-                                oracle_overrides=oracle_parents,
-                            )
-                            oracle_out.pop("_meta", None)
-                            for ofname, ores in oracle_out.items():
-                                if "oracle_prediction" in ores:
-                                    oracle_results[ofname] = ores["oracle_prediction"]
-                        except TypeError:
-                            pass  # decide_fn doesn't support oracle_overrides
-            for fname, res in results.items():
-                field_def = schema.fields.get(fname)
-                prediction = res.get("prediction")
-                # W6-B1: ordered-enum lines carry the scale + telemetry.
-                ordinal_choices = res.get("ordinal_choices")
-                ordinal_record = res.get("ordinal")
-                # Rotated variants reorder the SAME canonical choice strings,
-                # so a prediction string is already canonical; the remap seam
-                # only validates membership (and would translate a positional
-                # encoding here if a future track produced one).
-                if tag and tag.startswith("rot") and field_def is not None:
-                    if isinstance(prediction, str) and prediction not in field_def.choices:
-                        prediction = None
-                label = case.get("labels", {}).get(fname)
-                line = {
-                    "run_id": run_id,
-                    "case_id": case.get("id"),
-                    "group_id": case.get("group_id"),
-                    "source": case.get("source"),
-                    "workflow": case.get("workflow"),
-                    "field": fname,
-                    "type": res.get("type") or (field_def.field_type if field_def else None),
-                    "track": track,
-                    "model": model,
-                    "permutation": tag or "canonical",
-                    "label": label,
-                    "prediction": prediction,
-                    "valid": bool(res.get("valid", prediction is not None)),
-                    "correct": None
-                    if label is None
-                    else (prediction is not None and prediction == label),
-                    "log_scores": res.get("log_scores"),
-                    "probability": res.get("probability"),
-                    "per_option": res.get("per_option"),
-                    "latency_ms": meta.get("latency_ms"),
-                    # W5c-3: per-item end-to-end on every parallel line — the
-                    # single path now reports it too (None on other tracks).
-                    "per_item_end_to_end_ms": meta.get("per_item_end_to_end_ms"),
-                    "rows": meta.get("rows"),
-                    "passes": meta.get("passes"),
-                    "error": res.get("error"),
-                    "salvage_prediction": res.get("salvage_prediction"),
-                    "oracle_prediction": oracle_results.get(fname),
-                }
-                if ordinal_choices:
-                    # F3: the pair is written together, always — an ordered
-                    # line without its ordinal record is a contract violation
-                    # downstream (_ordinal_lines raises on it).
-                    line["ordinal_choices"] = ordinal_choices
-                    line["ordinal"] = ordinal_record
-                if carry_perturbation:
-                    line["perturbation"] = (case.get("meta") or {}).get("perturbation")
-                if carry_consensus:
-                    # meta.consensus is {field: {choice: p}}; the line carries
-                    # ITS field's distribution (what tvd_vs_consensus reads).
-                    consensus = ((case.get("meta") or {}).get("consensus") or {}).get(fname)
-                    if isinstance(consensus, dict) and consensus:
-                        line["consensus"] = consensus
-                # Constraints always carried when present (case-level, not
-                # schema-level — F1: StructuredSchema would parse a 'constraints'
-                # key as a field).
-                constraints = case.get("constraints")
-                if isinstance(constraints, list) and constraints:
-                    line["constraints"] = constraints
-                lines.append(line)
+    _breaker = CircuitBreaker()
+    _circuit_tripped: str | None = None
+    with ResultsLock(out_dir):
+        for case in selected:
+            schema = StructuredSchema(case["schema"])
+            variants = (
+                _schema_variants(case, schema, permutations)
+                if track == "parallel" and permutations != "none"
+                else [(None, case["schema"])]
+            )
+            for tag, schema_dict in variants:
+                _ckey = _case_key(case, tag or "canonical")
+                if _ckey in _resume_keys:
+                    # Already committed in a prior session — skip.
+                    continue
+                variant_lines: list[dict] = []
+                marker_lines: list[dict] = []
+                if _circuit_tripped is not None:
+                    # Breaker tripped: mark remaining variants and skip.
+                    marker_lines.append(
+                        _full_line_skeleton(
+                            _run_id_for_run,
+                            case,
+                            tag,
+                            track,
+                            model,
+                            field="_skipped",
+                            error=f"circuit_breaker_tripped:{_circuit_tripped}",
+                        )
+                    )
+                    # R2: markers go to errors.jsonl, NOT predictions.jsonl.
+                    _errors_path = os.path.join(out_dir, "errors.jsonl")
+                    _blob = "".join(json.dumps(ml, sort_keys=True) + "\n" for ml in marker_lines)
+                    with open(_errors_path, "a", encoding="utf-8") as _mf:
+                        _mf.write(_blob)
+                        _mf.flush()
+                        os.fsync(_mf.fileno())
+                    continue
+                try:
+                    results = decide_fn(
+                        schema_dict, case["context"], constraints=case.get("constraints")
+                    )
+                except TypeError:
+                    results = decide_fn(schema_dict, case["context"])
+                except Exception as exc:  # noqa: BLE001 — circuit breaker
+                    sig = failure_signature(exc)
+                    # P2/P3: write the error line (full shape) for BOTH infra
+                    # and non-infra — the failure IS the result.
+                    variant_lines.append(
+                        _full_line_skeleton(
+                            _run_id_for_run,
+                            case,
+                            tag,
+                            track,
+                            model,
+                            field="_error",
+                            error=f"{type(exc).__name__}:{exc}",
+                        )
+                    )
+                    lines.extend(variant_lines)
+                    # R2: infra failures go to errors.jsonl, NOT predictions.jsonl
+                    # (they must not survive resume). Validation errors (sig
+                    # is None) ARE journaled via write_case_blob — they are
+                    # permanent results.
+                    if sig is None:
+                        write_case_blob(
+                            os.path.join(out_dir, "predictions.jsonl"),
+                            os.path.join(out_dir, "completed_cases.jsonl"),
+                            _ckey,
+                            variant_lines,
+                        )
+                    else:
+                        _errors_path = os.path.join(out_dir, "errors.jsonl")
+                        _blob = "".join(
+                            json.dumps(vl, sort_keys=True) + "\n" for vl in variant_lines
+                        )
+                        with open(_errors_path, "a", encoding="utf-8") as _ef:
+                            _ef.write(_blob)
+                            _ef.flush()
+                            os.fsync(_ef.fileno())
+                    if sig is not None and _breaker.record(exc):
+                        _circuit_tripped = sig
+                        logger.error(
+                            "circuit breaker tripped (%s) after %d consecutive "
+                            "infra failures; stopping model %s",
+                            sig,
+                            _breaker._consecutive.get(sig, 0),
+                            model,
+                        )
+                    continue
+                _breaker.record_success()
+                meta = results.pop("_meta", {})
+                # W3-R: parallel-track _meta carries the engine's timing split.
+                if track == "parallel" and tag is None and meta:
+                    timing_meta.append(meta)
+                if tag is None and first_field_telemetry is None and meta.get("field_telemetry"):
+                    first_field_telemetry = meta["field_telemetry"]
+                if tag is None:
+                    n_canonical += len(results)
+                # R1: verify prompt_sha256 on resume (manifest IS existing_manifest,
+                # has the stored sha). Fill from first case on fresh run.
+                _prompt_sha = meta.get("prompt_sha256")
+                if resume and _prompt_sha is not None:
+                    if _prompt_sha != manifest.get("prompt_sha256"):
+                        raise ManifestMismatchError(
+                            {"prompt_sha256": (manifest.get("prompt_sha256"), _prompt_sha)}
+                        )
+                elif (
+                    not resume and _prompt_sha is not None and manifest.get("prompt_sha256") is None
+                ):
+                    manifest["prompt_sha256"] = _prompt_sha
+                    write_manifest(out_dir, manifest)
+                # W3-D part 2: oracle pass.
+                oracle_results: dict[str, Any] = {}
+                if track == "parallel" and tag is None:
+                    labels = case.get("labels", {})
+                    has_depends = any(
+                        isinstance(spec, dict) and spec.get("depends_on")
+                        for spec in schema_dict.values()
+                    )
+                    if has_depends and labels:
+                        oracle_parents: dict[str, object] = {}
+                        for spec in schema_dict.values():
+                            if isinstance(spec, dict) and spec.get("depends_on"):
+                                parent = spec["depends_on"]
+                                if parent in labels:
+                                    oracle_parents[parent] = labels[parent]
+                        if oracle_parents:
+                            try:
+                                oracle_out = decide_fn(
+                                    schema_dict,
+                                    case["context"],
+                                    constraints=case.get("constraints"),
+                                    oracle_overrides=oracle_parents,
+                                )
+                                oracle_out.pop("_meta", None)
+                                for ofname, ores in oracle_out.items():
+                                    if "oracle_prediction" in ores:
+                                        oracle_results[ofname] = ores["oracle_prediction"]
+                            except TypeError:
+                                pass
+                for fname, res in results.items():
+                    field_def = schema.fields.get(fname)
+                    prediction = res.get("prediction")
+                    # W6-B1: ordered-enum lines carry the scale + telemetry.
+                    ordinal_choices = res.get("ordinal_choices")
+                    ordinal_record = res.get("ordinal")
+                    if tag and tag.startswith("rot") and field_def is not None:
+                        if isinstance(prediction, str) and prediction not in field_def.choices:
+                            prediction = None
+                    label = case.get("labels", {}).get(fname)
+                    line = {
+                        "run_id": _run_id_for_run,
+                        "case_id": case.get("id"),
+                        "group_id": case.get("group_id"),
+                        "source": case.get("source"),
+                        "workflow": case.get("workflow"),
+                        "field": fname,
+                        "type": res.get("type") or (field_def.field_type if field_def else None),
+                        "track": track,
+                        "model": model,
+                        "permutation": tag or "canonical",
+                        "label": label,
+                        "prediction": prediction,
+                        "valid": bool(res.get("valid", prediction is not None)),
+                        "correct": None
+                        if label is None
+                        else (prediction is not None and prediction == label),
+                        "log_scores": res.get("log_scores"),
+                        "probability": res.get("probability"),
+                        "per_option": res.get("per_option"),
+                        "latency_ms": meta.get("latency_ms"),
+                        "per_item_end_to_end_ms": meta.get("per_item_end_to_end_ms"),
+                        "rows": meta.get("rows"),
+                        "passes": meta.get("passes"),
+                        "error": res.get("error"),
+                        "salvage_prediction": res.get("salvage_prediction"),
+                        "oracle_prediction": oracle_results.get(fname),
+                    }
+                    if ordinal_choices:
+                        line["ordinal_choices"] = ordinal_choices
+                        line["ordinal"] = ordinal_record
+                    if carry_perturbation:
+                        line["perturbation"] = (case.get("meta") or {}).get("perturbation")
+                    if carry_consensus:
+                        consensus = ((case.get("meta") or {}).get("consensus") or {}).get(fname)
+                        if isinstance(consensus, dict) and consensus:
+                            line["consensus"] = consensus
+                    constraints = case.get("constraints")
+                    if isinstance(constraints, list) and constraints:
+                        line["constraints"] = constraints
+                    variant_lines.append(line)
+                    # B1: commit this variant's lines with its own journal key.
+                if variant_lines:
+                    write_case_blob(
+                        os.path.join(out_dir, "predictions.jsonl"),
+                        os.path.join(out_dir, "completed_cases.jsonl"),
+                        _ckey,
+                        variant_lines,
+                    )
+                    lines.extend(variant_lines)
 
     config: dict[str, Any] = {
         "model": model,
@@ -693,45 +933,58 @@ def run_eval(
 
     config["dataset_lock_sha256"] = _sha256_file(dataset_lock_path)
 
+    # On resume, count ALL prediction lines in the file (including prior
+    # sessions). On fresh run, just len(lines).
+    _total_lines = len(lines)
+    if resume:
+        _pred_path = os.path.join(out_dir, "predictions.jsonl")
+        if os.path.exists(_pred_path):
+            with open(_pred_path, encoding="utf-8") as _pf:
+                _total_lines = sum(1 for _line in _pf if _line.strip())
+
     run = {
-        "run_id": run_id,
+        "run_id": _run_id_for_run,
         "environment": environment(),
         "config": config,
         "counts": {
             "cases": len(selected),
             "fields": n_canonical,
-            "prediction_lines": len(lines),
+            "prediction_lines": _total_lines,
         },
+        "circuit_breaker": _circuit_tripped,
     }
 
-    with open(os.path.join(out_dir, "predictions.jsonl"), "w", encoding="utf-8") as f:
-        for line in lines:
-            f.write(json.dumps(line, sort_keys=True) + "\n")
+    # predictions.jsonl is written per-case via write_case_blob (above);
+    # do NOT overwrite it here.
     if timing_meta:
-        # W3-R: per-combo timing JSON — the median of each split across the
-        # canonical decide calls. Same calls the predictions came from (no
-        # second run).
         timing_summary: dict[str, float] = {}
         for key in timing_meta[0]:
             values = [m[key] for m in timing_meta if key in m]
             if values and all(isinstance(v, (int, float)) for v in values):
                 timing_summary[key] = round(statistics.median(values), 4)
+        _timing_payload = {
+            "calls": len(timing_meta),
+            "median": timing_summary,
+            "segment": _segment,
+            "segment_id": _run_id_for_run,
+        }
+        # Write timing.segment-N.json (per-session, for resume) AND
+        # timing.json (backward compat for check_results/bench).
+        _timing_path = os.path.join(out_dir, f"timing.segment-{_segment}.json")
+        with open(_timing_path, "w", encoding="utf-8") as f:
+            json.dump(_timing_payload, f, indent=2, sort_keys=True)
+            f.write("\n")
         with open(os.path.join(out_dir, "timing.json"), "w", encoding="utf-8") as f:
-            json.dump(
-                {"calls": len(timing_meta), "median": timing_summary},
-                f,
-                indent=2,
-                sort_keys=True,
-            )
+            json.dump(_timing_payload, f, indent=2, sort_keys=True)
             f.write("\n")
     with open(os.path.join(out_dir, "run.json"), "w", encoding="utf-8") as f:
         json.dump(run, f, indent=2, sort_keys=True)
         f.write("\n")
     logger.info(
         "eval run %s: %d cases, %d prediction lines -> %s",
-        run_id,
+        _run_id_for_run,
         len(selected),
-        len(lines),
+        _total_lines,
         out_dir,
     )
     return run

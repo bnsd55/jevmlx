@@ -178,14 +178,8 @@ def check_folder(folder: Path) -> tuple[bool, list[str]]:
         extra = sorted(set(record) - set(PREDICTION_LINE_KEYS))
         # perturbation / consensus / oracle_prediction are optional add-ons,
         # not contract violations (oracle_prediction rides under
-        # oracle_overrides evaluation; W3-D). ordinal_choices / ordinal are
-        # the W6-B1 ordered-enum add-ons (ordered fields only).
-        extra = [
-            k
-            for k in extra
-            if k
-            not in ("perturbation", "consensus", "oracle_prediction", "ordinal_choices", "ordinal")
-        ]
+        # oracle_overrides evaluation; W3-D).
+        extra = [k for k in extra if k not in ("perturbation", "consensus", "oracle_prediction")]
         if missing:
             problems.append(f"{name}: line {index} missing keys {missing}")
         if extra:
@@ -214,8 +208,8 @@ def check_folder(folder: Path) -> tuple[bool, list[str]]:
     # the _meta-split keys land in timing.json (same calls, medians).
     is_parallel = bool(records) and all(r.get("track") in (None, "parallel") for r in records)
     if is_parallel:
-        timing_path = folder / "timing.json"
-        if not timing_path.exists():
+        timing_path = _latest_timing_path(folder)
+        if timing_path is None or not timing_path.exists():
             problems.append(
                 f"{name}: missing timing.json (parallel track must record the "
                 "timing split; naive/openai tracks legitimately have none)"
@@ -250,6 +244,19 @@ def check_folder(folder: Path) -> tuple[bool, list[str]]:
                             f"{name}: timing.json median missing key {key!r} "
                             "(results contract v2: token-accounting telemetry)"
                         )
+                # W5c-7 item 5: timing segment isolation. A resumed run
+                # carries segment > 0 and a segment_id; the report/leaderboard
+                # read per-item timings only from the LATEST segment — never
+                # pool across segments (a resumed run's timings are from a
+                # different process/machine-state, not comparable).
+                segment = (timing or {}).get("segment", 0)
+                segment_id = (timing or {}).get("segment_id")
+                if isinstance(segment, int) and segment > 0 and not segment_id:
+                    problems.append(
+                        f"{name}: timing.json segment={segment} but no "
+                        "segment_id (results contract v2: resumed runs must "
+                        "carry segment_id for timing isolation)"
+                    )
         # Batched-path per-item timing: when the predictions carry
         # batched per-item keys (decide_many), BOTH must be present.
         per_item_keys = {key for key in BATCHED_TIMING_KEYS if any(key in r for r in records)}
@@ -367,6 +374,28 @@ def _load_json(path: Path) -> dict | None:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+
+
+def _latest_timing_path(folder: Path) -> Path | None:
+    """The latest timing segment file (P4).
+
+    W5c-7: timing segments are separate files (timing.segment-N.json).
+    Return the highest-numbered segment, or timing.json (segment 0) if
+    no segments exist. Never merge across segments.
+    """
+    import glob
+
+    segments = []
+    for p in glob.glob(str(folder / "timing.segment-*.json")):
+        try:
+            seg = int(Path(p).name.split("segment-")[1].split(".")[0])
+            segments.append((seg, Path(p)))
+        except (ValueError, IndexError):
+            continue
+    if segments:
+        return max(segments, key=lambda x: x[0])[1]
+    timing_json = folder / "timing.json"
+    return timing_json if timing_json.exists() else None
 
 
 def check_parity(model_dir: Path) -> tuple[bool, list[str]]:

@@ -359,6 +359,14 @@ def _dispatch(argv) -> None:
     eval_p.add_argument(
         "--out", required=True, help="output directory (predictions.jsonl, run.json)"
     )
+    eval_p.add_argument(
+        "--resume",
+        action="store_true",
+        help="resume a crashed/interrupted run: verify the manifest matches, "
+        "skip cases already in the commit journal, append new predictions. "
+        "Refuses to mix a run whose manifest (config/code/model/tokenizer/"
+        "prompt/machine) differs.",
+    )
     bench_p = sub.add_parser(
         "bench",
         help="One command: complete PR-ready benchmark results folder.",
@@ -742,6 +750,7 @@ def _run_eval_command(args) -> None:
         plan_provider=plan_provider,
         dataset_lock_path=lock if os.path.exists(lock) else None,
         dataset_path=os.path.abspath(args.data),
+        resume=getattr(args, "resume", False),
     )
     print(
         f"run {run['run_id']}: {run['counts']['cases']} cases, "
