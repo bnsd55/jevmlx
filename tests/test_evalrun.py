@@ -93,6 +93,7 @@ def test_predictions_contract_lines(tmp_path):
         "probability",
         "per_option",
         "latency_ms",
+        "per_item_end_to_end_ms",
         "rows",
         "passes",
         "error",

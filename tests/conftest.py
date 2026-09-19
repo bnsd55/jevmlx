@@ -349,6 +349,8 @@ def make_engine_result(
         "suffix_eval_ms": 2.5,
         "lm_head_gather_ms": 0.3,
         "total_ms": 5.0,
+        # W5c-3: the single path's per-request end-to-end (elapsed - plan).
+        "per_item_end_to_end_ms": 4.9,
         "padded_token_positions": 6,
         "total_tokens_generated": 0,
         "peak_active_bytes": 1024,

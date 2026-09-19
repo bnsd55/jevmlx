@@ -138,9 +138,10 @@ def _load_published(path: Path | None) -> tuple[list[dict], dict]:
 def _per_item_end_to_end_ms(folder: Path) -> float | None:
     """Median per-item END-TO-END latency (ms) from predictions.jsonl.
 
-    Results contract v2 (W5-D finding 27): batched (decide_many) prediction
-    lines carry ``per_item_end_to_end_ms`` — that context's own prefill plus
-    its share of the group pass — the honest per-case number. Returns None
+    Results contract v2 (W5-D finding 27, W5c-3): parallel prediction lines
+    carry ``per_item_end_to_end_ms`` — that context's own prefill span plus
+    its assembly span (single path) or plus its amortized group share
+    (batched path) — the honest per-case number either way. Returns None
     when the lines carry no such key: the caller FAILS the folder (results
     contract v2; no pre-v2 folders exist on main, so there is no fallback).
     """
