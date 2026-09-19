@@ -125,6 +125,17 @@
   per-option distance from its threshold side, floored at 0, recomputed
   after every reconciler.
 
+- W5c-11 test hygiene: the fast suite (`-m 'not slow and not network'`) is
+  offline-clean — it passes with `HF_HUB_OFFLINE=1` and an empty `HF_HOME`.
+  `tests/test_api.py::test_decide_end_to_end` loads a real model and is now
+  `@pytest.mark.slow` (it previously carried no marker and broke offline
+  runs with `LocalEntryNotFoundError`); `TestAliasHubIdsExist` is also
+  `@pytest.mark.network` (HEADs huggingface.co). doctor's editable-install
+  check compares the tree the python interpreter IMPORTS (`jevmlx.__file__`)
+  with the tree the venv INSTALLED (`direct_url.json`): OK when equal, FAIL
+  naming both when different. The FAIL on a shared venv across worktrees is
+  BY DESIGN (each worktree gets its own venv — BENCHMARKING.md).
+
 ## Released
 
 - The engine is an object: `load_engine` returns a frozen `Engine`

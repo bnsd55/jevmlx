@@ -49,6 +49,7 @@ class TestAliasResolution:
 
 
 @pytest.mark.slow
+@pytest.mark.network  # HEAD https://huggingface.co/<id> — never runs offline
 class TestAliasHubIdsExist:
     """Verify the resolved Hub ids exist on huggingface.co (slow, network)."""
 

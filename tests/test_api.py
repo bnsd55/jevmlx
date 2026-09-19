@@ -351,6 +351,7 @@ def make_prompt_cache_like(model):
     return [_C(), _C()]
 
 
+@pytest.mark.slow  # real model load (mlx-community 0.5B) — runs via slowtest.sh only
 def test_decide_end_to_end():
     class TwoField(BaseModel):
         is_fraudulent: bool = Field(description="Whether the transaction is fraudulent")

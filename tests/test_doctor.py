@@ -9,6 +9,7 @@ import json
 import platform
 import subprocess
 import types
+from pathlib import Path
 
 import pytest
 
@@ -61,6 +62,20 @@ def healthy(monkeypatch):
         lambda: (doctor._ok("hf-cache", "cache ok; default cached"), []),
     )
     monkeypatch.setattr(doctor, "check_network", lambda: doctor._ok("network", "reachable"))
+
+    # The healthy scenario needs installed == imported. The shared venv
+    # installs editable from ~/git/jevmlx while tests import THIS tree, so
+    # patch direct_url to this checkout (the per-worktree-venv setup).
+    this_checkout = Path(doctor.__file__).resolve().parent.parent
+    monkeypatch.setattr(
+        doctor.importlib.metadata,
+        "distribution",
+        lambda name: types.SimpleNamespace(
+            read_text=lambda _n: json.dumps(
+                {"url": this_checkout.as_uri(), "dir_info": {"editable": True}}
+            )
+        ),
+    )
     return monkeypatch
 
 
@@ -421,7 +436,23 @@ class TestVenv:
 
 
 class TestEditableInstall:
-    def test_points_at_current_checkout_ok(self):
+    def test_points_at_current_checkout_ok(self, monkeypatch):
+        """Editable + imported tree == installed tree -> OK.
+
+        The real environment is a shared venv (installed from ~/git/jevmlx,
+        tests run from here), which correctly FAILS; patch the dist-info to
+        point at THIS checkout to build the OK case.
+        """
+        this_checkout = Path(doctor.__file__).resolve().parent.parent
+        monkeypatch.setattr(
+            doctor.importlib.metadata,
+            "distribution",
+            lambda name: types.SimpleNamespace(
+                read_text=lambda _n: json.dumps(
+                    {"url": this_checkout.as_uri(), "dir_info": {"editable": True}}
+                )
+            ),
+        )
         check = check_editable_install()
         assert check.status == "OK"
         assert "editable install" in check.detail
@@ -451,6 +482,13 @@ class TestEditableInstall:
         assert "not editable" in check.detail
 
     def test_other_checkout_fails(self, monkeypatch, tmp_path):
+        """Imported tree vs installed tree mismatch -> FAIL.
+
+        Only the direct_url is patched: the running interpreter imports the
+        REAL jevmlx tree (this checkout), while the fake dist-info claims
+        the venv installed from another worktree. The check must catch
+        exactly that mismatch (shared-venv workflow, a FAIL by design).
+        """
         fake = tmp_path / "other-checkout"
         fake.mkdir()
         payload = json.dumps({"url": fake.as_uri(), "dir_info": {"editable": True}})
@@ -461,7 +499,27 @@ class TestEditableInstall:
         )
         check = check_editable_install()
         assert check.status == "FAIL"
-        assert "not this checkout" in check.detail
+        assert "python imports jevmlx from" in check.detail
+        assert "other-checkout" in check.detail
+
+    def test_same_tree_ok(self, monkeypatch, tmp_path):
+        """Editable + installed tree == imported tree -> OK.
+
+        dist-info url AND jevmlx.__file__ both resolve to one tree (the
+        per-worktree-venv setup the G-rules require).
+        """
+        tree = tmp_path / "own-venv-checkout"
+        tree.mkdir()
+        payload = json.dumps({"url": tree.as_uri(), "dir_info": {"editable": True}})
+        monkeypatch.setattr(
+            doctor.importlib.metadata,
+            "distribution",
+            lambda name: types.SimpleNamespace(read_text=lambda _n: payload),
+        )
+        monkeypatch.setattr("jevmlx.__file__", str(tree / "jevmlx" / "__init__.py"))
+        check = check_editable_install()
+        assert check.status == "OK"
+        assert "editable install" in check.detail
 
     def test_not_installed_fails(self, monkeypatch):
         def raise_pnf(name):
@@ -485,19 +543,21 @@ class TestEditableInstall:
         assert check.status == "OK"
 
     def test_file_url_with_spaces_unquoted(self, monkeypatch, tmp_path):
+        """A mismatched url with %20 unquotes and FAILS, naming the tree.
+
+        The running interpreter imports the REAL tree; the dist-info url
+        (with the space) points elsewhere. _direct_url_path must unquote
+        %20 so the FAIL names a real-looking path ('my checkout'), not a
+        percent-encoded one.
+        """
         checkout = tmp_path / "my checkout"
         checkout.mkdir()
+        payload = json.dumps({"url": checkout.as_uri(), "dir_info": {"editable": True}})
         monkeypatch.setattr(
             doctor.importlib.metadata,
             "distribution",
-            lambda name: types.SimpleNamespace(
-                read_text=lambda _n: json.dumps(
-                    {"url": checkout.as_uri(), "dir_info": {"editable": True}}
-                )
-            ),
+            lambda name: types.SimpleNamespace(read_text=lambda _n: payload),
         )
-        # The installed url points at a different tree than this test file's
-        # checkout, and the space in the path must survive unquoting.
         check = check_editable_install()
         assert check.status == "FAIL"
         assert "my checkout" in check.detail
