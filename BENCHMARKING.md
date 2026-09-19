@@ -140,6 +140,13 @@ active / cache) per combo into the bench log and the combo's `run.json`
 leftover is released. `run_bench_models` (multi-model) already cleared
 between models; that is unchanged.
 
+W5c-14 adds a **cache cap** (`--metal-cache-gb`, default 8): at `run_bench`
+start `mx.metal.set_cache_limit` makes the allocator evict freed buffers
+above the cap instead of hoarding them — so inside a long combo (typesafe,
+426+ cases with rotations) the Metal allocator can no longer hoard ~94 GB
+and push the machine into swap. The cap is recorded in each combo's
+`run.json` `memory` block as `metal_cache_limit_bytes`.
+
 Anything outside `benchmarks/results/<machine>-<model-slug>/`: caches
 (`~/.cache/jevmlx/`), model weights, logs, editor files. Predictions larger
 than 5 MB total are gzipped automatically (the folder README says so).

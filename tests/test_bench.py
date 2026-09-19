@@ -1033,3 +1033,89 @@ def test_w5c13_augment_run_json_missing_file_is_noop(tmp_path):
     mem = {"peak_memory": 1, "active_memory": 2, "cache_memory": 3}
     _augment_run_json_memory(Path(tmp_path), mem)
     assert not (Path(tmp_path) / "run.json").exists()
+
+
+# --- W5c-14 (#79): cap the Metal buffer cache (--metal-cache-gb) ------------
+
+
+def test_w5c14_set_cache_limit_called_once_with_configured_bytes(tmp_path, monkeypatch):
+    """run_bench calls mx.metal.set_cache_limit once at start with the
+    configured --metal-cache-gb (default 8 => 8 * 2**30 bytes), and the run.json
+    memory block carries metal_cache_limit_bytes. Monkeypatches mlx.core.metal
+    so no real GPU is needed."""
+    import json
+
+    import mlx.core as mx
+
+    import jevmlx.bench as bench
+
+    calls = {"set_cache_limit": []}
+
+    monkeypatch.setattr(mx.metal, "set_cache_limit", lambda b: calls["set_cache_limit"].append(b))
+    monkeypatch.setattr(mx.metal, "clear_cache", lambda: None)
+    monkeypatch.setattr(mx.metal, "reset_peak_memory", lambda: None)
+    monkeypatch.setattr(mx.metal, "get_peak_memory", lambda: 0)
+    monkeypatch.setattr(mx.metal, "get_active_memory", lambda: 0)
+    monkeypatch.setattr(mx.metal, "get_cache_memory", lambda: 0)
+
+    monkeypatch.setattr(bench, "preflight", lambda force, ov: "test-machine")
+    monkeypatch.setattr(
+        bench,
+        "build_datasets",
+        lambda ds, **kw: ({"bundled": Path(tmp_path) / "bundled.jsonl"}, {}),
+    )
+    (Path(tmp_path) / "bundled.jsonl").write_text('{"q": "x"}\n', encoding="utf-8")
+    monkeypatch.setattr(bench, "_load_engine_with_timeout", lambda m, t: object())
+    monkeypatch.setattr(bench, "_run_model_parity", lambda m, e, f: None)
+    import jevmlx.engine as _eng
+
+    monkeypatch.setattr(_eng, "load_engine", lambda m: object())
+    import benchmarks.summarize_results as _sr
+
+    monkeypatch.setattr(_sr, "summarize", lambda *a, **kw: None)
+    monkeypatch.setattr(bench, "_print_pr_instructions", lambda f, r: None)
+
+    def _fake_run_one(model, track, scorer, jsonl, combo_dir, **kw):
+        run = {"run_id": "x", "environment": {}, "config": {}, "counts": {}}
+        (combo_dir / "run.json").write_text(json.dumps(run), encoding="utf-8")
+        (combo_dir / "predictions.jsonl").write_text("", encoding="utf-8")
+        return {"run": run, "report": combo_dir / "report.json"}
+
+    monkeypatch.setattr(bench, "_run_one", _fake_run_one)
+
+    out = Path(tmp_path) / "out"
+    bench.run_bench(
+        model="fake/model",
+        datasets=["bundled"],
+        scorers=["trie"],
+        tracks=["parallel"],
+        out=out,
+        runs=1,
+        force=True,
+        metal_cache_gb=4.0,
+    )
+
+    # set_cache_limit called EXACTLY once at start, with 4 GB in bytes.
+    assert len(calls["set_cache_limit"]) == 1, calls["set_cache_limit"]
+    assert calls["set_cache_limit"][0] == int(4.0 * 2**30)
+
+    # The run.json memory block carries metal_cache_limit_bytes.
+    folder = out / "test-machine-fake--model"
+    run = json.loads((folder / "parallel-trie-bundled" / "run.json").read_text())
+    assert "memory" in run
+    assert run["memory"]["metal_cache_limit_bytes"] == int(4.0 * 2**30)
+
+
+def test_w5c14_set_cache_limit_returns_none_on_failure(monkeypatch, capsys):
+    """_set_metal_cache_limit returns None when mx.metal raises (best-effort)
+    and prints a 'NOT set' warning so the silent-failure path is visible."""
+    import mlx.core as mx
+
+    from jevmlx.bench import _set_metal_cache_limit
+
+    monkeypatch.setattr(
+        mx.metal, "set_cache_limit", lambda b: (_ for _ in ()).throw(RuntimeError("no metal"))
+    )
+    assert _set_metal_cache_limit(8.0) is None
+    captured = capsys.readouterr()
+    assert "NOT set" in captured.out

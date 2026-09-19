@@ -479,6 +479,7 @@ def run_bench(
     force: bool = False,
     fresh: bool = False,
     load_timeout: float = 900.0,
+    metal_cache_gb: float = 8.0,
 ) -> Path:
     """Run the full bench matrix for one model; returns the results folder.
 
@@ -498,6 +499,22 @@ def run_bench(
 
     tag = preflight(force, machine_override)
     print(f"machine: {tag}")
+
+    # W5c-14 (#79): cap the Metal buffer cache for the whole run. The
+    # per-combo clear (W5c-13) releases the cache between combos, but inside
+    # a long combo (typesafe, 426+ cases with rotations) the Metal allocator
+    # hoards freed buffers and pushes the machine into swap. set_cache_limit
+    # makes the allocator evict buffers above the cap instead of hoarding —
+    # no per-case clear needed. Default 8 GB (the 7B weights are ~4 GB; the
+    # cap bounds the GPU leftover, not the live working set). Best-effort:
+    # a non-Metal build logs and continues.
+    metal_cache_limit_bytes = _set_metal_cache_limit(metal_cache_gb)
+    if metal_cache_limit_bytes is not None:
+        print(
+            f"[memory] Metal buffer cache cap: {metal_cache_gb} GB "
+            f"({metal_cache_limit_bytes} bytes)",
+            flush=True,
+        )
 
     dataset_paths, dataset_locks = build_datasets(datasets)
     if not dataset_paths:
@@ -611,7 +628,9 @@ def run_bench(
                 # check_results contract accepts optional keys).
                 mem = _sample_metal_memory()
                 print(f"  [memory] {combo}: {_memory_block_gb(mem)}", flush=True)
-                _augment_run_json_memory(combo_dir, mem)
+                _augment_run_json_memory(
+                    combo_dir, mem, metal_cache_limit_bytes=metal_cache_limit_bytes
+                )
                 _clear_metal_cache()
             except Exception as exc:  # noqa: BLE001 - failure is a result
                 status = "load_failed" if not engine_loaded else "run_failed"
@@ -651,6 +670,7 @@ def run_bench_models(
     force: bool = False,
     fresh: bool = False,
     load_timeout: float = 900.0,
+    metal_cache_gb: float = 8.0,
 ) -> Path:
     """Run the bench matrix for several models, sequentially.
 
@@ -687,6 +707,7 @@ def run_bench_models(
                 force=force,
                 fresh=fresh,
                 load_timeout=load_timeout,
+                metal_cache_gb=metal_cache_gb,
             )
         except SystemExit as exc:
             # run_bench exits 1 only when EVERY of its combos failed.
@@ -735,6 +756,29 @@ def _clear_metal_cache() -> None:
         mx.metal.clear_cache()
     except Exception:  # noqa: BLE001 - cleanup must never break the run
         pass
+
+
+def _set_metal_cache_limit(cache_gb: float) -> int | None:
+    """Cap the Metal buffer cache (W5c-14 #79); returns the bytes set, or None.
+
+    The per-combo clear (W5c-13) releases the cache between combos, but
+    inside a long combo the Metal allocator hoards freed buffers and pushes
+    the machine into swap. ``mx.metal.set_cache_limit`` makes the allocator
+    evict buffers above the cap instead of hoarding — no per-case clear
+    needed. Best-effort: a non-Metal build returns None and never raises.
+    """
+    try:
+        import mlx.core as mx
+
+        limit_bytes = int(float(cache_gb) * 2**30)
+        mx.metal.set_cache_limit(limit_bytes)
+        return limit_bytes
+    except Exception as exc:  # noqa: BLE001 - telemetry must never break the run
+        print(
+            f"[memory] Metal buffer cache cap NOT set ({exc!r}); the allocator may hoard",
+            flush=True,
+        )
+        return None
 
 
 # W5c-13 (#79): per-combo Metal memory telemetry. The three counters the
@@ -790,8 +834,10 @@ def _memory_block_gb(mem: dict[str, int]) -> str:
     )
 
 
-def _augment_run_json_memory(combo_dir: Path, mem: dict[str, int]) -> None:
-    """Add the 'memory' block to the combo's run.json (W5c-13 #79).
+def _augment_run_json_memory(
+    combo_dir: Path, mem: dict[str, int], *, metal_cache_limit_bytes: int | None = None
+) -> None:
+    """Add the 'memory' block to the combo's run.json (W5c-13 #79, W5c-14).
 
     run.json is written by jevmlx.evalrun.run_eval (out of this PR's
     scope); this reads it back, attaches the per-combo Metal memory
@@ -799,7 +845,8 @@ def _augment_run_json_memory(combo_dir: Path, mem: dict[str, int]) -> None:
     missing/corrupt run.json is skipped (the eval result is already on
     disk). The check_results contract accepts unknown-but-present optional
     keys (benchmarks/check_results.py: 'unknown-but-present optional keys
-    are not type-checked').
+    are not type-checked'). W5c-14: the cache cap set at run start is
+    recorded as metal_cache_limit_bytes (None when the cap could not be set).
     """
     import json
 
@@ -812,6 +859,7 @@ def _augment_run_json_memory(combo_dir: Path, mem: dict[str, int]) -> None:
         "peak_memory_bytes": mem["peak_memory"],
         "active_memory_bytes": mem["active_memory"],
         "cache_memory_bytes": mem["cache_memory"],
+        "metal_cache_limit_bytes": metal_cache_limit_bytes,
     }
     try:
         run_json.write_text(json.dumps(run, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -1055,6 +1103,15 @@ def main(argv: list[str] | None = None) -> int:
         help="seconds to wait for load_engine before recording a load_failed row (default 900)",
     )
     parser.add_argument(
+        "--metal-cache-gb",
+        type=float,
+        default=8.0,
+        help=(
+            "cap the Metal buffer cache in GB (default 8); the allocator evicts "
+            "freed buffers above the cap instead of hoarding them (#79)"
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="print the machine tag, dataset build plan, combo list with output "
@@ -1105,6 +1162,7 @@ def main(argv: list[str] | None = None) -> int:
             force=args.force,
             fresh=args.fresh,
             load_timeout=args.load_timeout,
+            metal_cache_gb=args.metal_cache_gb,
         )
     else:
         run_bench_models(
@@ -1118,6 +1176,7 @@ def main(argv: list[str] | None = None) -> int:
             force=args.force,
             fresh=args.fresh,
             load_timeout=args.load_timeout,
+            metal_cache_gb=args.metal_cache_gb,
         )
     return 0
 
