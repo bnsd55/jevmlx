@@ -400,15 +400,26 @@ def ordinal_mae_expected(records: list[dict]) -> dict[str, float | None]:
     The DISTRIBUTION's mean position vs gold — the soft ordinal error the
     hard argmax MAE cannot express (a 50/50 split between levels 0 and 2
     sits at expected 1.0: zero soft error against gold 1, two hard).
+
+    Skips records tagged ``source="hard"`` EXPLICITLY (a non-parallel track
+    has no distribution — its expected_index is the hard argmax, so the soft
+    metric is undefined on it, not merely absent). A validated record with a
+    non-numeric expected_index is a contract violation, not a silent skip.
     """
     per_field: dict[str, list[float]] = defaultdict(list)
     for field, record, choices, ordinal in _ordinal_lines(records):
+        if ordinal.get("source") == "hard":
+            continue
         gold = _level_index(choices, record.get("label"))
         if gold is None:
             continue
         expected = ordinal.get("expected_index")
         if not isinstance(expected, (int, float)):
-            continue
+            raise ValueError(
+                f"ordinal record for field {field!r} has a non-numeric "
+                f"expected_index ({expected!r}); a validated record must "
+                "carry a real distribution mean"
+            )
         per_field[field].append(abs(float(expected) - gold))
     return {field: _mean(gaps) for field, gaps in sorted(per_field.items())}
 

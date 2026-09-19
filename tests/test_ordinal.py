@@ -463,3 +463,145 @@ def test_ordinal_lines_strict_pairing():
         _ordinal_lines(broken)
     # Unordered lines (no key at all) still pass through untouched.
     assert _ordinal_lines([{"field": "t", "label": "a", "prediction": "b"}]) == []
+
+
+# ---- F5 round 2: hard records on non-parallel tracks -------------------------
+
+
+def test_attach_ordinal_derives_hard_record_for_predicted_level():
+    """_attach_ordinal on a non-parallel track derives a REAL hard record:
+    argmax_level = the predicted level's index, expected_index = argmax,
+    variance 0, normalized = argmax/(n-1), source='hard'."""
+    from jevmlx.evalrun import _attach_ordinal
+    from jevmlx.schema import StructuredSchema
+
+    schema = StructuredSchema(
+        {
+            "level": {
+                "type": "enum",
+                "choices": ["0", "1", "2", "3", "4"],
+                "ordered": True,
+                "description": "d",
+            }
+        }
+    )
+    field = schema.fields["level"]
+    entry = {"prediction": "2", "valid": True}
+    _attach_ordinal(field, entry)
+    assert entry["ordinal_choices"] == ["0", "1", "2", "3", "4"]
+    assert entry["ordinal"] == {
+        "argmax_level": 2,
+        "expected_index": 2.0,
+        "variance": 0.0,
+        "expected_score_normalized": 0.5,
+        "source": "hard",
+    }
+
+
+def test_attach_ordinal_invalid_prediction_worst_distance():
+    """An off-scale prediction on a hard track counts at the worst level
+    distance (len-1), matching the invalid-is-wrong rule."""
+    from jevmlx.evalrun import _attach_ordinal
+    from jevmlx.schema import StructuredSchema
+
+    schema = StructuredSchema(
+        {
+            "level": {
+                "type": "enum",
+                "choices": ["0", "1", "2", "3", "4"],
+                "ordered": True,
+                "description": "d",
+            }
+        }
+    )
+    entry = {"prediction": None, "valid": False}
+    _attach_ordinal(schema.fields["level"], entry)
+    assert entry["ordinal"]["argmax_level"] == 4
+    assert entry["ordinal"]["source"] == "hard"
+
+
+def test_attach_ordinal_noop_for_unordered():
+    from jevmlx.evalrun import _attach_ordinal
+    from jevmlx.schema import StructuredSchema
+
+    schema = StructuredSchema(
+        {"topic": {"type": "enum", "choices": ["a", "b"], "description": "d"}}
+    )
+    entry = {"prediction": "a", "valid": True}
+    _attach_ordinal(schema.fields["topic"], entry)
+    assert "ordinal_choices" not in entry and "ordinal" not in entry
+
+
+def test_compute_metrics_naive_track_hard_record():
+    """A naive-track ordered line (hard record, source='hard') computes the
+    hard ordinal_mae + confusion but is SKIPPED from ordinal_mae_expected
+    (no distribution)."""
+    from jevmlx.evalmetrics import compute_metrics
+
+    records = [
+        {
+            "case_id": "c1",
+            "field": "sentiment",
+            "label": "3",
+            "prediction": "2",
+            "valid": True,
+            "ordinal_choices": ["0", "1", "2", "3", "4"],
+            "ordinal": {
+                "argmax_level": 2,
+                "expected_index": 2.0,
+                "variance": 0.0,
+                "expected_score_normalized": 0.5,
+                "source": "hard",
+            },
+        }
+    ]
+    metrics = compute_metrics(records)
+    assert metrics["ordinal_mae"] == {"sentiment": 1.0}  # |2-3|
+    assert "sentiment" not in metrics.get("ordinal_mae_expected", {})
+    assert metrics["ordinal_confusion"]["sentiment"]["3"]["2"] == 1
+
+
+def test_compute_metrics_openai_track_hard_record():
+    """An openai_slots-track ordered line: same hard-record shape."""
+    from jevmlx.evalmetrics import compute_metrics
+
+    records = [
+        {
+            "case_id": "c2",
+            "field": "sentiment",
+            "label": "0",
+            "prediction": "1",
+            "valid": True,
+            "ordinal_choices": ["0", "1", "2"],
+            "ordinal": {
+                "argmax_level": 1,
+                "expected_index": 1.0,
+                "variance": 0.0,
+                "expected_score_normalized": 0.5,
+                "source": "hard",
+            },
+        }
+    ]
+    metrics = compute_metrics(records)
+    assert metrics["ordinal_mae"] == {"sentiment": 1.0}
+    assert "sentiment" not in metrics.get("ordinal_mae_expected", {})
+    assert metrics["ordinal_confusion"]["sentiment"]["0"]["1"] == 1
+
+
+def test_ordinal_mae_expected_raises_on_non_numeric_expected_in_validated_record():
+    """A validated record (source not 'hard') with a non-numeric
+    expected_index is a contract violation — raise, never a silent skip."""
+    from jevmlx.evalmetrics import ordinal_mae_expected
+
+    records = [
+        {
+            "case_id": "c3",
+            "field": "sentiment",
+            "label": "1",
+            "prediction": "1",
+            "ordinal_choices": ["0", "1", "2"],
+            "ordinal": {"argmax_level": 1, "expected_index": "oops", "variance": 0.0},
+        }
+    ]
+    with pytest.raises(ValueError, match="non-numeric expected_index"):
+        ordinal_mae_expected(records)

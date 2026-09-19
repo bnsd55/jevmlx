@@ -275,14 +275,41 @@ def parallel_decide_fn(engine, scoring: str = "slots", prior_correction: bool = 
 def _attach_ordinal(field, entry: dict) -> None:
     """W6-B1/F5: every track's decide_fn output carries the ordered scale +
     the derived ordinal telemetry, so ordinal_mae/confusion compute on
-    EVERY track (no tolerated-absence path). Ordered enums emit
-    'ordinal_choices' always; 'ordinal' rides the engine telemetry when
-    the track produced it (the naive/openai tracks report the hard key
-    only — their ordinal MAE is the argmax distance).
+    EVERY track (no tolerated-absence path).
+
+    The parallel track reads the engine's distribution-derived record from
+    its result telemetry. The non-parallel tracks (naive_local,
+    api_baseline, openai_slots) free-write or call out — they have no
+    distribution, only the hard prediction. For those, derive a REAL hard
+    record: argmax_level = index of the predicted level in the declared
+    scale order, expected_index = argmax_level (no soft evidence — the hard
+    pick IS the distribution's entire mass), variance 0.0,
+    expected_score_normalized = argmax/(n-1), tagged ``source="hard"`` so
+    ordinal_mae_expected skips it EXPLICITLY by source (the soft metric is
+    undefined on a hard-only record), never by an absent key. An invalid
+    (off-scale) prediction still emits the record with a worst-distance
+    argmax (len-1), matching the invalid-is-wrong rule.
     """
-    if field is not None and field.ordered:
-        entry["ordered"] = True
-        entry["ordinal_choices"] = list(field.choices)
+    if field is None or not field.ordered:
+        return
+    choices = list(field.choices)
+    prediction = entry.get("prediction")
+    entry["ordered"] = True
+    entry["ordinal_choices"] = choices
+    # Index of the predicted level; invalid => worst distance (len-1),
+    # the same rule ordinal_mae applies to the hard argmax.
+    try:
+        argmax = choices.index(str(prediction))
+    except (ValueError, TypeError):
+        argmax = len(choices) - 1
+    n = len(choices)
+    entry["ordinal"] = {
+        "argmax_level": argmax,
+        "expected_index": float(argmax),
+        "variance": 0.0,
+        "expected_score_normalized": (argmax / (n - 1)) if n > 1 else 1.0,
+        "source": "hard",
+    }
 
 
 def naive_local_decide_fn(engine) -> DecideFn:
