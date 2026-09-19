@@ -545,6 +545,10 @@ def run_bench(
                 combo_dir.mkdir(parents=True, exist_ok=True)
             _has_manifest = (combo_dir / "manifest.json").is_file()
             print(f"=== {combo} ({runs} run(s)) [{'resume' if _has_manifest else 'fresh'}] ===")
+            # W5c-13 (#79): reset the Metal peak-memory counter at combo
+            # start so each combo's peak is its own (not cumulative across
+            # the matrix). The clear happens AFTER the combo (below).
+            _reset_metal_peak_memory()
             try:
                 if not engine_loaded:
                     # Load once per model, lazily, inside the timeout guard.
@@ -598,14 +602,27 @@ def run_bench(
                     print(f"  run {run_index + 1}/{runs} done")
                 assert result is not None
                 last_run[combo] = result
+                # W5c-13 (#79): sample Metal memory AFTER the combo, then
+                # clear the buffer cache so it does not accumulate across
+                # combos (the single-model run_bench path never called
+                # _clear_metal_cache before — only run_bench_models did,
+                # between models). The memory block lands in the bench log
+                # and the combo's run.json (additive 'memory' key; the
+                # check_results contract accepts optional keys).
+                mem = _sample_metal_memory()
+                print(f"  [memory] {combo}: {_memory_block_gb(mem)}", flush=True)
+                _augment_run_json_memory(combo_dir, mem)
+                _clear_metal_cache()
             except Exception as exc:  # noqa: BLE001 - failure is a result
                 status = "load_failed" if not engine_loaded else "run_failed"
                 _write_failure_run(combo_dir, status, exc)
                 failed_combos[combo] = f"{type(exc).__name__}: {exc}"
                 print(f"FAILED combo {combo} ({status}): {failed_combos[combo]}", flush=True)
     finally:
-        # One model load per track group is enough; drop it between tracks so
-        # memory returns to baseline before the next track's runs.
+        # After ALL combos: drop the engine/weights cache so memory returns
+        # to baseline before the caller (or the next model in
+        # run_bench_models) proceeds. The per-combo Metal buffer-cache
+        # clear is above (W5c-13 #79); this releases the model itself.
         from jevmlx.engine import clear_engine_cache
 
         clear_engine_cache()
@@ -717,6 +734,88 @@ def _clear_metal_cache() -> None:
 
         mx.metal.clear_cache()
     except Exception:  # noqa: BLE001 - cleanup must never break the run
+        pass
+
+
+# W5c-13 (#79): per-combo Metal memory telemetry. The three counters the
+# Metal API exposes, sampled after a combo finishes, plus a peak reset at
+# combo start so each combo's peak is its own (not cumulative across the
+# matrix). All best-effort: a non-Metal build / import failure yields -1
+# and never breaks the run.
+_MEMORY_KEYS = ("peak_memory", "active_memory", "cache_memory")
+
+
+def _reset_metal_peak_memory() -> None:
+    """Reset the Metal peak-memory counter; never raises (best-effort)."""
+    try:
+        import mlx.core as mx
+
+        mx.metal.reset_peak_memory()
+    except Exception:  # noqa: BLE001 - telemetry must never break the run
+        pass
+
+
+def _sample_metal_memory() -> dict[str, int]:
+    """Sample the three Metal memory counters (bytes), -1 when unreadable.
+
+    - peak_memory:   mx.metal.get_peak_memory() — the high-water mark since
+                      the last reset_peak_memory() (reset at combo start).
+    - active_memory: mx.metal.get_active_memory() — buffers currently held.
+    - cache_memory:  mx.metal.get_cache_memory() — the buffer cache Metal
+                      keeps after frees (the #79 root cause: not returned to
+                      macOS until clear_cache()).
+    """
+    out: dict[str, int] = {k: -1 for k in _MEMORY_KEYS}
+    try:
+        import mlx.core as mx
+
+        out["peak_memory"] = int(mx.metal.get_peak_memory())
+        out["active_memory"] = int(mx.metal.get_active_memory())
+        out["cache_memory"] = int(mx.metal.get_cache_memory())
+    except Exception:  # noqa: BLE001 - telemetry must never break the run
+        pass
+    return out
+
+
+def _memory_block_gb(mem: dict[str, int]) -> str:
+    """A one-line bench-log string of the memory block in GB."""
+
+    def _gb(v: int) -> str:
+        return f"{v / 2**30:.2f} GB" if v >= 0 else "n/a"
+
+    return (
+        f"peak={_gb(mem['peak_memory'])} "
+        f"active={_gb(mem['active_memory'])} "
+        f"cache={_gb(mem['cache_memory'])}"
+    )
+
+
+def _augment_run_json_memory(combo_dir: Path, mem: dict[str, int]) -> None:
+    """Add the 'memory' block to the combo's run.json (W5c-13 #79).
+
+    run.json is written by jevmlx.evalrun.run_eval (out of this PR's
+    scope); this reads it back, attaches the per-combo Metal memory
+    sample as an additive 'memory' key, and writes it. Best-effort: a
+    missing/corrupt run.json is skipped (the eval result is already on
+    disk). The check_results contract accepts unknown-but-present optional
+    keys (benchmarks/check_results.py: 'unknown-but-present optional keys
+    are not type-checked').
+    """
+    import json
+
+    run_json = combo_dir / "run.json"
+    try:
+        run = json.loads(run_json.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    run["memory"] = {
+        "peak_memory_bytes": mem["peak_memory"],
+        "active_memory_bytes": mem["active_memory"],
+        "cache_memory_bytes": mem["cache_memory"],
+    }
+    try:
+        run_json.write_text(json.dumps(run, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    except OSError:
         pass
 
 

@@ -114,6 +114,32 @@ Paste `SUMMARY.md` into the PR description and link the machine specs
 
 ## What NOT to commit
 
+## RAM model (W5c-13, #79)
+
+Activity Monitor's "used" during a `jevmlx bench` run is NOT `weights ×
+number of cases`. It is three things, summed:
+
+1. **Model weights** — the 4-bit 7B is ~4 GB, held by the engine cache
+   (`load_engine` LRU, maxsize=1) for the whole run. The bench does NOT
+   unload between cases (a reload is 4 GB × hundreds of questions).
+2. **The live logits slab** for the CURRENT case — `rows × suffix_tokens ×
+   vocab` float32 per chunk. The chunking heuristic limits *concurrent*
+   rows (it ran 1 row/pass for the 7B smoke), but a long suffix still
+   builds a large `width × vocab` tensor. This dies when the decide()
+   call returns.
+3. **The Metal buffer cache** — Metal keeps freed GPU buffers in a cache
+   for reuse. After a huge case, a tiny case still shows high RAM because
+   bucket 3 stays; it is NOT returned to macOS until `mx.metal.clear_cache()`.
+
+The single-model `jevmlx bench --model <one>` path goes through `run_bench`,
+which (before W5c-13) only cleared the Metal cache in its `finally` — once
+after ALL combos. W5c-13 clears it **after every combo**, resets the peak
+memory counter at combo start, and logs the three Metal counters (peak /
+active / cache) per combo into the bench log and the combo's `run.json`
+`memory` block. The model is still loaded once and kept; only the GPU
+leftover is released. `run_bench_models` (multi-model) already cleared
+between models; that is unchanged.
+
 Anything outside `benchmarks/results/<machine>-<model-slug>/`: caches
 (`~/.cache/jevmlx/`), model weights, logs, editor files. Predictions larger
 than 5 MB total are gzipped automatically (the folder README says so).

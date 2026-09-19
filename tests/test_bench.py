@@ -906,3 +906,130 @@ def test_normalize_dataset_names_expands_bare_public():
         "boolq.natural",
         "boolq.balanced",
     ]
+
+
+# --- W5c-13 (#79): per-combo Metal cache clear + memory telemetry ----------
+
+
+def test_w5c13_clear_metal_cache_called_once_per_combo_and_memory_block_written(
+    tmp_path, monkeypatch
+):
+    """run_bench (single-model path) clears the Metal buffer cache AFTER every
+    combo (not only in run_bench_models between models), resets the peak
+    counter at combo start, and writes a 'memory' block (peak/active/cache)
+    into each combo's run.json. A fake mx.metal is monkeypatched so no real
+    GPU is needed; _run_one is stubbed to write a minimal run.json."""
+    import json
+
+    import mlx.core as mx
+
+    import jevmlx.bench as bench
+
+    # Fake mx.metal: counters + call recording. Monkeypatch the functions on
+    # the REAL mlx.core.metal module (bench does `import mlx.core as mx;
+    # mx.metal.clear_cache()` locally, so sys.modules faking is unreliable).
+    state = {"peak": 1000, "active": 500, "cache": 2000}
+    calls = {"clear_cache": 0, "reset_peak": 0}
+
+    def _fake_clear_cache():
+        calls["clear_cache"] += 1
+
+    def _fake_reset_peak():
+        calls["reset_peak"] += 1
+        state["peak"] = 0
+
+    monkeypatch.setattr(mx.metal, "clear_cache", _fake_clear_cache)
+    monkeypatch.setattr(mx.metal, "reset_peak_memory", _fake_reset_peak)
+    monkeypatch.setattr(mx.metal, "get_peak_memory", lambda: state["peak"])
+    monkeypatch.setattr(mx.metal, "get_active_memory", lambda: state["active"])
+    monkeypatch.setattr(mx.metal, "get_cache_memory", lambda: state["cache"])
+
+    # Stub the heavy pieces run_bench calls.
+    monkeypatch.setattr(bench, "preflight", lambda force, ov: "test-machine")
+    monkeypatch.setattr(
+        bench,
+        "build_datasets",
+        lambda ds, **kw: ({"bundled": Path(tmp_path) / "bundled.jsonl"}, {}),
+    )
+    # A minimal bundled dataset file so _run_one's stub has a path to read.
+    (Path(tmp_path) / "bundled.jsonl").write_text('{"q": "x"}\n', encoding="utf-8")
+    monkeypatch.setattr(bench, "_load_engine_with_timeout", lambda m, t: object())
+    monkeypatch.setattr(bench, "_run_model_parity", lambda m, e, f: None)
+    # Avoid a real model load for the parity check (load_engine is imported
+    # inside run_bench from jevmlx.engine; patch it there).
+    import jevmlx.engine as _eng
+
+    monkeypatch.setattr(_eng, "load_engine", lambda m: object())
+    import benchmarks.summarize_results as _sr
+
+    monkeypatch.setattr(_sr, "summarize", lambda *a, **kw: None)
+    monkeypatch.setattr(bench, "_print_pr_instructions", lambda f, r: None)
+
+    # Stub _run_one: write a minimal run.json + return a result dict. The
+    # W5c-13 memory augmentation reads run.json back and adds the 'memory' key.
+    def _fake_run_one(model, track, scorer, jsonl, combo_dir, **kw):
+        run = {"run_id": "x", "environment": {}, "config": {}, "counts": {}}
+        (combo_dir / "run.json").write_text(json.dumps(run), encoding="utf-8")
+        (combo_dir / "predictions.jsonl").write_text("", encoding="utf-8")
+        return {"run": run, "report": combo_dir / "report.json"}
+
+    monkeypatch.setattr(bench, "_run_one", _fake_run_one)
+
+    # Two combos: parallel-trie-bundled + parallel-slots-bundled.
+    out = Path(tmp_path) / "out"
+    bench.run_bench(
+        model="fake/model",
+        datasets=["bundled"],
+        scorers=["trie", "slots"],
+        tracks=["parallel"],
+        out=out,
+        runs=1,
+        force=True,
+    )
+
+    # The clear hook fired once per combo (2 combos = 2 clears), NOT only
+    # once at the end.
+    assert calls["clear_cache"] == 2, f"expected 2 clears, got {calls['clear_cache']}"
+    assert calls["reset_peak"] == 2, f"expected 2 peak resets, got {calls['reset_peak']}"
+
+    # Each combo's run.json carries the 'memory' block with the three keys.
+    folder = out / "test-machine-fake--model"
+    for combo in ("parallel-trie-bundled", "parallel-slots-bundled"):
+        run = json.loads((folder / combo / "run.json").read_text())
+        assert "memory" in run, f"{combo} missing memory block"
+        mem = run["memory"]
+        assert "peak_memory_bytes" in mem
+        assert "active_memory_bytes" in mem
+        assert "cache_memory_bytes" in mem
+        assert mem["cache_memory_bytes"] == 2000
+
+
+def test_w5c13_sample_metal_memory_returns_three_keys(monkeypatch):
+    """_sample_metal_memory returns the three counters; -1 when mx absent."""
+    # When mlx.core.metal raises, all three are -1 (best-effort, never raises).
+    import mlx.core as mx
+
+    from jevmlx.bench import _sample_metal_memory
+
+    monkeypatch.setattr(
+        mx.metal, "get_peak_memory", lambda: (_ for _ in ()).throw(RuntimeError("x"))
+    )
+    monkeypatch.setattr(
+        mx.metal, "get_active_memory", lambda: (_ for _ in ()).throw(RuntimeError("x"))
+    )
+    monkeypatch.setattr(
+        mx.metal, "get_cache_memory", lambda: (_ for _ in ()).throw(RuntimeError("x"))
+    )
+    mem = _sample_metal_memory()
+    assert set(mem.keys()) == {"peak_memory", "active_memory", "cache_memory"}
+    assert mem == {"peak_memory": -1, "active_memory": -1, "cache_memory": -1}
+
+
+def test_w5c13_augment_run_json_missing_file_is_noop(tmp_path):
+    """A missing/corrupt run.json is skipped (the eval result is already safe)."""
+    from jevmlx.bench import _augment_run_json_memory
+
+    # No run.json => no crash, no file created.
+    mem = {"peak_memory": 1, "active_memory": 2, "cache_memory": 3}
+    _augment_run_json_memory(Path(tmp_path), mem)
+    assert not (Path(tmp_path) / "run.json").exists()
