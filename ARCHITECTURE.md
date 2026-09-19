@@ -148,9 +148,10 @@ never the batch-wide sum; the group's merged scoring pass lives on the
 per-GROUP ledger ONLY (no fabricated per-context spans) and the amortized
 share is the ONE derived number `per_item_amortized_ms`, computed once
 from the group ledger via `Ledger.batched_views`.
-`per_item_end_to_end_ms` is the context's own prefill span start -> its
-assembly span end (the note's definition; the shared `prior_ms` is
-reported separately, not added). Because the per-context ledgers carry no
+`per_item_end_to_end_ms` = the context's own prefill span + the
+amortized group share + its own assembly span (sum of intervals, N6 — a
+context in group k never carries other groups' wall time; the shared
+`prior_ms` is reported separately, not added). Because the per-context ledgers carry no
 request span, their flat `elapsed_ms` is the top-level main-span sum of
 that context's own spans (single-context requests have a `request` span
 and report true wall); the shared `prior_ms` (request ledger, finding 26)
@@ -189,7 +190,7 @@ load).
 | `field_telemetry` | `{field: entry}` — see next table. |
 | `num_fields` | Field count. |
 
-Batched-only keys (`run_parallel_generation_batched`, every result): `group_wall_ms` (the group's wall time incl. prefill+scoring+assembly), `per_item_amortized_ms` (group wall / group size — the ONE amortized number, from `Ledger.batched_views`), `per_item_end_to_end_ms` (this context's own prefill span start -> its assembly span end; the shared `prior_ms` is reported separately, not added), `contexts_per_pass` (the ACTUAL group size — the final partial group reports its own smaller size). With `prior_correction=True` the neutral pass is computed ONCE per call on the request ledger and every result reports the shared `prior_ms` (`total_ms` includes it). Batched per-context ledgers carry no `request` span, so their flat `elapsed_ms` is the top-level main-span sum of that context's own spans (single-context requests have the `request` span and report true wall). |
+Batched-only keys (`run_parallel_generation_batched`, every result): `group_wall_ms` (merged scoring + assembly of the group — prefill is per context in `prefill_ms`, since the grouping loop needs the prefill sizes BEFORE it can form groups), `per_item_amortized_ms` (group wall / group size — the ONE amortized number, from `Ledger.batched_views`), `per_item_end_to_end_ms` (the context's OWN prefill span + the amortized group share + its OWN assembly span — a sum of intervals, so a context in group k never carries other groups' wall time; the shared `prior_ms` is reported separately, not added), `contexts_per_pass` (the ACTUAL group size — the final partial group reports its own smaller size). With `prior_correction=True` the neutral pass is computed ONCE per call on the request ledger and every result reports the shared `prior_ms` (`total_ms` includes it). Batched per-context ledgers carry no `request` span, so their flat `elapsed_ms` is the top-level main-span sum of that context's own spans (single-context requests have the `request` span and report true wall). |
 
 ### `field_telemetry` entry — built in `run_parallel_generation`'s field loop (multi), scalar branch, and the `<field>#count` branch
 

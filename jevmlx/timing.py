@@ -271,19 +271,22 @@ class Ledger:
                 return iv
         raise SpanError(f"no closed interval named {name!r}")
 
-    def batched_views(self, group_int: Interval, item_indices: list[int]) -> dict[str, list[float]]:
-        """The three decide_many views from one ledger (per the note).
+    def batched_views(self, group_int: Interval, n_items: int) -> dict[str, list[float]]:
+        """The group-level decide_many views from one ledger.
 
-        ``group_int`` is the outer group span (from ``intervals`` — find it
-        by name ``group_wall``). ``item_indices`` pairs each context with
-        its own intervals; ``per_item_end_to_end`` is that context's
-        prefill-span start → its assembly-span end.
+        ``group_int`` is the outer group span (``last_interval("group_wall")``);
+        ``n_items`` is the group's context count. Returns ``group_wall_ms``
+        (once) and ``per_item_amortized_ms`` (the group wall divided by the
+        group — the ONE amortized share, ``n_items`` entries). Per-context
+        end-to-end is NOT derived here: it is each context's own prefill
+        span + amortized share + own assembly span, assembled by the engine
+        from the per-context ledgers.
         """
         group_wall_ms = group_int.ms
-        n = len(item_indices)
+        n = max(1, n_items)
         return {
             "group_wall_ms": [group_wall_ms],
-            "per_item_amortized_ms": [group_wall_ms / max(1, n)] * max(1, n),
+            "per_item_amortized_ms": [group_wall_ms / n] * n,
         }
 
     def per_item_end_to_end(self, prefill_iv: Interval, assembly_iv: Interval) -> float:

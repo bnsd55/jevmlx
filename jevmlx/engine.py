@@ -16,7 +16,6 @@ import logging
 import math
 import platform
 import re
-import sys
 import time
 import weakref
 from collections import OrderedDict
@@ -1273,9 +1272,9 @@ def _score_rows(
                 [rows[ridx] + [pad_id] * (width - len(rows[ridx])) for ridx in chunk_rows],
                 dtype=mx.int32,
             )
-            bcast_span = ledger.span("cache_merge")
-            bcast_span.__enter__()
-            try:
+            # N7: with-form — on failure no interval is recorded (not a
+            # retry path; the with-form drops the span, per the doc).
+            with ledger.span("cache_merge"):
                 if cache_slots is not None:
                     # W3-F batched path: merge exactly this chunk's slots (row i
                     # of the chunk pairs with cache slot chunk_rows[i]).
@@ -1293,25 +1292,16 @@ def _score_rows(
                         if hasattr(c, "prepare"):
                             c.prepare(lengths=lengths, right_padding=padding)
                 _eval_cache_state(b_cache)
-            finally:
-                bcast_span.__exit__(None, None, None)
             # W5-D finding 30: failed attempts are recorded separately and
             # NEVER counted as passes; chunk_shapes only records forwards
             # that ran.
             chunk_retried = False
             try:
-                xform_span = ledger.span("transformer")
-                try:
-                    xform_span.__enter__()
+                # N7: with-form — a failed forward unwinds through the span
+                # (no interval recorded), the retry catches outside.
+                with ledger.span("transformer"):
                     out = model(padded, cache=b_cache)
                     mx.eval(out)  # W5b-14 review F8: the span covers the sync
-                except BaseException:
-                    # A failed forward records NO transformer interval (the
-                    # ledger drops spans an exception unwinds through).
-                    xform_span.__exit__(*sys.exc_info())
-                    raise
-                else:
-                    xform_span.__exit__(None, None, None)
             except Exception as exc:  # noqa: BLE001
                 del b_cache
                 if not _is_metal_allocation_error(exc) or chunk_len == 1:
@@ -1329,37 +1319,37 @@ def _score_rows(
             chunk_decisions = [row_decision[ridx] for ridx in chunk_rows]
             positions = mx.array([d[0] for d in chunk_decisions])
             max_allowed = max(len(d[1]) for d in chunk_decisions)
-            gather_span = ledger.span("gather")
-            gather_span.__enter__()
-            rows_at_pos = out[mx.arange(chunk_len), positions]
-            flat_idx = mx.array(
-                [
-                    i * vocab_size + tok
-                    for i, d in enumerate(chunk_decisions)
-                    for tok in (d[1] + [d[1][0]] * (max_allowed - len(d[1])))
-                ],
-                dtype=mx.int32,
-            )
-            gathered = mx.take(rows_at_pos.reshape(-1), flat_idx)
-            row_vocab_lse = mx.logsumexp(rows_at_pos, axis=1)
-            try:
-                mx.eval(gathered, row_vocab_lse)
-            except Exception as exc:  # noqa: BLE001
-                gather_span.__exit__(*sys.exc_info())
-                del out, b_cache
-                if not _is_metal_allocation_error(exc) or chunk_len == 1:
-                    raise
-                failed_attempts += 1
-                chunk_retried = True
-                chunk_size = max(1, chunk_len // 2)
-                logger.warning(
-                    "Chunk gather eval failed (%s); retrying %d rows as %d",
-                    type(exc).__name__,
-                    chunk_len,
-                    chunk_size,
+            # N7: with-form — a failed gather eval unwinds through the
+            # span (no interval), the retry catches outside.
+            with ledger.span("gather"):
+                rows_at_pos = out[mx.arange(chunk_len), positions]
+                flat_idx = mx.array(
+                    [
+                        i * vocab_size + tok
+                        for i, d in enumerate(chunk_decisions)
+                        for tok in (d[1] + [d[1][0]] * (max_allowed - len(d[1])))
+                    ],
+                    dtype=mx.int32,
                 )
-                continue
-            gather_span.__exit__(None, None, None)
+                gathered = mx.take(rows_at_pos.reshape(-1), flat_idx)
+                row_vocab_lse = mx.logsumexp(rows_at_pos, axis=1)
+                try:
+                    mx.eval(gathered, row_vocab_lse)
+                except Exception as exc:  # noqa: BLE001
+                    # N7 note: the span drops via the with-unwind on raise.
+                    del out, b_cache
+                    if not _is_metal_allocation_error(exc) or chunk_len == 1:
+                        raise
+                    failed_attempts += 1
+                    chunk_retried = True
+                    chunk_size = max(1, chunk_len // 2)
+                    logger.warning(
+                        "Chunk gather eval failed (%s); retrying %d rows as %d",
+                        type(exc).__name__,
+                        chunk_len,
+                        chunk_size,
+                    )
+                    continue
             if not chunk_retried:
                 passes += 1
                 chunk_shapes.append((width, chunk_len))
@@ -2115,7 +2105,6 @@ def run_parallel_generation(
     constraints: list[dict] | None = None,
     oracle_overrides: dict[str, object] | None = None,
     *,
-    ledger: "Ledger | None" = None,
     _prior_mode: bool = False,
 ) -> dict[str, Any]:
     """Decide every schema field in one batched forward pass.
@@ -2177,9 +2166,7 @@ def run_parallel_generation(
 
     # W5b-14: ONE ledger for the whole request — every interval measured
     # once, non-overlapping; the flat *_ms keys are derivations of it.
-    # A caller-supplied ledger (tests, prior mode) is reused as-is.
-    if ledger is None:
-        ledger = Ledger()
+    ledger = Ledger()
 
     # Neutral-context prior: what the model would emit with no evidence. The
     # same prompt v2 with the literal string "(no context provided)" inside
@@ -3146,8 +3133,7 @@ def finalize_public_result(
 
     W5b-14: EVERY flat ``*_ms`` key is a DERIVATION of the request ledger
     (``derived_flat``) — one measurement per interval, no overlapping
-    accumulators. Without a ledger (only the prior-mode internal pass),
-    the single elapsed-ms wall clock remains.
+    accumulators, no ledger-less path.
     """
     # W5b-14 review N1: the prior pass is REQUEST-level (runs once on the
     # request/group path); per-context ledgers carry no prior span, so the
@@ -3521,12 +3507,16 @@ def run_parallel_generation_batched(
     ``decide(..., prior_correction=True)`` per context (the neutral pass is
     shared, its wall time reported once as ``prior_ms`` on every result).
 
-    Timing (W5-D finding 27) is honest: ``group_wall_ms`` is the group's
-    wall time including prefill+scoring+assembly, ``per_item_amortized_ms``
-    divides it by the group, ``per_item_end_to_end_ms`` is that context's
-    own prefill + its share. ``contexts_per_pass`` is the ACTUAL group size
-    per group (the final partial group reports its own smaller size), not a
-    configured constant.
+    Timing (W5-D finding 27, N6) is honest: ``group_wall_ms`` = merged
+    scoring + assembly of the group (prefill is per context, in
+    ``prefill_ms`` — the grouping loop needs the prefill sizes BEFORE it
+    can form groups), ``per_item_amortized_ms`` divides the group wall by
+    the group, ``per_item_end_to_end_ms`` = the context's own prefill span
+    + the amortized group share + its own assembly span (sum of intervals —
+    a context in group k never carries other groups' wall time).
+    ``contexts_per_pass`` is the ACTUAL group size per group (the final
+    partial group reports its own smaller size), not a configured
+    constant.
 
     Context groups (W5-D finding 28) are built INCREMENTALLY from actual
     cumulative cache bytes plus the projected suffix cost, over contexts
@@ -3686,11 +3676,11 @@ def run_parallel_generation_batched(
                         ledger=ctx_ledger,
                     )
                 prefill_iv = prefill_iv_by_idx[idx]
-                assembly_iv = ctx_ledger.intervals[-1]
+                assembly_iv = ctx_ledger.last_interval("assembly")
                 res["contexts_per_pass"] = n_group
-                # F13: own prefill span start -> own assembly span end (the
-                # caller adds the shared prior_ms once, in the post-loop).
-                res["_per_item_end_to_end_ms"] = (assembly_iv.t1 - prefill_iv.t0) * 1000.0
+                # N6: own prefill + own assembly (the caller adds the
+                # amortized group share; prior_ms stays separate).
+                res["_per_item_own_ms"] = prefill_iv.ms + assembly_iv.ms
                 results[idx] = res
             return
 
@@ -3762,12 +3752,12 @@ def run_parallel_generation_batched(
                     ledger=ctx_ledger,
                 )
             prefill_iv = prefill_iv_by_idx[idx]
-            assembly_iv = ctx_ledger.intervals[-1]
+            assembly_iv = ctx_ledger.last_interval("assembly")
             res["contexts_per_pass"] = n_group
-            # W5-D finding 27 / W5b-14: per-item end-to-end is the context's
-            # own prefill span start -> its assembly span end; group views
-            # are filled after the loop (the group span closes first).
-            res["_per_item_end_to_end_ms"] = (assembly_iv.t1 - prefill_iv.t0) * 1000.0
+            # W5-D finding 27 / W5b-14 N6: own prefill + own assembly; the
+            # caller adds the amortized group share after the group span
+            # closes (a context never carries other groups' wall time).
+            res["_per_item_own_ms"] = prefill_iv.ms + assembly_iv.ms
             results[idx] = res
 
     for group_idx in groups:
@@ -3779,13 +3769,15 @@ def run_parallel_generation_batched(
         # F4/N5: the amortized share is ONE derived number from the group
         # ledger (batched_views) — no second hand-computed amortization.
         group_int = group_ledger.last_interval("group_wall")
-        views = group_ledger.batched_views(group_int, [(i, None) for i, _ in group_pf])
+        views = group_ledger.batched_views(group_int, n_group)
         for (idx, _pf), amortized in zip(group_pf, views["per_item_amortized_ms"], strict=True):
             res = results[idx]
             res["group_wall_ms"] = views["group_wall_ms"][0]
             res["per_item_amortized_ms"] = amortized
-            # F13: the note's definition — own prefill start -> own assembly
-            # end. prior_ms is reported separately (shared request-level
-            # value); it is NOT added here.
-            res["per_item_end_to_end_ms"] = res.pop("_per_item_end_to_end_ms")
+            # N6: per_item_end_to_end_ms = OWN prefill span + the amortized
+            # group share + OWN assembly span (a sum of intervals, not
+            # t1 - t0) — a context in group k never carries another group's
+            # wall time. prior_ms is reported separately (shared
+            # request-level value); it is NOT added here.
+            res["per_item_end_to_end_ms"] = res.pop("_per_item_own_ms") + amortized
     return results
