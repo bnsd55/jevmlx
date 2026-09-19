@@ -386,7 +386,6 @@ def _record_envelope_from_report(
     envelope is an optimization for the band, not a gate input.
     """
     try:
-
         from jevmlx.driftenv import (
             MAX_GAP_DRIFT_KEY,
             envelope_key,

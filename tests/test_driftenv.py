@@ -216,9 +216,7 @@ class _MarginFakeModel(BiasedFakeModel):
 def _schema_two_choice():
     from jevmlx.schema import StructuredSchema
 
-    return StructuredSchema(
-        {"action": {"type": "enum", "description": "d", "choices": ["A", "B"]}}
-    )
+    return StructuredSchema({"action": {"type": "enum", "description": "d", "choices": ["A", "B"]}})
 
 
 def test_engine_end_to_end_widened_band_rescores():

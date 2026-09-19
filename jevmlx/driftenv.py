@@ -522,9 +522,7 @@ def envelope_for_engine(engine: Any, *, probes_dir: Path | None = None) -> dict[
             f"canary probe failed for {key.get('model_id')}/{key.get('chip')}: {exc}"
         ) from exc
     if probes_dir is None:
-        probes_dir = probes_dir_for_record(
-            key.get("model_id") or "", chip=key.get("chip") or ""
-        )
+        probes_dir = probes_dir_for_record(key.get("model_id") or "", chip=key.get("chip") or "")
     record_envelope(record, probes_dir=probes_dir)
     # Read back the merged store (the write may have hit a covering bucket
     # already; the canary's own bucket is M<=16).
