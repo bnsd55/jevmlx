@@ -235,6 +235,23 @@
   (per-row peak-memory slope per width bin under `mx.reset_peak_memory`,
   B=1/2/4/8 at widths 4/8/16/32) and `adapters` (max abs diff + timing of
   full-width head vs decision-position head). No engine wiring.
+- Per-field probability semantics (W5b-13): every engine scoring stage —
+  scalar finalization, multi selection, count rows, case-constraint MAP,
+  dependency waves — sets a frozen semantics record
+  (`api.FieldSemantics`: score_source / temperature / calibrator_id /
+  prior_mode / constraint_changed / dependency_rescored) on its
+  field_telemetry entry, and `FieldResult.semantics` (required, kw-only)
+  coerces it at the public API boundary — a missing record raises, so
+  'required' holds at every decide() return. The result-level
+  `probability_status` is now a SUMMARY over the distinct
+  (score_source, temperature, calibrator_id, prior_mode) groups — one
+  clause per group with its field count; the old global-only statement is
+  gone (a result mixing temperature-scaled scalars, calibrated multi
+  options and dependency re-scores cannot be described by one sentence).
+  A calibrated multi records temperature None (the log-odds cut ignores
+  the caller T); count rows always do (fixed T=1 buckets);
+  constraint_changed reflects an actual selection change, not merely a
+  binding constraint.
 - Results contract v2 in the results tooling (PR #48):
   `check_results.py` requires `timing.json` on parallel-track combos with
   the full timing-split median (incl. `peak_incremental_bytes` +

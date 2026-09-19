@@ -153,7 +153,9 @@ def test_decide_fields_carry_semantics(monkeypatch):
 
 def test_missing_semantics_record_fails_loudly(monkeypatch):
     """A telemetry entry without a semantics record is a contract violation:
-    _build_field_results raises naming the field — never a silent None."""
+    _build_field_results raises naming the field — never a silent None
+    (F2: the boundary indexes directly; a KeyError and the ValueError are
+    both loud, so the pin accepts either)."""
     import jevmlx.api as api
     from tests.conftest import make_engine_result, make_field_telemetry
 
@@ -167,7 +169,7 @@ def test_missing_semantics_record_fails_loudly(monkeypatch):
     class Ticket(BaseModel):
         risk_tier: Literal["HIGH", "LOW"] = Field(description="Risk tier")
 
-    with pytest.raises(ValueError, match="semantics record"):
+    with pytest.raises((ValueError, KeyError), match="semantics"):
         jevmlx.decide(Ticket, "ctx", model="fake/model")
 
 
@@ -295,10 +297,12 @@ def test_engine_sets_semantics_on_all_shapes():
     assert sem_action["score_source"] == "rescored_batch1"
     assert sem_action["temperature"] == 1.0
     assert sem_action["prior_mode"] == "off"
-    # Multi: temperature None (fake ties are rescored; uncalibrated -> caller
-    # T applies to P(yes) softmax... T=1.0 here).
+    # Multi: uncalibrated fake run — the caller T (1.0) IS applied to the
+    # P(yes) softmax, so the record carries it (None only under calibration).
     sem_flags = r["field_telemetry"]["flags"]["semantics"]
     assert sem_flags["score_source"] == "rescored_batch1"
+    assert sem_flags["temperature"] == 1.0
+    assert sem_flags["prior_mode"] == "off"
 
     # Cardinality-1 + dependency re-decided child (chain schema: pa has one
     # choice -> schema-determined; cb re-decided in a wave).
@@ -380,3 +384,85 @@ def test_run_parallel_generation_imported_here():
     """Guard: the module-level import used by the pins above resolves to the
     live engine module (the test_check_results eviction trap)."""
     from jevmlx.engine import run_parallel_generation  # noqa: F401
+
+
+def test_prior_correction_lands_neutral_v1_on_real_run():
+    """F6a: prior_correction=True on a REAL engine path lands
+    prior_mode='neutral_v1' on every field's semantics record — asserted on
+    the run, not a hand-made dict. Fails if the scalar/multi setters stop
+    reading decision.prior_corrected / prior_entry."""
+    from jevmlx.schema import StructuredSchema
+    from tests.conftest import FakeModel, FakeTokenizer, make_engine
+
+    schema = StructuredSchema(
+        {
+            "action": {"type": "enum", "description": "d", "choices": ["A", "B"]},
+            "flags": {"type": "multi", "description": "d", "choices": ["x", "y"]},
+        }
+    )
+    corrected = run_parallel_generation(
+        make_engine(FakeModel(), FakeTokenizer()), "ctx", schema, prior_correction=True
+    )
+    raw = run_parallel_generation(make_engine(FakeModel(), FakeTokenizer()), "ctx", schema)
+    for fname in ("action", "flags"):
+        assert corrected["field_telemetry"][fname]["semantics"]["prior_mode"] == "neutral_v1"
+        assert raw["field_telemetry"][fname]["semantics"]["prior_mode"] == "off"
+
+
+def test_count_row_semantics_temperature_none_and_score_source_copied():
+    """F6b: the count row's semantics carries temperature None (fixed T=1
+    bucket softmaxes) and copies the parent multi's score_source + prior
+    mode. Fails if the count setter stops deriving from the parent."""
+    from jevmlx.schema import StructuredSchema
+    from tests.conftest import FakeModel, FakeTokenizer, make_engine
+
+    schema = StructuredSchema(
+        {"flags": {"type": "multi", "description": "d", "choices": ["x", "y"]}}
+    )
+    r = run_parallel_generation(
+        make_engine(FakeModel(), FakeTokenizer()), "ctx", schema, prior_correction=True
+    )
+    count = r["internal_telemetry"]["flags#count"]
+    parent = r["field_telemetry"]["flags"]
+    assert count["semantics"]["temperature"] is None
+    assert count["semantics"]["score_source"] == parent["semantics"]["score_source"]
+    assert count["semantics"]["prior_mode"] == parent["semantics"]["prior_mode"] == "neutral_v1"
+
+
+def test_uncalibrated_multi_carries_caller_temperature():
+    """F6c: an UNCALIBRATED multi records the caller temperature (the P(yes)
+    softmax used it) and prior_mode off without prior correction. Fails if
+    the multi setter stops passing the caller T on the uncalibrated path."""
+    from jevmlx.schema import StructuredSchema
+    from tests.conftest import FakeModel, FakeTokenizer, make_engine
+
+    schema = StructuredSchema(
+        {"flags": {"type": "multi", "description": "d", "choices": ["x", "y"]}}
+    )
+    r = run_parallel_generation(
+        make_engine(FakeModel(), FakeTokenizer()), "ctx", schema, temperature=0.6
+    )
+    sem = r["field_telemetry"]["flags"]["semantics"]
+    assert sem["temperature"] == 0.6
+    assert sem["calibrator_id"] is None
+    assert sem["prior_mode"] == "off"
+
+
+def test_trusted_nonbinding_count_reports_constraint_changed_false():
+    """F3/F4: neither an untrusted count (margin below COUNT_MARGIN_MIN: no
+    constraint ran) nor a trusted count whose constraint was non-binding
+    may claim constraint_changed — only a reconciler that CHANGED the
+    selection (or the count row's own trusted constraint running) may."""
+    from jevmlx.schema import StructuredSchema
+    from tests.conftest import FakeModel, FakeTokenizer, make_engine
+
+    schema = StructuredSchema(
+        {"flags": {"type": "multi", "description": "d", "choices": ["x", "y"]}}
+    )
+    # Zero logits -> P(yes)=0.5 for every option; the count row ties across
+    # buckets (untrusted), the threshold proposal selects all, nothing
+    # changed anything.
+    r = run_parallel_generation(make_engine(FakeModel(), FakeTokenizer()), "ctx", schema)
+    sem = r["field_telemetry"]["flags"]["semantics"]
+    assert sem["constraint_changed"] is False
+    assert r["internal_telemetry"]["flags#count"]["semantics"]["constraint_changed"] is False

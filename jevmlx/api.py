@@ -159,11 +159,9 @@ class FieldResult:
             only values are None, "none_of_above" and "abstain"; a
             withheld decision is exactly ``reason == "abstain"``.
         semantics: HOW this field's reported probabilities were produced —
-            see :class:`FieldSemantics`. Required: the engine fills it in
-            W5b-13 step 2 (this draft's decide() passes
-            telemetry.get("semantics") through, which is None until then;
-            the PR does not leave draft until every decided field carries a
-            real record).
+            see :class:`FieldSemantics`. Required: the engine's stages set
+            the record and _build_field_results coerces it; a telemetry
+            entry without one raises (never a silent None).
     """
 
     value: object
@@ -406,9 +404,10 @@ def _build_field_results(
         # W5b-13 step 2: the engine's stages set the semantics record; the
         # public API coerces it into the frozen FieldSemantics. A telemetry
         # entry without one is a contract violation — fail loudly, never
-        # ship a None semantics (the docstring's 'required' is now TRUE at
-        # every decide() return).
-        sem_dict = telemetry.get("semantics")
+        # ship a None semantics. (This is the boundary CHECK, not a
+        # tolerant read: the index below raises when the record is absent
+        # or not a dict.)
+        sem_dict = telemetry["semantics"]
         if not isinstance(sem_dict, dict):
             raise ValueError(
                 f"field telemetry for {name!r} carries no semantics record "

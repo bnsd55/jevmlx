@@ -1957,8 +1957,9 @@ def _selective_second_pass(
             # A MAP reconciliation that happened EARLIER stays recorded
             # (constraint_changed carries over); the oracle path records
             # without touching the main predictions, so its semantics live
-            # only on the fields it re-decided.
-            _prev_sem = field_telemetry[fname].get("semantics") or {}
+            # only on the fields it re-decided. F2: the record must exist —
+            # index directly.
+            _prev_sem = field_telemetry[fname]["semantics"]
             field_telemetry[fname]["semantics"] = _field_semantics(
                 score_source="oracle" if is_oracle else "dependency",
                 temperature=temperature,
@@ -1992,9 +1993,9 @@ def _selective_second_pass(
             if fname in parsed_json and parsed_json[fname]["value"] != val:
                 parsed_json[fname]["value"] = val
                 field_telemetry[fname]["value"] = val
-                # W5b-13: the post-dependency MAP changed this field again.
-                if "semantics" in field_telemetry[fname]:
-                    field_telemetry[fname]["semantics"]["constraint_changed"] = True
+                # W5b-13: the post-dependency MAP changed this field again
+                # (F2: the record must exist — index directly).
+                field_telemetry[fname]["semantics"]["constraint_changed"] = True
         final_assignment = {fname: pj["value"] for fname, pj in parsed_json.items()}
         if not compiled_constraints.satisfied(final_assignment):
             raise InternalConstraintViolationError(
@@ -2692,15 +2693,15 @@ def _cardinality_one_outcome(
             "rows": 0,
             "legal_mass": 1.0,
             # W5b-13: cardinality-1 fields are schema-determined — no model
-            # scoring, no temperature applied, nothing corrected.
-            "semantics": {
-                "score_source": "batched",
-                "temperature": None,
-                "calibrator_id": None,
-                "prior_mode": "off",
-                "constraint_changed": False,
-                "dependency_rescored": False,
-            },
+            # scoring, no temperature applied, nothing corrected (F5: built
+            # by the ONE record constructor).
+            "semantics": _field_semantics(
+                score_source="batched",
+                temperature=None,
+                calib=None,
+                calibrated_applied=False,
+                prior_corrected=False,
+            ),
         },
     )
 
@@ -2792,15 +2793,12 @@ def score_scalar_field(
     )
     calibration_id = calib.identity() if scalar_calibrated is not None else None
     # W5b-13: the per-field semantics record. Evidence source from the ONE
-    # finalizer (batch -> batched, batch1 -> rescored_batch1); the applied
-    # temperature is the fitted scalar T when the bundle supplied it, the
-    # caller temperature otherwise.
-    applied_temperature = (
-        calib.temperature if calib is not None and calib.has_scalar else temperature
-    )
+    # finalizer (batch -> batched, batch1 -> rescored_batch1). F5: the
+    # temperature arriving here IS the effective one — _load_calibration
+    # already replaced the caller T with the bundle's fitted scalar T.
     semantics = _field_semantics(
         score_source="rescored_batch1" if decision.rescored else "batched",
-        temperature=applied_temperature,
+        temperature=temperature,
         calib=calib,
         calibrated_applied=scalar_calibrated is not None,
         prior_corrected=decision.prior_corrected,
@@ -3026,6 +3024,10 @@ def solve_multi_set(
     telemetry = {
         "margin": margin,
         "reconciled_by": reconciled_by,
+        # W5b-13 F4: the raw threshold proposal — what constraint_changed
+        # compares the final selection against (reconciled_by == 'count'
+        # also fires when a trusted count was non-binding).
+        "threshold_proposal": sorted(selected_set),
         # W2-E step 3: the count row's answer and confidence.
         "count_choice": count_choice,
         "count_margin": count_margin,
@@ -3294,6 +3296,12 @@ def score_multi_field(
         prior_pairs,
         selected,
     )
+    # W5b-13 F4: constraint_changed compares the FINAL selected set to the
+    # raw threshold proposal (solved_telemetry['threshold_proposal']) —
+    # reconciled_by == 'count' also fires when a trusted count was
+    # non-binding (the solver reproduced the proposal), and that changed
+    # nothing.
+    constraint_changed = set(selected) != set(solved_telemetry["threshold_proposal"])
     # W5b-13: multi semantics. score_source mirrors the scalar vocabulary —
     # 'rescored_batch1' when any option's Y/N pair was band-rescored. The
     # caller temperature was applied to the P(yes) softmax, BUT the
@@ -3307,14 +3315,14 @@ def score_multi_field(
         calib=calib,
         calibrated_applied=calib is not None and calib.has_multi,
         prior_corrected=prior_entry is not None,
-        # solve_multi_set's reconciled_by: 'per_option' = the raw threshold
-        # proposal stood; 'count' or a setcons rule name = a reconciler
-        # overrode it (W5b-13 constraint_changed).
-        constraint_changed=solved_telemetry.get("reconciled_by") != "per_option",
+        constraint_changed=constraint_changed,
     )
     # The count row rides the parent multi's prior mode and score path; its
     # bucket scores are fixed T=1 softmaxes (never temperature-scaled) and
-    # its selection is the trusted-count rule (a reconciler by nature).
+    # its selection is the trusted-count rule. F3: constraint_changed only
+    # when a trusted count constraint actually RAN — an untrusted count
+    # (margin below COUNT_MARGIN_MIN) never became a constraint, and
+    # dropped_reason stays None on that path too.
     if count_telemetry is not None:
         count_telemetry["semantics"] = _field_semantics(
             score_source="rescored_batch1" if multi_rescored else "batched",
@@ -3322,7 +3330,8 @@ def score_multi_field(
             calib=None,
             calibrated_applied=False,
             prior_corrected=prior_entry is not None,
-            constraint_changed=count_telemetry.get("dropped_reason") is None,
+            constraint_changed=solved_telemetry.get("reconciled_by") == "count"
+            and count_telemetry.get("dropped_reason") is None,
         )
     return FieldOutcome(
         fname,
@@ -3381,9 +3390,8 @@ def reconcile_case_constraints(
                         field_log_scores[fname][str(val)]
                     )
                 # W5b-13: the MAP overrode the raw winner — the field's
-                # semantics record says so.
-                if "semantics" in field_telemetry[fname]:
-                    field_telemetry[fname]["semantics"]["constraint_changed"] = True
+                # semantics record says so (F2: must exist — index directly).
+                field_telemetry[fname]["semantics"]["constraint_changed"] = True
     return AssembledState(
         parsed_json=parsed_json,
         field_telemetry=field_telemetry,
@@ -3482,9 +3490,9 @@ def finalize_public_result(
     # re-scores cannot be described by one sentence.
     semantic_groups: dict[tuple, list[str]] = {}
     for fname, ft in state.field_telemetry.items():
-        sem = ft.get("semantics")
-        if not isinstance(sem, dict):
-            continue
+        # F2: the record must exist — index directly. A missing record is a
+        # results-contract violation, never a skippable field.
+        sem = ft["semantics"]
         key = (sem["score_source"], sem["temperature"], sem["calibrator_id"], sem["prior_mode"])
         semantic_groups.setdefault(key, []).append(fname)
     clauses: list[str] = []
@@ -3510,23 +3518,16 @@ def finalize_public_result(
         if pmode == "neutral_v1":
             parts.append("prior-corrected against the neutral-context pass")
         clauses.append("; ".join(parts))
-    if clauses:
-        probability_status = " per distinct semantics group | ".join(clauses)
-    else:
-        # No semantics records (fake/baseline paths): keep the classic
-        # temperature-honest statement rather than an empty string.
-        if temperature == 1.0:
-            probability_status = (
-                "constrained-path probability at T=1; uncalibrated as decision confidence"
-            )
-        else:
-            probability_status = (
-                f"post-hoc temperature-scaled constrained distribution "
-                f"(temperature={temperature}); ranking-invariant, not a T=1 probability; "
-                f"uncalibrated as decision confidence"
-            )
-        if prior_correction:
-            probability_status += "; prior-corrected against the neutral-context pass"
+    # Every engine path sets semantics records (F1): an empty group set is
+    # a bug, not a fallback case — fail loudly instead of shipping a global
+    # sentence that could contradict the per-field records.
+    if not clauses:
+        raise ValueError(
+            "finalize_public_result: no field carries a semantics record "
+            "(results-contract violation; the stages must set "
+            "field_telemetry[fname]['semantics'])"
+        )
+    probability_status = " per distinct semantics group | ".join(clauses)
 
     # Bug 9 / W5b-14: the timing split is honest about the whole request
     # wall time and every key is a ledger derivation (prior_ms = the prior
