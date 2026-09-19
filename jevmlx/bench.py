@@ -468,15 +468,6 @@ def _run_model_parity(model: str, engine, folder: Path) -> str | None:
     )
 
 
-def _combo_complete(combo_dir: Path) -> bool:
-    """Resume rule: predictions.jsonl + run.json + report.json all exist."""
-    return (
-        (combo_dir / "predictions.jsonl").is_file()
-        and (combo_dir / "run.json").is_file()
-        and (combo_dir / "report.json").is_file()
-    )
-
-
 def run_bench(
     model: str,
     datasets: list[str],
@@ -543,10 +534,17 @@ def run_bench(
             combo = f"{track}-{scorer}-{dataset}"
             combo_dir = folder / combo
             combo_dir.mkdir(parents=True, exist_ok=True)
-            if not fresh and _combo_complete(combo_dir):
-                print(f"=== {combo}: complete, skipping (--fresh to rerun) ===")
-                continue
-            print(f"=== {combo} ({runs} run(s)) ===")
+            # N3: --fresh deletes the combo dir (explicit, logged) so the
+            # run starts clean. Otherwise: manifest present -> resume,
+            # absent -> fresh.
+            if fresh and combo_dir.exists():
+                import shutil as _shutil
+
+                print(f"=== {combo}: --fresh, removing existing dir ===")
+                _shutil.rmtree(combo_dir)
+                combo_dir.mkdir(parents=True, exist_ok=True)
+            _has_manifest = (combo_dir / "manifest.json").is_file()
+            print(f"=== {combo} ({runs} run(s)) [{'resume' if _has_manifest else 'fresh'}] ===")
             try:
                 if not engine_loaded:
                     # Load once per model, lazily, inside the timeout guard.
@@ -582,6 +580,7 @@ def run_bench(
                         dataset_paths[dataset],
                         combo_dir,
                         dataset_lock_path=dataset_locks.get(dataset),
+                        resume=_has_manifest,
                     )
                     print(f"  run {run_index + 1}/{runs} done")
                 assert result is not None
@@ -737,6 +736,7 @@ def _run_one(
     jsonl: Path,
     combo_dir: Path,
     dataset_lock_path: Path | None = None,
+    resume: bool = False,
 ) -> dict:
     """One eval run (in-process) + metrics + report, into combo_dir."""
     cases = _load_cases(jsonl)
@@ -771,6 +771,7 @@ def _run_one(
         # distributions; lines get theirs so tvd_vs_consensus can run. Other
         # datasets have no meta.consensus and are unaffected.
         carry_consensus=True,
+        resume=resume,
     )
 
     records = load_predictions(combo_dir / "predictions.jsonl")
@@ -883,7 +884,11 @@ def dry_run(
             for dataset in combo_names:
                 combo = f"{track}-{scorer}-{dataset}"
                 combo_dir = folder / combo
-                state = "complete, would skip" if _combo_complete(combo_dir) else "would run"
+                state = (
+                    "would resume (has predictions)"
+                    if (combo_dir / "predictions.jsonl").is_file()
+                    else "would run"
+                )
                 print(f"    {combo} -> {combo_dir} [{state}]")
     return 0
 

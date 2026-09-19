@@ -48,9 +48,14 @@ Failure is a result, not a crash: a model that cannot load (or exceeds
 of its combos, and a combo that fails mid-run writes `run_failed` — both
 appear in `SUMMARY.md` with the error in the field-acc column. Exit code is
 0 as long as at least one combo succeeded; 1 only when EVERY combo failed.
-Reruns resume: a combo with `predictions.jsonl` + `run.json` + `report.json`
-tracks as complete and is skipped with a log line (state comes from the
-files, no manifest). Pass `--fresh` to force reruns.
+Reruns resume: a combo with `manifest.json` present resumes (`resume=True`
+passed to `run_eval`); completed cases are skipped via the commit journal
+(`completed_cases.jsonl`). A combo without a manifest is a fresh run. Use
+`jevmlx eval --resume` to resume a crashed/interrupted eval run into an
+existing output dir — the manifest is verified (config/code/model/tokenizer/
+prompt/machine must match), `predictions.jsonl` is truncated to the last
+committed byte offset (discarding any half-written trailing data), and
+completed cases are skipped. Pass `--fresh` to force reruns.
 
 ## 3. Commit the results folder
 
@@ -85,11 +90,7 @@ Paste `SUMMARY.md` into the PR description and link the machine specs
   (nothing is sampled or locked). TWO DISJOINT
   sampling views are written as separate cases files:
   `<name>.balanced.jsonl` (class-balanced diagnostic, 50 rows/class —
-  per-class accuracy, macro-F1, confusion, ordinal MAE — ordinal metrics
-  run on EVERY track: each track's decide_fn emits the ordered scale
-  (`ordinal_choices`) + the derived `ordinal` record, so the hard ordinal
-  MAE is computed everywhere; the soft `ordinal_mae_expected` needs the
-  engine telemetry and is therefore parallel-track-only) and
+  per-class accuracy, macro-F1, confusion, ordinal MAE) and
   `<name>.natural.jsonl` (the dataset's own class prevalence, 500 rows
   drawn from rows the balanced view did NOT take, so calibration rows
   are never the reported diagnostic rows — the view NLL/Brier/ECE

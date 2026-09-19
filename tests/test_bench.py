@@ -291,7 +291,7 @@ def _patch_bench_core(monkeypatch, tmp_path, failing_models=()):
 
     run_calls: list[str] = []
 
-    def fake_run_one(model, track, scorer, jsonl, combo_dir, dataset_lock_path=None):
+    def fake_run_one(model, track, scorer, jsonl, combo_dir, dataset_lock_path=None, resume=False):
         if model in failing_models:
             raise RuntimeError(f"load failed for {model}")
         run_calls.append(model)
@@ -618,9 +618,10 @@ def test_every_combo_failing_exits_nonzero(tmp_path, monkeypatch):
         )
 
 
-def test_resume_skips_complete_combos(tmp_path, monkeypatch, capsys):
-    """A combo folder with predictions+run.json+report.json is skipped with a
-    log line; state comes from files only."""
+def test_resume_does_not_skip_combos(tmp_path, monkeypatch, capsys):
+    """W5c-7 review: _combo_complete is gone — bench always passes resume=True.
+    A second invocation calls _run_one again (resume), not skips it.
+    """
     from jevmlx import bench
 
     run_calls = _patch_bench_core(monkeypatch, tmp_path)
@@ -637,7 +638,7 @@ def test_resume_skips_complete_combos(tmp_path, monkeypatch, capsys):
     )
     first_count = len(run_calls)
 
-    # Second invocation: the complete combo is skipped.
+    # Second invocation: bench calls _run_one again (resume=True, not skip).
     bench.run_bench(
         model="org/m",
         datasets=["bundled"],
@@ -646,9 +647,9 @@ def test_resume_skips_complete_combos(tmp_path, monkeypatch, capsys):
         out=out,
         runs=1,
     )
-    assert len(run_calls) == first_count  # no additional runs
+    assert len(run_calls) == first_count + 1  # _run_one called again (resume)
     printed = capsys.readouterr().out
-    assert "complete, skipping" in printed
+    assert "===" in printed  # the combo header printed again
 
 
 def test_fresh_reruns_complete_combos(tmp_path, monkeypatch):

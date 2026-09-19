@@ -261,7 +261,6 @@ Batched-only keys (`run_parallel_generation_batched`, every result): `group_wall
 | `alternatives` | Top 3 (choice, probability) pairs; multi: per-option (option, P(yes)) sorted desc. |
 | `reason` | None, `"none_of_above"` (caller opted in via `allow_none_of_above=True`, model picked the explicit opt-out → None), or `"abstain"` (`abstain_below_margin` set and the field's margin — `probability_margin` scalar / `threshold_distance` multi — fell below the cut; value withheld from the validated instance, raw kept for provenance). The single source of truth — no separate abstain flag. |
 | `semantics` | Frozen `api.FieldSemantics` (W5b-13): how THIS field's reported probabilities were produced — score_source, the temperature actually applied, the calibrator bundle id, prior_mode, constraint_changed, dependency_rescored. Required, kw-only; coerced from the telemetry record, never None. |
-| `ordinal` | Ordered enums only (W6-B1), else None. Frozen `api.OrdinalFieldRecord`: `argmax_level` (winning index in the declared scale order), `expected_index` (Σ pᵢ·i), `variance`, `expected_score_normalized` (E/(n−1)). Derived in `finalize_scalar_evidence` from the finalized distribution (after prior correction and temperature) — no extra model call, decided value untouched. Eval metrics: `ordinal_mae`, `ordinal_mae_expected`, `ordinal_confusion` (ordered fields only; results contract v2 additive keys `ordinal_choices`/`ordinal` on prediction lines, emitted on EVERY track). |
 
 ### Case-level constraints — `constraints.py`, applied by `_constrained_map`
 
@@ -453,7 +452,8 @@ prediction_lines).
 ### `timing.json` (per combo) — written by `run_eval` when the parallel track ran
 
 `{"calls": <canonical decide calls>, "median": {<split key>: <median over
-cases>}}` — split keys ride the parallel `_meta` (`latency_ms`, the full
+cases>}, "segment": <int>, "segment_id": "<run_id>#<segment>"}` — split keys
+ride the parallel `_meta` (`latency_ms`, the full
 engine split, `peak_active_bytes`, `padded_token_positions`,
 `rescored_fields_count`, `rerun_fields_count`, `num_fields`; results
 contract v2 adds `peak_incremental_bytes` + `failed_attempts` —
@@ -462,6 +462,46 @@ check_results.REQUIRED `RUN_TIMING_KEYS`). Batched-path runs also land
 (check_results `BATCHED_TIMING_KEYS`, required together when present).
 Same calls the predictions came from — no second run. Naive/openai tracks
 write none (no engine split exists there).
+
+**W5c-7 item 5 (timing segment isolation)**: timing.json carries a
+`segment` counter (0 on a fresh run, incremented on each `--resume`)
+and a `segment_id` (`{run_id}#{segment}`). `check_results` requires
+`segment_id` when `segment > 0`; the report/leaderboard read per-item
+timings only from the LATEST segment and never pool across segments —
+a resumed run's timings are from a different process/machine-state and
+are not comparable.
+
+### Crash-safe resumable eval (`jevmlx/resume.py`) — W5c-7 / B6 part 1
+
+Four concerns in one module:
+
+- **Immutable manifest** (`manifest.json`): written at START (before any
+  model work). Captures config, `dataset_lock_sha256`, `code_hash` (git
+  HEAD + dirty flag), `model_id`/`model_revision`, `tokenizer_revision`,
+  `tokenizer_chat_template_sha256`, `prompt_version`/`prompt_sha256`,
+  and `machine` (chip, macOS, mlx/mlx-lm versions). `--resume` verifies
+  it matches on every resume-critical field; `ManifestMismatchError`
+  names the diffs. `created_utc` and `manifest_version` are excluded
+  from the match (they describe the manifest, not the run).
+- **One-writer lock** (`.lock`): file-based, `O_EXCL` atomic acquire.
+  A stale lock (owner PID not alive via `os.kill(pid, 0)`) is breakable
+  so a crashed run can be resumed.
+- **Crash-safe per-case commit** (`write_case_blob`): all of a case's
+  prediction lines are written as one atomic blob (`write`+`flush`+
+  `fsync`) to `predictions.jsonl`, THEN the journal entry
+  (`completed_cases.jsonl`) lands. A crash after the blob but before
+  the journal re-runs the case (duplicate lines tolerated; resume
+  de-duplicates by journal key, not from the predictions file).
+  `run_eval` now writes predictions per-case (under the lock) instead
+  of all-at-once at the end.
+- **Circuit breaker** (`CircuitBreaker`): trips after 5 consecutive
+  infrastructure failures with the same broad signature (Metal OOM,
+  allocation, network, timeout, CUDA). Validation errors
+  (`ValueError`/`TypeError`/`KeyError`) do NOT trip it — "failure is a
+  result". A different signature resets the consecutive count. When
+  tripped, `run_eval` marks remaining cases for THAT model and returns
+  normally; the bench loop continues to the next model (the breaker
+  stops one model, not the whole run).
 
 ### `benchmarks/timing.py` report (standalone) — `run_timing` / `aggregate`
 

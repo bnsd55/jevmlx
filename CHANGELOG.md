@@ -42,6 +42,24 @@
   (results contract v2). The shared TypeSafe `score` mapping emits ordered
   enums (SST-5's 0..4 rides the same branch). Ordering on boolean/multi
   fields raises at compile time.
+- **W5c-7 / B6 part 1** — crash-safe resumable eval infrastructure
+  (`jevmlx/resume.py`). A new `--resume` flag on `jevmlx eval` verifies
+  the run manifest (config, code hash, model/tokenizer revision, prompt
+  version/sha, machine), skips cases already in the commit journal, and
+  appends new predictions — refusing to mix a run whose manifest differs.
+  **Manifest** (`manifest.json`): written at START (before any model
+  work); `--resume` verifies it matches on every resume-critical field.
+  **One-writer lock** (`.lock`): file-based, stale-lock breakable via
+  PID liveness. **Crash-safe per-case commit**: each case's prediction
+  lines are written as one atomic blob (fsync) THEN the journal entry
+  lands — a crash after the blob but before the journal re-runs the case
+  (duplicate lines tolerated; resume de-dupes by journal key). **Circuit
+  breaker**: trips after 5 consecutive infrastructure failures with the
+  same broad signature (Metal OOM, allocation, network, timeout); a
+  malformed dataset row or schema validation failure does NOT trip it
+  ("failure is a result" policy). `run_eval` now writes predictions
+  per-case (under the lock) instead of all-at-once at the end.
+
 - **W6-B5 (public gold datasets, pre-M5)** — three public datasets join the
   bench: AG News (4-class enum), BoolQ (boolean noul), SST-5 (ordinal 0-4
   enum, the B1 ordered-enum derivation — no new engine field type). Pinned
