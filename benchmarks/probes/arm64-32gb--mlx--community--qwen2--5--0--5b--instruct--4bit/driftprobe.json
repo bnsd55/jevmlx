@@ -1,0 +1,1317 @@
+{
+  "model": "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
+  "case": "code_security",
+  "schema_rows": 28,
+  "cache_dtype": "mlx.core.float16",
+  "repeatability": {
+    "tensor_rows": 112,
+    "repeats": 5,
+    "max_run_to_run_diff": 0.0,
+    "nondeterministic": false
+  },
+  "width_matrix": [
+    {
+      "matrix": "width",
+      "slot_mode": "broadcast",
+      "tensor_rows": 1,
+      "context_groups": 1,
+      "d_raw": {
+        "median": 0.0,
+        "p99": 0.0,
+        "max": 0.0,
+        "n": 1
+      },
+      "d_gap": {
+        "median": 0.0,
+        "p99": 0.0,
+        "max": 0.0,
+        "n": 1
+      },
+      "d_logp": {
+        "median": 0.0,
+        "p99": 0.0,
+        "max": 0.0,
+        "n": 1
+      },
+      "winner_mismatches": 0
+    },
+    {
+      "matrix": "width",
+      "slot_mode": "slots",
+      "tensor_rows": 1,
+      "context_groups": 1,
+      "d_raw": {
+        "median": 0.0,
+        "p99": 0.0,
+        "max": 0.0,
+        "n": 1
+      },
+      "d_gap": {
+        "median": 0.0,
+        "p99": 0.0,
+        "max": 0.0,
+        "n": 1
+      },
+      "d_logp": {
+        "median": 0.0,
+        "p99": 0.0,
+        "max": 0.0,
+        "n": 1
+      },
+      "winner_mismatches": 0
+    },
+    {
+      "matrix": "width",
+      "slot_mode": "broadcast",
+      "tensor_rows": 2,
+      "context_groups": 1,
+      "d_raw": {
+        "median": 0.03515625,
+        "p99": 0.0546875,
+        "max": 0.0546875,
+        "n": 2
+      },
+      "d_gap": {
+        "median": 0.02734375,
+        "p99": 0.0390625,
+        "max": 0.0390625,
+        "n": 2
+      },
+      "d_logp": {
+        "median": 0.023061910016453524,
+        "p99": 0.03809775129617421,
+        "max": 0.03809775129617421,
+        "n": 2
+      },
+      "winner_mismatches": 0,
+      "permuted": {
+        "d_raw": {
+          "median": 0.03515625,
+          "p99": 0.0546875,
+          "max": 0.0546875,
+          "n": 2
+        },
+        "d_gap": {
+          "median": 0.02734375,
+          "p99": 0.0390625,
+          "max": 0.0390625,
+          "n": 2
+        },
+        "d_logp": {
+          "median": 0.023061910016453524,
+          "p99": 0.03809775129617421,
+          "max": 0.03809775129617421,
+          "n": 2
+        },
+        "winner_mismatches": 0
+      }
+    },
+    {
+      "matrix": "width",
+      "slot_mode": "slots",
+      "tensor_rows": 2,
+      "context_groups": 1,
+      "d_raw": {
+        "median": 0.03515625,
+        "p99": 0.0546875,
+        "max": 0.0546875,
+        "n": 2
+      },
+      "d_gap": {
+        "median": 0.02734375,
+        "p99": 0.0390625,
+        "max": 0.0390625,
+        "n": 2
+      },
+      "d_logp": {
+        "median": 0.023061910016453524,
+        "p99": 0.03809775129617421,
+        "max": 0.03809775129617421,
+        "n": 2
+      },
+      "winner_mismatches": 0,
+      "permuted": {
+        "d_raw": {
+          "median": 0.03515625,
+          "p99": 0.0546875,
+          "max": 0.0546875,
+          "n": 2
+        },
+        "d_gap": {
+          "median": 0.02734375,
+          "p99": 0.0390625,
+          "max": 0.0390625,
+          "n": 2
+        },
+        "d_logp": {
+          "median": 0.023061910016453524,
+          "p99": 0.03809775129617421,
+          "max": 0.03809775129617421,
+          "n": 2
+        },
+        "winner_mismatches": 0
+      }
+    },
+    {
+      "matrix": "width",
+      "slot_mode": "broadcast",
+      "tensor_rows": 4,
+      "context_groups": 1,
+      "d_raw": {
+        "median": 0.03125,
+        "p99": 0.0546875,
+        "max": 0.0546875,
+        "n": 4
+      },
+      "d_gap": {
+        "median": 0.0234375,
+        "p99": 0.0390625,
+        "max": 0.0390625,
+        "n": 4
+      },
+      "d_logp": {
+        "median": 0.026771396770469025,
+        "p99": 0.04232575986446463,
+        "max": 0.04232575986446463,
+        "n": 4
+      },
+      "winner_mismatches": 0,
+      "permuted": {
+        "d_raw": {
+          "median": 0.03125,
+          "p99": 0.0546875,
+          "max": 0.0546875,
+          "n": 4
+        },
+        "d_gap": {
+          "median": 0.0234375,
+          "p99": 0.0390625,
+          "max": 0.0390625,
+          "n": 4
+        },
+        "d_logp": {
+          "median": 0.026771396770469025,
+          "p99": 0.04232575986446463,
+          "max": 0.04232575986446463,
+          "n": 4
+        },
+        "winner_mismatches": 0
+      }
+    },
+    {
+      "matrix": "width",
+      "slot_mode": "slots",
+      "tensor_rows": 4,
+      "context_groups": 1,
+      "d_raw": {
+        "median": 0.03125,
+        "p99": 0.0546875,
+        "max": 0.0546875,
+        "n": 4
+      },
+      "d_gap": {
+        "median": 0.0234375,
+        "p99": 0.0390625,
+        "max": 0.0390625,
+        "n": 4
+      },
+      "d_logp": {
+        "median": 0.026771396770469025,
+        "p99": 0.04232575986446463,
+        "max": 0.04232575986446463,
+        "n": 4
+      },
+      "winner_mismatches": 0,
+      "permuted": {
+        "d_raw": {
+          "median": 0.03125,
+          "p99": 0.0546875,
+          "max": 0.0546875,
+          "n": 4
+        },
+        "d_gap": {
+          "median": 0.0234375,
+          "p99": 0.0390625,
+          "max": 0.0390625,
+          "n": 4
+        },
+        "d_logp": {
+          "median": 0.026771396770469025,
+          "p99": 0.04232575986446463,
+          "max": 0.04232575986446463,
+          "n": 4
+        },
+        "winner_mismatches": 0
+      }
+    },
+    {
+      "matrix": "width",
+      "slot_mode": "broadcast",
+      "tensor_rows": 8,
+      "context_groups": 1,
+      "d_raw": {
+        "median": 0.03125,
+        "p99": 0.078125,
+        "max": 0.078125,
+        "n": 8
+      },
+      "d_gap": {
+        "median": 0.015625,
+        "p99": 0.046875,
+        "max": 0.046875,
+        "n": 8
+      },
+      "d_logp": {
+        "median": 0.012802915374697577,
+        "p99": 0.033310329942978,
+        "max": 0.033310329942978,
+        "n": 8
+      },
+      "winner_mismatches": 0,
+      "permuted": {
+        "d_raw": {
+          "median": 0.03125,
+          "p99": 0.078125,
+          "max": 0.078125,
+          "n": 8
+        },
+        "d_gap": {
+          "median": 0.015625,
+          "p99": 0.046875,
+          "max": 0.046875,
+          "n": 8
+        },
+        "d_logp": {
+          "median": 0.012802915374697577,
+          "p99": 0.033310329942978,
+          "max": 0.033310329942978,
+          "n": 8
+        },
+        "winner_mismatches": 0
+      }
+    },
+    {
+      "matrix": "width",
+      "slot_mode": "slots",
+      "tensor_rows": 8,
+      "context_groups": 1,
+      "d_raw": {
+        "median": 0.03125,
+        "p99": 0.078125,
+        "max": 0.078125,
+        "n": 8
+      },
+      "d_gap": {
+        "median": 0.015625,
+        "p99": 0.046875,
+        "max": 0.046875,
+        "n": 8
+      },
+      "d_logp": {
+        "median": 0.012802915374697577,
+        "p99": 0.033310329942978,
+        "max": 0.033310329942978,
+        "n": 8
+      },
+      "winner_mismatches": 0,
+      "permuted": {
+        "d_raw": {
+          "median": 0.03125,
+          "p99": 0.078125,
+          "max": 0.078125,
+          "n": 8
+        },
+        "d_gap": {
+          "median": 0.015625,
+          "p99": 0.046875,
+          "max": 0.046875,
+          "n": 8
+        },
+        "d_logp": {
+          "median": 0.012802915374697577,
+          "p99": 0.033310329942978,
+          "max": 0.033310329942978,
+          "n": 8
+        },
+        "winner_mismatches": 0
+      }
+    },
+    {
+      "matrix": "width",
+      "slot_mode": "broadcast",
+      "tensor_rows": 16,
+      "context_groups": 1,
+      "d_raw": {
+        "median": 0.01953125,
+        "p99": 0.125,
+        "max": 0.125,
+        "n": 16
+      },
+      "d_gap": {
+        "median": 0.01171875,
+        "p99": 0.0625,
+        "max": 0.0625,
+        "n": 16
+      },
+      "d_logp": {
+        "median": 0.011800570479359784,
+        "p99": 0.044312818586181635,
+        "max": 0.044312818586181635,
+        "n": 16
+      },
+      "winner_mismatches": 0,
+      "permuted": {
+        "d_raw": {
+          "median": 0.01953125,
+          "p99": 0.125,
+          "max": 0.125,
+          "n": 16
+        },
+        "d_gap": {
+          "median": 0.01171875,
+          "p99": 0.0625,
+          "max": 0.0625,
+          "n": 16
+        },
+        "d_logp": {
+          "median": 0.011800570479359784,
+          "p99": 0.044312818586181635,
+          "max": 0.044312818586181635,
+          "n": 16
+        },
+        "winner_mismatches": 0
+      }
+    },
+    {
+      "matrix": "width",
+      "slot_mode": "slots",
+      "tensor_rows": 16,
+      "context_groups": 1,
+      "d_raw": {
+        "median": 0.01953125,
+        "p99": 0.125,
+        "max": 0.125,
+        "n": 16
+      },
+      "d_gap": {
+        "median": 0.01171875,
+        "p99": 0.0625,
+        "max": 0.0625,
+        "n": 16
+      },
+      "d_logp": {
+        "median": 0.011800570479359784,
+        "p99": 0.044312818586181635,
+        "max": 0.044312818586181635,
+        "n": 16
+      },
+      "winner_mismatches": 0,
+      "permuted": {
+        "d_raw": {
+          "median": 0.01953125,
+          "p99": 0.125,
+          "max": 0.125,
+          "n": 16
+        },
+        "d_gap": {
+          "median": 0.01171875,
+          "p99": 0.0625,
+          "max": 0.0625,
+          "n": 16
+        },
+        "d_logp": {
+          "median": 0.011800570479359784,
+          "p99": 0.044312818586181635,
+          "max": 0.044312818586181635,
+          "n": 16
+        },
+        "winner_mismatches": 0
+      }
+    },
+    {
+      "matrix": "width",
+      "slot_mode": "broadcast",
+      "tensor_rows": 28,
+      "context_groups": 1,
+      "d_raw": {
+        "median": 0.01953125,
+        "p99": 0.125,
+        "max": 0.125,
+        "n": 28
+      },
+      "d_gap": {
+        "median": 0.01171875,
+        "p99": 0.0625,
+        "max": 0.0625,
+        "n": 28
+      },
+      "d_logp": {
+        "median": 0.01222534291148758,
+        "p99": 0.044312818586181635,
+        "max": 0.044312818586181635,
+        "n": 28
+      },
+      "winner_mismatches": 0,
+      "permuted": {
+        "d_raw": {
+          "median": 0.01953125,
+          "p99": 0.125,
+          "max": 0.125,
+          "n": 28
+        },
+        "d_gap": {
+          "median": 0.01171875,
+          "p99": 0.0625,
+          "max": 0.0625,
+          "n": 28
+        },
+        "d_logp": {
+          "median": 0.01222534291148758,
+          "p99": 0.044312818586181635,
+          "max": 0.044312818586181635,
+          "n": 28
+        },
+        "winner_mismatches": 0
+      }
+    },
+    {
+      "matrix": "width",
+      "slot_mode": "slots",
+      "tensor_rows": 28,
+      "context_groups": 1,
+      "d_raw": {
+        "median": 0.01953125,
+        "p99": 0.125,
+        "max": 0.125,
+        "n": 28
+      },
+      "d_gap": {
+        "median": 0.01171875,
+        "p99": 0.0625,
+        "max": 0.0625,
+        "n": 28
+      },
+      "d_logp": {
+        "median": 0.01222534291148758,
+        "p99": 0.044312818586181635,
+        "max": 0.044312818586181635,
+        "n": 28
+      },
+      "winner_mismatches": 0,
+      "permuted": {
+        "d_raw": {
+          "median": 0.01953125,
+          "p99": 0.125,
+          "max": 0.125,
+          "n": 28
+        },
+        "d_gap": {
+          "median": 0.01171875,
+          "p99": 0.0625,
+          "max": 0.0625,
+          "n": 28
+        },
+        "d_logp": {
+          "median": 0.01222534291148758,
+          "p99": 0.044312818586181635,
+          "max": 0.044312818586181635,
+          "n": 28
+        },
+        "winner_mismatches": 0
+      }
+    },
+    {
+      "matrix": "width",
+      "slot_mode": "broadcast",
+      "tensor_rows": 32,
+      "context_groups": 1,
+      "d_raw": {
+        "median": 0.015625,
+        "p99": 0.125,
+        "max": 0.125,
+        "n": 32
+      },
+      "d_gap": {
+        "median": 0.01171875,
+        "p99": 0.0625,
+        "max": 0.0625,
+        "n": 32
+      },
+      "d_logp": {
+        "median": 0.012862134223725619,
+        "p99": 0.044312818586181635,
+        "max": 0.044312818586181635,
+        "n": 32
+      },
+      "winner_mismatches": 0,
+      "permuted": {
+        "d_raw": {
+          "median": 0.015625,
+          "p99": 0.125,
+          "max": 0.125,
+          "n": 32
+        },
+        "d_gap": {
+          "median": 0.01171875,
+          "p99": 0.0625,
+          "max": 0.0625,
+          "n": 32
+        },
+        "d_logp": {
+          "median": 0.012862134223725619,
+          "p99": 0.044312818586181635,
+          "max": 0.044312818586181635,
+          "n": 32
+        },
+        "winner_mismatches": 0
+      }
+    },
+    {
+      "matrix": "width",
+      "slot_mode": "slots",
+      "tensor_rows": 32,
+      "context_groups": 1,
+      "d_raw": {
+        "median": 0.015625,
+        "p99": 0.125,
+        "max": 0.125,
+        "n": 32
+      },
+      "d_gap": {
+        "median": 0.01171875,
+        "p99": 0.0625,
+        "max": 0.0625,
+        "n": 32
+      },
+      "d_logp": {
+        "median": 0.012862134223725619,
+        "p99": 0.044312818586181635,
+        "max": 0.044312818586181635,
+        "n": 32
+      },
+      "winner_mismatches": 0,
+      "permuted": {
+        "d_raw": {
+          "median": 0.015625,
+          "p99": 0.125,
+          "max": 0.125,
+          "n": 32
+        },
+        "d_gap": {
+          "median": 0.01171875,
+          "p99": 0.0625,
+          "max": 0.0625,
+          "n": 32
+        },
+        "d_logp": {
+          "median": 0.012862134223725619,
+          "p99": 0.044312818586181635,
+          "max": 0.044312818586181635,
+          "n": 32
+        },
+        "winner_mismatches": 0
+      }
+    },
+    {
+      "matrix": "width",
+      "slot_mode": "broadcast",
+      "tensor_rows": 56,
+      "context_groups": 1,
+      "d_raw": {
+        "median": 0.015625,
+        "p99": 0.109375,
+        "max": 0.109375,
+        "n": 56
+      },
+      "d_gap": {
+        "median": 0.015625,
+        "p99": 0.0625,
+        "max": 0.0625,
+        "n": 56
+      },
+      "d_logp": {
+        "median": 0.008901968809050587,
+        "p99": 0.044312818586181635,
+        "max": 0.044312818586181635,
+        "n": 56
+      },
+      "winner_mismatches": 0,
+      "permuted": {
+        "d_raw": {
+          "median": 0.015625,
+          "p99": 0.109375,
+          "max": 0.109375,
+          "n": 56
+        },
+        "d_gap": {
+          "median": 0.015625,
+          "p99": 0.0625,
+          "max": 0.0625,
+          "n": 56
+        },
+        "d_logp": {
+          "median": 0.008901968809050587,
+          "p99": 0.044312818586181635,
+          "max": 0.044312818586181635,
+          "n": 56
+        },
+        "winner_mismatches": 0
+      }
+    },
+    {
+      "matrix": "width",
+      "slot_mode": "slots",
+      "tensor_rows": 56,
+      "context_groups": 1,
+      "d_raw": {
+        "median": 0.015625,
+        "p99": 0.109375,
+        "max": 0.109375,
+        "n": 56
+      },
+      "d_gap": {
+        "median": 0.015625,
+        "p99": 0.0625,
+        "max": 0.0625,
+        "n": 56
+      },
+      "d_logp": {
+        "median": 0.008901968809050587,
+        "p99": 0.044312818586181635,
+        "max": 0.044312818586181635,
+        "n": 56
+      },
+      "winner_mismatches": 0,
+      "permuted": {
+        "d_raw": {
+          "median": 0.015625,
+          "p99": 0.109375,
+          "max": 0.109375,
+          "n": 56
+        },
+        "d_gap": {
+          "median": 0.015625,
+          "p99": 0.0625,
+          "max": 0.0625,
+          "n": 56
+        },
+        "d_logp": {
+          "median": 0.008901968809050587,
+          "p99": 0.044312818586181635,
+          "max": 0.044312818586181635,
+          "n": 56
+        },
+        "winner_mismatches": 0
+      }
+    },
+    {
+      "matrix": "width",
+      "slot_mode": "broadcast",
+      "tensor_rows": 64,
+      "context_groups": 1,
+      "d_raw": {
+        "median": 0.015625,
+        "p99": 0.109375,
+        "max": 0.109375,
+        "n": 64
+      },
+      "d_gap": {
+        "median": 0.015625,
+        "p99": 0.0625,
+        "max": 0.0625,
+        "n": 64
+      },
+      "d_logp": {
+        "median": 0.009230918099440544,
+        "p99": 0.044312818586181635,
+        "max": 0.044312818586181635,
+        "n": 64
+      },
+      "winner_mismatches": 0,
+      "permuted": {
+        "d_raw": {
+          "median": 0.015625,
+          "p99": 0.109375,
+          "max": 0.109375,
+          "n": 64
+        },
+        "d_gap": {
+          "median": 0.015625,
+          "p99": 0.0625,
+          "max": 0.0625,
+          "n": 64
+        },
+        "d_logp": {
+          "median": 0.009230918099440544,
+          "p99": 0.044312818586181635,
+          "max": 0.044312818586181635,
+          "n": 64
+        },
+        "winner_mismatches": 0
+      }
+    },
+    {
+      "matrix": "width",
+      "slot_mode": "slots",
+      "tensor_rows": 64,
+      "context_groups": 1,
+      "d_raw": {
+        "median": 0.015625,
+        "p99": 0.109375,
+        "max": 0.109375,
+        "n": 64
+      },
+      "d_gap": {
+        "median": 0.015625,
+        "p99": 0.0625,
+        "max": 0.0625,
+        "n": 64
+      },
+      "d_logp": {
+        "median": 0.009230918099440544,
+        "p99": 0.044312818586181635,
+        "max": 0.044312818586181635,
+        "n": 64
+      },
+      "winner_mismatches": 0,
+      "permuted": {
+        "d_raw": {
+          "median": 0.015625,
+          "p99": 0.109375,
+          "max": 0.109375,
+          "n": 64
+        },
+        "d_gap": {
+          "median": 0.015625,
+          "p99": 0.0625,
+          "max": 0.0625,
+          "n": 64
+        },
+        "d_logp": {
+          "median": 0.009230918099440544,
+          "p99": 0.044312818586181635,
+          "max": 0.044312818586181635,
+          "n": 64
+        },
+        "winner_mismatches": 0
+      }
+    },
+    {
+      "matrix": "width",
+      "slot_mode": "broadcast",
+      "tensor_rows": 84,
+      "context_groups": 1,
+      "d_raw": {
+        "median": 0.015625,
+        "p99": 0.125,
+        "max": 0.125,
+        "n": 84
+      },
+      "d_gap": {
+        "median": 0.01171875,
+        "p99": 0.0625,
+        "max": 0.0625,
+        "n": 84
+      },
+      "d_logp": {
+        "median": 0.011692086693058101,
+        "p99": 0.044312818586181635,
+        "max": 0.044312818586181635,
+        "n": 84
+      },
+      "winner_mismatches": 0,
+      "permuted": {
+        "d_raw": {
+          "median": 0.015625,
+          "p99": 0.125,
+          "max": 0.125,
+          "n": 84
+        },
+        "d_gap": {
+          "median": 0.01171875,
+          "p99": 0.0625,
+          "max": 0.0625,
+          "n": 84
+        },
+        "d_logp": {
+          "median": 0.011692086693058101,
+          "p99": 0.044312818586181635,
+          "max": 0.044312818586181635,
+          "n": 84
+        },
+        "winner_mismatches": 0
+      }
+    },
+    {
+      "matrix": "width",
+      "slot_mode": "slots",
+      "tensor_rows": 84,
+      "context_groups": 1,
+      "d_raw": {
+        "median": 0.015625,
+        "p99": 0.125,
+        "max": 0.125,
+        "n": 84
+      },
+      "d_gap": {
+        "median": 0.01171875,
+        "p99": 0.0625,
+        "max": 0.0625,
+        "n": 84
+      },
+      "d_logp": {
+        "median": 0.011692086693058101,
+        "p99": 0.044312818586181635,
+        "max": 0.044312818586181635,
+        "n": 84
+      },
+      "winner_mismatches": 0,
+      "permuted": {
+        "d_raw": {
+          "median": 0.015625,
+          "p99": 0.125,
+          "max": 0.125,
+          "n": 84
+        },
+        "d_gap": {
+          "median": 0.01171875,
+          "p99": 0.0625,
+          "max": 0.0625,
+          "n": 84
+        },
+        "d_logp": {
+          "median": 0.011692086693058101,
+          "p99": 0.044312818586181635,
+          "max": 0.044312818586181635,
+          "n": 84
+        },
+        "winner_mismatches": 0
+      }
+    },
+    {
+      "matrix": "width",
+      "slot_mode": "broadcast",
+      "tensor_rows": 112,
+      "context_groups": 1,
+      "d_raw": {
+        "median": 0.015625,
+        "p99": 0.125,
+        "max": 0.125,
+        "n": 112
+      },
+      "d_gap": {
+        "median": 0.01171875,
+        "p99": 0.0625,
+        "max": 0.0625,
+        "n": 112
+      },
+      "d_logp": {
+        "median": 0.011692086693058101,
+        "p99": 0.044312818586181635,
+        "max": 0.044312818586181635,
+        "n": 112
+      },
+      "winner_mismatches": 0,
+      "groups_2": {
+        "d_raw": {
+          "median": 0.015625,
+          "p99": 0.125,
+          "max": 0.125,
+          "n": 112
+        },
+        "d_gap": {
+          "median": 0.01171875,
+          "p99": 0.0625,
+          "max": 0.0625,
+          "n": 112
+        },
+        "d_logp": {
+          "median": 0.011692086693058101,
+          "p99": 0.044312818586181635,
+          "max": 0.044312818586181635,
+          "n": 112
+        },
+        "winner_mismatches": 0
+      },
+      "groups_4": {
+        "d_raw": {
+          "median": 0.015625,
+          "p99": 0.125,
+          "max": 0.125,
+          "n": 112
+        },
+        "d_gap": {
+          "median": 0.01171875,
+          "p99": 0.0625,
+          "max": 0.0625,
+          "n": 112
+        },
+        "d_logp": {
+          "median": 0.011692086693058101,
+          "p99": 0.044312818586181635,
+          "max": 0.044312818586181635,
+          "n": 112
+        },
+        "winner_mismatches": 0
+      },
+      "permuted": {
+        "d_raw": {
+          "median": 0.015625,
+          "p99": 0.125,
+          "max": 0.125,
+          "n": 112
+        },
+        "d_gap": {
+          "median": 0.01171875,
+          "p99": 0.0625,
+          "max": 0.0625,
+          "n": 112
+        },
+        "d_logp": {
+          "median": 0.011692086693058101,
+          "p99": 0.044312818586181635,
+          "max": 0.044312818586181635,
+          "n": 112
+        },
+        "winner_mismatches": 0
+      }
+    },
+    {
+      "matrix": "width",
+      "slot_mode": "slots",
+      "tensor_rows": 112,
+      "context_groups": 1,
+      "d_raw": {
+        "median": 0.015625,
+        "p99": 0.125,
+        "max": 0.125,
+        "n": 112
+      },
+      "d_gap": {
+        "median": 0.01171875,
+        "p99": 0.0625,
+        "max": 0.0625,
+        "n": 112
+      },
+      "d_logp": {
+        "median": 0.011692086693058101,
+        "p99": 0.044312818586181635,
+        "max": 0.044312818586181635,
+        "n": 112
+      },
+      "winner_mismatches": 0,
+      "groups_2": {
+        "d_raw": {
+          "median": 0.015625,
+          "p99": 0.125,
+          "max": 0.125,
+          "n": 112
+        },
+        "d_gap": {
+          "median": 0.01171875,
+          "p99": 0.0625,
+          "max": 0.0625,
+          "n": 112
+        },
+        "d_logp": {
+          "median": 0.011692086693058101,
+          "p99": 0.044312818586181635,
+          "max": 0.044312818586181635,
+          "n": 112
+        },
+        "winner_mismatches": 0
+      },
+      "groups_4": {
+        "d_raw": {
+          "median": 0.015625,
+          "p99": 0.125,
+          "max": 0.125,
+          "n": 112
+        },
+        "d_gap": {
+          "median": 0.01171875,
+          "p99": 0.0625,
+          "max": 0.0625,
+          "n": 112
+        },
+        "d_logp": {
+          "median": 0.011692086693058101,
+          "p99": 0.044312818586181635,
+          "max": 0.044312818586181635,
+          "n": 112
+        },
+        "winner_mismatches": 0
+      },
+      "permuted": {
+        "d_raw": {
+          "median": 0.015625,
+          "p99": 0.125,
+          "max": 0.125,
+          "n": 112
+        },
+        "d_gap": {
+          "median": 0.01171875,
+          "p99": 0.0625,
+          "max": 0.0625,
+          "n": 112
+        },
+        "d_logp": {
+          "median": 0.011692086693058101,
+          "p99": 0.044312818586181635,
+          "max": 0.044312818586181635,
+          "n": 112
+        },
+        "winner_mismatches": 0
+      }
+    },
+    {
+      "matrix": "width",
+      "slot_mode": "broadcast",
+      "tensor_rows": 128,
+      "context_groups": 1,
+      "d_raw": {
+        "median": 0.015625,
+        "p99": 0.125,
+        "max": 0.125,
+        "n": 128
+      },
+      "d_gap": {
+        "median": 0.01171875,
+        "p99": 0.0625,
+        "max": 0.0625,
+        "n": 128
+      },
+      "d_logp": {
+        "median": 0.011692086693058101,
+        "p99": 0.044312818586181635,
+        "max": 0.044312818586181635,
+        "n": 128
+      },
+      "winner_mismatches": 0,
+      "permuted": {
+        "d_raw": {
+          "median": 0.015625,
+          "p99": 0.125,
+          "max": 0.125,
+          "n": 128
+        },
+        "d_gap": {
+          "median": 0.01171875,
+          "p99": 0.0625,
+          "max": 0.0625,
+          "n": 128
+        },
+        "d_logp": {
+          "median": 0.011692086693058101,
+          "p99": 0.044312818586181635,
+          "max": 0.044312818586181635,
+          "n": 128
+        },
+        "winner_mismatches": 0
+      }
+    },
+    {
+      "matrix": "width",
+      "slot_mode": "slots",
+      "tensor_rows": 128,
+      "context_groups": 1,
+      "d_raw": {
+        "median": 0.015625,
+        "p99": 0.125,
+        "max": 0.125,
+        "n": 128
+      },
+      "d_gap": {
+        "median": 0.01171875,
+        "p99": 0.0625,
+        "max": 0.0625,
+        "n": 128
+      },
+      "d_logp": {
+        "median": 0.011692086693058101,
+        "p99": 0.044312818586181635,
+        "max": 0.044312818586181635,
+        "n": 128
+      },
+      "winner_mismatches": 0,
+      "permuted": {
+        "d_raw": {
+          "median": 0.015625,
+          "p99": 0.125,
+          "max": 0.125,
+          "n": 128
+        },
+        "d_gap": {
+          "median": 0.01171875,
+          "p99": 0.0625,
+          "max": 0.0625,
+          "n": 128
+        },
+        "d_logp": {
+          "median": 0.011692086693058101,
+          "p99": 0.044312818586181635,
+          "max": 0.044312818586181635,
+          "n": 128
+        },
+        "winner_mismatches": 0
+      }
+    }
+  ],
+  "mask_control": {
+    "tensor_rows": 16,
+    "note": "mlx_lm derives the mask from the cache object; the decide_many path differs from batch=1 ONLY by the BatchKVCache(left_padding) object. This control measures the drift of that exact shape difference at a small width (the full curve is in the width matrix).",
+    "d_raw": {
+      "median": 0.01953125,
+      "p99": 0.125,
+      "max": 0.125,
+      "n": 16
+    },
+    "d_gap": {
+      "median": 0.01171875,
+      "p99": 0.0625,
+      "max": 0.0625,
+      "n": 16
+    },
+    "d_logp": {
+      "median": 0.011800570479359784,
+      "p99": 0.044312818586181635,
+      "max": 0.044312818586181635,
+      "n": 16
+    },
+    "winner_mismatches": 0
+  },
+  "cache_control": {
+    "tensor_rows": 16,
+    "prefill_deterministic": true,
+    "merged_cache_slots_identical": true,
+    "broadcast_slots": {
+      "d_raw": {
+        "median": 0.01953125,
+        "p99": 0.125,
+        "max": 0.125,
+        "n": 16
+      },
+      "d_gap": {
+        "median": 0.01171875,
+        "p99": 0.0625,
+        "max": 0.0625,
+        "n": 16
+      },
+      "d_logp": {
+        "median": 0.011800570479359784,
+        "p99": 0.044312818586181635,
+        "max": 0.044312818586181635,
+        "n": 16
+      },
+      "winner_mismatches": 0
+    },
+    "independent_slots": {
+      "d_raw": {
+        "median": 0.01953125,
+        "p99": 0.125,
+        "max": 0.125,
+        "n": 16
+      },
+      "d_gap": {
+        "median": 0.01171875,
+        "p99": 0.0625,
+        "max": 0.0625,
+        "n": 16
+      },
+      "d_logp": {
+        "median": 0.011800570479359784,
+        "p99": 0.044312818586181635,
+        "max": 0.044312818586181635,
+        "n": 16
+      },
+      "winner_mismatches": 0
+    },
+    "note": "cache VALUES were compared EXACTLY (elementwise, shapes, offsets) before scoring \u2014 and per-slot inside the merged batched cache: identical => the drift comes from the forward shape, not the cache contents."
+  },
+  "near_tie": {
+    "near_tie_rows": 3,
+    "min_batch1_margin": 0.0625,
+    "widths": [
+      {
+        "tensor_rows": 16,
+        "slot_mode": "slots",
+        "d_raw": {
+          "median": 0.015625,
+          "p99": 0.03125,
+          "max": 0.03125,
+          "n": 2
+        },
+        "d_gap": {
+          "median": 0.0078125,
+          "p99": 0.015625,
+          "max": 0.015625,
+          "n": 2
+        },
+        "d_logp": {
+          "median": 0.004286509759330315,
+          "p99": 0.00857301951866063,
+          "max": 0.00857301951866063,
+          "n": 2
+        },
+        "winner_mismatches": 0
+      },
+      {
+        "tensor_rows": 56,
+        "slot_mode": "slots",
+        "d_raw": {
+          "median": 0.015625,
+          "p99": 0.03125,
+          "max": 0.03125,
+          "n": 6
+        },
+        "d_gap": {
+          "median": 0.015625,
+          "p99": 0.015625,
+          "max": 0.015625,
+          "n": 6
+        },
+        "d_logp": {
+          "median": 0.008026068736732839,
+          "p99": 0.00857301951866063,
+          "max": 0.00857301951866063,
+          "n": 6
+        },
+        "winner_mismatches": 0
+      },
+      {
+        "tensor_rows": 112,
+        "slot_mode": "slots",
+        "d_raw": {
+          "median": 0.015625,
+          "p99": 0.03125,
+          "max": 0.03125,
+          "n": 12
+        },
+        "d_gap": {
+          "median": 0.0078125,
+          "p99": 0.015625,
+          "max": 0.015625,
+          "n": 12
+        },
+        "d_logp": {
+          "median": 0.004248691016016437,
+          "p99": 0.00857301951866063,
+          "max": 0.00857301951866063,
+          "n": 12
+        },
+        "winner_mismatches": 0
+      }
+    ]
+  },
+  "parity_reference": {
+    "winners_identical": true,
+    "max_abs_drift_nats": 0.04577926327619686,
+    "max_raw_row_drift_nats": 0.125,
+    "per_case": {
+      "code_security": {
+        "max_abs_drift_nats": 0.04577926327619686,
+        "max_raw_row_drift_nats": 0.125
+      }
+    }
+  }
+}
