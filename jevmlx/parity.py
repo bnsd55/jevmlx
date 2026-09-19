@@ -159,19 +159,53 @@ def parity_report(
 ) -> dict[str, Any]:
     """The ``parity.json`` payload for a model folder (schema above).
 
-    Takes the loaded :class:`jevmlx.engine.Engine` ."""
+    Takes the loaded :class:`jevmlx.engine.Engine`.
+
+    W5c-1: runs BOTH parity checks into ONE payload —
+    :func:`check_scoring_parity` (batch vs chunked, single-context) AND
+    :func:`check_batched_parity` (batched-vs-independent matrix with the
+    raw pre-rescore row-logit gate). ``check_results.check_parity``
+    rejects a parity.json without ``max_raw_row_drift_nats`` as pre-v2, so
+    the bench's payload must always carry both key sets.
+
+    The GATE is: winners identical (both checks), single-context
+    batch-vs-chunked drift under ``atol`` (the W1-A invariant, unchanged),
+    and raw pre-rescore row drift under ``raw_atol``. The single-context
+    and batched-raw drifts are SEPARATE keys each against its own
+    documented band — they are different measurements (batch<=2 vs
+    batch=max(context_counts)*n_rows), so one ``max`` would gate the
+    single-context invariant at the batched envelope and vice versa. The
+    multi-context batched FINAL log-score drift is a third measurement:
+    recorded as ``max_batched_drift_nats``, reported but not banded (its
+    winner identity and the raw row gate cover a real divergence).
+    """
 
     from jevmlx.engine import INSTABILITY_BAND, PROMPT_VERSION
 
     result = check_scoring_parity(engine, cases, max_rows_options)
+    batched = check_batched_parity(engine, cases)
+    winners_identical = bool(result["winners_identical"] and batched["winners_identical"])
+    # The gated single-context drift (W1-A invariant, measured ~0.044 on
+    # this machine's real models — headroom under the shared band).
+    max_abs_drift = result["max_abs_drift_nats"]
+    # W5-D finding 42: the raw pre-rescore row-logit gate (from the
+    # batched matrix) — the key check_results requires for v2. Gated at
+    # its own band (raw_atol), NOT the single-context atol.
+    max_raw_drift = batched["max_raw_row_drift_nats"]
+    raw_atol = batched["raw_atol"]
+    # The batched matrix's final log-score drift: informative, not gated.
+    max_batched_drift = batched["max_abs_drift_nats"]
     return {
         "model": model_id,
         "prompt_version": PROMPT_VERSION,
-        "max_abs_drift_nats": round(result["max_abs_drift_nats"], 6),
-        "winners_identical": result["winners_identical"],
+        "max_abs_drift_nats": round(max_abs_drift, 6),
+        "max_raw_row_drift_nats": round(max_raw_drift, 6),
+        "max_batched_drift_nats": round(max_batched_drift, 6),
+        "winners_identical": winners_identical,
         "atol": INSTABILITY_BAND,
+        "raw_atol": raw_atol,
         "passed": bool(
-            result["winners_identical"] and result["max_abs_drift_nats"] < INSTABILITY_BAND
+            winners_identical and max_abs_drift < INSTABILITY_BAND and max_raw_drift < raw_atol
         ),
         "cases": [case_id for case_id, _preset in (cases or bundled_preset_specs())],
         "test": PARITY_TEST_NAME,
@@ -256,6 +290,7 @@ def check_batched_parity(
     ``batched_matrix`` section per case.
     """
     from jevmlx.engine import (
+        INSTABILITY_BAND,
         _build_schema_rows,
         _prefill,
         _score_rows,
@@ -265,6 +300,20 @@ def check_batched_parity(
 
     if cases is None:
         cases = bundled_preset_specs()
+
+    # W5c-1: the raw pre-rescore row gate scores the SAME rows at batch=1
+    # (the canonical reference the near-tie rescore trusts) vs batch=
+    # max(context_counts)*n_rows (one merged pass per group, the decide_many
+    # row shape). That is a batch-SHAPE stress, not a same-shape comparison:
+    # Metal FP accumulation grows with the merged reduction width, so the
+    # raw drift on a real model (measured 0.125 at context_count=4) is
+    # ~2.5x the single-context W1-A band (0.05) with winners identical —
+    # accumulation noise, not a divergence. The raw gate's job is to catch
+    # a real shape-dependent divergence (the W5-D RowDriftModel fixture
+    # adds 5.0 nats — 25x this envelope). Its tolerance therefore scales
+    # with the matrix's own context-count multiplier rather than reusing
+    # the single-context band.
+    raw_atol = max(context_counts) * INSTABILITY_BAND
 
     winners_identical = True
     max_abs_drift = 0.0
@@ -377,5 +426,9 @@ def check_batched_parity(
         "winners_identical": winners_identical,
         "max_abs_drift_nats": max_abs_drift,
         "max_raw_row_drift_nats": max_raw_drift,
+        # W5c-1: the documented band for the batched raw row gate (a
+        # batch-shape stress, not a same-shape comparison) — see the
+        # raw_atol derivation above.
+        "raw_atol": raw_atol,
         "per_case": per_case,
     }

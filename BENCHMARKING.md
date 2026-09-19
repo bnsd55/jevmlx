@@ -85,10 +85,18 @@ than 5 MB total are gzipped automatically (the folder README says so).
 - [ ] Folder contains only the bench output (predictions, run.json,
       report.json/.md, dataset lock files, SUMMARY.md, folder README)
 - [ ] `parity.json` in the model folder — records the passing slow parity
-      test (W1-A batch vs chunked log_score agreement). A model cannot
-      enter the README leaderboard without it. Schema:
+      test (W1-A batch vs chunked log_score agreement, single-context)
+      AND the batched matrix (W5-D findings 40/42: batched-vs-independent
+      finals plus the raw pre-rescore row-logit gate). A model cannot
+      enter the README leaderboard without it; `check_results` rejects a
+      payload without `max_raw_row_drift_nats` as pre-v2. The gate covers
+      winners, the single-context drift (atol) and the batched raw row
+      drift (raw_atol — the raw gate is a batch-shape stress with its own
+      documented band, not the single-context atol). Schema:
       `{"model": "...", "test": "test_w1a_...", "passed": true,
-      "max_drift_nats": 0.027, "atol": 0.05, "run_at": "..."}`
+      "max_abs_drift_nats": 0.027, "max_raw_row_drift_nats": 0.125,
+      "max_batched_drift_nats": 0.05, "winners_identical": true,
+      "atol": 0.05, "raw_atol": 0.2, "run_at": "..."}`
 - [ ] `SUMMARY.md` pasted into the PR description
 - [ ] Machine specs (chip, RAM, macOS) mentioned in the PR body
 - [ ] No hand-edited numbers — recompute instead of fixing up

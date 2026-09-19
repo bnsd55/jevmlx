@@ -66,6 +66,9 @@ def test_parity_report_passes_on_stable_fake(tmp_path):
     assert payload["winners_identical"] is True
     assert payload["max_abs_drift_nats"] == 0.0
     assert payload["atol"] == PARITY_ATOL
+    assert payload["raw_atol"] == 4 * PARITY_ATOL  # max(context_counts)=4
+    assert payload["max_raw_row_drift_nats"] == 0.0
+    assert payload["max_batched_drift_nats"] == 0.0  # recorded, not gated
     assert payload["model"] == "fake/stable"
     assert payload["prompt_version"].startswith("jevmlx-parallel-")
     assert payload["test"] == "test_w1a_scoring_parity_batch_vs_chunked_real_model"
@@ -177,3 +180,44 @@ def test_parity_real_model_twin(engine):
         "high_cardinality_255",
         "support_triage",
     ]
+
+
+def test_parity_report_carries_v2_keys_and_passes_check_parity(tmp_path):
+    """W5c-1: parity_report runs BOTH checks — the payload carries the v2
+    key set (max_raw_row_drift_nats + raw_atol from the batched matrix's
+    raw pre-rescore gate) and check_results.check_parity accepts it (no
+    pre-v2 rejection, no failed stages). A winners-flip payload names its
+    stage and is rejected."""
+    from benchmarks.check_results import _parity_failed_stages, check_parity
+    from jevmlx.parity import write_parity_json
+
+    payload = write_parity_json(
+        make_engine(_StableModel(), _CountTokenizer()), "fake/stable", tmp_path, _cases()
+    )
+    # v2 key set present.
+    assert "max_raw_row_drift_nats" in payload
+    assert "max_abs_drift_nats" in payload
+    assert "max_batched_drift_nats" in payload  # recorded, not gated
+    assert "raw_atol" in payload
+    assert payload["raw_atol"] == 4 * payload["atol"]  # max(context_counts)=4
+    assert payload["winners_identical"] is True
+    # check_parity accepts the file (not pre-v2, not failed).
+    ok, problems = check_parity(tmp_path)
+    assert ok is True, problems
+    # And the stage classifier finds no failing stage.
+    assert _parity_failed_stages(payload) == []
+
+    # A winners-flip payload: the stage classifier names the stage and
+    # check_parity rejects the folder.
+    drift_dir = tmp_path.parent / "drift"
+    drift_dir.mkdir()
+    write_parity_json(
+        make_engine(_DriftingModel(), _CountTokenizer()), "fake/drift", drift_dir, _cases()
+    )
+    on_disk = json.loads((drift_dir / "parity.json").read_text(encoding="utf-8"))
+    assert on_disk["passed"] is False
+    stages = _parity_failed_stages(on_disk)
+    assert stages and stages != ["unspecified stage (payload carries no stage keys)"]
+    ok, problems = check_parity(drift_dir)
+    assert ok is False
+    assert any("parity.json shows test did not pass" in p for p in problems)

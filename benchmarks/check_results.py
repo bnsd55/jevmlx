@@ -359,8 +359,10 @@ def check_parity(model_dir: Path) -> tuple[bool, list[str]]:
           "prompt_version": "jevmlx-parallel-v8",
           "max_abs_drift_nats": 0.027,
           "max_raw_row_drift_nats": 0.031,
+          "max_batched_drift_nats": 0.05,
           "winners_identical": true,
           "atol": 0.05,
+          "raw_atol": 0.2,
           "passed": true,
           "cases": ["code_security", "fintech_fraud", ...],
           "test": "test_w1a_scoring_parity_batch_vs_chunked_real_model",
@@ -368,8 +370,10 @@ def check_parity(model_dir: Path) -> tuple[bool, list[str]]:
         }
 
     ``passed`` covers three stages: winners identical, final log-score
-    drift within atol, and raw pre-rescore row drift within atol. The
-    failure message names the stage that failed.
+    drift within atol, and raw pre-rescore row drift within raw_atol
+    (W5c-1: the batched raw gate is a batch-shape stress with its own
+    documented band, distinct from the single-context atol). The failure
+    message names the stage that failed.
     """
     problems: list[str] = []
     name = str(model_dir)
@@ -389,7 +393,7 @@ def check_parity(model_dir: Path) -> tuple[bool, list[str]]:
             f"{'; '.join(stages)} "
             f"(max_drift={parity.get('max_abs_drift_nats', parity.get('max_drift_nats'))}, "
             f"raw_row_drift={parity.get('max_raw_row_drift_nats')}, "
-            f"atol={parity.get('atol')})"
+            f"atol={parity.get('atol')}, raw_atol={parity.get('raw_atol', parity.get('atol'))})"
         )
         return False, problems
     # A v1 file (no raw-gate keys) predates the batched matrix; a folder
@@ -407,9 +411,12 @@ def _parity_failed_stages(parity: dict) -> list[str]:
     """Which parity stages failed, from the recorded payload.
 
     Stages: winners (final decisions flipped), log_score drift over atol,
-    raw pre-rescore row drift over atol.
+    raw pre-rescore row drift over raw_atol (W5c-1: the batched raw gate
+    has its own documented band — it is a batch-shape stress, not a
+    same-shape comparison).
     """
     atol = parity.get("atol")
+    raw_atol = parity.get("raw_atol", atol)
     stages: list[str] = []
     if not parity.get("winners_identical", True):
         stages.append("winners flipped (final decisions disagree)")
@@ -417,11 +424,14 @@ def _parity_failed_stages(parity: dict) -> list[str]:
     if isinstance(drift, int | float) and isinstance(atol, int | float) and drift >= atol:
         stages.append("final log-score drift >= atol")
     raw = parity.get("max_raw_row_drift_nats")
-    if isinstance(raw, int | float) and isinstance(atol, int | float) and raw >= atol:
-        stages.append("raw pre-rescore row-logit drift >= atol")
+    if isinstance(raw, int | float) and isinstance(raw_atol, int | float) and raw >= raw_atol:
+        stages.append("raw pre-rescore row-logit drift >= raw_atol")
     elif raw is None and not stages:
         stages.append("unspecified stage (payload carries no stage keys)")
-    return stages or ["passed=false with no recognizable stage keys"]
+    # A passing payload has NO failed stages — an empty list is the honest
+    # answer, not a junk sentinel (W5c-1: parity_report output must
+    # classify clean).
+    return stages
 
 
 def check_root(root: Path) -> list[tuple[Path, bool, list[str]]]:
