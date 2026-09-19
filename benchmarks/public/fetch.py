@@ -311,38 +311,6 @@ def build_case(
     }
 
 
-def sample_balanced(
-    rows: list[dict], ds: PublicDataset, per_class: int = BALANCED_ROWS_PER_CLASS, log=print
-) -> list[dict]:
-    """Class-balanced diagnostic view: per_class rows per class, chosen by
-    lowest deterministic slot (F9: a class shorter than per_class is LOUD —
-    logged with the shortfall, never silently under-sampled)."""
-    by_class: dict[object, list[dict]] = {}
-    for row in rows:
-        by_class.setdefault(ds.label_of(row), []).append(row)
-    picked: list[dict] = []
-    for label in sorted(by_class, key=lambda x: str(x)):
-        bucket = sorted(by_class[label], key=lambda r: _slot(ds.row_id(r, "x", 0)))
-        take = bucket[:per_class]
-        if len(take) < per_class:
-            log(
-                f"{ds.name}: class {label!r} has only {len(bucket)} rows "
-                f"(< per_class={per_class}) — diagnostic sample under-filled"
-            )
-        picked.extend(take)
-    return picked
-
-
-def sample_natural(
-    rows: list[dict], ds: PublicDataset, total: int = NATURAL_ROWS, log=print
-) -> list[dict]:
-    """Natural-distribution view (F8): the dataset's own class prevalence,
-    drawn from rows NOT in the balanced view — the calibration rows are
-    never the reported diagnostic rows (the 'do not fit calibration on
-    reported rows' rule)."""
-    return rows
-
-
 # ---- fetch + write --------------------------------------------------------
 
 
@@ -393,51 +361,22 @@ def _row_text(ds: PublicDataset, row: dict) -> str:
     return row["text"]
 
 
-def fetch_view(
-    ds: PublicDataset,
-    split: str,
-    view: str,
-    rows: list[dict] | None = None,
-    row_indexes: list[int] | None = None,
-) -> tuple[list[dict], dict]:
-    """Sample + build one view.
-
-    ``rows``/``row_indexes``: pre-read rows with their source indexes (the
-    split file is downloaded+parsed ONCE per dataset, not once per view —
-    misc fix). ``view='natural'`` excludes the balanced view's rows (F8).
-    Returns (records, file sha256 map).
-    """
-    path = _download(ds, split)
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    if rows is None:
-        rows = list(ds.row_reader(path))
-        row_indexes = list(range(len(rows)))
-    assert row_indexes is not None and len(rows) == len(row_indexes)
-
-    texts = [_row_text(ds, row) for row in rows]
-    if view == "balanced":
-        picked_pos = _balanced_positions(ds, texts, rows)
-    else:
-        picked_pos = _natural_positions(ds, texts, rows, exclude=set())
-    records = [
-        build_case(ds, rows[pos], split, view, texts[pos], row_indexes[pos]) for pos in picked_pos
-    ]
-    return records, {ds.files[split]: digest}
-
-
 def _balanced_positions(
     ds: PublicDataset,
-    texts: list[str],
+    split: str,
     rows: list[dict],
     per_class: int = BALANCED_ROWS_PER_CLASS,
     log=print,
 ) -> list[int]:
+    """Class-balanced diagnostic positions: per_class rows per class, chosen
+    by lowest deterministic slot of the RECORDED source_row_id (the same id
+    the case stores — N2: the split rides along, no placeholder)."""
     by_class: dict[object, list[int]] = {}
     for pos, row in enumerate(rows):
         by_class.setdefault(ds.label_of(row), []).append(pos)
     picked: list[int] = []
     for label in sorted(by_class, key=lambda x: str(x)):
-        bucket = sorted(by_class[label], key=lambda pos: _slot(ds.row_id(rows[pos], "x", pos)))
+        bucket = sorted(by_class[label], key=lambda pos: _slot(ds.row_id(rows[pos], split, pos)))
         take = bucket[:per_class]
         if len(take) < per_class:
             log(
@@ -450,16 +389,17 @@ def _balanced_positions(
 
 def _natural_positions(
     ds: PublicDataset,
-    texts: list[str],
+    split: str,
     rows: list[dict],
     exclude: set[int],
     total: int = NATURAL_ROWS,
     log=print,
 ) -> list[int]:
     """F8: natural view = the dataset's own prevalence, drawn from rows the
-    balanced view did NOT take (disjoint), by lowest deterministic slot."""
+    balanced view did NOT take (disjoint), by lowest deterministic slot of
+    the recorded source_row_id."""
     remaining = [pos for pos in range(len(rows)) if pos not in exclude]
-    ranked = sorted(remaining, key=lambda pos: _slot(ds.row_id(rows[pos], "x", pos)))
+    ranked = sorted(remaining, key=lambda pos: _slot(ds.row_id(rows[pos], split, pos)))
     picked = ranked[:total]
     if len(picked) < total:
         log(
@@ -488,9 +428,9 @@ def fetch_dataset(
     indexes = list(range(len(rows)))
     texts = [_row_text(ds, row) for row in rows]
 
-    balanced_pos = _balanced_positions(ds, texts, rows, per_class=per_class)
+    balanced_pos = _balanced_positions(ds, split, rows, per_class=per_class)
     natural_pos = _natural_positions(
-        ds, texts, rows, exclude=set(balanced_pos), total=natural_total
+        ds, split, rows, exclude=set(balanced_pos), total=natural_total
     )
 
     views: dict[str, list[dict]] = {"balanced": [], "natural": []}

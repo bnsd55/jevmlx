@@ -830,3 +830,78 @@ def test_parity_note_names_stage_and_drift(tmp_path):
         json.dumps({"passed": True, "atol": 0.05, "max_gap_drift_nats": 0.01}), encoding="utf-8"
     )
     assert _model_parity_note(d) is None
+
+
+def test_bench_main_accepts_public_dataset_names_dry_run(tmp_path, monkeypatch, capsys):
+    """F2 (review 3): the CLI accepts the 9 public names (3 bare + 6
+    view-suffixed) — THROUGH main()/argparse, with --dry-run. A bare name
+    expands to both views in the printed plan (the same expansion the run
+    path uses); an unknown name still errors."""
+    from jevmlx import bench
+
+    # No cache: nothing downloads in a dry run; build_datasets is stubbed
+    # to keep the test hermetic.
+    monkeypatch.setattr(bench, "build_datasets", lambda names: ({}, {}), raising=False)
+    rc = bench.main(
+        [
+            "--model",
+            "fake/model",
+            "--datasets",
+            "ag_news,ag_news.balanced,boolq.natural,sst5",
+            "--scorers",
+            "slots",
+            "--tracks",
+            "parallel",
+            "--dry-run",
+            "--out",
+            str(tmp_path / "out"),
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    # ag_news bare + ag_news.balanced dedupe to the same two views.
+    assert "ag_news.balanced" in out and "ag_news.natural" in out
+    assert "boolq.natural" in out
+    assert "boolq.balanced" not in out  # not requested
+    assert "sst5.balanced" in out and "sst5.natural" in out
+    assert "parallel-slots-ag_news.balanced" in out
+    assert "parallel-slots-boolq.natural" in out
+
+
+def test_bench_main_rejects_unknown_public_view(tmp_path, capsys):
+    """The suffix is validated: 'ag_news.diagnostic' is not a name."""
+    from jevmlx import bench
+
+    with pytest.raises(SystemExit):
+        bench.main(
+            [
+                "--model",
+                "fake/model",
+                "--datasets",
+                "ag_news.diagnostic",
+                "--dry-run",
+                "--out",
+                str(tmp_path / "out"),
+            ]
+        )
+    assert "invalid datasets" in capsys.readouterr().err
+
+
+def test_normalize_dataset_names_expands_bare_public():
+    """The ONE expansion rule: bare public -> both views, order kept,
+    deduped; non-public names pass through."""
+    from jevmlx.bench import normalize_dataset_names
+
+    assert normalize_dataset_names(["ag_news"]) == [
+        "ag_news.balanced",
+        "ag_news.natural",
+    ]
+    assert normalize_dataset_names(["bundled", "sst5", "bundled"]) == [
+        "bundled",
+        "sst5.balanced",
+        "sst5.natural",
+    ]
+    assert normalize_dataset_names(["boolq.natural", "boolq"]) == [
+        "boolq.natural",
+        "boolq.balanced",
+    ]

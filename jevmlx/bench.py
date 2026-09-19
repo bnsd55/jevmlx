@@ -38,6 +38,35 @@ DATASETS = (
     "synthetic-injection",
     "synthetic-dependent",
 )
+
+# W6-B5 public gold datasets (F2): the BARE name is accepted on the CLI as
+# shorthand for both views; build_datasets only produces the VIEW-SUFFIXED
+# cases files, so combos expand bare -> suffixed.
+PUBLIC_DATASETS = ("ag_news", "boolq", "sst5")
+PUBLIC_VIEWS = ("balanced", "natural")
+PUBLIC_DATASET_NAMES = tuple(f"{name}.{view}" for name in PUBLIC_DATASETS for view in PUBLIC_VIEWS)
+DATASETS_ALL = DATASETS + PUBLIC_DATASETS + PUBLIC_DATASET_NAMES
+
+
+def normalize_dataset_names(names: list[str]) -> list[str]:
+    """Expand bare public names to their two views, drop duplicates, keep
+    order. Non-public names pass through unchanged.
+
+    This is the ONE place bare-vs-suffixed is resolved (the CLI validator
+    and the combo builder both call it), so the two can never drift.
+    """
+    expanded: list[str] = []
+    for name in names:
+        if name in PUBLIC_DATASETS:
+            for view in PUBLIC_VIEWS:
+                suffixed = f"{name}.{view}"
+                if suffixed not in expanded:
+                    expanded.append(suffixed)
+        elif name not in expanded:
+            expanded.append(name)
+    return expanded
+
+
 SCORERS = ("slots", "labels")
 TRACKS = ("parallel", "naive_local")
 
@@ -165,11 +194,19 @@ def build_datasets(
 
     # W6-B5 public gold datasets: two views each (balanced diagnostic /
     # natural distribution), each view its own cases file + lock. The
-    # verifier re-checks the pinned file sha256s on cache reuse (F5).
-    for name in ("ag_news", "boolq", "sst5"):
-        if name not in datasets:
-            continue
-        for view in ("balanced", "natural"):
+    # verifier re-checks the pinned file sha256s on cache reuse (F5). Both
+    # the bare name and the view-suffixed names are accepted here (F2); the
+    # requested views are tracked so only the asked-for files are built.
+    requested_public = {
+        (name[: -len(f".{view}")], view)
+        for name in datasets
+        for name_, view in [(name, name.split(".", 1)[-1])]
+        if name in PUBLIC_DATASET_NAMES
+    } | {(name, view) for name in datasets if name in PUBLIC_DATASETS for view in PUBLIC_VIEWS}
+    for name in PUBLIC_DATASETS:
+        for view in PUBLIC_VIEWS:
+            if (name, view) not in requested_public:
+                continue
             jsonl = BENCH_CACHE / f"{name}.{view}.jsonl"
             lock = BENCH_CACHE / f"{name}.{view}.dataset.lock.json"
             try:
@@ -289,6 +326,10 @@ def _public_pin_problem(lock: Path) -> str | None:
 
 def _build_public_view(name: str, view: str) -> None:
     """One public-gold view: fetch the pinned revision, sample, write.
+
+    Uses the fetcher's DEFAULT sample sizes (50/class balanced, 500
+    natural) — the bench does not thread --per-class/--natural-rows; those
+    CLI knobs exist for direct `python -m benchmarks.public.fetch` runs.
 
     Both views come from one download (fetch_dataset downloads the split
     once and samples twice), so rebuilding 'balanced' also refreshes
@@ -484,19 +525,12 @@ def run_bench(
     last_run: dict[str, dict[str, Any]] = {}
     failed_combos: dict[str, str] = {}
 
-    # Bare public names ("ag_news") expand to both views
-    # ("ag_news.balanced", "ag_news.natural") — a bare name alone produces
-    # ZERO combos (its cases live in the view-suffixed files only).
-    def _combo_datasets(names: list[str]) -> list[str]:
-        expanded: list[str] = []
-        for name in names:
-            if name in dataset_paths:
-                expanded.append(name)
-            elif name in ("ag_news", "boolq", "sst5"):
-                expanded.extend(f"{name}.{view}" for view in ("balanced", "natural"))
-        return expanded
-
-    combo_dataset_names = _combo_datasets(datasets)
+    # Bare public names expand to both views through the ONE normalizer
+    # (the same helper the CLI validator used) — no second, drifting
+    # expansion rule. Only names with a built cases file become combos.
+    combo_dataset_names = [
+        name for name in normalize_dataset_names(datasets) if name in dataset_paths
+    ]
     combos = [
         (track, scorer, dataset)
         for track, scorer in _track_scorer_grid(tracks, scorers)
@@ -831,9 +865,12 @@ def dry_run(
     """Print the run plan and exit 0 without loading anything."""
     tag = machine_tag(machine_override)
     print(f"machine: {tag}")
+    # Bare public names expand here too — the plan must show the SAME
+    # combos the run would execute.
+    combo_names = normalize_dataset_names(datasets)
     print("datasets:")
     cached, _locks = build_datasets(datasets) if datasets else ({}, {})
-    for name in datasets:
+    for name in combo_names:
         path = cached.get(name)
         state = "cached" if path is not None and Path(path).is_file() else "to build"
         print(f"  {name}: {state}")
@@ -843,7 +880,7 @@ def dry_run(
         folder = out / f"{tag}-{slug}"
         print(f"  model {model} (memory {_model_memory_estimate(model)}) -> {folder}")
         for track, scorer in _track_scorer_grid(tracks, scorers):
-            for dataset in datasets:
+            for dataset in combo_names:
                 combo = f"{track}-{scorer}-{dataset}"
                 combo_dir = folder / combo
                 state = "complete, would skip" if _combo_complete(combo_dir) else "would run"
@@ -919,7 +956,7 @@ def main(argv: list[str] | None = None) -> int:
     scorers = [s for s in (s.strip() for s in args.scorers.split(",")) if s]
     tracks = [t for t in (t.strip() for t in args.tracks.split(",")) if t]
     for name, values, allowed in (
-        ("datasets", datasets, DATASETS),
+        ("datasets", datasets, DATASETS_ALL),
         ("scorers", scorers, SCORERS),
         ("tracks", tracks, TRACKS),
     ):

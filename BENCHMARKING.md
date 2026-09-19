@@ -73,8 +73,10 @@ Paste `SUMMARY.md` into the PR description and link the machine specs
   runs both views): AG News (4-class topic enum), BoolQ (yes/no reading
   comprehension), SST-5 (ordinal 0-4 sentiment). Each is PINNED to a
   dataset repo commit sha with a hardcoded per-file EXPECTED sha256:
-  verified on download and re-checked against the lock on cache reuse —
-  a mismatch fails closed (nothing is sampled or locked). TWO DISJOINT
+  verified on download, and re-checked on cache reuse by comparing the
+  LOCK's recorded sha256 against the pin (the cached cases bytes are
+  covered by the lock's own cases_sha256) — a mismatch fails closed
+  (nothing is sampled or locked). TWO DISJOINT
   sampling views are written as separate cases files:
   `<name>.balanced.jsonl` (class-balanced diagnostic, 50 rows/class —
   per-class accuracy, macro-F1, confusion, ordinal MAE) and
