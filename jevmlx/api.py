@@ -439,7 +439,7 @@ def _decide_once[T: BaseModel](
     scoring: str = "slots",
     allow_none_of_above: bool = False,
     abstain_below_margin: float | None = None,
-    calibration: str | dict | CalibrationBundle | None = None,
+    calibration: str | CalibrationBundle | None = None,
     prior_correction: bool = False,
     constraints: list[dict] | None = None,
 ) -> Decision[T]:
@@ -506,14 +506,16 @@ def _assemble_decision[T: BaseModel](
 
 
 def _resolve_calibration(
-    calibration: str | CalibrationBundle | dict | None,
+    calibration: str | CalibrationBundle | None,
 ) -> CalibrationBundle | None:
-    """W5-C F3 boundary: load/construct the bundle HERE, before the engine.
+    """W5-C F3 boundary: load the bundle HERE, before the engine.
 
     ``decide``/``decide_many`` accept a JSON file path (what ``jevmlx
-    calibrate --out`` writes), an inline dict, or a constructed bundle; the
-    ENGINE itself takes only ``CalibrationBundle | None`` — no file I/O, no
-    duck typing. One helper, one load, shared by all entry points.
+    calibrate --out`` writes) or a constructed bundle — NO dict payload
+    (a second shape is a dual path; ``CalibrationBundle.load`` is the only
+    boundary for files, and the ONE bundle shape is what the CLI writes).
+    The ENGINE itself takes only ``CalibrationBundle | None`` — no file
+    I/O, no duck typing. One helper, one load, shared by all entry points.
     """
     if calibration is None or isinstance(calibration, CalibrationBundle):
         return calibration
@@ -522,14 +524,9 @@ def _resolve_calibration(
             return CalibrationBundle.load(calibration)
         except ValueError as exc:
             raise ValueError(f"calibration bundle invalid: {exc}") from exc
-    if isinstance(calibration, dict):
-        try:
-            return CalibrationBundle.from_payload(calibration)
-        except ValueError as exc:
-            raise ValueError(f"calibration bundle invalid: {exc}") from exc
     raise TypeError(
-        "calibration must be a JSON file path, a dict payload, a "
-        f"CalibrationBundle, or None, got {type(calibration).__name__}"
+        "calibration must be a JSON file path, a CalibrationBundle, or None, "
+        f"got {type(calibration).__name__}"
     )
 
 
@@ -604,7 +601,7 @@ def decide[T: BaseModel](
     scoring: str = "slots",
     allow_none_of_above: bool = False,
     abstain_below_margin: float | None = None,
-    calibration: str | dict | CalibrationBundle | None = None,
+    calibration: str | CalibrationBundle | None = None,
     prior_correction: bool = False,
     constraints: list[dict] | None = None,
 ) -> Decision[T]:
@@ -669,7 +666,7 @@ def decide_many[T: BaseModel](
     scoring: str = "slots",
     allow_none_of_above: bool = False,
     abstain_below_margin: float | None = None,
-    calibration: str | dict | CalibrationBundle | None = None,
+    calibration: str | CalibrationBundle | None = None,
     prior_correction: bool = False,
     constraints: list[dict] | None = None,
 ) -> list[Decision[T]]:

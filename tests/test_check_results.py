@@ -205,8 +205,16 @@ def test_imports_without_mlx(monkeypatch):
     monkeypatch.setitem(sys.modules, "mlx.core", None)
     monkeypatch.setitem(sys.modules, "mlx_lm", None)
     # Force a re-import of the check module's dependencies.
+    # W5-C-fix: jevmlx.calibrate is NOT an mlx dependency and holds the
+    # CalibrationBundle class; evicting it while jevmlx.engine survives
+    # makes isinstance(bundle, CalibrationBundle) stale across the suite
+    # (engine holds the old class object, later imports get a new one).
+    # Keep it resident so the typed object's identity is stable.
     for mod in list(sys.modules):
-        if mod.startswith("jevmlx.") and mod not in ("jevmlx.engine",):
+        if mod.startswith("jevmlx.") and mod not in (
+            "jevmlx.engine",
+            "jevmlx.calibrate",
+        ):
             del sys.modules[mod]
     import importlib
 

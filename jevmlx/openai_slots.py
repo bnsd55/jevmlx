@@ -291,7 +291,7 @@ def decide_openai(
     tokenizer,
     *,
     timeout: float = 120.0,
-    calibration: str | dict | CalibrationBundle | None = None,
+    calibration: str | CalibrationBundle | None = None,
 ) -> dict[str, Any]:
     """Decide every schema field through an OpenAI-compatible endpoint.
 
@@ -300,25 +300,24 @@ def decide_openai(
     ``alternatives``, ``rows``, ``passes``), ``confidence_model:
     "openai_slots"``, ``prompt_version``, ``prompt_sha256``, ``elapsed_ms``.
     One ``max_tokens=1`` request per scalar field; one Y/N request per
-    multi option. ``calibration`` (JSON path or dict) selects multi options
-    by calibrated log-odds > 0, exactly like the native engine. Raises
-    ChatCompletionsError on non-2xx responses.
+    multi option. ``calibration`` (JSON path or bundle) selects multi
+    options by calibrated log-odds > 0, exactly like the native engine.
+    Raises ChatCompletionsError on non-2xx responses.
     """
-    # F3 boundary: the openai path resolves the calibration HERE (path ->
-    # CalibrationBundle.load, dict -> from_payload) and hands the engine
-    # and _decide_multi_field a constructed bundle only.
+    # F3 boundary (W5-C-fix): the openai path resolves the calibration HERE
+    # (path -> CalibrationBundle.load) and hands _decide_multi_field a
+    # constructed bundle only. No dict payload — a second shape is a dual
+    # path.
     from jevmlx.calibrate import CalibrationBundle
 
     if calibration is None or isinstance(calibration, CalibrationBundle):
         calib = calibration
     elif isinstance(calibration, str):
         calib = CalibrationBundle.load(calibration)
-    elif isinstance(calibration, dict):
-        calib = CalibrationBundle.from_payload(calibration)
     else:
         raise TypeError(
-            "calibration must be a JSON file path, a dict payload, a "
-            f"CalibrationBundle, or None, got {type(calibration).__name__}"
+            "calibration must be a JSON file path, a CalibrationBundle, or "
+            f"None, got {type(calibration).__name__}"
         )
     t0 = time.perf_counter()
     parsed_json: dict[str, Any] = {}
