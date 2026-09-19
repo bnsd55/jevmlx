@@ -138,11 +138,12 @@ class Engine:
             layers produce (the ``merge`` broadcast gate reads this).
         width_slope: the measured width-bin tiling slope (W5-D) — carried
             per engine instead of process-global state.
-        drift_envelope: the W5c-9 drift-envelope resolution (key, bucket,
-            bound E_bound, rescore band, source) — the persisted, measured
-            bound on batched pairwise-gap drift this machine/model tuple
-            exhibits. The near-tie rescore band = band(M) for the pass's
-            shape bucket; parity's 0.05 contract is SEPARATE and unchanged.
+        drift_envelope: the W5c-9 drift-envelope resolution (key, records,
+            source) — the persisted, measured bound on batched pairwise-gap
+            drift this machine/model tuple exhibits. The engine carries the
+            RECORDS so the per-pass rescore band resolves by the pass's M
+            (jevmlx.driftenv.band_for_pass); parity's 0.05 contract is
+            SEPARATE and unchanged.
     """
 
     model: Any
@@ -268,29 +269,18 @@ def _load_engine_resolved(model_id: str):
     logger.info("Width-bin tiling slope measured: %.3f", width_slope)
 
     # W5c-9: the persisted drift envelope — recorded for this tuple or the
-    # one-forward canary (which also WRITES its record). Resolution failure
-    # falls back to the conservative plateau bound so the band never
-    # under-covers; the failure is loud in the log.
-    try:
-        from jevmlx.driftenv import envelope_for_engine
+    # one-forward canary (which also WRITES its record). The engine carries
+    # the RECORDS so the per-pass band resolves by M (the canary's M<=16
+    # record must not be applied to an M>16 production pass). Resolution
+    # failure RAISES — no constant fallback (H3): a broken probe must not
+    # silently under-cover the band.
+    from jevmlx.driftenv import envelope_for_engine
 
-        drift_envelope = envelope_for_engine(
-            _EngineEnvelopeShim(model, tokenizer, model_id, profile)
-        )
-    except Exception as exc:  # noqa: BLE001 — the envelope must not break load
-        logger.warning("drift-envelope resolution failed (%s); conservative plateau", exc)
-        drift_envelope = {
-            "key": {},
-            "bucket": "M<=16",
-            "bound": 0.0625,
-            "band": 0.125,
-            "source": "fallback",
-        }
+    drift_envelope = envelope_for_engine(_EngineEnvelopeView(model, tokenizer, model_id, profile))
     logger.info(
-        "Drift envelope: bound=%.6f band=%.6f source=%s",
-        drift_envelope["bound"],
-        drift_envelope["band"],
-        drift_envelope["source"],
+        "Drift envelope: %d record(s), source=%s",
+        len(drift_envelope.get("records", [])),
+        drift_envelope.get("source"),
     )
 
     # every per-model property resolved ONCE, here.
@@ -320,12 +310,13 @@ def _load_engine_resolved(model_id: str):
     return engine
 
 
-class _EngineEnvelopeShim:
-    """The minimal view of a PARTIALLY-built engine the envelope resolver
-    needs (model, tokenizer, model_id, revision) — the Engine dataclass
-    requires every field at once, but the envelope resolves BEFORE the
-    engine exists (its canary runs inside the load warmup). Attribute-only;
-    never passed anywhere the full Engine is expected."""
+class _EngineEnvelopeView:
+    """A read-only view of the partially-built engine the envelope resolver
+    needs (model, tokenizer, model_id, revision, profile, vocab_size) —
+    the Engine dataclass requires every field at once, but the envelope
+    resolves BEFORE the engine exists (its canary runs inside the load
+    warmup). Attribute-only; never passed anywhere the full Engine is
+    expected."""
 
     def __init__(self, model: Any, tokenizer: Any, model_id: str, profile: Any):
         self.model = model
@@ -869,6 +860,18 @@ class ScalarEvidence:
     source_shape: str = "batch"  # "batch" | "batch1" | "dependency" | "oracle"
 
 
+# W3-E (GPT-REVIEW Q4 'Near-tie nondeterminism', bug 13): the measured
+# batch-shape instability band on Metal (see the W3-C measurement in
+# tests/conftest.py — worst 0.0293 nats on main itself, identical with the
+# W3-C branch). Log-score gaps inside this band are batch-shape noise, not
+# model signal: a field whose top candidates sit within the band is RESCORED
+# at batch=1 (the canonical shape) and that result is taken. conftest.py
+# imports this constant so tests and engine share one number. W5c-9: this is
+# the PARITY contract (0.05 on d_gap) AND the canonical-path default band;
+# the batched pass widens it with the persisted drift envelope.
+INSTABILITY_BAND = 5e-2
+
+
 @dataclass(frozen=True)
 class OrdinalTelemetry:
     """W6-B1: ordinal (ordered-enum) telemetry, derived from the finalized
@@ -1034,8 +1037,7 @@ def finalize_scalar_evidence(
     # from a multi-row batched pass (source_shape == "batch"); a batch=1 /
     # dependency / oracle re-measure is already the canonical shape.
     # W5c-9: the band is the pass's DECISION band — INSTABILITY_BAND widened
-    # by the persisted drift envelope's E_bound for the pass's shape bucket
-    # (None => the historical constant; the envelope-less paths).
+    # by the persisted drift envelope's E_bound for the pass's shape bucket.
     band = rescore_band_nats
     rescored = False
     if n > 0:
@@ -1180,6 +1182,16 @@ def _width_bin(width: int) -> int:
         if width <= b:
             return b
     return _WIDTH_BINS[-1]
+
+
+def _pass_m_rows(scored: "ScoreRowsResult") -> int:
+    """The merged width M for the rescore band: the largest batched forward's
+    chunk length (C7: count rows per chunk pass, not all rows; C1: the
+    merged width, not one context's slice). The band protects the WORST
+    shape the pass tiled at."""
+    if scored.chunk_shapes:
+        return max(cl for _w, cl in scored.chunk_shapes)
+    return len(scored.row_logits)
 
 
 def _width_bin_max_rows(
@@ -2610,6 +2622,7 @@ def run_parallel_generation(
             _prior_mode=_prior_mode,
             ledger=ledger,
             drift_envelope=engine.drift_envelope,
+            pass_m_rows=_pass_m_rows(scored),
         )
 
     # 3. Memory guard: rows are broadcast copies of the prefill cache. The
@@ -2667,6 +2680,7 @@ def run_parallel_generation(
         _prior_mode=_prior_mode,
         ledger=ledger,
         drift_envelope=engine.drift_envelope,
+        pass_m_rows=_pass_m_rows(scored),
     )
 
 
@@ -2882,7 +2896,7 @@ def score_scalar_field(
     vocab_size: int,
     pad_id: int,
     ledger: "Ledger",
-    drift_band: tuple[float, float | None] | None = None,
+    drift_band: tuple[float, float | None],
 ) -> FieldOutcome:
     """Stage 2 (W5b-10 C1): finalize ONE scalar (enum/boolean) field.
 
@@ -3245,7 +3259,7 @@ def _rescore_multi_options(
     vocab_size: int,
     pad_id: int,
     ledger: "Ledger",
-    drift_band: tuple[float, float | None] | None = None,
+    drift_band: tuple[float, float | None],
 ) -> tuple[list[int], bool]:
     """W3-E band rescore for a multi field's near-threshold options.
 
@@ -3260,7 +3274,7 @@ def _rescore_multi_options(
     E_bound(M) from the persisted drift envelope) when provided; None =>
     the historical constant (envelope-less paths).
     """
-    band = drift_band[0] if drift_band else INSTABILITY_BAND
+    band = drift_band[0]
     rescored_oids = [
         oi
         for oi, ridx in enumerate(idxs)
@@ -3414,7 +3428,7 @@ def score_multi_field(
     vocab_size: int,
     pad_id: int,
     ledger: "Ledger",
-    drift_band: tuple[float, float | None] | None = None,
+    drift_band: tuple[float, float | None],
 ) -> FieldOutcome:
     """Stage 3 (W5b-10 C1): finalize ONE multi field.
 
@@ -3866,7 +3880,7 @@ def _score_all_fields(
     vocab_size: int,
     pad_id: int,
     ledger: "Ledger",
-    drift_band: tuple[float, float | None] | None = None,
+    drift_band: tuple[float, float | None],
 ) -> tuple[AssembledState, list[str]]:
     """Stage 2 (W5b-10 C1): first-pass scoring of EVERY field.
 
@@ -3965,7 +3979,8 @@ def _assemble(
     active_start: int = 0,
     _prior_mode: bool = False,
     ledger: "Ledger",
-    drift_envelope: dict[str, Any] | None = None,
+    drift_envelope: dict[str, Any],
+    pass_m_rows: int,
 ) -> dict[str, Any]:
     """Assemble per-field decisions from the scored rows (W3-F stage 3).
 
@@ -3989,28 +4004,27 @@ def _assemble(
     lead_in = built["lead_in"]
 
     # W5c-9: the pass's DECISION band from the persisted drift envelope —
-    # INSTABILITY_BAND + E_bound(M) where M = the number of rows the pass
-    # actually scored (len(scored.row_logits); the merged decide_many pass
-    # scores n_group * R rows). None envelope (tests / legacy callers) =>
-    # the historical constant band. (band, E_bound) rides to every field
+    # INSTABILITY_BAND + E_bound(M). M is the MERGED pass width (pass_m_rows),
+    # NOT this context's R rows: decide_many slices the merged result per
+    # context before _assemble, so len(scored.row_logits) here is R — the
+    # band would resolve to the M<=4 bucket for a 2-row schema batched 12
+    # times. The caller passes the merged n_group*R (C1). The band resolves
+    # from the engine's RECORDS by M (C2); M above the largest recorded
+    # bucket uses the largest recorded bound. RAISES when no record covers
+    # the pass (no constant). (band, E_bound) rides to every field
     # finalizer; the rescore trigger widens, the PARITY contract does not.
-    drift_band: tuple[float, float | None] | None = None
-    if drift_envelope is not None and scored.row_logits:
-        from jevmlx.driftenv import band_for_rows
+    from jevmlx.driftenv import band_for_pass, bound_from_records, shape_bucket
 
-        m_pass = len(scored.row_logits)
-        band = band_for_rows(drift_envelope, m_pass)
-        # E_bound as recorded (not re-derived from the rounded band — the
-        # lattice round-up would inflate it).
-        e_bound = drift_envelope.get("bound")
-        drift_band = (band, e_bound)
-        logger.debug(
-            "Rescore band for %d-row pass: %.6f (envelope %.6f, source %s)",
-            m_pass,
-            band,
-            e_bound or 0.0,
-            drift_envelope.get("source"),
-        )
+    band = band_for_pass(drift_envelope.get("records", []), pass_m_rows)
+    e_bound = bound_from_records(drift_envelope.get("records", []), shape_bucket(pass_m_rows))
+    drift_band = (band, e_bound)
+    logger.debug(
+        "Rescore band for %d-row pass: %.6f (envelope %.6f, source %s)",
+        pass_m_rows,
+        band,
+        e_bound or 0.0,
+        drift_envelope.get("source"),
+    )
     field_plans = built["field_plans"]
     vocab_size = (
         model.args.vocab_size
@@ -4345,6 +4359,7 @@ def run_parallel_generation_batched(
                         active_start=active_start,
                         ledger=ctx_ledger,
                         drift_envelope=engine.drift_envelope,
+                        pass_m_rows=0,
                     )
                 prefill_iv = prefill_iv_by_idx[idx]
                 assembly_iv = ctx_ledger.last_interval("assembly")
@@ -4429,6 +4444,7 @@ def run_parallel_generation_batched(
                     active_start=active_start,
                     ledger=ctx_ledger,
                     drift_envelope=engine.drift_envelope,
+                    pass_m_rows=n_group * R,
                 )
             prefill_iv = prefill_iv_by_idx[idx]
             assembly_iv = ctx_ledger.last_interval("assembly")

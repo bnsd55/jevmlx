@@ -17,7 +17,8 @@ The rule this module ships (GPT-REVIEW-4-drift question 2):
 where E_bound comes from a PERSISTED drift envelope — measured, not
 fitted — keyed by the tuple that actually determines the numerics:
 
-    (model_id, revision, quantization, mlx_version, chip, activation dtype)
+    (model_id, revision, quantization, mlx_version, chip, activation dtype,
+     bucket_edges_version)
 
 with a COARSE shape bucket (M<=4, <=8, <=16, >16): the probe showed the
 plateau starts at 16 rows and is flat to 128, so bucketing by exact M would
@@ -32,11 +33,16 @@ Sources of the envelope, in order of authority:
 2. CANARY: when nothing is recorded for the tuple, engine load runs a tiny
    one-forward 16-row probe on a fixed synthetic schema and uses it, logs
    that the envelope is unrecorded, and writes it (so the next load has a
-   recorded value).
+   recorded value). The canary MEASURES; it never installs a constant —
+   on failure the load RAISES (no silent under-cover).
 
-E_bound = max(recorded, canary), rounded UP to the next 1/64 nat — the
-drift lattice IS the fp16 ULP ladder (0.015625/0.03125/0.0625/0.125), so
-the band lives on the same grid it protects.
+E_bound = max over all recorded buckets AT OR ABOVE the pass's bucket
+(the plateau is monotone in M up to the flat region), rounded UP to the
+next 1/64 nat — the drift lattice IS the fp16 ULP ladder
+(0.015625/0.03125/0.0625/0.125), so the band lives on the same grid it
+protects. A pass with M ABOVE the largest recorded bucket uses the
+largest recorded bound (the plateau's upper reach) — never a smaller
+bucket's, never a constant.
 
 The PARITY CONTRACT IS UNCHANGED: parity still fails when measured d_gap
 exceeds 0.05. This band protects DECISIONS (every reference near tie
@@ -46,25 +52,31 @@ ARCHITECTURE.md "Rescore band vs parity contract".
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
-import platform
 from pathlib import Path
 from typing import Any
 
 __all__ = [
     "DRIFT_LATTICE",
+    "BUCKET_EDGES",
+    "BUCKET_EDGES_VERSION",
     "MAX_GAP_DRIFT_KEY",
+    "DriftEnvelopeError",
     "shape_bucket",
+    "bucket_labels",
     "round_up_lattice",
     "envelope_cache_path",
     "load_envelope_record",
     "record_envelope",
     "bound_from_records",
     "rescore_band",
-    "band_for_rows",
+    "band_for_pass",
+    "envelope_key",
     "envelope_for_engine",
+    "recorded_envelope_records",
     "CANARY_SCHEMA",
     "run_canary",
 ]
@@ -84,6 +96,74 @@ MAX_GAP_DRIFT_KEY = "max_gap_drift_nats"
 # the engine reads at load).
 _ENVELOPE_CACHE = Path.home() / ".cache" / "jevmlx" / "driftenv"
 
+
+class DriftEnvelopeError(RuntimeError):
+    """A drift-envelope resolution that must not proceed silently — the
+    canary failed, the cache is read-only, the chip could not be resolved,
+    or a batched pass's M sits above the largest recorded bucket with no
+    plateau record. The caller (engine load / a batched pass) RAISES this
+    rather than installing a constant band."""
+
+
+# ---------------------------------------------------------------------------
+# Bucket edges — shipped in the package, versioned, part of the envelope key.
+# ---------------------------------------------------------------------------
+
+# The W5c-4 matrix measured the drift plateau starting at 16 rows and flat
+# to 128. These edges are the DEFAULT set; a finer M>16 split (the fp32
+# bisect jump between M=16 and M=112) lands as a NEW versioned edge set —
+# never an in-place edit, because the edge version rides in the envelope
+# key (records under different edges never mix). The shipped data file
+# jevmlx/data/bucket_edges.json is the single source of truth; these
+# module constants mirror it for import-time use and are overwritten from
+# the file at import when it resolves.
+BUCKET_EDGES_VERSION = 1
+BUCKET_EDGES: tuple[int, ...] = (4, 8, 16)
+
+
+def _load_shipped_edges() -> tuple[int, ...]:
+    """Read the shipped bucket_edges.json (the package's source of truth).
+
+    A malformed/missing file is a packaging bug, not a runtime fallback:
+    raise so it surfaces in CI, never silently to the band.
+    """
+    path = Path(__file__).resolve().parent / "data" / "bucket_edges.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    edges = sorted(int(e) for e in data["edges"] if isinstance(e, (int, float)) and e > 0)
+    if len(edges) < 2 or len(edges) != len(set(edges)):
+        raise DriftEnvelopeError(f"malformed bucket_edges.json: {edges}")
+    return tuple(edges)
+
+
+try:
+    BUCKET_EDGES = _load_shipped_edges()
+except DriftEnvelopeError:
+    raise
+except OSError:
+    # Source checkout without the data file packaged (e.g. a raw sdist) —
+    # the constant above stands; a packaged install always has the file.
+    pass
+
+
+def _load_shipped_edges() -> tuple[int, ...]:
+    """Read the shipped bucket_edges.json (the package's source of truth).
+
+    A malformed/missing file is a packaging bug, not a runtime fallback:
+    raise so it surfaces in CI, never silently to the band.
+    """
+    path = Path(__file__).resolve().parent / "data" / "bucket_edges.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    edges = sorted(int(e) for e in data["edges"] if isinstance(e, (int, float)) and e > 0)
+    if len(edges) < 2 or len(edges) != len(set(edges)):
+        raise DriftEnvelopeError(f"malformed bucket_edges.json: {edges}")
+    return tuple(edges)
+
+
+def bucket_labels() -> list[str]:
+    """The ordered bucket labels for the shipped edge set."""
+    return [f"M<={e}" for e in BUCKET_EDGES] + [f"M>{BUCKET_EDGES[-1]}"]
+
+
 # The canary probe's fixed synthetic schema: one boolean field, a 16-row
 # decision (the plateau's onset) — enough rows to cross the M<=16 bucket
 # boundary in one forward, small enough to be negligible at load.
@@ -96,51 +176,11 @@ CANARY_SCHEMA: dict[str, dict] = {
 
 
 def shape_bucket(m_rows: int) -> str:
-    """The shape bucket for a pass of M rows.
-
-    Default edges (4, 8, 16) mirror the W5c-4 plateau measurement (drift
-    onset at 16; everything above shares the M>16 bucket). DATA-DRIVEN
-    OVERRIDE (W5c-9 review): when the recorded bucket-edge file carries
-    explicit edges, those govern — a finer M>16 split lands as a recorded
-    edge set (e.g. the fp32 bisect jump between M=16 and M=112 =>
-    edges 16/32/64/112), never as a code change.
-    """
-    edges = _recorded_bucket_edges()
-    if edges is None:
-        edges = (4, 8, 16)
-    labels = [f"M<={e}" for e in edges]
-    for e, label in zip(edges, labels, strict=True):
-        if m_rows <= e:
-            return label
-    return f"M>{edges[-1]}"
-
-
-# The bucket-edge version rides in the envelope key: changing edges does
-# not silently mix records written under different edges.
-BUCKET_EDGES_VERSION = 1
-
-
-def _recorded_bucket_edges() -> tuple[int, ...] | None:
-    """Bucket edges from the recorded edge-set file, when present.
-
-    <cache>/bucket_edges.json: {\"version\": N, \"edges\": [4, 8, 16, 32, 112]}
-    written by the analyst when the bisect report lands. Missing/malformed
-    => the default plateau edges. The version check guards against reading
-    edges older than this code's expectations.
-    """
-    try:
-        raw = (_ENVELOPE_CACHE / "bucket_edges.json").read_text(encoding="utf-8")
-        data = json.loads(raw)
-        version = int(data.get("version", -1))
-        edges = data.get("edges")
-        if version != BUCKET_EDGES_VERSION or not isinstance(edges, list):
-            return None
-        clean = sorted(int(e) for e in edges if isinstance(e, (int, float)) and e > 0)
-        if len(clean) < 2 or len(clean) != len(set(clean)):
-            return None
-        return tuple(clean)
-    except (OSError, json.JSONDecodeError, ValueError, TypeError):
-        return None
+    """The shape bucket for a pass of M rows, from the shipped edge set."""
+    for edge in BUCKET_EDGES:
+        if m_rows <= edge:
+            return f"M<={edge}"
+    return f"M>{BUCKET_EDGES[-1]}"
 
 
 def round_up_lattice(x: float) -> float:
@@ -152,13 +192,12 @@ def envelope_cache_path(key: dict[str, Any]) -> Path:
     """The user-cache path for one envelope tuple.
 
     Keyed by (model_id, revision, quantization, mlx_version, chip,
-    activation dtype) — the tuple that determines the numerics. Quantization
-    dicts hash by their sorted JSON (group_size/bits vary per model).
+    activation dtype, bucket_edges_version) — the tuple that determines the
+    numerics. Quantization dicts hash by their sorted JSON (group_size/bits
+    vary per model). The bucket-edge version is part of the key: records
+    written under different edge sets never collide.
     """
     h = json.dumps(key, sort_keys=True, default=str)
-    # stable short hash: the tuple itself is too nested for a filename.
-    import hashlib
-
     digest = hashlib.sha256(h.encode()).hexdigest()[:16]
     return _ENVELOPE_CACHE / f"{digest}.json"
 
@@ -176,32 +215,59 @@ def record_envelope(record: dict[str, Any], *, probes_dir: Path | None = None) -
     """Persist an envelope record: user cache + (best-effort) probes folder.
 
     ``record`` carries the full tuple key + ``shape_bucket`` +
-    ``max_gap_drift_nats`` (+ provenance). The cache write is authoritative;
-    the probes-folder copy is written when the dir exists or can be created
-    (repo checkouts), and silently skipped elsewhere (installed wheels).
+    ``max_gap_drift_nats`` (+ provenance). The cache write keeps the MAX
+    per (key, shape_bucket) — never last-writer-wins (C3): a driftprobe run
+    that measured 0.125 must survive a later parity_report that measured
+    0.0625 for the same bucket.
+
+    A read-only cache (C6) is handled: the write is attempted, on
+    PermissionError the in-memory record is kept (the engine resolution
+    already holds it) and a warning logs — NO constant fallback installs.
     """
     written: list[Path] = []
     cache_path = envelope_cache_path(record.get("key") or record)
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    # Merge into the cache: keep the max per (key, shape_bucket).
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:  # noqa: BLE001 — read-only home / sandbox
+        logger.warning(
+            "drift-envelope cache dir unwritable (%s); record kept in-memory, "
+            "canary will re-run next load",
+            exc,
+        )
+        return written
+    # Merge into the cache: keep the MAX per (key, shape_bucket).
     existing = load_envelope_record(record.get("key") or record) or {"records": []}
-    records = [
-        r
-        for r in existing.get("records", [])
-        if r.get("shape_bucket") != record.get("shape_bucket")
-    ]
-    records.append(record)
-    cache_path.write_text(
-        json.dumps({"key": record.get("key") or record, "records": records}, indent=2),
-        encoding="utf-8",
-    )
-    written.append(cache_path)
+    records = list(existing.get("records", []))
+    bucket = record.get("shape_bucket")
+    new_val = record.get(MAX_GAP_DRIFT_KEY)
+    replaced = False
+    for i, r in enumerate(records):
+        if r.get("shape_bucket") == bucket:
+            old_val = r.get(MAX_GAP_DRIFT_KEY)
+            if isinstance(old_val, (int, float)) and isinstance(new_val, (int, float)):
+                if float(new_val) > float(old_val):
+                    records[i] = record
+            else:
+                records[i] = record
+            replaced = True
+            break
+    if not replaced:
+        records.append(record)
+    payload = {"key": record.get("key") or record, "records": records}
+    try:
+        cache_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        written.append(cache_path)
+    except OSError as exc:  # noqa: BLE001 — read-only cache (C6)
+        logger.warning(
+            "drift-envelope cache write failed (%s); record kept in-memory, "
+            "canary will re-run next load",
+            exc,
+        )
+        return written
     if probes_dir is not None:
         try:
             probes_dir.mkdir(parents=True, exist_ok=True)
             slug = json.dumps(record.get("key") or record, sort_keys=True, default=str)
-            import hashlib
-
             name = hashlib.sha256(slug.encode()).hexdigest()[:16]
             p = probes_dir / f"driftenv-{name}.json"
             p.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
@@ -214,20 +280,18 @@ def record_envelope(record: dict[str, Any], *, probes_dir: Path | None = None) -
 def bound_from_records(records: list[dict[str, Any]], bucket: str) -> float | None:
     """E_bound for the bucket from envelope records (None when absent).
 
-    The bucket's own record bounds it; a HIGHER bucket's record also bounds
-    it (the plateau is monotone in M up to the flat region — the W5c-4
-    matrix showed no decrease past 16; using the max keeps fail-safe).
+    The TIGHTEST covering bucket: the smallest bucket >= the pass's bucket
+    that has a record. A higher bucket's plateau bounds any smaller M, so
+    the nearest covering record is the correct (least wasteful) bound.
+    For a pass whose M sits ABOVE the largest recorded bucket, the LARGEST
+    recorded bound applies (the plateau's upper reach) — never a smaller
+    bucket's, never a constant.
     """
-    edges = _recorded_bucket_edges() or (4, 8, 16)
-    labels = [f"M<={e}" for e in edges] + [f"M>{edges[-1]}"]
+    labels = bucket_labels()
     try:
         bi = labels.index(bucket)
     except ValueError:
         return None
-    # The TIGHTEST covering bucket: the smallest bucket >= the pass's
-    # bucket that has a record. A higher bucket's plateau bounds any
-    # smaller M, so the nearest covering record is the correct (least
-    # wasteful) bound.
     covering = [
         (labels.index(r.get("shape_bucket")), float(r.get(MAX_GAP_DRIFT_KEY)))
         for r in records
@@ -235,10 +299,17 @@ def bound_from_records(records: list[dict[str, Any]], bucket: str) -> float | No
         and labels.index(r.get("shape_bucket")) >= bi
         and isinstance(r.get(MAX_GAP_DRIFT_KEY), (int, float))
     ]
-    if not covering:
-        return None
-    covering.sort()
-    return covering[0][1]
+    if covering:
+        covering.sort()
+        return covering[0][1]
+    # No covering bucket: fall back to the LARGEST recorded bound (the
+    # plateau's upper reach) — M above the largest recorded bucket.
+    all_vals = [
+        float(r.get(MAX_GAP_DRIFT_KEY))
+        for r in records
+        if r.get("shape_bucket") in labels and isinstance(r.get(MAX_GAP_DRIFT_KEY), (int, float))
+    ]
+    return max(all_vals) if all_vals else None
 
 
 def rescore_band(e_bound: float) -> float:
@@ -249,34 +320,104 @@ def rescore_band(e_bound: float) -> float:
     return round_up_lattice(INSTABILITY_BAND + e_bound)
 
 
-def band_for_rows(envelope: dict[str, Any], m_rows: int) -> float:
-    """The rescore band for a pass of M rows from a resolved envelope.
+def band_for_pass(records: list[dict[str, Any]], m_rows: int) -> float:
+    """The rescore band for a pass of M rows from a tuple's envelope records.
 
-    The envelope carries the bound for the pass's shape bucket; the bucket
-    is recomputed from M (not trusted from the resolution record, which is
-    the canary's bucket). When the envelope is missing or malformed the
-    CONSERVATIVE plateau bound (0.0625) applies — the band never
-    under-covers because of bookkeeping.
+    Resolves E_bound for the pass's shape bucket from the records (the
+    tightest covering bucket; M above the largest recorded bucket uses the
+    largest recorded bound). RAISES :class:`DriftEnvelopeError` when NO
+    record covers the pass — a batched pass must not proceed with an
+    unmeasured band (the escape the PR exists to close). Callers that
+    legitimately have no envelope (the canonical batch=1 / dependency /
+    oracle paths, which never rescore) never call this. M == 0 (a
+    degenerate no-rows schema) returns INSTABILITY_BAND — no batched pass
+    ran, so no widening applies.
     """
     from jevmlx.engine import INSTABILITY_BAND
 
-    bound = None
-    if isinstance(envelope, dict):
-        records = envelope.get("records")
-        if isinstance(records, list):
-            bound = bound_from_records(records, shape_bucket(m_rows))
-        elif envelope.get("bound") is not None:
-            # The resolution record is for one bucket; a larger M in a
-            # HIGHER bucket needs the higher bucket's bound — conservatively
-            # reuse the resolved bound (the plateau is flat above 16).
-            bound = float(envelope["bound"])
+    if m_rows <= 0:
+        return INSTABILITY_BAND
+    bound = bound_from_records(records, shape_bucket(m_rows))
     if bound is None:
-        bound = 0.0625
-    return round_up_lattice(INSTABILITY_BAND + bound)
+        raise DriftEnvelopeError(
+            f"no drift-envelope record covers a {m_rows}-row pass "
+            f"(bucket {shape_bucket(m_rows)}); run benchmarks/driftprobe.py"
+        )
+    return rescore_band(bound)
+
+
+def _chip_tag() -> str:
+    """The machine chip tag (machine_tag() without the RAM suffix).
+
+    Refuses None (C5): a None chip collides envelope keys across machines.
+    """
+    from jevmlx.bench import machine_tag
+
+    tag = machine_tag()
+    if not tag:
+        raise DriftEnvelopeError("machine chip tag could not be resolved (sysctl)")
+    return tag.rsplit("-", 1)[0]
+
+
+def _activation_dtype(engine: Any) -> str:
+    """The activation dtype the batched matmuls actually run in (C5).
+
+    MEASURED from a one-token forward on the loaded model — not assumed
+    'float16'. A real MLX model returns logits whose dtype IS the
+    activation dtype. When the model is not callable (test fakes / a model
+    that defers its forward), the dtype is inferred from the engine's
+    metadata: quantized => float16 activations on Apple Silicon, else
+    float32. RAISES :class:`DriftEnvelopeError` when neither path resolves
+    a dtype (a None/unknown dtype collides envelope keys across models).
+    """
+    model = getattr(engine, "model", None)
+    tokenizer = getattr(engine, "tokenizer", None)
+    # One-token forward on the model's native path. The output logits'
+    # dtype IS the activation dtype the batched matmuls run in.
+    dtype = ""
+    try:
+        import mlx.core as _mx
+
+        ids = _mx.array([[0]])
+        if (
+            tokenizer is not None
+            and hasattr(tokenizer, "bos_token_id")
+            and tokenizer.bos_token_id is not None
+        ):
+            ids = _mx.array([[tokenizer.bos_token_id]])
+        out = model(ids)
+        # Llama-style models return (logits, cache); take the logits.
+        logits = out[0] if isinstance(out, (tuple, list)) else out
+        dtype = str(getattr(logits, "dtype", ""))
+    except Exception:  # noqa: BLE001 — measurement fails on non-callable fakes
+        dtype = ""
+    if dtype:
+        return dtype
+    # Fallback: infer from metadata (quantized => float16 on Apple Silicon).
+    meta = {}
+    try:
+        from jevmlx.engine import engine_metadata
+
+        meta = engine_metadata(getattr(engine, "model_id", "") or "")
+    except Exception:  # noqa: BLE001 — best-effort metadata
+        meta = {}
+    if meta.get("quantization"):
+        return "float16"
+    if getattr(engine, "model_id", None) is not None:
+        # An unquantized model on MLX defaults to float32 activations.
+        return "float32"
+    raise DriftEnvelopeError(
+        "activation dtype could not be measured (model not callable) nor "
+        "inferred (no metadata); refusing a None dtype"
+    )
 
 
 def envelope_key(engine: Any) -> dict[str, Any]:
-    """The envelope tuple for a loaded engine (see module docstring)."""
+    """The envelope tuple for a loaded engine (see module docstring).
+
+    The bucket-edge version rides in the key (records under different edges
+    never mix). The chip is REQUIRED (refuses None — C5).
+    """
     from jevmlx.engine import engine_metadata
 
     meta = engine_metadata(getattr(engine, "model_id", "") or "")
@@ -289,19 +430,70 @@ def envelope_key(engine: Any) -> dict[str, Any]:
         "quantization": quant,
         "mlx_version": meta.get("mlx_version"),
         "chip": _chip_tag(),
-        "activation_dtype": "float16",
+        "activation_dtype": _activation_dtype(engine),
+        "bucket_edges_version": BUCKET_EDGES_VERSION,
     }
 
 
-def _chip_tag() -> str | None:
-    """The machine chip tag (machine_tag() without the RAM suffix)."""
-    try:
-        from jevmlx.bench import machine_tag
+def recorded_envelope_records(engine: Any) -> list[dict[str, Any]]:
+    """The cached envelope RECORDS for the engine's tuple (empty when none).
 
-        tag = machine_tag()
-        return tag.rsplit("-", 1)[0] if tag else None
-    except Exception:  # noqa: BLE001 — best-effort provenance
-        return None
+    The engine carries the RECORDS (not a single resolved bound) so the
+    per-pass resolution can pick the right bucket (C2): the load-time
+    canary's M<=16 record must not be applied to an M>16 production pass.
+    """
+    key = envelope_key(engine)
+    cached = load_envelope_record(key)
+    if cached is None:
+        return []
+    records = cached.get("records", [])
+    return records if isinstance(records, list) else []
+
+
+def envelope_for_engine(engine: Any) -> dict[str, Any]:
+    """Resolve the envelope for a loaded engine: the tuple's RECORDS,
+    augmented by the canary when nothing is recorded.
+
+    Returns the resolution the engine carries — the RECORDS list (so the
+    per-pass band resolves by M) plus the key and source:
+
+        {
+          "key": <tuple>, "records": [...], "source": "recorded"|"canary",
+        }
+
+    When no record exists for the tuple, the canary runs (and WRITES its
+    record — the next load finds it), a warning logs that the envelope was
+    unrecorded, and the canary's record joins the records list. The canary
+    MEASURES; on failure the load RAISES (no constant fallback — H3).
+    """
+    key = envelope_key(engine)
+    cached = load_envelope_record(key)
+    records = list(cached.get("records", [])) if cached else []
+    if records:
+        return {"key": key, "records": records, "source": "recorded"}
+    logger.warning(
+        "drift envelope unrecorded for %s/%s — running the load-time canary "
+        "and writing the record (run benchmarks/driftprobe.py for the full matrix)",
+        key.get("model_id"),
+        key.get("chip"),
+    )
+    try:
+        record = run_canary(engine)
+    except DriftEnvelopeError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — a failed probe must not under-cover
+        raise DriftEnvelopeError(
+            f"canary probe failed for {key.get('model_id')}/{key.get('chip')}: {exc}"
+        ) from exc
+    from jevmlx.bench import HERE
+
+    probes_dir = Path(HERE) / "probes" if Path(HERE).exists() else None
+    record_envelope(record, probes_dir=probes_dir)
+    # Read back the merged store (the write may have hit a covering bucket
+    # already; the canary's own bucket is M<=16).
+    fresh = load_envelope_record(key)
+    records = list(fresh.get("records", [])) if fresh else [record]
+    return {"key": key, "records": records, "source": "canary"}
 
 
 def run_canary(engine: Any) -> dict[str, Any]:
@@ -311,31 +503,17 @@ def run_canary(engine: Any) -> dict[str, Any]:
     Measures d_gap of the field's branch logits at the decide_many shape
     (16 copies of the rows in ONE merged pass, per-row slots) against the
     canonical batch=1 shape — the same decomposition parity's RAW stage
-    uses. Never raises: on any failure the canary reports a CONSERVATIVE
-    fallback (the plateau value 0.0625) so the band never under-covers
-    because the probe itself broke.
+    uses. The canary MEASURES; on any failure it RAISES (H3: no constant
+    fallback — a broken probe must not silently under-cover the band).
     """
     key = envelope_key(engine)
-    bucket = "M<=16"
-    try:
-        measured = _canary_gap_drift(engine)
-    except Exception as exc:  # noqa: BLE001 — the canary must not break load
-        logger.warning("drift-envelope canary failed (%s); using conservative fallback", exc)
-        measured = None
-    plateau_fallback = 0.0625
-    # A measured 0 can be honest for a TINY schema (one branch, logits on
-    # the same fp16 grid at every shape) — but it must NOT shrink the band
-    # below the measured plateau: the canary schema is synthetic, the real
-    # workload's drift was measured at 0.0625 on real schemas. The canary
-    # LOWER-bounds nothing; it only ever RAISES the band above the known
-    # plateau when IT measures more. So: value = max(measured, plateau)
-    # when measured; the plateau alone when the probe failed.
-    value = max(float(measured), plateau_fallback) if measured is not None else plateau_fallback
+    bucket = shape_bucket(16)
+    measured = _canary_gap_drift(engine)
     record = {
         "key": key,
         "shape_bucket": bucket,
-        MAX_GAP_DRIFT_KEY: value,
-        "source": "canary" if measured is not None else "canary_fallback",
+        MAX_GAP_DRIFT_KEY: float(measured),
+        "source": "canary",
         "canary_rows": 16,
     }
     return record
@@ -352,7 +530,7 @@ def _canary_gap_drift(engine: Any) -> float:
     tokenizer = engine.tokenizer
     built = _build_schema_rows(schema, tokenizer, "slots")
     if not built["rows"]:
-        return 0.0
+        raise DriftEnvelopeError("canary schema produced no rows; cannot measure")
     pf = _prefill(engine.model, tokenizer, context, schema, Ledger(), "slots", engine.profile)
     n = 16
     rows_n = built["rows"] * math.ceil(n / len(built["rows"]))
@@ -389,55 +567,3 @@ def _canary_gap_drift(engine: Any) -> float:
         got_gap = max(got) - min(got)
         worst = max(worst, abs(ref_gap - got_gap))
     return worst
-
-
-def envelope_for_engine(engine: Any) -> dict[str, Any]:
-    """Resolve the envelope for a loaded engine: recorded value or canary.
-
-    Returns the resolution dict the engine carries:
-
-        {
-          "key": <tuple>, "bucket": <bucket-of-load>, "bound": E_bound,
-          "band": rescore_band(E_bound), "source": "recorded"|"canary",
-        }
-
-    When no record exists for the tuple, the canary runs (and WRITES its
-    record — the next load finds it), a warning logs that the envelope was
-    unrecorded, and E_bound = max(recorded, canary) = the canary value.
-    When a record exists, it is used AS IS (the canary does not re-run at
-    every load; the probe/parity writers keep it fresh).
-    """
-    key = envelope_key(engine)
-    bucket = shape_bucket(16)  # the load-time canary's own bucket
-    cached = load_envelope_record(key)
-    recorded = bound_from_records(cached.get("records", []), bucket) if cached else None
-    if recorded is not None:
-        return {
-            "key": key,
-            "bucket": bucket,
-            "bound": round_up_lattice(recorded),
-            "band": rescore_band(recorded),
-            "source": "recorded",
-        }
-    logger.warning(
-        "drift envelope unrecorded for %s/%s — running the load-time canary "
-        "and writing the record (run benchmarks/driftprobe.py for the full matrix)",
-        key.get("model_id"),
-        key.get("chip"),
-    )
-    record = run_canary(engine)
-    from jevmlx.bench import HERE
-
-    probes_dir = Path(HERE) / "probes"
-    record_envelope(record, probes_dir=probes_dir if Path(HERE).exists() else None)
-    return {
-        "key": key,
-        "bucket": bucket,
-        "bound": round_up_lattice(record[MAX_GAP_DRIFT_KEY]),
-        "band": rescore_band(record[MAX_GAP_DRIFT_KEY]),
-        "source": record["source"],
-    }
-
-
-def _platform_note() -> str:
-    return platform.platform()

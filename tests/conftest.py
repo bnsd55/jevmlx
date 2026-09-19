@@ -429,6 +429,11 @@ def make_engine(
     FakeModel/FakeTokenizer; the per-model properties (profile, vocab,
     weights) resolve here — the engine is built fully loaded, as load_engine
     would produce it.
+
+    W5c-9: ``drift_envelope`` defaults to a TEST envelope (constant band,
+    0.05 — the historical behavior) so the majority of tests that don't
+    care about the rescore band stay unchanged; tests that DO pass an
+    explicit envelope. The envelope is REQUIRED on the Engine (no None).
     """
     from jevmlx.engine import (
         Engine,
@@ -444,6 +449,12 @@ def make_engine(
         tokenizer = FakeTokenizer()
     if vocab_size is None:
         vocab_size = _vocab_size_of(model)
+    if drift_envelope is None:
+        # Test envelope: a single M>16 record at the plateau (0.0625) —
+        # the band every real engine resolves on this machine. Tests that
+        # need the CONSTANT band (no widening) build their own envelope
+        # with a 0.0 record, or call _constant_test_envelope().
+        drift_envelope = _test_envelope()
     return Engine(
         model=model,
         tokenizer=tokenizer,
@@ -456,6 +467,31 @@ def make_engine(
         width_slope=1.0,
         drift_envelope=drift_envelope,
     )
+
+
+def _test_envelope() -> dict:
+    """The default test envelope: a single M>16 record at the plateau
+    (0.0625) — the measured bound on this machine, so the test band is the
+    real production band (0.125), not a synthetic constant."""
+    from jevmlx.driftenv import MAX_GAP_DRIFT_KEY
+
+    return {
+        "key": {"model_id": "fake-engine", "bucket_edges_version": 1},
+        "records": [{"shape_bucket": "M>16", MAX_GAP_DRIFT_KEY: 0.0625, "source": "test"}],
+        "source": "test",
+    }
+
+
+def _constant_test_envelope() -> dict:
+    """A test envelope with a 0.0 bound — the CONSTANT band (0.05), for
+    tests asserting the pre-W5c-9 behavior (no widening)."""
+    from jevmlx.driftenv import MAX_GAP_DRIFT_KEY
+
+    return {
+        "key": {"model_id": "fake-engine", "bucket_edges_version": 1},
+        "records": [{"shape_bucket": "M>16", MAX_GAP_DRIFT_KEY: 0.0, "source": "test"}],
+        "source": "test",
+    }
 
 
 @pytest.fixture(scope="module")

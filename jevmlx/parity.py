@@ -307,6 +307,7 @@ def parity_report(
     max_gap_drift = batched["max_gap_drift_nats"]
     max_logp_drift = batched["max_logp_drift_nats"]
     max_margin_drift = batched["max_margin_drift_nats"]
+    max_merged_rows = batched.get("max_merged_rows", 0)
     # Rescore-gate safety assertion (review section 2, item 4): did any
     # field sit inside the 0.05 near-tie band at batch=1 but escape the
     # rescore under batching? That is the actual failure mode the raw gate
@@ -317,7 +318,7 @@ def parity_report(
     # record (user cache + probes folder) — the measured envelope the engine
     # band reads. The PARITY GATE below stays at the FIXED 0.05: recording
     # the envelope never redefines parity; it bounds the rescore band.
-    recorded = _record_envelope_from_report(engine, model_id, max_gap_drift)
+    recorded = _record_envelope_from_report(engine, model_id, max_gap_drift, max_merged_rows)
     passed = bool(
         winners_identical
         and max_abs_drift < INSTABILITY_BAND
@@ -373,7 +374,9 @@ def write_parity_json(
 # ---------------------------------------------------------------- helpers --
 
 
-def _record_envelope_from_report(engine: Any, model_id: str, max_gap_drift: float) -> dict:
+def _record_envelope_from_report(
+    engine: Any, model_id: str, max_gap_drift: float, merged_rows: int
+) -> dict:
     """Persist the report's measured d_gap as a drift-envelope record (W5c-9).
 
     The batched matrix measured pairwise-gap drift at the 4-context merged
@@ -388,7 +391,7 @@ def _record_envelope_from_report(engine: Any, model_id: str, max_gap_drift: floa
         from jevmlx.driftenv import MAX_GAP_DRIFT_KEY, envelope_key, record_envelope, shape_bucket
 
         key = envelope_key(engine)
-        bucket = shape_bucket(4 * 112)  # the matrix's merged pass: M > 16
+        bucket = shape_bucket(merged_rows)  # the real merged pass M (C4)
         record = {
             "key": key,
             "shape_bucket": bucket,
@@ -524,6 +527,7 @@ def check_batched_parity(
     max_gap_drift = 0.0
     max_logp_drift = 0.0
     max_margin_drift = 0.0
+    max_merged_rows = 0  # W5c-9 C4: the largest merged pass M the matrix ran
     per_case: dict[str, dict[str, Any]] = {}
 
     built_cache: dict[str, Any] = {}
@@ -593,6 +597,7 @@ def check_batched_parity(
         max_gap_drift = max(max_gap_drift, gap_drift)
         max_logp_drift = max(max_logp_drift, logp_drift)
         max_margin_drift = max(max_margin_drift, margin_drift)
+        max_merged_rows = max(max_merged_rows, n_ctx * len(built["rows"]))
 
         # --- Final decisions at 1/2/4 contexts, equal + mixed lengths.
         case_drift = 0.0
@@ -646,5 +651,8 @@ def check_batched_parity(
         "max_gap_drift_nats": max_gap_drift,
         "max_logp_drift_nats": max_logp_drift,
         "max_margin_drift_nats": max_margin_drift,
+        # W5c-9 C4: the largest merged pass M the matrix ran (n_ctx * R
+        # per case) — the bucket the persisted envelope record belongs to.
+        "max_merged_rows": max_merged_rows,
         "per_case": per_case,
     }

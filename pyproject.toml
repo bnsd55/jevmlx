@@ -60,3 +60,6 @@ markers = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["jevmlx"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"jevmlx/data/bucket_edges.json" = "jevmlx/data/bucket_edges.json"
