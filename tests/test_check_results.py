@@ -274,6 +274,7 @@ class TestParityGate:
                     "max_abs_drift_nats": 0.027,
                     "max_raw_row_drift_nats": 0.031,
                     "atol": 0.05,
+                    "max_gap_drift_nats": 0.01,
                     "run_at": "2026-09-18T12:00:00Z",
                 }
             )
@@ -301,6 +302,8 @@ class TestParityGate:
                     "max_abs_drift_nats": 0.15,
                     "max_raw_row_drift_nats": 0.02,
                     "atol": 0.05,
+                    "max_gap_drift_nats": 0.01,
+                    "max_margin_drift_nats": 0.01,
                     "winners_identical": True,
                     "run_at": "2026-09-18T12:00:00Z",
                 }
@@ -310,10 +313,11 @@ class TestParityGate:
         assert not ok
         assert any("did not pass" in p and "log-score drift" in p for p in problems)
 
-    def test_raw_row_drift_stage_named(self, tmp_path):
-        """A raw pre-rescore gate failure names THAT stage (v2, finding 42):
-        the final-decision drift can stay inside the band while the raw row
-        logits drift past it."""
+    def test_gap_drift_stage_named(self, tmp_path):
+        """A batched pairwise GAP drift failure names THAT stage (W5c-1
+        review section 2): the final-decision drift can stay inside the
+        band while the pairwise gaps drift past it — raw-logit drift is a
+        diagnostic, the gap is the gate."""
         from benchmarks.check_results import check_parity
 
         (tmp_path / "parity.json").write_text(
@@ -322,6 +326,8 @@ class TestParityGate:
                     "passed": False,
                     "max_abs_drift_nats": 0.01,
                     "max_raw_row_drift_nats": 0.2,
+                    "max_gap_drift_nats": 0.2,
+                    "max_margin_drift_nats": 0.01,
                     "atol": 0.05,
                     "winners_identical": True,
                 }
@@ -329,7 +335,7 @@ class TestParityGate:
         )
         ok, problems = check_parity(tmp_path)
         assert not ok
-        assert any("raw pre-rescore row-logit drift" in p for p in problems)
+        assert any("batched pairwise gap drift" in p for p in problems)
 
     def test_pre_v2_parity_payload_fails(self, tmp_path):
         """A v1 parity.json (no raw-gate key) fails: the bench regenerates
@@ -351,6 +357,29 @@ class TestParityGate:
         ok, problems = check_parity(tmp_path)
         assert not ok
         assert any("pre-v2" in p for p in problems)
+
+    def test_missing_gap_drift_key_fails(self, tmp_path):
+        """W5c-1 review: a v2 payload that carries max_raw_row_drift_nats but
+        is missing max_gap_drift_nats is a CONTRACT failure (not a fallback)
+        — the gated decomposition key is mandatory."""
+        from benchmarks.check_results import check_parity
+
+        (tmp_path / "parity.json").write_text(
+            json.dumps(
+                {
+                    "model": "m",
+                    "test": "w1a",
+                    "passed": True,
+                    "max_abs_drift_nats": 0.02,
+                    "max_raw_row_drift_nats": 0.03,
+                    "atol": 0.05,
+                    "run_at": "2026-09-18T12:00:00Z",
+                }
+            )
+        )
+        ok, problems = check_parity(tmp_path)
+        assert not ok
+        assert any("pre-v2" in p and "max_gap_drift_nats" in p for p in problems)
 
     def test_corrupt_parity_fails(self, tmp_path):
         from benchmarks.check_results import check_parity

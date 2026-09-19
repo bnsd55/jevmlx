@@ -66,6 +66,12 @@ def test_parity_report_passes_on_stable_fake(tmp_path):
     assert payload["winners_identical"] is True
     assert payload["max_abs_drift_nats"] == 0.0
     assert payload["atol"] == PARITY_ATOL
+    assert payload["max_raw_row_drift_nats"] == 0.0  # diagnostic only
+    assert payload["max_gap_drift_nats"] == 0.0  # the gate (fail-closed at atol)
+    assert payload["max_margin_drift_nats"] == 0.0
+    assert payload["max_batched_drift_nats"] == 0.0  # recorded, not gated
+    assert payload["rescore_gate"]["escaped_near_tie"] == []  # empty = pass
+    assert "environment" in payload
     assert payload["model"] == "fake/stable"
     assert payload["prompt_version"].startswith("jevmlx-parallel-")
     assert payload["test"] == "test_w1a_scoring_parity_batch_vs_chunked_real_model"
@@ -120,7 +126,14 @@ def test_summarize_gates_parity_failed_rows(tmp_path):
         )
     (model_dir / "parity.json").write_text(
         json.dumps(
-            {"passed": False, "max_abs_drift_nats": 0.9, "atol": 0.05, "winners_identical": False}
+            {
+                "passed": False,
+                "max_abs_drift_nats": 0.9,
+                "atol": 0.05,
+                "max_gap_drift_nats": 0.01,
+                "max_margin_drift_nats": 0.01,
+                "winners_identical": False,
+            }
         ),
         encoding="utf-8",
     )
@@ -133,7 +146,13 @@ def test_summarize_gates_parity_failed_rows(tmp_path):
     # Passing parity: numbers survive.
     (model_dir / "parity.json").write_text(
         json.dumps(
-            {"passed": True, "max_abs_drift_nats": 0.01, "atol": 0.05, "winners_identical": True}
+            {
+                "passed": True,
+                "max_abs_drift_nats": 0.01,
+                "atol": 0.05,
+                "max_gap_drift_nats": 0.01,
+                "winners_identical": True,
+            }
         ),
         encoding="utf-8",
     )
@@ -168,12 +187,66 @@ def test_parity_real_model_twin(engine):
     from jevmlx.parity import parity_report
 
     payload = parity_report(engine, "twin/real-model")
+    # Winners stay identical (the decision invariant holds).
     assert payload["winners_identical"] is True
+    # The single-context W1-A gate still passes (measured ~0.044 < 0.05).
     assert payload["max_abs_drift_nats"] < PARITY_ATOL
-    assert payload["passed"] is True
+    # W5c-1 review section 2: the batched pairwise GAP drift (0.070) and
+    # margin drift (0.063) EXCEED the fixed 0.05 contract, so the batched
+    # gate FAILS CLOSED — parity_passed is False for the 0.5B. The raw
+    # drift (0.125) is a diagnostic, not the gate. This is the honest
+    # result: the 0.5B does NOT pass batched parity at the fixed band.
+    assert (
+        payload["max_gap_drift_nats"] >= PARITY_ATOL
+        or payload["max_margin_drift_nats"] >= PARITY_ATOL
+    )
+    assert payload["passed"] is False
     assert payload["cases"] == [
         "code_security",
         "fintech_fraud",
         "high_cardinality_255",
         "support_triage",
     ]
+
+
+def test_parity_report_carries_v2_keys_and_passes_check_parity(tmp_path):
+    """W5c-1: parity_report runs BOTH checks — the payload carries the v2
+    key set (the gated decomposition: max_gap_drift_nats +
+    max_margin_drift_nats) and check_results.check_parity accepts it (no
+    pre-v2 rejection, no failed stages). A winners-flip payload names its
+    stage and is rejected."""
+    from benchmarks.check_results import _parity_failed_stages, check_parity
+    from jevmlx.parity import write_parity_json
+
+    payload = write_parity_json(
+        make_engine(_StableModel(), _CountTokenizer()), "fake/stable", tmp_path, _cases()
+    )
+    # v2 key set present.
+    assert "max_raw_row_drift_nats" in payload  # diagnostic
+    assert "max_abs_drift_nats" in payload
+    assert "max_batched_drift_nats" in payload  # recorded, not gated
+    assert "max_gap_drift_nats" in payload  # the gate
+    assert "max_margin_drift_nats" in payload
+    assert "rescore_gate" in payload
+    assert "environment" in payload
+    assert payload["winners_identical"] is True
+    # check_parity accepts the file (not pre-v2, not failed).
+    ok, problems = check_parity(tmp_path)
+    assert ok is True, problems
+    # And the stage classifier finds no failing stage.
+    assert _parity_failed_stages(payload) == []
+
+    # A winners-flip payload: the stage classifier names the stage and
+    # check_parity rejects the folder.
+    drift_dir = tmp_path.parent / "drift"
+    drift_dir.mkdir()
+    write_parity_json(
+        make_engine(_DriftingModel(), _CountTokenizer()), "fake/drift", drift_dir, _cases()
+    )
+    on_disk = json.loads((drift_dir / "parity.json").read_text(encoding="utf-8"))
+    assert on_disk["passed"] is False
+    stages = _parity_failed_stages(on_disk)
+    assert stages and stages != ["unspecified stage (payload carries no stage keys)"]
+    ok, problems = check_parity(drift_dir)
+    assert ok is False
+    assert any("parity.json shows test did not pass" in p for p in problems)
