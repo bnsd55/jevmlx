@@ -50,6 +50,8 @@ __all__ = [
 
 # decide_fn(schema_dict, context) -> {field: {"prediction", "valid", "error",
 # "log_scores", "probability", "per_option", "type"}, "_meta": {...}}.
+# W5c-3: parallel _meta carries per_item_end_to_end_ms (single and batched
+# engine paths both report it); it rides every parallel prediction line.
 DecideFn = Callable[[dict, str], dict[str, Any]]
 
 logger = logging.getLogger(__name__)
@@ -68,6 +70,7 @@ PREDICTION_LINE_KEYS: tuple[str, ...] = (
     "latency_ms",
     "log_scores",
     "model",
+    "per_item_end_to_end_ms",
     "per_option",
     "passes",
     "permutation",
@@ -233,6 +236,10 @@ def parallel_decide_fn(engine, scoring: str = "slots", prior_correction: bool = 
             "lm_head_gather_ms": result["lm_head_gather_ms"],
             "second_pass_ms": result["second_pass_ms"],
             "total_ms": result["total_ms"],
+            # W5c-3: the single path's honest per-request latency — the same
+            # key the batched path reports per context (results contract v2
+            # must not depend on which engine path produced the lines).
+            "per_item_end_to_end_ms": result["per_item_end_to_end_ms"],
             # Results contract v2 (W5-D findings 30/32): retry count and
             # request-scoped peak ride the split so timing.json shows them
             # next to the absolute peak.
@@ -541,6 +548,9 @@ def run_eval(
                     "probability": res.get("probability"),
                     "per_option": res.get("per_option"),
                     "latency_ms": meta.get("latency_ms"),
+                    # W5c-3: per-item end-to-end on every parallel line — the
+                    # single path now reports it too (None on other tracks).
+                    "per_item_end_to_end_ms": meta.get("per_item_end_to_end_ms"),
                     "rows": meta.get("rows"),
                     "passes": meta.get("passes"),
                     "error": res.get("error"),

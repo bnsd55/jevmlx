@@ -410,6 +410,28 @@ def test_main_check_readme_exits_0_when_fresh(tmp_path, capsys):
     assert "up to date" in capsys.readouterr().out.lower()
 
 
+def test_local_rows_accept_single_path_folder(tmp_path):
+    """W5c-3: the single path (run_parallel_generation) also reports
+    per_item_end_to_end_ms — a parallel folder whose lines carry it but no
+    batched pair (group_wall_ms/per_item_amortized_ms) is a valid folder:
+    the leaderboard must accept it (the contract is per-item e2e, not
+    batched-specific keys)."""
+    import json as _json
+
+    official = _write_official(tmp_path)
+    results = _write_local_result(tmp_path)
+    combo = next(p for p in (results / "m1-8gb-fake").iterdir() if p.is_dir())
+    records = []
+    for i, line in enumerate((combo / "predictions.jsonl").read_text().splitlines()):
+        rec = _json.loads(line)
+        rec["per_item_end_to_end_ms"] = 500.0 + i * 100  # median 0.65s -> 0.7s at 1dp
+        records.append(_json.dumps(rec))
+    (combo / "predictions.jsonl").write_text("\n".join(records) + "\n", encoding="utf-8")
+    table = build_table(results, None, official)
+    assert "fake-1b" in table
+    assert "0.7s" in table  # per-item e2e median, not the latency_ms median
+
+
 def test_local_rows_fail_without_per_item_timing(tmp_path):
     """Contract v2: a parallel combo whose predictions lack
     per_item_end_to_end_ms FAILS loudly — no latency_ms fallback (there are

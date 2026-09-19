@@ -9,6 +9,7 @@
     "padded_token_positions": 6.0,
     "peak_active_bytes": 1024.0,
     "peak_incremental_bytes": 512.0,
+    "per_item_end_to_end_ms": 4.5,
     "plan_compile_ms": 0.1,
     "prefill_ms": 2.0,
     "prior_ms": 0.0,

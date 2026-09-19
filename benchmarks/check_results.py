@@ -68,10 +68,15 @@ TIMING_SPLIT_KEYS = (
     "total_ms",
 )
 
-# W5-D finding 27/30/32: batched-path per-item timing (present when
-# decide_many produced the records) and the request-scoped memory + retry
-# counters every parallel result reports.
-BATCHED_TIMING_KEYS = ("group_wall_ms", "per_item_amortized_ms", "per_item_end_to_end_ms")
+# W5-D finding 27/30/32 + W5c-3: the per-item timing split. Since W5c-3 the
+# SINGLE path also reports per_item_end_to_end_ms (own prefill span + own
+# assembly span, from the same ledger), so that key is required on every
+# parallel prediction line; group_wall_ms / per_item_amortized_ms stay the
+# batched-only pair (they land together when decide_many produced the
+# records). RUN_TIMING_KEYS are the request-scoped memory + retry counters
+# every parallel result reports.
+PER_ITEM_END_TO_END_KEY = "per_item_end_to_end_ms"
+BATCHED_TIMING_KEYS = ("group_wall_ms", "per_item_amortized_ms")
 RUN_TIMING_KEYS = ("peak_active_bytes", "peak_incremental_bytes", "failed_attempts")
 
 
@@ -219,15 +224,28 @@ def check_folder(folder: Path) -> tuple[bool, list[str]]:
                         f"{peak_incremental!r}, expected a number"
                     )
         # Batched-path per-item timing: when the predictions carry
-        # per-item keys (decide_many), ALL of them must be present.
+        # batched per-item keys (decide_many), BOTH must be present.
         per_item_keys = {key for key in BATCHED_TIMING_KEYS if any(key in r for r in records)}
         if per_item_keys and per_item_keys != set(BATCHED_TIMING_KEYS):
             missing = sorted(set(BATCHED_TIMING_KEYS) - per_item_keys)
             problems.append(
                 f"{name}: batched per-item timing incomplete — missing {missing} "
-                "(group_wall_ms / per_item_amortized_ms / per_item_end_to_end_ms "
-                "land together)"
+                "(group_wall_ms / per_item_amortized_ms land together)"
             )
+
+    # W5c-3: per_item_end_to_end_ms is required on parallel lines — the
+    # single path reports it since W5c-3 (elapsed - plan), the batched path
+    # since W5-D finding 27/N6. A parallel line without it is a broken
+    # folder (no fallback; the leaderboard reads this key).
+    if is_parallel:
+        for index, record in enumerate(records):
+            ms = record.get(PER_ITEM_END_TO_END_KEY)
+            if not _is_number(ms):
+                problems.append(
+                    f"{name}: line {index} missing/invalid "
+                    f"{PER_ITEM_END_TO_END_KEY} ({ms!r}) — results contract v2 "
+                    "(single and batched paths both report it)"
+                )
 
     # Report reproducibility: recompute metrics and diff against committed.
     try:

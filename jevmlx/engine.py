@@ -3534,6 +3534,17 @@ def finalize_public_result(
     # phase; total = prior + elapsed; suffix_eval_ms = the cache_merge +
     # transformer + gather composite). ONE measurement per interval — the
     # ledger is the only source; no accumulator fallback exists.
+    # W5c-3: per_item_end_to_end_ms is the SINGLE path's honest per-request
+    # latency, same definition as the batched key (own prefill span + own
+    # assembly span, a sum of intervals). Derived from CLOSED ledger spans:
+    # elapsed_ms - plan_compile_ms. On the single ledger the top-level
+    # request span minus the plan span is exactly prefill + scoring +
+    # assembly; on the batched per-context ledgers the top-level main-span
+    # sum minus a 0 plan is prefill + assembly (the group's scoring pass
+    # lives on the group ledger) — the same interval-set definition on both
+    # shapes, no per-path branch. The assembly span itself is not closed
+    # yet (this runs inside it), so last_interval("assembly") is not
+    # available here by design.
     timing_keys = {
         "elapsed_ms": round(flat["elapsed_ms"], 2),
         "prior_ms": round(flat["prior_ms"], 2),
@@ -3543,6 +3554,7 @@ def finalize_public_result(
         "suffix_eval_ms": round(flat["suffix_eval_ms"], 2),
         "lm_head_gather_ms": round(flat["lm_head_gather_ms"], 2),
         "total_ms": round(flat["total_ms"], 2),
+        "per_item_end_to_end_ms": round(flat["elapsed_ms"] - flat["plan_compile_ms"], 2),
     }
     chunk_shapes = scored.chunk_shapes
     passes = scored.passes
