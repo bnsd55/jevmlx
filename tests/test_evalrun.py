@@ -468,10 +468,16 @@ def test_carry_perturbation_flag_passes_meta_through(tmp_path):
 
 
 def test_carry_consensus_flag_adds_consensus_distribution(tmp_path):
-    """carry_consensus=True puts meta.consensus on lines that have one."""
+    """carry_consensus=True puts each line's OWN field distribution on it.
+
+    meta.consensus is the fetchers' ``{field: {choice: p}}``; the line for
+    field X carries ``consensus[X]`` (the shape tvd_vs_consensus reads), and a
+    field absent from the map gets no key.
+    """
     base = _two_cases()[0]
+    flag_dist = {"true": 0.9, "false": 0.1}
     cases = [
-        {**base, "source": "typesafe", "meta": {"consensus": {"true": 0.9, "false": 0.1}}},
+        {**base, "source": "typesafe", "meta": {"consensus": {"flag": flag_dist}}},
         {**base, "id": "wf/case-2", "group_id": "wf/case-2", "source": "typesafe", "meta": {}},
     ]
 
@@ -497,11 +503,11 @@ def test_carry_consensus_flag_adds_consensus_distribution(tmp_path):
         carry_consensus=True,
     )
     lines = _read_lines(tmp_path / "b" / "predictions.jsonl")
-    by_case = {}
-    for line in lines:
-        by_case.setdefault(line["case_id"], []).append(line.get("consensus"))
-    assert by_case["wf/case-1"] == [{"true": 0.9, "false": 0.1}, {"true": 0.9, "false": 0.1}]
-    assert by_case["wf/case-2"] == [None, None]
+    by_line = {(line["case_id"], line["field"]): line.get("consensus") for line in lines}
+    assert by_line[("wf/case-1", "flag")] == flag_dist
+    assert by_line[("wf/case-1", "action")] is None  # not in the consensus map
+    assert by_line[("wf/case-2", "flag")] is None
+    assert by_line[("wf/case-2", "action")] is None
 
 
 def test_run_eval_writes_timing_json_for_parallel_track(tmp_path):

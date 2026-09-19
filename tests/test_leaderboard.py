@@ -181,6 +181,59 @@ def _write_local_result_v2(root: Path) -> Path:
     return root
 
 
+def _add_typed_decisions_combo(root: Path) -> None:
+    """Clone the typesafe combo into a typed-decisions one (accuracy 0.6)."""
+    machine_dir = root / "m1-8gb-fake"
+    src = machine_dir / "parallel-trie-typesafe"
+    dst = machine_dir / "parallel-trie-typed-decisions"
+    dst.mkdir()
+    run = json.loads((src / "run.json").read_text())
+    run["config"]["dataset_path"] = "/cache/jevmlx/bench/typed-decisions.jsonl"
+    (dst / "run.json").write_text(json.dumps(run), encoding="utf-8")
+    report = json.loads((src / "report.json").read_text())
+    report["metrics"]["agreement"]["agreement_common_subset"] = 0.6
+    report["metrics"]["agreement"]["n_cases"] = 400
+    (dst / "report.json").write_text(json.dumps(report), encoding="utf-8")
+    (dst / "predictions.jsonl").write_bytes((src / "predictions.jsonl").read_bytes())
+    lock = {
+        "sources": [
+            {
+                "repo_id": "LocalLLaMA/typed-decisions",
+                "revision": "0af3f0e9dc6d28c2f8f1c9d1ba2e4a55f0e6c9d3",
+            }
+        ],
+        "parser_version": "1",
+        "counts": {},
+        "cases_sha256": "x",
+    }
+    (dst / "typed-decisions.dataset.lock.json").write_text(json.dumps(lock), encoding="utf-8")
+
+
+def test_typed_decisions_rows_render_in_their_own_group(tmp_path):
+    official = _write_official(tmp_path)
+    published = _write_published(tmp_path)
+    results = _write_local_result(tmp_path)
+    _write_local_result_v2(results)
+    _add_typed_decisions_combo(results)
+    table = build_table(results, published, official)
+    lines = table.splitlines()
+    group_c = next(i for i, ln in enumerate(lines) if "**jevmlx, local (measured)**" in ln)
+    group_d = next(i for i, ln in enumerate(lines) if "LocalLLaMA/typed-decisions test split" in ln)
+    assert group_c < group_d
+    # Each group holds exactly its own dataset's row: typesafe 75.0% / 4
+    # cases under C, typed-decisions 60.0% / 400 cases under D.
+    assert lines[group_c + 1].startswith("| fake-1b |") and "75.0%" in lines[group_c + 1]
+    assert lines[group_d + 1].startswith("| fake-1b |") and "60.0%" in lines[group_d + 1]
+    assert lines[group_d + 1].rstrip().endswith("| 400 |")
+    assert group_d == group_c + 2  # exactly one typesafe row between the headers
+    # Caption derives cases from the row and names the pinned revision —
+    # no hardcoded 400/test split.
+    assert "400 cases" in table
+    assert "revision 0af3f0e9dc6d28c2f8f1c9d1ba2e4a55f0e6c9d3" in table
+    assert "official `test` split" not in table
+    assert "No local results yet" not in table
+
+
 def test_official_block_exact_text(tmp_path):
     """Official + published blocks render the exact expected rows."""
     official = _write_official(tmp_path)

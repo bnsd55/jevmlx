@@ -535,9 +535,14 @@ def accuracy_cluster_bootstrap(
 # ------------------------------------------------- TypeSafe-comparable metrics
 
 
+# Sources whose labels are TypeSafe-style consensus pseudo-labels: the web
+# scrape and the same task published as parquet (LocalLLaMA/typed-decisions).
+CONSENSUS_SOURCES = frozenset({"typesafe", "typed-decisions"})
+
+
 def _typesafe_lines(records: list[dict]) -> list[dict]:
-    """Records from TypeSafe-derived cases (source == 'typesafe')."""
-    return [r for r in records if r.get("source") == "typesafe"]
+    """Records from consensus-labelled cases (see ``CONSENSUS_SOURCES``)."""
+    return [r for r in records if r.get("source") in CONSENSUS_SOURCES]
 
 
 def _is_ambiguous(record: dict) -> bool:
