@@ -123,6 +123,31 @@ jevmlx decide --backend openai --base-url http://localhost:11434/v1 --api-model 
 
 Two tradeoffs: one request per field (slower than one pass), and only the server's top-k logprobs are visible — options missing from that list get a floor probability and the telemetry flags `truncated: true`.
 
+## Serve over HTTP
+
+`jevmlx serve` loads a model once and exposes `POST /decide`, `GET /health`, and `GET /ready` on a local port. One Metal GPU, one serial worker, a bounded admission queue in front.
+
+```bash
+jevmlx serve --model mlx-community/Qwen2.5-1.5B-Instruct-4bit --port 8000
+```
+
+**Endpoints**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/decide` | `{"schema": {...}, "context": "...", "temperature": 1.0}` -> the per-field result dict |
+| `GET` | `/health` | Process liveness (always 200). Carries `queue_depth`, `queue_capacity`, `worker_alive`, `requests_served` |
+| `GET` | `/ready` | `503` until model load + warm-up complete AND the worker is alive, then `200` |
+
+**Backpressure + admission limits** (W6-B7):
+
+- **429 + `Retry-After`** when the admission queue is full (not 529). `--queue-size` (default 16). The server is a `ThreadingHTTPServer`; one thread per connection, but a single serial worker processes GPU work — two decide calls never overlap.
+- **413** when a request exceeds a hard limit, before any model work: `--max-rows` (expanded scoring rows, default 2048; O(schema) arithmetic on the raw dict, not `_build_schema_rows`), `--max-prompt-tokens` (default 8192). The projected-memory limit was dropped — the engine already chunks rows to its measured width-bin budget, so a whole-request projection describes memory the engine never allocates.
+- **Request id**: the client's `X-Request-Id` is echoed in the response header + body; if absent one is generated.
+- **Queue telemetry**: `queue_depth` and `queue_wait_ms` ride every `/decide` response; `queue_depth` + `queue_capacity` ride `/health`.
+- **Worker resilience**: an exception in the decide worker is a 500 to that request; the worker catches it and continues (it does not die). `/ready` goes 503 if the worker dies.
+- **Ready vs live**: the port binds BEFORE warm-up, so `/ready` is reachable during warm-up (a 503 is a real response, not a connection refusal).
+
 ## Leaderboard
 
 Agreement with the TypeSafe public eval consensus. Official rows are cited from TypeSafe's page; local rows are measured by contributors on the 20 public examples.

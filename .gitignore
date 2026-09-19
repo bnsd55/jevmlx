@@ -1,6 +1,6 @@
 # Environments
+.venv
 .venv/
-.venv-dev/
 __pycache__/
 *.pyc
 
@@ -12,4 +12,3 @@ dist/
 
 # Lockfile stays local; consumers resolve their own dependencies
 uv.lock
-.venv/

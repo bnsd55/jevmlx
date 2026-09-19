@@ -21,6 +21,11 @@ from jevmlx.lint import lint_schema
 from jevmlx.log import configure
 from jevmlx.models import DEFAULT_MODEL
 from jevmlx.schema import StructuredSchema
+from jevmlx.serve import (
+    DEFAULT_MAX_PROMPT_TOKENS,
+    DEFAULT_MAX_ROWS,
+    DEFAULT_QUEUE_SIZE,
+)
 
 
 def _engine():
@@ -262,6 +267,25 @@ def _dispatch(argv) -> None:
     )
     serve_p.add_argument("--host", default="127.0.0.1")
     serve_p.add_argument("--port", type=int, default=8000)
+    # W6-B7: backpressure + admission-limit knobs.
+    serve_p.add_argument(
+        "--queue-size",
+        type=int,
+        default=DEFAULT_QUEUE_SIZE,
+        help="bounded admission queue depth (full queue -> 429 + Retry-After)",
+    )
+    serve_p.add_argument(
+        "--max-rows",
+        type=int,
+        default=DEFAULT_MAX_ROWS,
+        help="hard limit on expanded scoring rows (exceed -> 413)",
+    )
+    serve_p.add_argument(
+        "--max-prompt-tokens",
+        type=int,
+        default=DEFAULT_MAX_PROMPT_TOKENS,
+        help="hard limit on prompt token count (exceed -> 413)",
+    )
     ap.add_argument("-v", "--verbose", action="store_true", help="info-level logs on stderr")
 
     validate_p = sub.add_parser(
@@ -565,7 +589,14 @@ def _dispatch(argv) -> None:
     elif args.command == "serve":
         from jevmlx.serve import serve
 
-        serve(args.model, args.host, args.port)
+        serve(
+            args.model,
+            args.host,
+            args.port,
+            queue_size=args.queue_size,
+            max_rows=args.max_rows,
+            max_prompt_tokens=args.max_prompt_tokens,
+        )
 
     elif args.command == "bench":
         from jevmlx.bench import main as bench_main

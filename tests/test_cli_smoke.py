@@ -387,14 +387,14 @@ def test_serve_decides_over_http(fake_engine, preset_files, monkeypatch):
 
     captured: dict = {}
 
-    class _CapturingServer(serve_mod.HTTPServer):
+    class _CapturingServer(serve_mod.ThreadingHTTPServer):
         """Force port 0 (OS free-port) and capture the bound address."""
 
         def __init__(self, addr, *a, **k):
             super().__init__((addr[0], 0), *a, **k)
             captured["server"] = self
 
-    monkeypatch.setattr(serve_mod, "HTTPServer", _CapturingServer)
+    monkeypatch.setattr(serve_mod, "ThreadingHTTPServer", _CapturingServer)
     real_serve_forever = _CapturingServer.serve_forever
     started = threading.Event()
 
