@@ -41,7 +41,10 @@ Run (model-loading — MUST go through the shared slot lock):
     ~/git/jev-on-a-laptop/.agent-mail/slowtest.sh \
         .venv/bin/python benchmarks/driftprobe.py [--model ID] [--quick]
 
-Outputs: benchmarks/results/<machine>--<model-slug>/driftprobe.json + .md.
+Outputs: benchmarks/probes/<machine>--<model-slug>/driftprobe.json + .md
+(diagnostic artifacts OUTSIDE the results contract — benchmarks/results/ is
+validated against the results contract v2 by CI; probes are not contract
+files).
 Fast tests only for CI — this script is slow by design and is NOT a test.
 """
 
@@ -463,8 +466,10 @@ def _near_tie_matrix(
 
 
 def _model_folder(engine: Engine) -> str:
-    """The machine-tagged results folder for this engine (the bench's own
-    layout): benchmarks/results/<machine>-<model-slug>/driftprobe.json."""
+    """The machine-tagged probes folder for this engine:
+    benchmarks/probes/<machine>-<model-slug>/driftprobe.json (diagnostic
+    artifacts live OUTSIDE benchmarks/results/ — that folder is validated
+    against the results contract v2 by CI)."""
     chip = platform.machine()  # arm64
     try:
         ram_gb = round(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 2**30)
@@ -472,7 +477,7 @@ def _model_folder(engine: Engine) -> str:
         ram_gb = 0
     slug = re.sub(r"[^a-z0-9]+", "--", engine.model_id.lower()).strip("-")
     here = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(here, "results", f"{chip}-{ram_gb}gb--{slug}")
+    return os.path.join(here, "probes", f"{chip}-{ram_gb}gb--{slug}")
 
 
 def main() -> int:

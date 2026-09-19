@@ -80,6 +80,13 @@ Anything outside `benchmarks/results/<machine>-<model-slug>/`: caches
 (`~/.cache/jevmlx/`), model weights, logs, editor files. Predictions larger
 than 5 MB total are gzipped automatically (the folder README says so).
 
+Exception — `benchmarks/probes/<machine-tag>--<model-slug>/`: diagnostic
+probe artifacts (e.g. `driftprobe.json`/`driftprobe.md` from
+`benchmarks/driftprobe.py`). These are NOT results-contract files and are
+not validated by the results-check CI job; they document one-off
+diagnostic measurements (batched drift matrix, kernel-shape probes) that
+accompany a PR but are not part of the results ledger.
+
 ## PR checklist
 
 - [ ] Folder contains only the bench output (predictions, run.json,
