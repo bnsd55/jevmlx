@@ -78,7 +78,8 @@ Read the result. `decide(...)` returns a `Decision`: `.value` (a validated
   decided value stays the winning level; ordering only adds derived
   telemetry — `argmax_level` (winning index), `expected_index` (Σ pᵢ·i), its
   `variance`, and `expected_score_normalized` in [0, 1] — computed from the
-  finalized distribution, no extra model call. Eval runs on ordered fields
+  finalized distribution (after prior correction and temperature), no extra
+  model call. Eval runs on ordered fields
   also report `ordinal_mae` (mean |argmax − gold|), `ordinal_mae_expected`
   (soft, |E − gold|) and an ordinal confusion matrix.
 - `semantics` (a frozen `FieldSemantics`): how THIS field's reported

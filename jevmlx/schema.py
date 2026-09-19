@@ -355,6 +355,14 @@ class FieldDefinition:
     ):
         # Frozen dataclass with a custom __init__: the validation logic is
         # the constructor's contract; freeze happens through object.__setattr__.
+        # F2 (review): strictness at the schema boundary — a truthy non-bool
+        # ("yes", 1) must not silently become an ordered scale; the Pydantic
+        # path raises for the same input, so the dict path matches.
+        if not isinstance(ordered, bool):
+            raise TypeError(
+                f"Field '{name}': ordered must be a bool, got "
+                f"{ordered!r} ({type(ordered).__name__})"
+            )
         field_type = field_type.lower()
         if field_type == "boolean":
             # W6-B1: ordering is an enum-level scale; a two-level boolean
@@ -400,13 +408,7 @@ class FieldDefinition:
             # ordinal SCALE (e.g. SST-5's "0".."4", very negative .. very
             # positive). The order is the CHOICES order; the decided value
             # stays the winning level (no new public field type, no change
-            # to scoring). Ordering on boolean or multi fields raises.
-            if ordered and field_type == "boolean":
-                raise ValueError(
-                    f"Field '{name}': boolean fields cannot be ordered; use an "
-                    "ordered enum with choices ['true', 'false'] if a two-level "
-                    "scale is intended"
-                )
+            # to scoring).
         else:
             raise ValueError(
                 f"Unsupported field type '{field_type}'. "
@@ -419,9 +421,7 @@ class FieldDefinition:
         object.__setattr__(self, "set_constraints", set_constraints)
         object.__setattr__(self, "choices", resolved_choices)
         object.__setattr__(self, "choice_descriptions", resolved_descriptions)
-        object.__setattr__(
-            self, "ordered", bool(ordered) and field_type in ("enum", "choice", "selection")
-        )
+        object.__setattr__(self, "ordered", ordered)
 
         if self.field_type in ("multi", "enum", "choice", "selection"):
             seen: set[str] = set()

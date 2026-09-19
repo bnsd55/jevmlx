@@ -2755,30 +2755,39 @@ def _cardinality_one_outcome(
     if fdef.field_type == "boolean":
         val = val == "true" if isinstance(val, str) else val
     key = val if isinstance(val, str) else str(val)
-    return FieldOutcome(
-        fname,
-        {"value": val, "prob": 1.0},
-        {
-            "value": val,
-            "type": fdef.field_type,
-            "probability": 1.0,
-            "cardinality": fdef.cardinality,
-            "log_scores": {key: 0.0},
-            "top_choices": [{"choice": key, "probability": 1.0}],
-            "rows": 0,
-            "legal_mass": 1.0,
-            # W5b-13: cardinality-1 fields are schema-determined — no model
-            # scoring, no temperature applied, nothing corrected (F5: built
-            # by the ONE record constructor).
-            "semantics": _field_semantics(
-                score_source="batched",
-                temperature=None,
-                calib=None,
-                calibrated_applied=False,
-                prior_corrected=False,
-            ),
-        },
-    )
+    telemetry = {
+        "value": val,
+        "type": fdef.field_type,
+        "probability": 1.0,
+        "cardinality": fdef.cardinality,
+        "log_scores": {key: 0.0},
+        "top_choices": [{"choice": key, "probability": 1.0}],
+        "rows": 0,
+        "legal_mass": 1.0,
+        # W5b-13: cardinality-1 fields are schema-determined — no model
+        # scoring, no temperature applied, nothing corrected (F5: built
+        # by the ONE record constructor).
+        "semantics": _field_semantics(
+            score_source="batched",
+            temperature=None,
+            calib=None,
+            calibrated_applied=False,
+            prior_corrected=False,
+        ),
+    }
+    # W6-B1/F3: an ordered cardinality-1 enum STILL emits the degenerate
+    # ordinal record (the [1.0] distribution) so the key's presence is
+    # guaranteed whenever the field is ordered — same rule as the multi-choice
+    # path through finalize_scalar_evidence, never a tolerated absence.
+    if fdef.ordered:
+        ot = ordinal_telemetry([1.0])
+        telemetry["ordinal"] = {
+            "argmax_level": ot.argmax_level,
+            "expected_index": ot.expected_index,
+            "variance": ot.variance,
+            "expected_score_normalized": ot.expected_score_normalized,
+        }
+    return FieldOutcome(fname, {"value": val, "prob": 1.0}, telemetry)
 
 
 def score_scalar_field(
@@ -2905,8 +2914,11 @@ def score_scalar_field(
         # W5b-13: how this field's reported probabilities were produced.
         "semantics": semantics,
     }
-    # W6-B1: ordered enums carry the derived ordinal record (None for
-    # unordered fields — the key is simply absent, additive contract).
+    # W6-B1: ordered enums ALWAYS carry the derived ordinal record — even a
+    # cardinality-1 scale emits the degenerate record (argmax 0, E 0,
+    # var 0, norm 1.0) so downstream consumers can rely on the key's
+    # presence whenever the field is ordered (F3). Unordered fields: the
+    # key is absent (additive contract).
     if decision.ordinal is not None:
         telemetry["ordinal"] = {
             "argmax_level": decision.ordinal.argmax_level,

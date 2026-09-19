@@ -341,15 +341,23 @@ def _ordinal_lines(records: list[dict]) -> list[tuple[str, dict, list[str], dict
     """Ordered-enum prediction lines: (field, record, choices, ordinal).
 
     A line is ordinal when the schema declared it ordered (the prediction
-    line carries ``ordinal_choices``) AND the engine derived telemetry
-    (``ordinal``) — unordered fields never enter the ordinal metrics.
+    line carries ``ordinal_choices``) — unordered fields never enter the
+    ordinal metrics. F3: STRICT pairing — a line that carries
+    ``ordinal_choices`` but no ``ordinal`` record is a contract violation
+    (every track now emits both), never a silently-skipped row.
     """
     lines = []
     for record in records:
         choices = record.get("ordinal_choices")
-        ordinal = record.get("ordinal")
-        if not isinstance(choices, list) or not isinstance(ordinal, dict):
+        if not isinstance(choices, list):
             continue
+        ordinal = record.get("ordinal")
+        if not isinstance(ordinal, dict):
+            raise ValueError(
+                f"prediction line for field {record.get('field')!r} carries "
+                "'ordinal_choices' but no 'ordinal' telemetry (results-contract "
+                "violation; every track emits both for ordered enums)"
+            )
         lines.append((record.get("field", ""), record, list(choices), ordinal))
     return lines
 

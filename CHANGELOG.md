@@ -10,7 +10,8 @@
   temperature — `argmax_level`, `expected_index` (Σ pᵢ·i), `variance` and
   `expected_score_normalized` in [0, 1] into an `ordinal` sub-record
   (`api.OrdinalFieldRecord`; engine `OrdinalTelemetry`) — `None`/absent for
-  unordered fields, no extra model call. evalmetrics adds `ordinal_mae`
+  unordered fields, computed after prior correction and temperature, no
+  extra model call. Ordered lines carry the pair on EVERY track. evalmetrics adds `ordinal_mae`
   (mean |argmax − gold|), `ordinal_mae_expected` (soft, |E − gold|) and an
   ordinal confusion matrix, computed only for ordered fields; prediction
   lines carry additive `ordinal_choices`/`ordinal` keys on every track

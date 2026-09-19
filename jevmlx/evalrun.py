@@ -272,6 +272,19 @@ def parallel_decide_fn(engine, scoring: str = "slots", prior_correction: bool = 
     return decide
 
 
+def _attach_ordinal(field, entry: dict) -> None:
+    """W6-B1/F5: every track's decide_fn output carries the ordered scale +
+    the derived ordinal telemetry, so ordinal_mae/confusion compute on
+    EVERY track (no tolerated-absence path). Ordered enums emit
+    'ordinal_choices' always; 'ordinal' rides the engine telemetry when
+    the track produced it (the naive/openai tracks report the hard key
+    only — their ordinal MAE is the argmax distance).
+    """
+    if field is not None and field.ordered:
+        entry["ordered"] = True
+        entry["ordinal_choices"] = list(field.choices)
+
+
 def naive_local_decide_fn(engine) -> DecideFn:
     """Track ``naive_local``: the same local model free-writes the JSON object.
     Takes the loaded :class:`Engine`.
@@ -294,12 +307,15 @@ def naive_local_decide_fn(engine) -> DecideFn:
         out: dict[str, dict[str, Any]] = {}
         for fname in schema.fields:
             strict = strict_values.get(fname)
-            out[fname] = {
+            entry: dict[str, Any] = {
                 "prediction": strict,
                 "valid": strict is not None,
                 "salvage_prediction": salvage_values.get(fname),
                 "error": next((e for e in errors if fname in e), None),
             }
+            # W6-B1/F5: ordered enums carry the scale on EVERY track.
+            _attach_ordinal(schema.fields.get(fname), entry)
+            out[fname] = entry
         out["_meta"] = {
             "latency_ms": result.get("elapsed_ms"),
             "rows": None,
@@ -326,11 +342,14 @@ def api_baseline_decide_fn(
         out: dict[str, dict[str, Any]] = {}
         for fname in schema.fields:
             value = result["values"].get(fname)
-            out[fname] = {
+            entry: dict[str, Any] = {
                 "prediction": value,
                 "valid": value is not None,
                 "error": next((e for e in result["errors"] if fname in e), None),
             }
+            # W6-B1/F5: ordered enums carry the scale on EVERY track.
+            _attach_ordinal(schema.fields.get(fname), entry)
+            out[fname] = entry
         out["_meta"] = {
             "latency_ms": result.get("latency_ms"),
             "rows": None,
@@ -361,7 +380,7 @@ def openai_slots_decide_fn(
         out: dict[str, dict[str, Any]] = {}
         for fname, telemetry in result["field_telemetry"].items():
             field = schema.fields.get(fname)
-            out[fname] = {
+            entry = {
                 "prediction": telemetry["value"],
                 "probability": telemetry.get("probability"),
                 "per_option": telemetry.get("per_option"),
@@ -369,6 +388,9 @@ def openai_slots_decide_fn(
                 "log_scores": telemetry.get("log_scores"),
                 "truncated": telemetry.get("truncated"),
             }
+            # W6-B1/F5: ordered enums carry the scale on EVERY track.
+            _attach_ordinal(field, entry)
+            out[fname] = entry
         out["_meta"] = {
             "latency_ms": result.get("elapsed_ms"),
             "rows": None,
@@ -577,9 +599,11 @@ def run_eval(
                     "oracle_prediction": oracle_results.get(fname),
                 }
                 if ordinal_choices:
+                    # F3: the pair is written together, always — an ordered
+                    # line without its ordinal record is a contract violation
+                    # downstream (_ordinal_lines raises on it).
                     line["ordinal_choices"] = ordinal_choices
-                    if ordinal_record is not None:
-                        line["ordinal"] = ordinal_record
+                    line["ordinal"] = ordinal_record
                 if carry_perturbation:
                     line["perturbation"] = (case.get("meta") or {}).get("perturbation")
                 if carry_consensus:

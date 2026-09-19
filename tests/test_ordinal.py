@@ -413,3 +413,53 @@ def test_evalrun_prediction_lines_carry_ordinal_keys(tmp_path):
     assert level_lines[0]["ordinal_choices"] == ["0", "1", "2"]
     assert level_lines[0]["ordinal"]["expected_index"] == 0.8
     assert "ordinal" not in flag_lines[0] and "ordinal_choices" not in flag_lines[0]
+
+
+# ---- review fixes F2/F3 -------------------------------------------------------
+
+
+def test_dict_schema_rejects_non_bool_ordered():
+    """F2: the dict-schema path is as strict as the Pydantic path — a
+    truthy non-bool ordered raises TypeError, never silently orders."""
+    with pytest.raises(TypeError, match="ordered must be a bool"):
+        StructuredSchema(
+            {"level": {"type": "enum", "description": "d", "choices": ["0", "1"], "ordered": "yes"}}
+        )
+    with pytest.raises(TypeError, match="ordered must be a bool"):
+        StructuredSchema(
+            {"level": {"type": "enum", "choices": ["0", "1"], "description": "d", "ordered": 1}}
+        )
+
+
+def test_cardinality_one_ordered_enum_emits_degenerate_record():
+    """F3: an ordered enum with ONE choice still emits the ordinal record
+    (the degenerate scale) — the key's presence is guaranteed."""
+    from conftest import make_engine
+    from test_engine_fake import BiasedFakeModel
+
+    from jevmlx.engine import run_parallel_generation
+
+    model = BiasedFakeModel(vocab_size=64, winner_token=ord("A") % 60)
+    schema = StructuredSchema(
+        {"level": {"type": "enum", "description": "d", "choices": ["only"], "ordered": True}}
+    )
+    result = run_parallel_generation(make_engine(model), "ctx", schema)
+    telemetry = result["field_telemetry"]["level"]
+    assert telemetry["ordinal"] == {
+        "argmax_level": 0,
+        "expected_index": 0.0,
+        "variance": 0.0,
+        "expected_score_normalized": 1.0,
+    }
+
+
+def test_ordinal_lines_strict_pairing():
+    """F3: ordinal_choices without ordinal is a contract violation — raise,
+    never a silently-skipped row."""
+    from jevmlx.evalmetrics import _ordinal_lines
+
+    broken = [{"field": "s", "label": "1", "prediction": "1", "ordinal_choices": ["0", "1"]}]
+    with pytest.raises(ValueError, match="no 'ordinal' telemetry"):
+        _ordinal_lines(broken)
+    # Unordered lines (no key at all) still pass through untouched.
+    assert _ordinal_lines([{"field": "t", "label": "a", "prediction": "b"}]) == []
