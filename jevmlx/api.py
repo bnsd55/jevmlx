@@ -403,6 +403,18 @@ def _build_field_results(
         # Provenance (the bundle identity) belongs to the telemetry, not to
         # confidence_model: model stays the clean decision-model name.
         calibrated_flag = telemetry.get("calibrated") is not None
+        # W5b-13 step 2: the engine's stages set the semantics record; the
+        # public API coerces it into the frozen FieldSemantics. A telemetry
+        # entry without one is a contract violation — fail loudly, never
+        # ship a None semantics (the docstring's 'required' is now TRUE at
+        # every decide() return).
+        sem_dict = telemetry.get("semantics")
+        if not isinstance(sem_dict, dict):
+            raise ValueError(
+                f"field telemetry for {name!r} carries no semantics record "
+                "(results-contract violation; engine stages must set "
+                "field_telemetry[fname]['semantics'])"
+            )
         fields[name] = FieldResult(
             value=telemetry["value"],
             score=score,
@@ -414,11 +426,7 @@ def _build_field_results(
             model=confidence_model,
             alternatives=alternatives,
             reason=reason,
-            # W5b-13 step 2 fills this from the engine's per-stage records
-            # (telemetry.get('semantics') is None until then — acceptable
-            # ONLY inside the draft PR; decide() does not ship to ready
-            # state until the engine sets it).
-            semantics=telemetry.get("semantics"),
+            semantics=FieldSemantics(**sem_dict),
         )
     return fields
 

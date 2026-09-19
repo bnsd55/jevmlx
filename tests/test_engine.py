@@ -412,18 +412,21 @@ def test_timing_split_on_real_model(engine):
 
 @pytest.mark.slow
 def test_probability_status_temperature_on_real_model(engine):
-    """Bug 12 on a real model: T=1 keeps the classic status; T!=1 states the
-    post-hoc scaling and the temperature value."""
+    """Bug 12 + W5b-13 on a real model: the status is the per-group summary —
+    the T clause carries the temperature (T=1 = constrained-path, T!=1 =
+    post-hoc scaling with the value)."""
     schema = StructuredSchema(
         {"tier": {"type": "enum", "description": "d", "choices": ["LOW", "HIGH"]}}
     )
     at_one = run_parallel_generation(engine, "ctx", schema, temperature=1.0)
-    assert at_one["probability_status"] == (
-        "constrained-path probability at T=1; uncalibrated as decision confidence"
-    )
+    status_one = at_one["probability_status"]
+    assert "1 field" in status_one
+    assert "constrained-path probability" in status_one
+    assert "uncalibrated" in status_one
     at_half = run_parallel_generation(engine, "ctx", schema, temperature=0.5)
-    assert "temperature=0.5" in at_half["probability_status"]
-    assert "temperature-scaled" in at_half["probability_status"]
+    status_half = at_half["probability_status"]
+    assert "T=0.5" in status_half
+    assert "temperature-scaled" in status_half
 
 
 @pytest.mark.slow
