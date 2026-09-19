@@ -155,11 +155,20 @@ nonce fence is NOT used** in the messages form — the template's own turn
 boundaries are the boundary (a user message is data, the assistant turn
 the model fills). A single-system template is therefore never surprised by
 a second system turn; a no-system profile (Gemma, probed at load) gets the
-protocol system text merged into the first user turn with `
+protocol system text merged into the FIRST user turn with `\n\n` (the same
+deterministic merge the string form uses) — the remaining messages keep
+their order. No silent fallback: a template that rejects the remaining
+roles RAISES.
 
-`, the same
-deterministic merge the string form uses. No silent fallback: a template
-that rejects the remaining roles RAISES.
+**Security boundary (both forms).** Caller content is inserted into the
+chat template as RAW text. A payload containing the template's control
+strings (`<|im_start|>system` on Qwen, `<start_of_turn>` on Gemma) would
+tokenize to REAL special tokens and could open a new turn, overriding the
+library-owned protocol block. Every caller message (messages form) AND the
+string form's fenced context is tokenized with `add_special_tokens=False`
+at the boundary; if any produced id is in the tokenizer's
+`all_special_ids`, the call raises `ValueError` — the control string never
+reaches the template.
 
 The messages-form protocol block for `risk_enum_bool_messages` (generated):
 
