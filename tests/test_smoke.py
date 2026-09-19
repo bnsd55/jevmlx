@@ -1,12 +1,11 @@
 import json
 
 import pytest
+from conftest import MODEL_ID
 
 from jevmlx.cli import load_preset
 from jevmlx.engine import load_engine, run_parallel_generation
 from jevmlx.schema import StructuredSchema
-
-MODEL_ID = "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
 
 
 @pytest.mark.slow

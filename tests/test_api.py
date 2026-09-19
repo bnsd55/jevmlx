@@ -2,7 +2,14 @@ import enum
 from typing import Literal
 
 import pytest
-from conftest import FakeModel, FakeTokenizer, make_engine, make_engine_result, make_field_telemetry
+from conftest import (
+    MODEL_ID,
+    FakeModel,
+    FakeTokenizer,
+    make_engine,
+    make_engine_result,
+    make_field_telemetry,
+)
 from pydantic import BaseModel, Field
 
 import jevmlx
@@ -347,11 +354,7 @@ def test_decide_end_to_end():
         risk_tier: Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"] = Field(description="Risk tier")
 
     fraud_preset = load_preset("fintech_fraud")
-    d = jevmlx.decide(
-        TwoField,
-        fraud_preset["context"],
-        model="mlx-community/Qwen2.5-0.5B-Instruct-4bit",
-    )
+    d = jevmlx.decide(TwoField, fraud_preset["context"], model=MODEL_ID)
     assert isinstance(d.value, TwoField)
     assert set(d.fields) == {"is_fraudulent", "risk_tier"}
     assert all(0.0 <= fr.probability <= 1.0 for fr in d.fields.values())
