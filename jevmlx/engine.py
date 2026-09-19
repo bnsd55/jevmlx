@@ -138,6 +138,11 @@ class Engine:
             layers produce (the ``merge`` broadcast gate reads this).
         width_slope: the measured width-bin tiling slope (W5-D) — carried
             per engine instead of process-global state.
+        drift_envelope: the W5c-9 drift-envelope resolution (key, bucket,
+            bound E_bound, rescore band, source) — the persisted, measured
+            bound on batched pairwise-gap drift this machine/model tuple
+            exhibits. The near-tie rescore band = band(M) for the pass's
+            shape bucket; parity's 0.05 contract is SEPARATE and unchanged.
     """
 
     model: Any
@@ -149,6 +154,7 @@ class Engine:
     weight_bytes: int
     cache_capabilities: tuple[str, ...]
     width_slope: float
+    drift_envelope: dict[str, Any]
 
 
 # mlx imports are deferred so this module imports cleanly on a machine
@@ -261,6 +267,32 @@ def _load_engine_resolved(model_id: str):
     width_slope = _measure_width_slope(model)
     logger.info("Width-bin tiling slope measured: %.3f", width_slope)
 
+    # W5c-9: the persisted drift envelope — recorded for this tuple or the
+    # one-forward canary (which also WRITES its record). Resolution failure
+    # falls back to the conservative plateau bound so the band never
+    # under-covers; the failure is loud in the log.
+    try:
+        from jevmlx.driftenv import envelope_for_engine
+
+        drift_envelope = envelope_for_engine(
+            _EngineEnvelopeShim(model, tokenizer, model_id, profile)
+        )
+    except Exception as exc:  # noqa: BLE001 — the envelope must not break load
+        logger.warning("drift-envelope resolution failed (%s); conservative plateau", exc)
+        drift_envelope = {
+            "key": {},
+            "bucket": "M<=16",
+            "bound": 0.0625,
+            "band": 0.125,
+            "source": "fallback",
+        }
+    logger.info(
+        "Drift envelope: bound=%.6f band=%.6f source=%s",
+        drift_envelope["bound"],
+        drift_envelope["band"],
+        drift_envelope["source"],
+    )
+
     # every per-model property resolved ONCE, here.
     vocab_size = _vocab_size_of(model)
     weight_bytes = _model_weight_bytes(model)
@@ -275,6 +307,7 @@ def _load_engine_resolved(model_id: str):
         weight_bytes=weight_bytes,
         cache_capabilities=cache_capabilities,
         width_slope=width_slope,
+        drift_envelope=drift_envelope,
     )
     logger.info(
         "Engine ready: %s rev=%s vocab=%d weights=%.1fMB caches=%s",
@@ -285,6 +318,22 @@ def _load_engine_resolved(model_id: str):
         ",".join(cache_capabilities) or "none",
     )
     return engine
+
+
+class _EngineEnvelopeShim:
+    """The minimal view of a PARTIALLY-built engine the envelope resolver
+    needs (model, tokenizer, model_id, revision) — the Engine dataclass
+    requires every field at once, but the envelope resolves BEFORE the
+    engine exists (its canary runs inside the load warmup). Attribute-only;
+    never passed anywhere the full Engine is expected."""
+
+    def __init__(self, model: Any, tokenizer: Any, model_id: str, profile: Any):
+        self.model = model
+        self.tokenizer = tokenizer
+        self.model_id = model_id
+        self.profile = profile
+        self.revision = _revision_of(model_id)
+        self.vocab_size = _vocab_size_of(model)
 
 
 def _revision_of(model_id: str) -> str | None:
@@ -789,6 +838,18 @@ class InternalConstraintViolationError(RuntimeError):
     never a returned decision."""
 
 
+# W3-E (GPT-REVIEW Q4 'Near-tie nondeterminism', bug 13): the measured
+# batch-shape instability band on Metal (see the W3-C measurement in
+# tests/conftest.py — worst 0.0293 nats on main itself, identical with the
+# W3-C branch). Log-score gaps inside this band are batch-shape noise, not
+# model signal: a field whose top candidates sit within the band is RESCORED
+# at batch=1 (the canonical shape) and that result is taken. conftest.py
+# imports this constant so tests and engine share one number. W5c-9: this is
+# the PARITY contract (0.05 on d_gap) AND the canonical-path default band;
+# the batched pass widens it with the persisted drift envelope.
+INSTABILITY_BAND = 5e-2
+
+
 @dataclass(frozen=True)
 class ScalarEvidence:
     """Raw per-choice evidence for ONE scalar field (W5-B review C.2).
@@ -868,6 +929,14 @@ class ScalarDecision:
     prior_log_scores: dict[str, float] | None  # neutral pass log_scores, when used
     prior_corrected: bool
     evidence_source: str  # "batch" | "batch1" | "dependency" | "oracle"
+    # W5c-9: the decision band this decision used (INSTABILITY_BAND +
+    # E_bound from the persisted drift envelope, rounded up to the 1/64
+    # lattice) and the E_bound itself (None for canonical paths that never
+    # rode the envelope — dependency/oracle/batch1 evidence). Parity's 0.05
+    # contract is SEPARATE. REQUIRED (no constant default — the band must
+    # be the pass's actual resolved value, never an assumed 0.05).
+    rescore_band_nats: float
+    drift_envelope_nats: float | None
     ordinal: OrdinalTelemetry | None = None  # W6-B1: ordered enums only
 
 
@@ -924,15 +993,17 @@ def finalize_scalar_evidence(
     rescore: "Callable[[list[int]], ScalarEvidence] | None" = None,
     rescore_idxs: list[int] | None = None,
     ordered: bool = False,
+    rescore_band_nats: float = INSTABILITY_BAND,
+    drift_envelope_nats: float | None = None,
 ) -> tuple[ScalarDecision, bool]:
     """THE one scalar finalizer (W5-B review C.2 / finding 7).
 
     Consumes raw :class:`ScalarEvidence` and produces the complete finalized
-    decision — INSTABILITY_BAND canonical rescore, prior correction,
-    confidence temperature, tie flag, legal mass, top_choices and margins —
-    in ONE place. The normal pass, the batch=1 rescore, the dependency
-    rescore and the oracle rescore all call this; no scoring semantics may
-    be re-derived anywhere else.
+    decision — near-tie canonical rescore, prior correction, confidence
+    temperature, tie flag, legal mass, top_choices and margins — in ONE
+    place. The normal pass, the batch=1 rescore, the dependency rescore and
+    the oracle rescore all call this; no scoring semantics may be
+    re-derived anywhere else.
 
     ``rescore`` + ``rescore_idxs``: only the normal batched pass supplies a
     rescore callback (it owns the engine row set); a batch=1, dependency or
@@ -942,6 +1013,15 @@ def finalize_scalar_evidence(
     ordinal telemetry (expected index / variance over the DECLARED choice
     order, which ``evidence.choices`` preserves). The decided value is
     untouched; unordered fields carry ``ordinal=None``.
+    W5c-9: ``rescore_band_nats`` is the DECISION band for this pass —
+    INSTABILITY_BAND + E_bound(M) from the persisted drift envelope
+    (jevmlx.driftenv), NOT the parity contract. The batched pass resolves
+    it from the engine's envelope records for the pass's M (always present
+    after load); the canonical batch=1 / dependency / oracle paths pass
+    INSTABILITY_BAND (the default) because their evidence is already at
+    canonical shape — the gate requires source_shape == "batch", so the
+    band is moot there. ``drift_envelope_nats`` is E_bound itself, for
+    telemetry (None for every path that did not ride the envelope).
 
     Returns (ScalarDecision, rescored_flag).
     """
@@ -953,12 +1033,14 @@ def finalize_scalar_evidence(
     # W3-E near-tie canonical rescore: only meaningful when the evidence came
     # from a multi-row batched pass (source_shape == "batch"); a batch=1 /
     # dependency / oracle re-measure is already the canonical shape.
+    # W5c-9: the band is the pass's DECISION band — INSTABILITY_BAND widened
+    # by the persisted drift envelope's E_bound for the pass's shape bucket
+    # (None => the historical constant; the envelope-less paths).
+    band = rescore_band_nats
     rescored = False
     if n > 0:
         order = sorted(range(n), key=raw_scores.__getitem__, reverse=True)
-        band_candidates = [
-            i for i in order if raw_scores[order[0]] - raw_scores[i] < INSTABILITY_BAND
-        ]
+        band_candidates = [i for i in order if raw_scores[order[0]] - raw_scores[i] < band]
         if len(band_candidates) > 1 and evidence.source_shape == "batch" and rescore is not None:
             rescored_evidence = rescore(rescore_idxs or [])
             raw_scores = list(rescored_evidence.log_scores_raw)
@@ -997,18 +1079,10 @@ def finalize_scalar_evidence(
         prior_corrected=prior_entry is not None,
         evidence_source="batch1" if rescored else evidence.source_shape,
         ordinal=ordinal_telemetry(probs_list) if ordered else None,
+        rescore_band_nats=band,
+        drift_envelope_nats=drift_envelope_nats,
     )
     return decision, rescored
-
-
-# W3-E (GPT-REVIEW Q4 'Near-tie nondeterminism', bug 13): the measured
-# batch-shape instability band on Metal (see the W3-C measurement in
-# tests/conftest.py — worst 0.0293 nats on main itself, identical with the
-# W3-C branch). Log-score gaps inside this band are batch-shape noise, not
-# model signal: a field whose top candidates sit within the band is RESCORED
-# at batch=1 (the canonical shape) and that result is taken. conftest.py
-# imports this constant so tests and engine share one number.
-INSTABILITY_BAND = 5e-2
 
 
 def _rows_per_chunk(budget_bytes: int, bytes_per_row: int, max_rows: int | None) -> int:
@@ -2535,6 +2609,7 @@ def run_parallel_generation(
             active_start=active_start,
             _prior_mode=_prior_mode,
             ledger=ledger,
+            drift_envelope=engine.drift_envelope,
         )
 
     # 3. Memory guard: rows are broadcast copies of the prefill cache. The
@@ -2591,6 +2666,7 @@ def run_parallel_generation(
         active_start=active_start,
         _prior_mode=_prior_mode,
         ledger=ledger,
+        drift_envelope=engine.drift_envelope,
     )
 
 
@@ -2806,6 +2882,7 @@ def score_scalar_field(
     vocab_size: int,
     pad_id: int,
     ledger: "Ledger",
+    drift_band: tuple[float, float | None] | None = None,
 ) -> FieldOutcome:
     """Stage 2 (W5b-10 C1): finalize ONE scalar (enum/boolean) field.
 
@@ -2859,6 +2936,8 @@ def score_scalar_field(
         rescore=rescore_fn,
         rescore_idxs=idxs,
         ordered=fdef.ordered,
+        rescore_band_nats=drift_band[0],
+        drift_envelope_nats=drift_band[1],
     )
     w_prob = decision.probability
 
@@ -2906,6 +2985,11 @@ def score_scalar_field(
         # INSTABILITY_BAND after the batch=1 rescore.
         "tie": decision.tie,
         "rescored": rescored,
+        # W5c-9: the decision band this field's rescore gate used —
+        # INSTABILITY_BAND + E_bound(M) from the persisted drift envelope —
+        # and the E_bound itself. NOT the parity contract (still 0.05).
+        "rescore_band_nats": decision.rescore_band_nats,
+        "drift_envelope_nats": decision.drift_envelope_nats,
         # W2-D: legal_mass — probability the model assigned to the union of
         # allowed continuations at the winner's branch point(s), against the
         # FULL vocabulary (raw, pre-prior-correction).
@@ -3161,20 +3245,26 @@ def _rescore_multi_options(
     vocab_size: int,
     pad_id: int,
     ledger: "Ledger",
+    drift_band: tuple[float, float | None] | None = None,
 ) -> tuple[list[int], bool]:
     """W3-E band rescore for a multi field's near-threshold options.
 
     A Y/N decision near p=0.5 is the same near-tie as a scalar enum — a
-    |yes - no| inside INSTABILITY_BAND is batch-shape noise. Rescore those
+    |yes - no| inside the decision band is batch-shape noise. Rescore those
     options' rows at batch=1 and replace their raw pairs (and legal-mass
     entries, in the row's own shape) IN the dispatch object so prior +
     softmax + selection all see the canonical result. Returns (rescored
     option indexes, whether any rescore ran).
+
+    W5c-9: the band is the pass's DECISION band (INSTABILITY_BAND +
+    E_bound(M) from the persisted drift envelope) when provided; None =>
+    the historical constant (envelope-less paths).
     """
+    band = drift_band[0] if drift_band else INSTABILITY_BAND
     rescored_oids = [
         oi
         for oi, ridx in enumerate(idxs)
-        if abs(dispatch.option_pair[ridx][0] - dispatch.option_pair[ridx][1]) < INSTABILITY_BAND
+        if abs(dispatch.option_pair[ridx][0] - dispatch.option_pair[ridx][1]) < band
     ]
     if not rescored_oids:
         return [], False
@@ -3324,6 +3414,7 @@ def score_multi_field(
     vocab_size: int,
     pad_id: int,
     ledger: "Ledger",
+    drift_band: tuple[float, float | None] | None = None,
 ) -> FieldOutcome:
     """Stage 3 (W5b-10 C1): finalize ONE multi field.
 
@@ -3349,7 +3440,15 @@ def score_multi_field(
     # batch=1 and replace their raw pairs BEFORE the scoring loop, so prior
     # + softmax + selection all see the canonical result.
     rescored_oids, multi_rescored = _rescore_multi_options(
-        model, cache, built, dispatch, idxs, vocab_size, pad_id, ledger
+        model,
+        cache,
+        built,
+        dispatch,
+        idxs,
+        vocab_size,
+        pad_id,
+        ledger,
+        drift_band=drift_band,
     )
     for oi, ridx in enumerate(idxs):
         pair = list(dispatch.option_pair[ridx])
@@ -3767,6 +3866,7 @@ def _score_all_fields(
     vocab_size: int,
     pad_id: int,
     ledger: "Ledger",
+    drift_band: tuple[float, float | None] | None = None,
 ) -> tuple[AssembledState, list[str]]:
     """Stage 2 (W5b-10 C1): first-pass scoring of EVERY field.
 
@@ -3800,6 +3900,7 @@ def _score_all_fields(
                 vocab_size=vocab_size,
                 pad_id=pad_id,
                 ledger=ledger,
+                drift_band=drift_band,
             )
             if outcome.rescored:
                 rescored_fields.append(fname)
@@ -3826,6 +3927,7 @@ def _score_all_fields(
                 vocab_size=vocab_size,
                 pad_id=pad_id,
                 ledger=ledger,
+                drift_band=drift_band,
             )
             if outcome.rescored:
                 rescored_fields.append(fname)
@@ -3863,6 +3965,7 @@ def _assemble(
     active_start: int = 0,
     _prior_mode: bool = False,
     ledger: "Ledger",
+    drift_envelope: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble per-field decisions from the scored rows (W3-F stage 3).
 
@@ -3884,6 +3987,30 @@ def _assemble(
     built["scoring"] = scoring
     dispatch = dispatch_rows(built, scored)
     lead_in = built["lead_in"]
+
+    # W5c-9: the pass's DECISION band from the persisted drift envelope —
+    # INSTABILITY_BAND + E_bound(M) where M = the number of rows the pass
+    # actually scored (len(scored.row_logits); the merged decide_many pass
+    # scores n_group * R rows). None envelope (tests / legacy callers) =>
+    # the historical constant band. (band, E_bound) rides to every field
+    # finalizer; the rescore trigger widens, the PARITY contract does not.
+    drift_band: tuple[float, float | None] | None = None
+    if drift_envelope is not None and scored.row_logits:
+        from jevmlx.driftenv import band_for_rows
+
+        m_pass = len(scored.row_logits)
+        band = band_for_rows(drift_envelope, m_pass)
+        # E_bound as recorded (not re-derived from the rounded band — the
+        # lattice round-up would inflate it).
+        e_bound = drift_envelope.get("bound")
+        drift_band = (band, e_bound)
+        logger.debug(
+            "Rescore band for %d-row pass: %.6f (envelope %.6f, source %s)",
+            m_pass,
+            band,
+            e_bound or 0.0,
+            drift_envelope.get("source"),
+        )
     field_plans = built["field_plans"]
     vocab_size = (
         model.args.vocab_size
@@ -3909,6 +4036,7 @@ def _assemble(
             vocab_size=vocab_size,
             pad_id=pad_id,
             ledger=ledger,
+            drift_band=drift_band,
         )
 
     # W3-D: constrained MAP. W5-B (review 43): PRIOR MODE STOPS HERE — the
@@ -4216,6 +4344,7 @@ def run_parallel_generation_batched(
                         oracle_overrides=oracle_overrides,
                         active_start=active_start,
                         ledger=ctx_ledger,
+                        drift_envelope=engine.drift_envelope,
                     )
                 prefill_iv = prefill_iv_by_idx[idx]
                 assembly_iv = ctx_ledger.last_interval("assembly")
@@ -4299,6 +4428,7 @@ def run_parallel_generation_batched(
                     oracle_overrides=oracle_overrides,
                     active_start=active_start,
                     ledger=ctx_ledger,
+                    drift_envelope=engine.drift_envelope,
                 )
             prefill_iv = prefill_iv_by_idx[idx]
             assembly_iv = ctx_ledger.last_interval("assembly")

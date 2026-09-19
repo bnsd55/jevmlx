@@ -1,0 +1,16 @@
+{
+  "key": {
+    "model_id": "fake-engine",
+    "revision": null,
+    "quantization": null,
+    "mlx_version": "0.32.2",
+    "chip": "m2pro",
+    "activation_dtype": "float32",
+    "bucket_edges_version": 1
+  },
+  "shape_bucket": "M>16",
+  "max_gap_drift_nats": 0.0,
+  "source": "parity_report",
+  "model": "fake/stable",
+  "matrix_rows": 4
+}

@@ -1,0 +1,18 @@
+{
+  "key": {
+    "model_id": "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
+    "revision": "a5339a4131f135d0fdc6a5c8b5bbed2753bbe0f3",
+    "quantization": {
+      "bits": 4,
+      "group_size": 64
+    },
+    "mlx_version": "0.32.2",
+    "chip": "m2pro",
+    "activation_dtype": "float16",
+    "bucket_edges_version": 1
+  },
+  "shape_bucket": "M<=16",
+  "max_gap_drift_nats": 0.0,
+  "source": "canary",
+  "canary_rows": 16
+}

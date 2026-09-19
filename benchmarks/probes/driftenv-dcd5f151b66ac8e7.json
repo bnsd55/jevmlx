@@ -1,0 +1,14 @@
+{
+  "key": {
+    "model_id": "fake-engine",
+    "revision": null,
+    "quantization": null,
+    "mlx_version": "0.32.2",
+    "chip": "m2pro",
+    "activation_dtype": "float16"
+  },
+  "shape_bucket": "M<=16",
+  "max_gap_drift_nats": 0.0625,
+  "source": "canary",
+  "canary_rows": 16
+}

@@ -237,7 +237,8 @@ Batched-only keys (`run_parallel_generation_batched`, every result): `group_wall
 | `margin` | Multi only: min \|P(yes) - cut\| over the final set in probability units (engine-side name; the API exposes it as `threshold_distance`; an option forced in against its P(yes) shows 0). |
 | `top_choices` | Top (choice, probability) pairs, most probable first (top 5). |
 | `rows` | Rows the field consumed (0 for cardinality-1 fields). |
-| `tie` / `rescored` | Scalar: whether the top-2 gap is inside `INSTABILITY_BAND` (subsumes exact-equality ties), and whether the batch=1 rescore replaced the batched result. Multi: `rescored` when any option's Y/N pair was rescored. |
+| `tie` / `rescored` | Scalar: whether the top-2 gap is inside the rescore band (W5c-9: `INSTABILITY_BAND + E_bound(M)` from the drift envelope — `INSTABILITY_BAND` itself when no envelope rides; subsumes exact-equality ties), and whether the batch=1 rescore replaced the batched result. Multi: `rescored` when any option's Y/N pair was rescored. |
+| `rescore_band_nats` / `drift_envelope_nats` | W5c-9: the decision band this field's rescore trigger used (`INSTABILITY_BAND + E_bound`, rounded up to the 1/64-nat lattice) and the envelope bound E_bound itself. `drift_envelope_nats` is None when no envelope rode (constant-band paths). NOT the parity atol — the parity contract stays 0.05 on d_gap (ARCHITECTURE design decision 10). |
 | `evidence_source` | Scalar only (W5-B, PR #45): which scoring path produced the final evidence — `batch` (batched pass), `batch1` (canonical rescore replaced it), `dependency` (second pass), `oracle` (forced re-score). Rides on scalar entries and on second-pass re-decides. |
 | `semantics` | W5b-13: the per-field semantics record (coerced to frozen `api.FieldSemantics` at the public boundary): `score_source` (`batched`/`rescored_batch1`/`dependency`/`oracle`), `temperature` actually applied (None for count rows and calibrated multi selections), `calibrator_id` (bundle identity when a fitted calibrator set the selection), `prior_mode` (`off`/`neutral_v1`), `constraint_changed` (a reconciler overrode the raw winner — an actual selection change, not merely a binding constraint), `dependency_rescored`. REQUIRED on every entry — `_build_field_results` raises without it. |
 | `legal_mass` | Probability the model assigned to the union of allowed continuations at the winner's branch point(s), against the full vocabulary = sum(exp(z_allowed)) / sum(exp(z_vocab)). Per-branch leakage signal — the constrained distribution can confidently pick A over B even when almost all unconstrained mass is on a reasoning token/newline/label text. Product over the winner's branch path (scalar); per-option Y/N branches (multi); the count row has its own (`legal_mass` + `min_option_legal_mass` on the `<field>#count` entry). 1.0 for cardinality-1 fields (nothing branched). Always computed. Raw, pre-prior-correction logits. |
@@ -620,3 +621,19 @@ conversion: same shape with empty `sources` plus `fetched_at`.
    `dataset.lock.json`, `run.json`, and `parity.json` exist so any number in
    a report can be traced to the exact prompt, data, and parity state that
    produced it.
+10. **Rescore band vs parity contract (W5c-9).** The near-tie rescore's
+   trigger and the parity gate share ONE measured quantity (d_gap) but are
+   two DIFFERENT thresholds, deliberately: the parity gate stays at the
+   fixed `INSTABILITY_BAND` (0.05 nats, fail-closed — widening it would
+   bless drift instead of catching it), while the rescore trigger WIDENS to
+   `INSTABILITY_BAND + E_bound(M)` from the persisted drift envelope
+   (`jevmlx/driftenv.py`: records keyed by model/revision/quantization/
+   mlx-version/chip/dtype + a shape bucket of M; written by
+   `benchmarks/driftprobe.py`, by `parity_report`, and by the load-time
+   16-row canary when nothing is recorded). Too low a band costs a wrong
+   winner (a reference near tie escaping the canonical batch=1 shape — the
+   measured `code_security/is_vulnerability` escape); too high costs only
+   throughput. The band protects DECISIONS; parity protects HONEST
+   PROBABILITIES. Per-field telemetry carries `rescore_band_nats` (the
+   band the decision used) and `drift_envelope_nats` (E_bound) so every
+   decision's trigger is auditable; `FieldSemantics` is unchanged.

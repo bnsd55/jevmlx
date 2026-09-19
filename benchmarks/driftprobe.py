@@ -58,6 +58,7 @@ import platform
 import re
 import statistics
 import sys
+from pathlib import Path
 from typing import Any
 
 from jevmlx.engine import (
@@ -563,6 +564,12 @@ def main() -> int:
     with open(json_path, "w") as f:
         json.dump(report, f, indent=2)
 
+    # W5c-9: persist the drift ENVELOPE from this probe's measurements —
+    # per width bucket, the max d_gap at that bucket — into the user cache
+    # (keyed by the envelope tuple) and this probes folder. The engine band
+    # reads the recorded envelope; the probe is the authoritative writer.
+    _persist_envelope(engine, report, out_dir)
+
     md = _markdown(report)
     md_path = os.path.join(out_dir, "driftprobe.md")
     with open(md_path, "w") as f:
@@ -574,6 +581,43 @@ def main() -> int:
 
 def _fmt(v: float | None) -> str:
     return "-" if v is None else f"{v:.4f}"
+
+
+def _persist_envelope(engine: Engine, report: dict[str, Any], out_dir: str) -> list[str]:
+    """W5c-9: write drift-envelope records from the width matrix.
+
+    For every measured tensor-row count n, the envelope's shape bucket is
+    shape_bucket(n) and the bound is that width entry's max d_gap. The
+    max across each bucket's entries is what persists (a bucket's bound
+    must cover every pass inside it). Writes to the user cache through
+    jevmlx.driftenv.record_envelope AND a copies file in the probes folder.
+    """
+    from jevmlx.driftenv import MAX_GAP_DRIFT_KEY, envelope_key, record_envelope, shape_bucket
+
+    key = envelope_key(engine)
+    by_bucket: dict[str, float] = {}
+    for entry in report.get("width_matrix", {}).get("widths", []):
+        n = entry.get("tensor_rows")
+        d_gap = (entry.get("d_gap") or {}).get("max")
+        if not isinstance(n, int) or not isinstance(d_gap, (int, float)):
+            continue
+        b = shape_bucket(n)
+        by_bucket[b] = max(by_bucket.get(b, 0.0), float(d_gap))
+    if not by_bucket:
+        return []
+    written: list[str] = []
+    for b, d_gap in sorted(by_bucket.items()):
+        rec = {
+            "key": key,
+            "shape_bucket": b,
+            MAX_GAP_DRIFT_KEY: d_gap,
+            "source": "driftprobe",
+            "model": report.get("model"),
+        }
+        paths = record_envelope(rec, probes_dir=Path(out_dir))
+        written.extend(str(p) for p in paths)
+    print(f"drift envelope records written: {len(by_bucket)} bucket(s) -> {written[0]}")
+    return written
 
 
 def _fmt3(d: dict) -> str:

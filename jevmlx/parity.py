@@ -313,6 +313,11 @@ def parity_report(
     # is a proxy for.
     rescore_flag = _rescore_gate_safety_assertion(engine, cases)
     escaped = rescore_flag["escaped_near_tie"]
+    # W5c-9: the batched matrix's measured d_gap PERSISTS as a drift-envelope
+    # record (user cache + probes folder) — the measured envelope the engine
+    # band reads. The PARITY GATE below stays at the FIXED 0.05: recording
+    # the envelope never redefines parity; it bounds the rescore band.
+    recorded = _record_envelope_from_report(engine, model_id, max_gap_drift)
     passed = bool(
         winners_identical
         and max_abs_drift < INSTABILITY_BAND
@@ -332,6 +337,9 @@ def parity_report(
         "max_batched_drift_nats": round(max_batched_drift, 6),
         "winners_identical": winners_identical,
         "atol": INSTABILITY_BAND,
+        # W5c-9: the drift-envelope resolution this report persisted (bound,
+        # band, source) — informational; the gate above is untouched.
+        "drift_envelope": recorded,
         # Rescore-gate safety assertion (review item 4).
         "rescore_gate": rescore_flag,
         # Environment metadata (review item 3).
@@ -363,6 +371,58 @@ def write_parity_json(
 
 
 # ---------------------------------------------------------------- helpers --
+
+
+def _record_envelope_from_report(engine: Any, model_id: str, max_gap_drift: float) -> dict:
+    """Persist the report's measured d_gap as a drift-envelope record (W5c-9).
+
+    The batched matrix measured pairwise-gap drift at the 4-context merged
+    shape (M = 4 * rows — the M>16 bucket for every bundled schema). The
+    record lands in the user cache (keyed by the envelope tuple) and the
+    model's probes folder. Best-effort: a failure NEVER fails parity — the
+    envelope is an optimization for the band, not a gate input.
+    """
+    try:
+        from pathlib import Path
+
+        from jevmlx.driftenv import MAX_GAP_DRIFT_KEY, envelope_key, record_envelope, shape_bucket
+
+        key = envelope_key(engine)
+        bucket = shape_bucket(4 * 112)  # the matrix's merged pass: M > 16
+        record = {
+            "key": key,
+            "shape_bucket": bucket,
+            MAX_GAP_DRIFT_KEY: float(max_gap_drift),
+            "source": "parity_report",
+            "model": model_id,
+            "matrix_rows": 4,
+        }
+        probes_dir = None
+        try:
+            from jevmlx.bench import HERE
+
+            probes_dir = (
+                Path(HERE) / "probes" / f"{key.get('chip') or 'unknown-chip'}--{_slug(model_id)}"
+            )
+        except Exception:  # noqa: BLE001 — best-effort persistence
+            probes_dir = None
+        record_envelope(record, probes_dir=probes_dir)
+        from jevmlx.driftenv import rescore_band
+
+        return {
+            "shape_bucket": bucket,
+            MAX_GAP_DRIFT_KEY: round(float(max_gap_drift), 6),
+            "band": round(rescore_band(max_gap_drift), 6),
+        }
+    except Exception as exc:  # noqa: BLE001 — never fails parity
+        return {"error": str(exc)}
+
+
+def _slug(model_id: str) -> str:
+    """A filesystem-safe slug for the model id (probes folder naming)."""
+    import re
+
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", model_id).strip("-") or "model"
 
 
 def _make_schema(case_id: str, schema_dict: dict) -> Any:

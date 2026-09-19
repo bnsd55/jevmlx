@@ -419,6 +419,7 @@ def make_engine(
     *,
     model_id: str = "fake-engine",
     vocab_size: int | None = None,
+    drift_envelope: dict | None = None,
 ):
     """Build a real :class:`jevmlx.engine.Engine` around (fakes | live parts).
 
@@ -453,6 +454,7 @@ def make_engine(
         weight_bytes=_model_weight_bytes(model),
         cache_capabilities=("KVCache",),
         width_slope=1.0,
+        drift_envelope=drift_envelope,
     )
 
 
