@@ -35,6 +35,22 @@ def _freeze_plan(plan: Any) -> Any:
     return plan
 
 
+def _thaw_plan(plan: Any) -> Any:
+    """The inverse of :func:`_freeze_plan`: plain dict/list containers.
+
+    For JSON serialization (run.json's ``compiled_plan_sha256``,
+    ``schema.plan_hash``): json.dumps raises on ``MappingProxyType``, and a
+    ``default=list`` fallback would collapse every mapping to its key list —
+    thaw recursively so the payload carries the plan's CONTENT. Hash
+    consumers must thaw before dumping, never dump the frozen container.
+    """
+    if isinstance(plan, dict) or isinstance(plan, MappingProxyType):
+        return {k: _thaw_plan(v) for k, v in plan.items()}
+    if isinstance(plan, (list, tuple)):
+        return [_thaw_plan(v) for v in plan]
+    return plan
+
+
 def _freeze_choice_descriptions(
     name: str, choices: tuple[str, ...], descriptions: Mapping[str, str] | None
 ) -> Mapping[str, str]:

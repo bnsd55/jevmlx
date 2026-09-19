@@ -16,11 +16,18 @@ import sys
 from importlib import resources
 
 from jevmlx import __version__
-from jevmlx.engine import load_engine, run_parallel_generation
 from jevmlx.lint import lint_schema
 from jevmlx.log import configure
 from jevmlx.models import DEFAULT_MODEL
 from jevmlx.schema import StructuredSchema
+
+
+def _engine():
+    """The engine pair, imported lazily: `jevmlx validate` and `--version`
+    work without MLX loaded; `import jevmlx.cli` stays cheap."""
+    from jevmlx.engine import load_engine, run_parallel_generation
+
+    return load_engine, run_parallel_generation
 
 
 def load_preset(name: str) -> dict:
@@ -93,7 +100,53 @@ def _rounded_json_payload(result: dict) -> dict:
     return parsed
 
 
+def _one_line(exc: BaseException) -> str:
+    """The failure message: exception type + full message (multi-line
+    validation errors keep their detail; the whole block is indented under
+    the header)."""
+    message = str(exc).rstrip("\n")
+    if not message:
+        return type(exc).__name__
+    return f"{type(exc).__name__}: {message}"
+
+
 def main(argv=None) -> None:
+    """The `jevmlx` entry point.
+
+    Errors:
+    - argument/usage errors: argparse exits 2 with one line on stderr.
+    - user-input failures (missing file, invalid JSON, schema/constraint
+      rejection, engine environment errors): exit 1 with the full error
+      message on stderr — no traceback. With -v/--verbose the exception
+      re-raises instead (full traceback for debugging).
+    - anything else propagates (a traceback is the right output for a bug).
+    """
+    try:
+        _dispatch(argv)
+    except (OSError, json.JSONDecodeError, ValueError, RuntimeError, ModuleNotFoundError) as exc:
+        # ModuleNotFoundError from optional imports (transformers behind
+        # mlx-lm) is an environment problem, not a bug.
+        if _last_verbose(argv):
+            raise
+        print(f"jevmlx: {_one_line(exc)}", file=sys.stderr)
+        raise SystemExit(1) from None
+    except KeyboardInterrupt:
+        print("jevmlx: interrupted", file=sys.stderr)
+        raise SystemExit(130) from None
+
+
+def _last_verbose(argv) -> bool:
+    """Whether the invocation asked for -v/--verbose (traceback on error).
+
+    Cheap pre-parse: dispatch already parsed the real args; this re-scan only
+    decides the error path. `jevmlx -v <cmd> ...` or a global flag after the
+    subcommand both count.
+    """
+    tokens = list(argv) if argv is not None else sys.argv[1:]
+    return any(t in ("-v", "--verbose") for t in tokens)
+
+
+def _dispatch(argv) -> None:
     ap = argparse.ArgumentParser(prog="jevmlx", description=__doc__)
     ap.add_argument("--version", action="version", version=f"jevmlx {__version__}")
     sub = ap.add_subparsers(dest="command", required=True)
@@ -416,7 +469,9 @@ def main(argv=None) -> None:
             )
             model_label = args.api_model
         else:
-            print(f"Loading {args.model} ...", flush=True)
+            if not args.as_json:
+                print(f"Loading {args.model} ...", flush=True)
+            load_engine, run_parallel_generation = _engine()
             model, tokenizer = load_engine(args.model)
 
             schema = StructuredSchema(schema_dict)
@@ -441,6 +496,7 @@ def main(argv=None) -> None:
     elif args.command == "calibrate":
         from jevmlx import calibrate
 
+        load_engine, _ = _engine()
         print(f"Loading {args.model} ...", flush=True)
         model, tokenizer = load_engine(args.model)
         cases = calibrate.load_cases(args.data)
@@ -584,6 +640,7 @@ def _run_eval_command(args) -> None:
     lock = os.path.join(os.path.dirname(os.path.abspath(args.data)), "dataset.lock.json")
 
     if args.track == "parallel":
+        load_engine, _ = _engine()
         print(f"Loading {args.model} ...", flush=True)
         model, tokenizer = load_engine(args.model)
         decide_fn = evalrun.parallel_decide_fn(
@@ -592,6 +649,7 @@ def _run_eval_command(args) -> None:
         chat_template = getattr(tokenizer, "chat_template", None)
         plan_provider = lambda schema: schema.compile_labels_plan(tokenizer)  # noqa: E731
     elif args.track == "naive_local":
+        load_engine, _ = _engine()
         print(f"Loading {args.model} ...", flush=True)
         model, tokenizer = load_engine(args.model)
         decide_fn = evalrun.naive_local_decide_fn(model, tokenizer)

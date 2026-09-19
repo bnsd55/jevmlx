@@ -118,5 +118,5 @@ def serve(model_id: str, host: str = "127.0.0.1", port: int = 8000) -> None:
         return run_parallel_generation(model, tokenizer, context, schema, temperature=temperature)
 
     server = HTTPServer((host, port), make_handler(decide_fn, model_id, _ServerStats()))
-    logger.info("jevmlx serving %s on http://%s:%s", model_id, host, port)
+    logger.info("jevmlx serving %s on http://%s:%s", model_id, host, server.server_port)
     server.serve_forever()

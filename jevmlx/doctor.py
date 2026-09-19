@@ -388,6 +388,9 @@ def check_model(model: str | None) -> Check:
     """Optional: dry-run tokenizer load; chat template + system-role support."""
     if model is None:
         return _ok("model", "skipped (pass --model M to check a tokenizer)")
+    # Accept aliases (fast/quality/test) the same way load_engine does —
+    # otherwise `doctor --model quality` fails on the bare alias.
+    model = resolve_model(model)
     try:
         from transformers import AutoTokenizer
 
