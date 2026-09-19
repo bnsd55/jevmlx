@@ -163,6 +163,26 @@ def build_datasets(
         paths[name] = jsonl
         paths_locks[name] = lock
 
+    # W6-B5 public gold datasets: two views each (balanced diagnostic /
+    # natural distribution), each view its own cases file + lock.
+    for name in ("ag_news", "boolq", "sst5"):
+        if name not in datasets:
+            continue
+        for view in ("balanced", "natural"):
+            jsonl = BENCH_CACHE / f"{name}.{view}.jsonl"
+            lock = BENCH_CACHE / f"{name}.{view}.dataset.lock.json"
+            try:
+                _rebuild_if_needed(jsonl, lock, lambda n=name, v=view: _build_public_view(n, v))
+            except OSError as exc:
+                if offline_ok and not (jsonl.exists() and lock.exists()):
+                    print(f"{name}.{view} dataset skipped (offline): {exc}")
+                elif jsonl.exists() and lock.exists():
+                    print(f"{name}.{view}: reusing cached copy (fetch failed: {exc})")
+                else:
+                    raise
+            paths[f"{name}.{view}"] = jsonl
+            paths_locks[f"{name}.{view}"] = lock
+
     if "perturbed" in datasets:
         jsonl = BENCH_CACHE / "perturbed.jsonl"
         lock = BENCH_CACHE / "perturbed.dataset.lock.json"
@@ -221,6 +241,26 @@ def _build_typesafe() -> None:
     rc = fetch_main(["--out", out])
     if rc != 0:
         raise OSError("typesafe fetch failed")
+
+
+def _build_public_view(name: str, view: str) -> None:
+    """One public-gold view: fetch the pinned revision, sample, write.
+
+    Both views come from one download (fetch_dataset downloads the split
+    once and samples twice), so rebuilding 'balanced' also refreshes
+    'natural' — _rebuild_if_needed's cases_sha256 check catches drift on
+    either file independently.
+    """
+    from benchmarks.public.fetch import DATASETS, EVAL_SPLITS, fetch_dataset, write_view
+
+    ds = DATASETS[name]
+    print(f"building {name}.{view} dataset (downloads from the Hugging Face Hub)...")
+    views, sha_by_file = fetch_dataset(ds, EVAL_SPLITS[name])
+    for v, records in views.items():
+        out = BENCH_CACHE / f"{name}.{v}.jsonl"
+        lock = BENCH_CACHE / f"{name}.{v}.dataset.lock.json"
+        write_view(records, out, lock, files_sha256=sha_by_file)
+        print(f"  wrote {out.name} ({len(records)} cases)")
 
 
 def _build_typed_decisions() -> None:

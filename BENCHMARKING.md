@@ -64,9 +64,24 @@ Paste `SUMMARY.md` into the PR description and link the machine specs
 
 - Preflight: Apple Silicon check; refuses on battery or when another process
   holds significant Metal memory (`--force` overrides with a printed warning).
-- Datasets: bundled cases, TypeSafe's public set (skipped offline), and
-  deterministic perturbations of the bundled cases — built once into
-  `~/.cache/jevmlx/bench/` and reused while the lock files match.
+- Datasets: bundled cases, TypeSafe's public set (skipped offline), the
+  typed-decisions Hugging Face mirror, the three PUBLIC gold datasets
+  (below), and deterministic perturbations of the bundled cases — built
+  once into `~/.cache/jevmlx/bench/` and reused while the lock files match.
+- Public gold datasets (W6-B5, pass `--datasets` `ag_news`, `boolq`,
+  `sst5`): AG News (4-class topic enum), BoolQ (yes/no reading
+  comprehension), SST-5 (ordinal 0-4 sentiment). Each is PINNED to a
+  dataset repo commit sha recorded in its lock, every downloaded file's
+  sha256 is verified, and TWO sampling views are written as separate
+  cases files: `<name>.balanced.jsonl` (class-balanced diagnostic —
+  per-class accuracy, macro-F1, confusion, ordinal MAE) and
+  `<name>.natural.jsonl` (the dataset's own class prevalence — the view
+  NLL/Brier/ECE describe; the two views measure different things and are
+  never mixed). Selection is deterministic: `hash(seed, source_row_id)`.
+  License/terms are recorded per dataset in the lock and redistribution
+  is NOT cleared for any of them: cases files store row ids, split,
+  option order and input hashes — NEVER the source text (the eval runner
+  expands each row from the pinned local HF cache).
 - Runs: for every (track, scorer, dataset) — `eval` in-process `--runs` times
   (default 2), last run kept, order-rotation permutations on for the parallel
   track. Writes `predictions.jsonl`, `run.json`, `report.json`, `report.md`

@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **W6-B5 (public gold datasets, pre-M5)** — three public datasets join the
+  bench: AG News (4-class enum), BoolQ (boolean noul), SST-5 (ordinal 0-4
+  enum, the B1 ordered-enum derivation — no new engine field type). Pinned
+  by dataset repo commit sha (`DEFAULT_REVISION` per dataset, like
+  typed-decisions) with per-file sha256 in the lock and FAIL-CLOSED on
+  missing provenance. Two deterministic sampling views per dataset
+  (`hash(seed, source_row_id)` selection): class-balanced diagnostic
+  (per-class accuracy, macro-F1, confusion, ordinal MAE) and
+  natural-distribution (NLL, Brier, ECE) as SEPARATE cases files
+  (`<name>.balanced.jsonl` / `<name>.natural.jsonl`), never mixed. License
+  and redistribution status recorded in every lock; source text never
+  enters a results artifact (row ids + input hashes only). One shared
+  question-type mapping with `benchmarks/typesafe/questions.py` (the score
+  scale is now overridable — no per-dataset copy). Bench names:
+  `ag_news`, `boolq`, `sst5` (each producing `.balanced` / `.natural`).
+
 - W5c-6 / B4: token-accounting telemetry. Every engine result (single and
   batched) and timing.json now carry: `naive_branch_prompt_tokens` (sum of
   full prompt length for every actual scoring row, shared prefix repeated),

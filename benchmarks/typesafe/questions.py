@@ -35,13 +35,16 @@ def as_obj(value):
     return value
 
 
-def field_schema(question: dict) -> dict | None:
+def field_schema(question: dict, *, score_choices=None) -> dict | None:
     """Map one question to a jevmlx schema field, or None to skip.
 
     ``noul`` -> boolean; ``choice`` -> enum over the criteria keys (published
-    order); ``score`` -> enum over "0".."3" with the level texts folded into
-    the description. Unknown types (free text) are not decidable by the
-    engine and are skipped.
+    order); ``score`` -> enum over the score scale with the level texts
+    folded into the description. The scale is SCORE_CHOICES ("0".."3") by
+    default; ``score_choices`` overrides it for datasets with a different
+    ordinal range (e.g. SST-5's 0..4) — still ONE mapping owner, no local
+    copy. Unknown types (free text) are not decidable by the engine and are
+    skipped.
     """
     instructions = question["instructions"]
     criteria = question.get("criteria")
@@ -55,7 +58,7 @@ def field_schema(question: dict) -> dict | None:
         return {
             "type": "enum",
             "description": f"{instructions} Scale: {levels}.",
-            "choices": list(SCORE_CHOICES),
+            "choices": list(score_choices or SCORE_CHOICES),
         }
     return None
 
