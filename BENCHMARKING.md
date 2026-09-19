@@ -79,7 +79,11 @@ Paste `SUMMARY.md` into the PR description and link the machine specs
   (nothing is sampled or locked). TWO DISJOINT
   sampling views are written as separate cases files:
   `<name>.balanced.jsonl` (class-balanced diagnostic, 50 rows/class —
-  per-class accuracy, macro-F1, confusion, ordinal MAE) and
+  per-class accuracy, macro-F1, confusion, ordinal MAE — ordinal metrics
+  run on EVERY track: each track's decide_fn emits the ordered scale
+  (`ordinal_choices`) + the derived `ordinal` record, so the hard ordinal
+  MAE is computed everywhere; the soft `ordinal_mae_expected` needs the
+  engine telemetry and is therefore parallel-track-only) and
   `<name>.natural.jsonl` (the dataset's own class prevalence, 500 rows
   drawn from rows the balanced view did NOT take, so calibration rows
   are never the reported diagnostic rows — the view NLL/Brier/ECE

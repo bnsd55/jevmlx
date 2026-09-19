@@ -59,6 +59,9 @@ def field_schema(question: dict, *, score_choices=None) -> dict | None:
             "type": "enum",
             "description": f"{instructions} Scale: {levels}.",
             "choices": list(score_choices or SCORE_CHOICES),
+            # W6-B1: a score question IS an ordinal scale — the level order
+            # is the scale order, so the engine derives ordinal telemetry.
+            "ordered": True,
         }
     return None
 

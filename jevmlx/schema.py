@@ -340,6 +340,7 @@ class FieldDefinition:
     choice_descriptions: Mapping[str, str]
     depends_on: str | None
     set_constraints: tuple[Mapping[str, Any], ...] = ()
+    ordered: bool = False
 
     def __init__(
         self,
@@ -350,14 +351,36 @@ class FieldDefinition:
         choice_descriptions: Mapping[str, str] | None = None,
         depends_on: str | None = None,
         set_constraints: tuple[Mapping[str, Any], ...] = (),
+        ordered: bool = False,
     ):
         # Frozen dataclass with a custom __init__: the validation logic is
         # the constructor's contract; freeze happens through object.__setattr__.
+        # F2 (review): strictness at the schema boundary — a truthy non-bool
+        # ("yes", 1) must not silently become an ordered scale; the Pydantic
+        # path raises for the same input, so the dict path matches.
+        if not isinstance(ordered, bool):
+            raise TypeError(
+                f"Field '{name}': ordered must be a bool, got "
+                f"{ordered!r} ({type(ordered).__name__})"
+            )
         field_type = field_type.lower()
         if field_type == "boolean":
+            # W6-B1: ordering is an enum-level scale; a two-level boolean
+            # that wants ordinal semantics should be an ordered enum.
+            if ordered:
+                raise ValueError(
+                    f"Field '{name}': boolean fields cannot be ordered; use an "
+                    "ordered enum with choices ['true', 'false'] if a two-level "
+                    "scale is intended"
+                )
             resolved_choices: tuple[str, ...] = ("true", "false")
             resolved_descriptions: Mapping[str, str] = MappingProxyType({})
         elif field_type == "multi":
+            if ordered:
+                raise ValueError(
+                    f"Field '{name}': multi fields cannot be ordered; ordering "
+                    "is an enum-level scale over mutually exclusive levels"
+                )
             if not choices or len(choices) < 2:
                 raise ValueError(f"Field '{name}' of type multi must have at least 2 choices.")
             if len(choices) > 64:
@@ -381,6 +404,11 @@ class FieldDefinition:
             resolved_descriptions = _freeze_choice_descriptions(
                 name, resolved_choices, choice_descriptions
             )
+            # W6-B1: an enum may declare ordered=True — its choices form an
+            # ordinal SCALE (e.g. SST-5's "0".."4", very negative .. very
+            # positive). The order is the CHOICES order; the decided value
+            # stays the winning level (no new public field type, no change
+            # to scoring).
         else:
             raise ValueError(
                 f"Unsupported field type '{field_type}'. "
@@ -393,6 +421,7 @@ class FieldDefinition:
         object.__setattr__(self, "set_constraints", set_constraints)
         object.__setattr__(self, "choices", resolved_choices)
         object.__setattr__(self, "choice_descriptions", resolved_descriptions)
+        object.__setattr__(self, "ordered", ordered)
 
         if self.field_type in ("multi", "enum", "choice", "selection"):
             seen: set[str] = set()
@@ -629,6 +658,7 @@ class StructuredSchema:
                 choices=spec.get("choices", None),
                 choice_descriptions=spec.get("choice_descriptions", None),
                 depends_on=spec.get("depends_on", None),
+                ordered=spec.get("ordered", False),
             )
             if spec.get("set_constraints"):
                 # W2-SETCONS: schema-dict-declared set constraints are

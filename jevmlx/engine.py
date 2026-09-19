@@ -809,6 +809,50 @@ class ScalarEvidence:
 
 
 @dataclass(frozen=True)
+class OrdinalTelemetry:
+    """W6-B1: ordinal (ordered-enum) telemetry, derived from the finalized
+    distribution WITHOUT another model call.
+
+    The decided value stays the winning level (a plain string); this record
+    only describes the distribution OVER the ordered levels.
+
+    Attributes:
+        argmax_level: index of the winning choice in the field's declared
+            (scale) order.
+        expected_index: sum p_i * i over the levels — the distribution's
+            mean position on the scale.
+        variance: sum p_i * (i - expected_index)^2 — the spread around it.
+        expected_score_normalized: expected_index / (n_levels - 1),
+            rescaled to [0, 1] (1.0 when the field has a single level).
+    """
+
+    argmax_level: int
+    expected_index: float
+    variance: float
+    expected_score_normalized: float
+
+
+def ordinal_telemetry(probs: list[float]) -> OrdinalTelemetry:
+    """Derive the W6-B1 ordinal record from a level-indexed distribution.
+
+    Pure function of the finalized probabilities — the order lives in the
+    caller (the field's declared choices); this only needs the vector in
+    scale order.
+    """
+    n = len(probs)
+    argmax_level = max(range(n), key=probs.__getitem__)
+    expected = sum(p * i for i, p in enumerate(probs))
+    variance = sum(p * (i - expected) ** 2 for i, p in enumerate(probs))
+    normalized = expected / (n - 1) if n > 1 else 1.0
+    return OrdinalTelemetry(
+        argmax_level=argmax_level,
+        expected_index=expected,
+        variance=variance,
+        expected_score_normalized=normalized,
+    )
+
+
+@dataclass(frozen=True)
 class ScalarDecision:
     """One scalar field's finalized decision + complete public telemetry."""
 
@@ -824,6 +868,7 @@ class ScalarDecision:
     prior_log_scores: dict[str, float] | None  # neutral pass log_scores, when used
     prior_corrected: bool
     evidence_source: str  # "batch" | "batch1" | "dependency" | "oracle"
+    ordinal: OrdinalTelemetry | None = None  # W6-B1: ordered enums only
 
 
 @dataclass(frozen=True)
@@ -878,6 +923,7 @@ def finalize_scalar_evidence(
     temperature: float,
     rescore: "Callable[[list[int]], ScalarEvidence] | None" = None,
     rescore_idxs: list[int] | None = None,
+    ordered: bool = False,
 ) -> tuple[ScalarDecision, bool]:
     """THE one scalar finalizer (W5-B review C.2 / finding 7).
 
@@ -891,6 +937,11 @@ def finalize_scalar_evidence(
     ``rescore`` + ``rescore_idxs``: only the normal batched pass supplies a
     rescore callback (it owns the engine row set); a batch=1, dependency or
     oracle evidence is already at the canonical shape.
+
+    ``ordered`` (W6-B1): the field is an ordered enum — attach the derived
+    ordinal telemetry (expected index / variance over the DECLARED choice
+    order, which ``evidence.choices`` preserves). The decided value is
+    untouched; unordered fields carry ``ordinal=None``.
 
     Returns (ScalarDecision, rescored_flag).
     """
@@ -945,6 +996,7 @@ def finalize_scalar_evidence(
         prior_log_scores=dict(prior_entry["log_scores"]) if prior_entry is not None else None,
         prior_corrected=prior_entry is not None,
         evidence_source="batch1" if rescored else evidence.source_shape,
+        ordinal=ordinal_telemetry(probs_list) if ordered else None,
     )
     return decision, rescored
 
@@ -1948,6 +2000,7 @@ def _selective_second_pass(
                 prior_entry=prior_entry,
                 temperature=temperature,
                 rescore=None,
+                ordered=fdef.ordered,
             )
             w_prob = decision.probability
 
@@ -2702,30 +2755,39 @@ def _cardinality_one_outcome(
     if fdef.field_type == "boolean":
         val = val == "true" if isinstance(val, str) else val
     key = val if isinstance(val, str) else str(val)
-    return FieldOutcome(
-        fname,
-        {"value": val, "prob": 1.0},
-        {
-            "value": val,
-            "type": fdef.field_type,
-            "probability": 1.0,
-            "cardinality": fdef.cardinality,
-            "log_scores": {key: 0.0},
-            "top_choices": [{"choice": key, "probability": 1.0}],
-            "rows": 0,
-            "legal_mass": 1.0,
-            # W5b-13: cardinality-1 fields are schema-determined — no model
-            # scoring, no temperature applied, nothing corrected (F5: built
-            # by the ONE record constructor).
-            "semantics": _field_semantics(
-                score_source="batched",
-                temperature=None,
-                calib=None,
-                calibrated_applied=False,
-                prior_corrected=False,
-            ),
-        },
-    )
+    telemetry = {
+        "value": val,
+        "type": fdef.field_type,
+        "probability": 1.0,
+        "cardinality": fdef.cardinality,
+        "log_scores": {key: 0.0},
+        "top_choices": [{"choice": key, "probability": 1.0}],
+        "rows": 0,
+        "legal_mass": 1.0,
+        # W5b-13: cardinality-1 fields are schema-determined — no model
+        # scoring, no temperature applied, nothing corrected (F5: built
+        # by the ONE record constructor).
+        "semantics": _field_semantics(
+            score_source="batched",
+            temperature=None,
+            calib=None,
+            calibrated_applied=False,
+            prior_corrected=False,
+        ),
+    }
+    # W6-B1/F3: an ordered cardinality-1 enum STILL emits the degenerate
+    # ordinal record (the [1.0] distribution) so the key's presence is
+    # guaranteed whenever the field is ordered — same rule as the multi-choice
+    # path through finalize_scalar_evidence, never a tolerated absence.
+    if fdef.ordered:
+        ot = ordinal_telemetry([1.0])
+        telemetry["ordinal"] = {
+            "argmax_level": ot.argmax_level,
+            "expected_index": ot.expected_index,
+            "variance": ot.variance,
+            "expected_score_normalized": ot.expected_score_normalized,
+        }
+    return FieldOutcome(fname, {"value": val, "prob": 1.0}, telemetry)
 
 
 def score_scalar_field(
@@ -2796,6 +2858,7 @@ def score_scalar_field(
         temperature=temperature,
         rescore=rescore_fn,
         rescore_idxs=idxs,
+        ordered=fdef.ordered,
     )
     w_prob = decision.probability
 
@@ -2851,6 +2914,18 @@ def score_scalar_field(
         # W5b-13: how this field's reported probabilities were produced.
         "semantics": semantics,
     }
+    # W6-B1: ordered enums ALWAYS carry the derived ordinal record — even a
+    # cardinality-1 scale emits the degenerate record (argmax 0, E 0,
+    # var 0, norm 1.0) so downstream consumers can rely on the key's
+    # presence whenever the field is ordered (F3). Unordered fields: the
+    # key is absent (additive contract).
+    if decision.ordinal is not None:
+        telemetry["ordinal"] = {
+            "argmax_level": decision.ordinal.argmax_level,
+            "expected_index": decision.ordinal.expected_index,
+            "variance": decision.ordinal.variance,
+            "expected_score_normalized": decision.ordinal.expected_score_normalized,
+        }
     if decision.prior_corrected:
         telemetry["prior_log_scores"] = dict(decision.prior_log_scores)
         telemetry["prior_corrected"] = True

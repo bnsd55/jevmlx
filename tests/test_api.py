@@ -43,12 +43,14 @@ def test_schema_from_model_exact_dict():
             "choices": ["LOW", "MEDIUM", "HIGH", "CRITICAL"],
             "description": "Risk tier",
             "choice_descriptions": {},
+            "ordered": False,
         },
         "severity": {
             "type": "enum",
             "choices": ["LOW", "MEDIUM", "HIGH"],
             "description": "Case severity",
             "choice_descriptions": {},
+            "ordered": False,
         },
         "notes": {"type": "boolean", "description": "notes"},
     }
@@ -223,6 +225,7 @@ def test_schema_from_model_accepts_strenum():
             "choices": ["red", "green"],
             "description": "color",
             "choice_descriptions": {},
+            "ordered": False,
         }
     }
 

@@ -41,6 +41,8 @@ __all__ = [
     "Decision",
     "FieldResult",
     "FieldSemantics",
+    "OrdinalFieldRecord",
+    "Ordered",
     "decide",
     "decide_many",
     "schema_from_model",
@@ -57,6 +59,32 @@ _SUPPORTED = (
 # separate, thresholded ``abstain`` (see FieldResult.abstain).
 NONE_OF_ABOVE = "NONE_OF_ABOVE"
 NONE_OF_ABOVE_DESCRIPTION = "none of the options apply"
+
+
+class Ordered:
+    """Marks an enum field as an ORDINAL scale (W6-B1).
+
+    Attach via ``Field(json_schema_extra={"ordered": True})`` or the plain
+    marker ``Field(json_schema_extra=Ordered())`` — the choices' DECLARATION
+    order is the scale order (level 0 = first Literal member). The decided
+    value stays the winning level (a plain string); ordering only adds
+    ordinal telemetry (expected index / variance) and ordinal metrics.
+
+        class Sentiment(BaseModel):
+            level: Literal["0", "1", "2", "3", "4"] = Field(
+                description="Sentiment level",
+                json_schema_extra={"ordered": True},
+            )
+    """
+
+    def __repr__(self) -> str:
+        return "Ordered()"
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Ordered)
+
+    def __hash__(self) -> int:
+        return hash("Ordered")
 
 
 def _choice_values(name: str, values: list) -> list[str]:
@@ -120,6 +148,26 @@ class FieldSemantics:
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
+class OrdinalFieldRecord:
+    """W6-B1: ordinal telemetry for ONE ordered-enum field.
+
+    Derived from the finalized distribution over the field's declared
+    (scale) order — no extra model call, the decided value unchanged.
+
+    Attributes:
+        argmax_level: index of the winning level in scale order.
+        expected_index: distribution mean over the scale (sum p_i * i).
+        variance: distribution spread around the mean.
+        expected_score_normalized: expected_index / (n - 1), in [0, 1].
+    """
+
+    argmax_level: int
+    expected_index: float
+    variance: float
+    expected_score_normalized: float
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
 class FieldResult:
     """Provenance for one decided field.
 
@@ -162,6 +210,8 @@ class FieldResult:
             see :class:`FieldSemantics`. Required: the engine's stages set
             the record and _build_field_results coerces it; a telemetry
             entry without one raises (never a silent None).
+        ordinal: W6-B1, ORDERED enums only — the derived ordinal record
+            (see :class:`OrdinalFieldRecord`); None for unordered fields.
     """
 
     value: object
@@ -175,6 +225,7 @@ class FieldResult:
     alternatives: tuple[tuple[str, float], ...]
     reason: str | None
     semantics: FieldSemantics
+    ordinal: OrdinalFieldRecord | None = None
 
 
 @dataclasses.dataclass
@@ -186,6 +237,35 @@ class Decision[T: BaseModel]:
 
 def _description(name: str, info) -> str:
     return info.description or name.replace("_", " ")
+
+
+def _ordered_flag(name: str, info) -> bool:
+    """Read the W6-B1 ordered marker from a field's json_schema_extra.
+
+    Accepted: ``{"ordered": True}`` or an ``Ordered()`` instance (bare or
+    merged in a dict). Anything else (including truthy non-bool junk) is a
+    TypeError — an accidentally-ordered field would silently corrupt every
+    ordinal metric, so this fails loudly.
+    """
+    extra = info.json_schema_extra
+    if extra is None:
+        return False
+    if isinstance(extra, Ordered):
+        return True
+    if isinstance(extra, dict):
+        if "ordered" not in extra:
+            return False
+        flag = extra["ordered"]
+        if isinstance(flag, Ordered):
+            return True
+        if flag is True:
+            return True
+        if flag is False:
+            return False
+    raise TypeError(
+        f"Field '{name}': json_schema_extra['ordered'] must be True, False, "
+        f"or Ordered(); got {extra!r}"
+    )
 
 
 def _choice_descriptions(name: str, info) -> dict[str, str]:
@@ -291,6 +371,7 @@ def schema_from_model(model_cls: type[BaseModel]) -> dict:
                 "choices": _choice_values(name, list(typing.get_args(ann))),
                 "description": _description(name, info),
                 "choice_descriptions": _choice_descriptions(name, info),
+                "ordered": _ordered_flag(name, info),
             }
         elif isinstance(ann, type) and issubclass(ann, enum.Enum):
             # Collect member values, skipping the synthetic 'descriptions'
@@ -306,6 +387,7 @@ def schema_from_model(model_cls: type[BaseModel]) -> dict:
                 "choices": values,
                 "description": _description(name, info),
                 "choice_descriptions": _enum_class_descriptions(ann),
+                "ordered": _ordered_flag(name, info),
             }
         else:
             raise TypeError(f"Field '{name}' has unsupported type {ann!r}. {_SUPPORTED}")
@@ -414,6 +496,17 @@ def _build_field_results(
                 "(results-contract violation; engine stages must set "
                 "field_telemetry[fname]['semantics'])"
             )
+        # W6-B1: ordered enums carry the engine's derived ordinal record;
+        # unordered fields have no key and keep ordinal=None.
+        ordinal_record = None
+        ord_dict = telemetry.get("ordinal")
+        if ord_dict is not None:
+            ordinal_record = OrdinalFieldRecord(
+                argmax_level=ord_dict["argmax_level"],
+                expected_index=ord_dict["expected_index"],
+                variance=ord_dict["variance"],
+                expected_score_normalized=ord_dict["expected_score_normalized"],
+            )
         fields[name] = FieldResult(
             value=telemetry["value"],
             score=score,
@@ -426,6 +519,7 @@ def _build_field_results(
             alternatives=alternatives,
             reason=reason,
             semantics=FieldSemantics(**sem_dict),
+            ordinal=ordinal_record,
         )
     return fields
 

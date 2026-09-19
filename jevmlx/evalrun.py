@@ -216,6 +216,15 @@ def parallel_decide_fn(engine, scoring: str = "slots", prior_correction: bool = 
                 "per_option": telemetry.get("per_option"),
                 "type": telemetry.get("type") or (field.field_type if field else None),
             }
+            # W6-B1: ordered enums carry the scale (choice order = level
+            # order) + the derived ordinal telemetry, so ordinal metrics can
+            # be computed from the predictions file alone.
+            if field is not None and field.ordered:
+                entry["ordered"] = True
+                entry["ordinal_choices"] = list(field.choices)
+                ord_record = telemetry.get("ordinal")
+                if isinstance(ord_record, dict):
+                    entry["ordinal"] = ord_record
             if field is not None and field.field_type != "multi":
                 raw = telemetry.get("log_scores")
                 if isinstance(raw, dict):
@@ -263,6 +272,46 @@ def parallel_decide_fn(engine, scoring: str = "slots", prior_correction: bool = 
     return decide
 
 
+def _attach_ordinal(field, entry: dict) -> None:
+    """W6-B1/F5: every track's decide_fn output carries the ordered scale +
+    the derived ordinal telemetry, so ordinal_mae/confusion compute on
+    EVERY track (no tolerated-absence path).
+
+    The parallel track reads the engine's distribution-derived record from
+    its result telemetry. The non-parallel tracks (naive_local,
+    api_baseline, openai_slots) free-write or call out — they have no
+    distribution, only the hard prediction. For those, derive a REAL hard
+    record: argmax_level = index of the predicted level in the declared
+    scale order, expected_index = argmax_level (no soft evidence — the hard
+    pick IS the distribution's entire mass), variance 0.0,
+    expected_score_normalized = argmax/(n-1), tagged ``source="hard"`` so
+    ordinal_mae_expected skips it EXPLICITLY by source (the soft metric is
+    undefined on a hard-only record), never by an absent key. An invalid
+    (off-scale) prediction still emits the record with a worst-distance
+    argmax (len-1), matching the invalid-is-wrong rule.
+    """
+    if field is None or not field.ordered:
+        return
+    choices = list(field.choices)
+    prediction = entry.get("prediction")
+    entry["ordered"] = True
+    entry["ordinal_choices"] = choices
+    # Index of the predicted level; invalid => worst distance (len-1),
+    # the same rule ordinal_mae applies to the hard argmax.
+    try:
+        argmax = choices.index(str(prediction))
+    except (ValueError, TypeError):
+        argmax = len(choices) - 1
+    n = len(choices)
+    entry["ordinal"] = {
+        "argmax_level": argmax,
+        "expected_index": float(argmax),
+        "variance": 0.0,
+        "expected_score_normalized": (argmax / (n - 1)) if n > 1 else 1.0,
+        "source": "hard",
+    }
+
+
 def naive_local_decide_fn(engine) -> DecideFn:
     """Track ``naive_local``: the same local model free-writes the JSON object.
     Takes the loaded :class:`Engine`.
@@ -285,12 +334,15 @@ def naive_local_decide_fn(engine) -> DecideFn:
         out: dict[str, dict[str, Any]] = {}
         for fname in schema.fields:
             strict = strict_values.get(fname)
-            out[fname] = {
+            entry: dict[str, Any] = {
                 "prediction": strict,
                 "valid": strict is not None,
                 "salvage_prediction": salvage_values.get(fname),
                 "error": next((e for e in errors if fname in e), None),
             }
+            # W6-B1/F5: ordered enums carry the scale on EVERY track.
+            _attach_ordinal(schema.fields.get(fname), entry)
+            out[fname] = entry
         out["_meta"] = {
             "latency_ms": result.get("elapsed_ms"),
             "rows": None,
@@ -317,11 +369,14 @@ def api_baseline_decide_fn(
         out: dict[str, dict[str, Any]] = {}
         for fname in schema.fields:
             value = result["values"].get(fname)
-            out[fname] = {
+            entry: dict[str, Any] = {
                 "prediction": value,
                 "valid": value is not None,
                 "error": next((e for e in result["errors"] if fname in e), None),
             }
+            # W6-B1/F5: ordered enums carry the scale on EVERY track.
+            _attach_ordinal(schema.fields.get(fname), entry)
+            out[fname] = entry
         out["_meta"] = {
             "latency_ms": result.get("latency_ms"),
             "rows": None,
@@ -352,7 +407,7 @@ def openai_slots_decide_fn(
         out: dict[str, dict[str, Any]] = {}
         for fname, telemetry in result["field_telemetry"].items():
             field = schema.fields.get(fname)
-            out[fname] = {
+            entry = {
                 "prediction": telemetry["value"],
                 "probability": telemetry.get("probability"),
                 "per_option": telemetry.get("per_option"),
@@ -360,6 +415,9 @@ def openai_slots_decide_fn(
                 "log_scores": telemetry.get("log_scores"),
                 "truncated": telemetry.get("truncated"),
             }
+            # W6-B1/F5: ordered enums carry the scale on EVERY track.
+            _attach_ordinal(field, entry)
+            out[fname] = entry
         out["_meta"] = {
             "latency_ms": result.get("elapsed_ms"),
             "rows": None,
@@ -526,6 +584,9 @@ def run_eval(
             for fname, res in results.items():
                 field_def = schema.fields.get(fname)
                 prediction = res.get("prediction")
+                # W6-B1: ordered-enum lines carry the scale + telemetry.
+                ordinal_choices = res.get("ordinal_choices")
+                ordinal_record = res.get("ordinal")
                 # Rotated variants reorder the SAME canonical choice strings,
                 # so a prediction string is already canonical; the remap seam
                 # only validates membership (and would translate a positional
@@ -564,6 +625,12 @@ def run_eval(
                     "salvage_prediction": res.get("salvage_prediction"),
                     "oracle_prediction": oracle_results.get(fname),
                 }
+                if ordinal_choices:
+                    # F3: the pair is written together, always — an ordered
+                    # line without its ordinal record is a contract violation
+                    # downstream (_ordinal_lines raises on it).
+                    line["ordinal_choices"] = ordinal_choices
+                    line["ordinal"] = ordinal_record
                 if carry_perturbation:
                     line["perturbation"] = (case.get("meta") or {}).get("perturbation")
                 if carry_consensus:

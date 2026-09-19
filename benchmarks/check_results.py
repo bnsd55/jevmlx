@@ -178,8 +178,14 @@ def check_folder(folder: Path) -> tuple[bool, list[str]]:
         extra = sorted(set(record) - set(PREDICTION_LINE_KEYS))
         # perturbation / consensus / oracle_prediction are optional add-ons,
         # not contract violations (oracle_prediction rides under
-        # oracle_overrides evaluation; W3-D).
-        extra = [k for k in extra if k not in ("perturbation", "consensus", "oracle_prediction")]
+        # oracle_overrides evaluation; W3-D). ordinal_choices / ordinal are
+        # the W6-B1 ordered-enum add-ons (ordered fields only).
+        extra = [
+            k
+            for k in extra
+            if k
+            not in ("perturbation", "consensus", "oracle_prediction", "ordinal_choices", "ordinal")
+        ]
         if missing:
             problems.append(f"{name}: line {index} missing keys {missing}")
         if extra:
