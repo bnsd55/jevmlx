@@ -775,8 +775,7 @@ def _set_metal_cache_limit(cache_gb: float) -> int | None:
         return limit_bytes
     except Exception as exc:  # noqa: BLE001 - telemetry must never break the run
         print(
-            f"[memory] Metal buffer cache cap NOT set ({exc!r}); "
-            "the allocator may hoard",
+            f"[memory] Metal buffer cache cap NOT set ({exc!r}); the allocator may hoard",
             flush=True,
         )
         return None
