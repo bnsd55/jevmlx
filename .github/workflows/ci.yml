@@ -21,7 +21,7 @@ jobs:
         run: |
           uv python install 3.12
           uv venv --python 3.12 .venv
-          uv pip install --python .venv/bin/python -e '.[dev]'
+          uv pip install --python .venv/bin/python -e '.[dev,bench]'
 
       - name: Lint (ruff)
         run: |
