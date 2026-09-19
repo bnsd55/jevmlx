@@ -80,15 +80,16 @@ class _OpenSpan:
 class _SpanContext:
     """The context manager ``with ledger.span(name, phase):`` yields."""
 
-    __slots__ = ("_ledger", "_name", "_phase")
+    __slots__ = ("_ledger", "_name", "_phase", "_opened")
 
     def __init__(self, ledger: Ledger, name: str, phase: str):
         self._ledger = ledger
         self._name = name
         self._phase = phase
+        self._opened: _OpenSpan | None = None
 
     def __enter__(self) -> None:
-        self._ledger._open(self._name, self._phase)
+        self._opened = self._ledger._open(self._name, self._phase)
 
     def __exit__(self, exc_type, exc, tb) -> None:
         if exc_type is not None:
@@ -99,16 +100,19 @@ class _SpanContext:
             # exception and continue, and the parents close normally later.
             # (Dropping the whole stack broke parents that outlive a caught
             # child failure — e.g. a Metal retry inside a group span.)
-            stack = self._ledger._stack
-            if self not in stack:
-                # Already dropped by an inner __exit__ with exc_info — a
-                # double unwind is a no-op.
+            opened = self._opened
+            self._opened = None
+            if opened is None or opened not in self._ledger._stack:
+                # Never opened, or already dropped by an inner __exit__ with
+                # exc_info — a double unwind is a no-op.
                 return
+            stack = self._ledger._stack
             while stack:
                 span = stack.pop()
-                if span is self:
+                if span is opened:
                     break
             return
+        self._opened = None
         self._ledger._close()
 
 
@@ -148,7 +152,7 @@ class Ledger:
     def intervals(self) -> list[Interval]:
         return list(self._intervals)
 
-    def _open(self, name: str, phase: str) -> None:
+    def _open(self, name: str, phase: str) -> _OpenSpan:
         parent = self._stack[-1] if self._stack else None
         t0 = time.perf_counter()
         if parent is not None and t0 < parent.t0:
@@ -160,7 +164,9 @@ class Ledger:
                 f"span {name!r} at depth {depth} starts at {t0:.6f}, before "
                 f"the previous sibling closed at {prev_end:.6f} (overlap)"
             )
-        self._stack.append(_OpenSpan(name, phase, t0, parent))
+        opened = _OpenSpan(name, phase, t0, parent)
+        self._stack.append(opened)
+        return opened
 
     def _close(self) -> None:
         if not self._stack:
@@ -189,7 +195,7 @@ class Ledger:
             out[iv.phase][iv.name] = out[iv.phase].get(iv.name, 0.0) + iv.ms
         return out
 
-    def derived_flat(self) -> dict[str, float]:
+    def derived_flat(self, prior_ms: float | None = None) -> dict[str, float]:
         """Today's flat ``*_ms`` keys, derived from the interval set.
 
         One place computes them (per the note): the flat keys exist only so
@@ -197,6 +203,11 @@ class Ledger:
         separately measured. ``elapsed_ms`` sums only TOP-LEVEL main spans
         (children are inside their parents' [t0, t1] — the partition makes
         the top-level sum the true elapsed time without double counting).
+
+        ``prior_ms`` overrides the prior-phase derivation for ledgers that
+        carry no prior span (the batched per-context ledgers: the neutral
+        pass runs ONCE on the request ledger — finding 26 — and is exposed
+        on every result as the shared value).
         """
         top_level = self._top_level_intervals()
 
@@ -207,7 +218,8 @@ class Ledger:
         def name_ms(name: str) -> float:
             return sum(iv.ms for iv in self._intervals if iv.name == name)
 
-        prior_ms = sum(iv.ms for iv in self._top_level_intervals(phase="prior"))
+        if prior_ms is None:
+            prior_ms = sum(iv.ms for iv in self._top_level_intervals(phase="prior"))
         # elapsed_ms = the ONE top-level ``request`` span when present
         # (W5b-14 review F10: true wall time — the stage spans are children
         # of it and never double-count). Older paths without a request span
@@ -251,6 +263,14 @@ class Ledger:
                 top.append(iv)
         return top
 
+    def last_interval(self, name: str) -> Interval:
+        """The most recent CLOSED interval with this name (SpanError if none
+        closed yet) — the call-site replacement for bare ``intervals[-1]``."""
+        for iv in reversed(self._intervals):
+            if iv.name == name:
+                return iv
+        raise SpanError(f"no closed interval named {name!r}")
+
     def batched_views(self, group_int: Interval, item_indices: list[int]) -> dict[str, list[float]]:
         """The three decide_many views from one ledger (per the note).
 
@@ -263,7 +283,7 @@ class Ledger:
         n = len(item_indices)
         return {
             "group_wall_ms": [group_wall_ms],
-            "per_item_amortized_ms": [group_wall_ms / max(1, n)],
+            "per_item_amortized_ms": [group_wall_ms / max(1, n)] * max(1, n),
         }
 
     def per_item_end_to_end(self, prefill_iv: Interval, assembly_iv: Interval) -> float:

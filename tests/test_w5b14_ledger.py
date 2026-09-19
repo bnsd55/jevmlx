@@ -146,8 +146,17 @@ class TestReviewFixes:
                 },
             }
         )
-        res = run_parallel_generation(FakeModel(vocab_size=64), FakeTokenizer(), "ctx", schema)
-        assert res["second_pass_ms"] > 0.0
+        # Equality per review: drive a ledger through and compare the flat
+        # key to the dependency interval, not just a sign check.
+        from jevmlx.timing import Ledger
+
+        ledger = Ledger()
+        res = run_parallel_generation(
+            FakeModel(vocab_size=64), FakeTokenizer(), "ctx", schema, ledger=ledger
+        )
+        dep = [iv for iv in ledger.intervals if iv.name == "dependency"]
+        assert dep, "expected a dependency span when a field has depends_on"
+        assert res["second_pass_ms"] == pytest.approx(dep[-1].ms, abs=0.01)
         # The dependency span is INSIDE the request wall.
         assert res["second_pass_ms"] <= res["elapsed_ms"] + 1e-6
 
@@ -177,7 +186,41 @@ class TestReviewFixes:
         assert len(results) == 2
         for res in results:
             assert res["group_wall_ms"] > 0.0
-            assert res["failed_attempts"] >= 1 or res["sequential_forward_passes"] >= 1
+            # N4: the batched path passes failed_attempts through.
+            assert res["failed_attempts"] >= 1
+
+    def test_degenerate_schema_no_crash(self):
+        """N2 repro: an R==0 (single-choice) schema through the batched
+        path must produce results with group views — the old branch never
+        stored results[idx] and opened a nested group_wall."""
+        schema = StructuredSchema(
+            {"pick": {"type": "enum", "description": "d", "choices": ["ONLY"]}}
+        )
+        results = run_parallel_generation_batched(
+            FakeModel(vocab_size=64), FakeTokenizer(), ["a", "b"], schema
+        )
+        assert len(results) == 2
+        for res in results:
+            assert res["group_wall_ms"] > 0.0
+            assert res["per_item_amortized_ms"] > 0.0
+            assert res["per_item_end_to_end_ms"] > 0.0
+            assert res["contexts_per_pass"] == 2
+
+    def test_batched_prior_ms_shared_nonzero(self):
+        """N1: prior_correction=True in the batched path reports the shared
+        prior pass on EVERY result (prior_ms > 0), and total_ms includes it
+        (finding 26)."""
+        schema = _schema()
+        results = run_parallel_generation_batched(
+            FakeModel(vocab_size=64),
+            FakeTokenizer(),
+            ["ctx one", "ctx two"],
+            schema,
+            prior_correction=True,
+        )
+        for res in results:
+            assert res["prior_ms"] > 0.0
+            assert res["total_ms"] == pytest.approx(res["elapsed_ms"] + res["prior_ms"], abs=0.05)
 
     def test_unpadded_chunks_eval_their_cache(self):
         """F6: _eval_cache_state runs UNCONDITIONALLY — an unpadded merge
