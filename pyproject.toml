@@ -42,6 +42,8 @@ jevmlx = "jevmlx.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest", "ruff", "twine"]
+# `jevmlx bench --datasets typed-decisions` reads Hugging Face parquet shards.
+bench = ["pyarrow"]
 
 [tool.ruff]
 line-length = 100

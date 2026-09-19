@@ -23,6 +23,10 @@ c. **jevmlx, local (measured)**: ``benchmarks/results`` folders on the
    typesafe dataset, parallel track — Accuracy = agreement on L1's common
    subset, per-workflow agreement, Time per case = median end-to-end latency
    per case, Cost per case = "$0 (local)", Cases = n.
+d. **jevmlx, local on LocalLLaMA/typed-decisions (measured)**: same columns
+   for results folders on the ``typed-decisions`` dataset (the task published
+   as versioned parquet; official ``test`` split, 400 cases). Kept as its own
+   group: it is a different test set from the 20 public examples.
 
 With ``--readme`` the table is written between
 ``<!-- leaderboard:start -->`` / ``<!-- leaderboard:end -->`` markers.
@@ -48,6 +52,12 @@ _WORKFLOW_COLS = [
     ("security_incidents", "Security"),
     ("invoice_processing", "Invoices"),
 ]
+
+# Local datasets with TypeSafe-style consensus labels -> row-group title.
+_LOCAL_GROUPS = {
+    "typesafe": "jevmlx, local (measured)",
+    "typed-decisions": "jevmlx, local on LocalLLaMA/typed-decisions test split (measured)",
+}
 
 _HEADER = (
     "| Model | Source | Scorer | Machine | Accuracy | Customer service | "
@@ -201,7 +211,7 @@ def _local_rows(results_root: Path) -> list[dict]:
             track = config.get("track", "")
             dataset = config.get("dataset_path", "") or ""
             dataset_name = dataset if "/" not in dataset else Path(dataset).stem
-            if track != "parallel" or dataset_name != "typesafe":
+            if track != "parallel" or dataset_name not in _LOCAL_GROUPS:
                 continue
             metrics = report.get("metrics", {})
             ta = metrics.get("agreement", {})
@@ -228,6 +238,7 @@ def _local_rows(results_root: Path) -> list[dict]:
             time_per_case_s = end_to_end / 1000.0
             rows.append(
                 {
+                    "dataset": dataset_name,
                     "model": model,
                     "source": "local",
                     "scorer": scorer,
@@ -337,11 +348,13 @@ def build_table(
                 )
             )
 
-    # Group C: jevmlx, local (measured).
-    if local_rows:
-        lines.append("| **jevmlx, local (measured)** | | | | | | | | | | | |")
-        for r in local_rows:
-            lines.append(_row_line(r))
+    # Groups C/D: jevmlx, local (measured), one group per dataset — they are
+    # different test sets and must never share a column.
+    for dataset_name, title in _LOCAL_GROUPS.items():
+        group = [r for r in local_rows if r.get("dataset") == dataset_name]
+        if group:
+            lines.append(f"| **{title}** | | | | | | | | | | | |")
+            lines.extend(_row_line(r) for r in group)
 
     # Caption lines.
     lines.append("")
@@ -350,6 +363,13 @@ def build_table(
         "the 20 public example cases, so the numbers are indicative, not the "
         "same test._"
     )
+    if any(r.get("dataset") == "typed-decisions" for r in local_rows):
+        lines.append(
+            "_typed-decisions rows are on the official `test` split of "
+            "[LocalLLaMA/typed-decisions]"
+            "(https://huggingface.co/datasets/LocalLLaMA/typed-decisions) "
+            "(400 cases), revision pinned in each folder's dataset.lock.json._"
+        )
     lines.append(
         "_Consensus label = the agreement of GPT-6 Astra + Claude Fable 5.1 "
         "(TypeSafe's reference)._"

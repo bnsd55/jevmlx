@@ -30,6 +30,7 @@ MAX_FOLDER_BYTES = 5 * 1024 * 1024
 DATASETS = (
     "bundled",
     "typesafe",
+    "typed-decisions",
     "perturbed",
     "synthetic-labels",
     "synthetic-cardinality",
@@ -139,19 +140,21 @@ def build_datasets(datasets: list[str], offline_ok: bool = True) -> dict[str, Pa
         _rebuild_if_needed(jsonl, lock, _build_bundled)
         paths["bundled"] = jsonl
 
-    if "typesafe" in datasets:
-        jsonl = BENCH_CACHE / "typesafe.jsonl"
-        lock = BENCH_CACHE / "typesafe.dataset.lock.json"
+    for name, build in (("typesafe", _build_typesafe), ("typed-decisions", _build_typed_decisions)):
+        if name not in datasets:
+            continue
+        jsonl = BENCH_CACHE / f"{name}.jsonl"
+        lock = BENCH_CACHE / f"{name}.dataset.lock.json"
         try:
-            _rebuild_if_needed(jsonl, lock, _build_typesafe)
+            _rebuild_if_needed(jsonl, lock, build)
         except OSError as exc:
             if offline_ok and not (jsonl.exists() and lock.exists()):
-                print(f"typesafe dataset skipped (offline): {exc}")
+                print(f"{name} dataset skipped (offline): {exc}")
             elif jsonl.exists() and lock.exists():
-                print(f"typesafe dataset: reusing cached copy (fetch failed: {exc})")
+                print(f"{name} dataset: reusing cached copy (fetch failed: {exc})")
             else:
                 raise
-        paths["typesafe"] = jsonl
+        paths[name] = jsonl
 
     if "perturbed" in datasets:
         jsonl = BENCH_CACHE / "perturbed.jsonl"
@@ -198,6 +201,20 @@ def _build_typesafe() -> None:
     rc = fetch_main(["--out", out])
     if rc != 0:
         raise OSError("typesafe fetch failed")
+
+
+def _build_typed_decisions() -> None:
+    from benchmarks.typed_decisions.fetch import main as fetch_main
+
+    out = BENCH_CACHE / "typed-decisions.jsonl"
+    lock = BENCH_CACHE / "typed-decisions.dataset.lock.json"
+    print("building typed-decisions dataset (downloads from the Hugging Face Hub)...")
+    try:
+        rc = fetch_main(["--out", str(out), "--lock", str(lock)])
+    except Exception as exc:  # noqa: BLE001 — hub errors are not all OSError
+        raise OSError(f"typed-decisions fetch failed: {exc}") from exc
+    if rc != 0:
+        raise OSError("typed-decisions fetch failed")
 
 
 def _build_perturbed(bundled: Path) -> None:
@@ -581,6 +598,10 @@ def _run_one(model: str, track: str, scorer: str, jsonl: Path, combo_dir: Path) 
         extra_config={"scoring": scorer if track == "parallel" else "slots"},
         chat_template=chat_template,
         dataset_path=str(jsonl),
+        # Consensus datasets (typesafe, typed-decisions) carry per-field
+        # distributions; lines get theirs so tvd_vs_consensus can run. Other
+        # datasets have no meta.consensus and are unaffected.
+        carry_consensus=True,
     )
 
     records = load_predictions(combo_dir / "predictions.jsonl")
@@ -715,7 +736,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--datasets",
         default="bundled,typesafe,perturbed",
-        help="comma list: bundled,typesafe,perturbed,synthetic-*",
+        help="comma list: bundled,typesafe,typed-decisions,perturbed,synthetic-*",
     )
     parser.add_argument("--scorers", default="slots,labels", help="comma list: slots,labels")
     parser.add_argument(

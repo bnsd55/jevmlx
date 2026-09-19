@@ -55,6 +55,21 @@ jevmlx eval --data benchmarks/cases.jsonl --track parallel \
     --limit 20 --out runs/smoke
 ```
 
+## typed-decisions (Hugging Face)
+
+[`LocalLLaMA/typed-decisions`](https://huggingface.co/datasets/LocalLLaMA/typed-decisions)
+is the TypeSafe typed-decisions task published as versioned parquet: the same
+four workflows and question types as the `typesafe` scrape, with per-field
+consensus probabilities and an official `train`/`test` split (1200/400 cases).
+`jevmlx bench --datasets typed-decisions` builds the `test` split (revision
+pinned in `dataset.lock.json`); results render as their own leaderboard group.
+Reading the parquet needs `pip install 'jevmlx[bench]'` (pyarrow).
+
+```bash
+python -m benchmarks.typed_decisions.fetch --out cases.jsonl \
+    [--split train] [--workflow customer_service] [--revision <sha>]
+```
+
 ## Synthetic sets
 
 `python -m benchmarks.synthetic --out DIR [--set NAME ...] [--seed 0]` generates

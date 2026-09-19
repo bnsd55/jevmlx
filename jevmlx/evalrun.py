@@ -435,8 +435,9 @@ def run_eval(
     :func:`jevmlx.evalmetrics.perturbation_flip_rate`.
 
     With ``carry_consensus=True`` each prediction line whose case carries a
-    ``meta.consensus`` distribution (TypeSafe fetcher) gets a ``"consensus"``
-    key with that dict, feeding :func:`jevmlx.evalmetrics.tvd_vs_consensus`.
+    ``meta.consensus[field]`` distribution (TypeSafe / typed-decisions
+    fetchers) gets a ``"consensus"`` key with that field's ``{choice: p}``
+    dict, feeding :func:`jevmlx.evalmetrics.tvd_vs_consensus`.
     """
     run_id = run_id or make_run_id()
     os.makedirs(out_dir, exist_ok=True)
@@ -549,7 +550,9 @@ def run_eval(
                 if carry_perturbation:
                     line["perturbation"] = (case.get("meta") or {}).get("perturbation")
                 if carry_consensus:
-                    consensus = (case.get("meta") or {}).get("consensus")
+                    # meta.consensus is {field: {choice: p}}; the line carries
+                    # ITS field's distribution (what tvd_vs_consensus reads).
+                    consensus = ((case.get("meta") or {}).get("consensus") or {}).get(fname)
                     if isinstance(consensus, dict) and consensus:
                         line["consensus"] = consensus
                 # Constraints always carried when present (case-level, not

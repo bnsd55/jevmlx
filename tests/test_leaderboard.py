@@ -181,6 +181,43 @@ def _write_local_result_v2(root: Path) -> Path:
     return root
 
 
+def _add_typed_decisions_combo(root: Path) -> None:
+    """Clone the typesafe combo into a typed-decisions one (accuracy 0.6)."""
+    machine_dir = root / "m1-8gb-fake"
+    src = machine_dir / "parallel-trie-typesafe"
+    dst = machine_dir / "parallel-trie-typed-decisions"
+    dst.mkdir()
+    run = json.loads((src / "run.json").read_text())
+    run["config"]["dataset_path"] = "/cache/jevmlx/bench/typed-decisions.jsonl"
+    (dst / "run.json").write_text(json.dumps(run), encoding="utf-8")
+    report = json.loads((src / "report.json").read_text())
+    report["metrics"]["agreement"]["agreement_common_subset"] = 0.6
+    report["metrics"]["agreement"]["n_cases"] = 400
+    (dst / "report.json").write_text(json.dumps(report), encoding="utf-8")
+    (dst / "predictions.jsonl").write_bytes((src / "predictions.jsonl").read_bytes())
+
+
+def test_typed_decisions_rows_render_in_their_own_group(tmp_path):
+    official = _write_official(tmp_path)
+    published = _write_published(tmp_path)
+    results = _write_local_result(tmp_path)
+    _write_local_result_v2(results)
+    _add_typed_decisions_combo(results)
+    table = build_table(results, published, official)
+    lines = table.splitlines()
+    group_c = next(i for i, ln in enumerate(lines) if "**jevmlx, local (measured)**" in ln)
+    group_d = next(i for i, ln in enumerate(lines) if "LocalLLaMA/typed-decisions test split" in ln)
+    assert group_c < group_d
+    # Each group holds exactly its own dataset's row: typesafe 75.0% / 4
+    # cases under C, typed-decisions 60.0% / 400 cases under D.
+    assert lines[group_c + 1].startswith("| fake-1b |") and "75.0%" in lines[group_c + 1]
+    assert lines[group_d + 1].startswith("| fake-1b |") and "60.0%" in lines[group_d + 1]
+    assert lines[group_d + 1].rstrip().endswith("| 400 |")
+    assert group_d == group_c + 2  # exactly one typesafe row between the headers
+    assert "official `test` split" in table
+    assert "No local results yet" not in table
+
+
 def test_official_block_exact_text(tmp_path):
     """Official + published blocks render the exact expected rows."""
     official = _write_official(tmp_path)
