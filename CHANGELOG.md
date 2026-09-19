@@ -19,6 +19,19 @@
   prefix, and token-position savings do not map linearly to latency.
   `check_results` contract v2 enforces the new keys in timing.json's
   median block.
+- **W5c-5 (golden prompts, pre-M5)** — the rendered prompt is now a
+  tested contract: PROMPT_PROTOCOL.md (versioned, its example blocks
+  GENERATED between markers by `benchmarks/golden_prompts.py --write`),
+  committed golden vectors under `tests/golden/prompts/` (unit =
+  prompt version x profile x PINNED tokenizer revision x representative
+  request; 3 profiles — qwen2.5, qwen3 thinking-off, gemma merged-system
+  — x 3 cases: slots, labels, multi; real-tokenizer vectors pinned via
+  `from_pretrained(revision=...)`), and `--check` (CI) that re-renders
+  everything through the live renderer and fails on any drift. Not
+  circular: the committed file is the only "expected". The fast CI suite
+  stays HF-free (`network` marker), one cache-backed CI step owns the
+  tokenizer files.
+
 - **W5-C** — set constraints, joint count + set optimization, typed
   calibration, internal telemetry, abstention contract (PROMPT_VERSION
   `jevmlx-parallel-v9`). The set-constraint solver is exact: connected
@@ -182,7 +195,6 @@
   monotone-equivalent), k capped at the option count; otherwise the
   per-option rule stands. Telemetry: `count_choice`, `count_margin`,
   `reconciled_by` on the field entry plus a `<field>#count` scalar entry.
-
 
 - W2-D legal_mass telemetry: per-branch leakage signal added to engine
   field telemetry. legal_mass = sum(exp(z_allowed)) / sum(exp(z_vocab)) —

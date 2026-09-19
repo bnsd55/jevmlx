@@ -158,7 +158,7 @@ git clone https://github.com/bnsd55/jevmlx && cd jevmlx && ./setup.sh
 
 ## How it works
 
-The schema compiles per tokenizer: a bounded codebook search picks the neutral alias codes whose candidate rows tokenize most cleanly, and the prompt renders FROM the compiled plan — the model is taught exactly the protocol the scorer judges. The context is fenced with a per-context nonce, so no interior line can impersonate the closing fence.
+The schema compiles per tokenizer: a bounded codebook search picks the neutral alias codes whose candidate rows tokenize most cleanly, and the prompt renders FROM the compiled plan — the model is taught exactly the protocol the scorer judges. The context is fenced with a per-context nonce, so no interior line can impersonate the closing fence. The rendered prompt is a tested contract: [PROMPT_PROTOCOL.md](PROMPT_PROTOCOL.md) documents it, and committed golden vectors (`benchmarks/golden_prompts.py --check`, run in CI) fail on any renderer drift.
 
 The model prefills once and the KV cache is shared. One scoring row per field (extra trie rows for multi-token options), a restricted softmax over each field's allowed options, and the JSON is assembled from the winners — with a probability per field. Chunks are sized by a measured active-memory budget (the B=1/B=2 tiling slope is probed at engine load; Metal allocation failures halve the chunk and retry, counted in `failed_attempts`). Temperature is applied once at the end; ties resolve deterministically. Batched `decide_many` runs one prior pass and one merged scoring pass per context group. [ARCHITECTURE.md](ARCHITECTURE.md) has the full picture.
 

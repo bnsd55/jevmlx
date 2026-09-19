@@ -28,5 +28,23 @@ jobs:
           .venv/bin/ruff check .
           .venv/bin/ruff format --check .
 
-      - name: Fast tests (no model downloads)
-        run: .venv/bin/pytest -m "not slow" -q
+      - name: Fast tests (no model downloads, no Hub access)
+        run: .venv/bin/pytest -m "not slow and not network" -q
+
+      - name: Cache pinned golden-prompt tokenizers (W5c-5)
+        # F1: the tokenizers are PINNED to snapshot revisions (the key), so
+        # the cache is stable and only downloads tokenizer files (KBs-MBs,
+        # never model weights).
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface/hub
+          key: golden-prompts-qwen25-a5339a41-gemma-2c715097
+
+      - name: Golden prompt vectors (W5c-5)
+        # ONE step for the whole prompt contract (F3): --check re-renders
+        # every committed vector through the live renderer and diffs the
+        # doc's generated sections. A cold-offline cache miss exits with a
+        # clear 'tokenizer not available' message, not a traceback. The
+        # pytest fast suite stays HF-free: its real-tokenizer tests carry
+        # the network marker and are excluded with -m 'not network'.
+        run: .venv/bin/python -m benchmarks.golden_prompts --check
