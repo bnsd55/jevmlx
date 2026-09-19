@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- W6-B7: serve.py backpressure + admission limits. The HTTP server is now
+  a `ThreadingHTTPServer` (HTTP/1.0, one thread per connection) with a
+  bounded admission queue (default 16, via `--queue-size`) feeding a single
+  serial GPU worker — two decide calls never overlap. A full queue returns
+  HTTP 429 with a `Retry-After` header (fixed 2s, not 529). `/health`
+  reports process liveness + worker-alive (always 200) plus queue depth +
+  capacity; `/ready` returns 503 until model load + warm-up complete AND
+  the worker is alive, then 200. The port binds BEFORE warm-up so `/ready`
+  is reachable during warm-up. Every response echoes the client's
+  `X-Request-Id` (capped, newline-stripped) or generates one. Queue depth
+  and queue-wait ms ride every decide response; queue depth + capacity ride
+  `/health`. Client-disconnect cancellation: a client gone while queued is
+  marked cancelled and excluded from depth immediately (no dead-client slot
+  leak). The worker catches any exception from `decide_fn`, returns 500 to
+  that request, and continues (it does not die; `/ready` reflects
+  worker-alive). Hard admission limits (`--max-rows`, `--max-prompt-tokens`)
+  reject oversized requests with HTTP 413 before any model work, using
+  O(schema) arithmetic on the raw dict (not `_build_schema_rows`). The
+  projected-memory limit was dropped — the engine already chunks rows to its
+  measured budget. `queue_wait_ms` is stamped by the worker at pickup (not
+  submit time). During warm-up `/decide` returns 503 (not 200 with empty
+  fields); only one admission queue exists. A malformed schema is 400, not a
+  dropped connection. No dual-path fallbacks: tests inject the real
+  admission-function shapes.
 - W6-B1: ordered-enum telemetry. An enum field may declare `ordered: True`
   (schema dict) / `Field(json_schema_extra={"ordered": True})` or bare
   `Ordered()` (Pydantic) — the choices' declaration order is the ordinal
@@ -38,7 +62,6 @@
   `ag_news`, `boolq`, `sst5` (each producing `.balanced` / `.natural`; a
   bare name runs both views; `--per-class` / `--natural-rows` override the
   sample sizes).
-
 - W5c-6 / B4: token-accounting telemetry. Every engine result (single and
   batched) and timing.json now carry: `naive_branch_prompt_tokens` (sum of
   full prompt length for every actual scoring row, shared prefix repeated),
