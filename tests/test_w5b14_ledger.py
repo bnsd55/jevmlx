@@ -12,9 +12,8 @@
 """
 
 import pytest
-from conftest import FakeModel, FakeTokenizer
+from conftest import FakeModel, make_engine
 
-from conftest import make_engine
 from jevmlx.engine import run_parallel_generation, run_parallel_generation_batched
 from jevmlx.schema import StructuredSchema
 
