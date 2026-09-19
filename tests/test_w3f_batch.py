@@ -12,7 +12,7 @@ Verifies:
 from __future__ import annotations
 
 import pydantic
-from conftest import FakeModel, FakeTokenizer
+from conftest import FakeModel, FakeTokenizer, make_engine
 
 from jevmlx.engine import run_parallel_generation, run_parallel_generation_batched
 from jevmlx.schema import StructuredSchema
@@ -33,12 +33,12 @@ def test_batched_equals_separate_calls():
     separate = []
     for ctx in contexts:
         m = FakeModel(vocab_size=64)
-        separate.append(run_parallel_generation(m, FakeTokenizer(), ctx, schema))
+        separate.append(run_parallel_generation(make_engine(m, FakeTokenizer()), ctx, schema))
 
     # Batched call (one model, shared pass).
     model = FakeModel(vocab_size=64)
     tok = FakeTokenizer()
-    batched = run_parallel_generation_batched(model, tok, contexts, schema)
+    batched = run_parallel_generation_batched(make_engine(model, tok), contexts, schema)
 
     assert len(batched) == 3
     for sep, bat, ctx in zip(separate, batched, contexts, strict=True):
@@ -56,7 +56,7 @@ def test_batched_input_order_preserved():
     )
     contexts = ["first", "second", "third", "fourth"]
     model = FakeModel(vocab_size=64)
-    results = run_parallel_generation_batched(model, FakeTokenizer(), contexts, schema)
+    results = run_parallel_generation_batched(make_engine(model), contexts, schema)
     assert len(results) == 4
     # All four succeed and are valid decisions for the same schema.
     for r in results:
@@ -72,7 +72,7 @@ def test_batched_telemetry_shared_pass():
         {"pick": {"type": "enum", "description": "d", "choices": ["ALPHA", "BETA"]}}
     )
     model = FakeModel(vocab_size=64)
-    results = run_parallel_generation_batched(model, FakeTokenizer(), ["a", "b", "c"], schema)
+    results = run_parallel_generation_batched(make_engine(model), ["a", "b", "c"], schema)
     # Every context reports the same shared pass count.
     passes = {r["sequential_forward_passes"] for r in results}
     assert len(passes) == 1
@@ -83,7 +83,7 @@ def test_batched_empty_contexts():
         {"pick": {"type": "enum", "description": "d", "choices": ["ALPHA", "BETA"]}}
     )
     model = FakeModel(vocab_size=64)
-    assert run_parallel_generation_batched(model, FakeTokenizer(), [], schema) == []
+    assert run_parallel_generation_batched(make_engine(model), [], schema) == []
 
 
 def test_batched_constraints_flow_through():
@@ -109,7 +109,7 @@ def test_batched_constraints_flow_through():
     ]
     model = FakeModel(vocab_size=64)
     results = run_parallel_generation_batched(
-        model, FakeTokenizer(), ["ctx-a", "ctx-b"], schema, constraints=constraints
+        make_engine(model), ["ctx-a", "ctx-b"], schema, constraints=constraints
     )
     assert len(results) == 2
     for r in results:
@@ -129,9 +129,7 @@ def test_decide_many_batched_end_to_end(monkeypatch):
         is_fraudulent: bool = pydantic.Field(description="Whether the txn is fraudulent")
         risk_tier: Literal["LOW", "HIGH"] = pydantic.Field(description="Risk tier")
 
-    monkeypatch.setattr(
-        api, "load_engine", lambda model_id: (FakeModel(vocab_size=64), FakeTokenizer())
-    )
+    monkeypatch.setattr(api, "load_engine", lambda model_id: make_engine(FakeModel(vocab_size=64)))
     results = api.decide_many(
         TwoField,
         ["transaction one", "transaction two"],
@@ -152,7 +150,7 @@ def test_contexts_per_pass_telemetry_and_bounding():
     )
     model = FakeModel(vocab_size=64)
     contexts = [f"ctx {i}" for i in range(12)]
-    results = run_parallel_generation_batched(model, FakeTokenizer(), contexts, schema)
+    results = run_parallel_generation_batched(make_engine(model), contexts, schema)
     assert len(results) == 12
     cpp = results[0]["contexts_per_pass"]
     assert cpp >= 1
@@ -177,7 +175,7 @@ def test_batched_empty_rows_schema():
         {"pick": {"type": "enum", "description": "d", "choices": ["ALPHA", "BETA"]}}
     )
     model = FakeModel(vocab_size=64)
-    results = run_parallel_generation_batched(model, FakeTokenizer(), ["a"], schema)
+    results = run_parallel_generation_batched(make_engine(model), ["a"], schema)
     assert len(results) == 1
     assert "pick" in results[0]["parsed_json"]
 
@@ -201,7 +199,7 @@ def test_grouped_contexts_prefill_their_own_prompts(monkeypatch):
     monkeypatch.setattr(eng, "_contexts_per_pass", lambda nbytes: 2)
 
     batched = run_parallel_generation_batched(
-        FakeModel(vocab_size=64), FakeTokenizer(), contexts, schema
+        make_engine(FakeModel(vocab_size=64)), contexts, schema
     )
     assert len(batched) == 5
     # With group_size=2 and 5 contexts the groups are [0,1], [2,3], [4] —
@@ -236,5 +234,5 @@ def test_grouped_contexts_prefill_their_own_prompts(monkeypatch):
     # And the batched probabilities still match separate calls bit-for-bit
     # (the parity guarantee is unchanged by grouping).
     for ctx, bat in zip(contexts, batched, strict=True):
-        sep = run_parallel_generation(FakeModel(vocab_size=64), FakeTokenizer(), ctx, schema)
+        sep = run_parallel_generation(make_engine(FakeModel(vocab_size=64)), ctx, schema)
         assert bat["parsed_json"] == sep["parsed_json"], ctx

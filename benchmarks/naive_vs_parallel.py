@@ -43,7 +43,7 @@ def main() -> None:
     from jevmlx.schema import StructuredSchema
 
     t0 = time.perf_counter()
-    model, tokenizer = load_engine(args.model_id)
+    engine = load_engine(args.model_id)
     load_s = round(time.perf_counter() - t0, 1)
     print(f"[load+warmup] {load_s}s", flush=True)
 
@@ -53,8 +53,8 @@ def main() -> None:
         schema = StructuredSchema(preset["schema"])
         print(f"--> {preset['title']}", flush=True)
 
-        naive = run_naive_generation(model, tokenizer, preset["context"], schema)
-        parallel = run_parallel_generation(model, tokenizer, preset["context"], schema)
+        naive = run_naive_generation(engine, preset["context"], schema)
+        parallel = run_parallel_generation(engine, preset["context"], schema)
         speedup = naive["elapsed_ms"] / max(parallel["elapsed_ms"], 1.0)
 
         row = {

@@ -36,6 +36,8 @@ except ImportError:  # pre-W5-B base: the type does not exist yet
     class ConstraintError(Exception): ...
 
 
+from conftest import make_engine
+
 from jevmlx.constraints import check_constraint
 from jevmlx.engine import run_parallel_generation
 from jevmlx.schema import SchemaCompileError, StructuredSchema
@@ -102,7 +104,6 @@ class RoutingBiasModel:
         return {}
 
     def __call__(self, tokens, cache=None):
-
         batch, seq_len = tokens.shape
         is_prefill = cache is not None and batch == 1 and seq_len > 40
         if is_prefill:
@@ -191,7 +192,7 @@ def test_conditioned_rows_use_header_not_schema_lead_in(row_capture):
             },
         }
     )
-    result = run_parallel_generation(model, tok, "ctx", schema)
+    result = run_parallel_generation(make_engine(model, tok), "ctx", schema)
     assert result["rerun_fields"] == ["cb"]
     # Dependency rows are identifiable by content (the header token 'G').
     dep_rows = [r for call in row_capture for r in call if G in r]
@@ -230,7 +231,7 @@ def test_labels_mode_second_pass_does_not_crash():
             },
         }
     )
-    result = run_parallel_generation(model, tok, "ctx", schema, scoring="labels")
+    result = run_parallel_generation(make_engine(model, tok), "ctx", schema, scoring="labels")
     assert result["rerun_fields"] == ["cb"]
     assert result["parsed_json"]["cb"]["value"] in {"X1", "X2"}
 
@@ -279,7 +280,7 @@ def test_second_pass_binds_each_field_own_definition():
             "e1": {"type": "enum", "description": "d", "choices": ["X1", "X2"], "depends_on": "pa"},
         }
     )
-    result = run_parallel_generation(model, tok, "ctx", schema)
+    result = run_parallel_generation(make_engine(model, tok), "ctx", schema)
     assert set(result["rerun_fields"]) == {"b1", "e1"}
     b1 = result["parsed_json"]["b1"]["value"]
     assert isinstance(b1, bool), f"boolean child value leaked as {type(b1)}: {b1!r}"
@@ -305,8 +306,12 @@ def test_second_pass_prior_correction_and_temperature():
             },
         }
     )
-    r1 = run_parallel_generation(model, tok, "ctx", schema, prior_correction=True, temperature=1.0)
-    r2 = run_parallel_generation(model, tok, "ctx", schema, prior_correction=True, temperature=2.0)
+    r1 = run_parallel_generation(
+        make_engine(model, tok), "ctx", schema, prior_correction=True, temperature=1.0
+    )
+    r2 = run_parallel_generation(
+        make_engine(model, tok), "ctx", schema, prior_correction=True, temperature=2.0
+    )
     assert r1["rerun_fields"] == ["cb"] and r2["rerun_fields"] == ["cb"]
     # The conditioned winner is the second choice, confidently, at T=1.
     assert r1["parsed_json"]["cb"]["value"] == "NEWVALUE"
@@ -315,7 +320,7 @@ def test_second_pass_prior_correction_and_temperature():
     assert r2["parsed_json"]["cb"]["value"] == "NEWVALUE"
     assert r2["field_telemetry"]["cb"]["probability"] < r1["field_telemetry"]["cb"]["probability"]
     # The prior was actually subtracted: the uncorrected run differs.
-    r0 = run_parallel_generation(model, tok, "ctx", schema, prior_correction=False)
+    r0 = run_parallel_generation(make_engine(model, tok), "ctx", schema, prior_correction=False)
     assert r0["field_telemetry"]["cb"]["log_scores"] != r1["field_telemetry"]["cb"]["log_scores"]
 
 
@@ -340,7 +345,9 @@ def test_second_pass_cannot_undo_constraint():
     constraints = [
         {"type": "implies", "parent": "za", "child": "wq", "mapping": {"A": ["X"], "B": ["Y"]}}
     ]
-    result = run_parallel_generation(model, tok, "ctx", schema, constraints=constraints)
+    result = run_parallel_generation(
+        make_engine(model, tok), "ctx", schema, constraints=constraints
+    )
     # za: evidence bias +20 at 'A' -> A (valid parent). wq: evidence leans Y
     # (+0.1 at 'B', low margin -> rerun); the CONDITIONED rerun also picks Y
     # (+2.0 at 'B'), which violates A->X. The post-wave MAP must put it back.
@@ -373,7 +380,9 @@ def test_map_forced_non_argmax_parent_never_conditions():
     constraints = [
         {"type": "implies", "parent": "za", "child": "wq", "mapping": {"B": ["X1", "X2"]}}
     ]
-    result = run_parallel_generation(model, tok, "ctx", schema, constraints=constraints)
+    result = run_parallel_generation(
+        make_engine(model, tok), "ctx", schema, constraints=constraints
+    )
     assert result["parsed_json"]["za"]["value"] == "B"
     assert result["rerun_fields"] == [], (
         f"conditioned on a MAP-forced parent the model rejected: {result['rerun_fields']!r}"
@@ -387,7 +396,7 @@ def test_dependency_waves_condition_on_updated_parents(row_capture):
     model = RoutingBiasModel()
     tok = BijectiveTokenizer()
     schema = StructuredSchema(_chain_schema())
-    result = run_parallel_generation(model, tok, "ctx", schema)
+    result = run_parallel_generation(make_engine(model, tok), "ctx", schema)
     # cb reruns (evidence tie), flips to NEWVALUE under conditioning; gc must
     # then rerun conditioned on the UPDATED cb — two waves.
     assert set(result["rerun_fields"]) == {"cb", "gc"}
@@ -448,19 +457,19 @@ def test_constraints_validated_before_model_work():
         }
     )
     with pytest.raises(ValueError, match="type"):
-        run_parallel_generation(model, tok, "ctx", schema, constraints=[{"type": "typo"}])
+        run_parallel_generation(
+            make_engine(model, tok), "ctx", schema, constraints=[{"type": "typo"}]
+        )
     with pytest.raises(ValueError, match="unknown field"):
         run_parallel_generation(
-            model,
-            tok,
+            make_engine(model, tok),
             "ctx",
             schema,
             constraints=[{"type": "implies", "parent": "zz", "child": "wq", "mapping": {}}],
         )
     with pytest.raises(ValueError, match="not a value"):
         run_parallel_generation(
-            model,
-            tok,
+            make_engine(model, tok),
             "ctx",
             schema,
             constraints=[
@@ -469,8 +478,7 @@ def test_constraints_validated_before_model_work():
         )
     with pytest.raises(ValueError, match="not a value"):
         run_parallel_generation(
-            model,
-            tok,
+            make_engine(model, tok),
             "ctx",
             schema,
             constraints=[
@@ -499,8 +507,7 @@ def test_case_constraint_on_multi_field_rejected():
     )
     with pytest.raises(ValueError, match="multi"):
         run_parallel_generation(
-            model,
-            tok,
+            make_engine(model, tok),
             "ctx",
             schema,
             constraints=[
@@ -509,8 +516,7 @@ def test_case_constraint_on_multi_field_rejected():
         )
     with pytest.raises(ValueError, match="multi"):
         run_parallel_generation(
-            model,
-            tok,
+            make_engine(model, tok),
             "ctx",
             schema,
             constraints=[{"type": "excludes", "field": "za", "value": "A", "other": "tags"}],
@@ -534,7 +540,9 @@ def test_prior_pass_stops_after_first_pass(row_capture):
             },
         }
     )
-    prior = eng._get_or_compute_prior(model, tok, schema, "slots", None, "(no context provided)")
+    prior = eng._get_or_compute_prior(
+        make_engine(model, tok), schema, "slots", None, "(no context provided)"
+    )
     # The neutral pass must store the FIRST-pass scores: cb's neutral rows
     # are unbiased (tie -> uniform). A leaked dependency-conditioned score
     # would carry the +2.0-at-'B' bias (NEWVALUE decisive).

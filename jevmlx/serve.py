@@ -111,11 +111,11 @@ def serve(model_id: str, host: str = "127.0.0.1", port: int = 8000) -> None:
     from jevmlx.schema import StructuredSchema
 
     logger.info("Loading %s ...", model_id)
-    model, tokenizer = load_engine(model_id)
+    engine = load_engine(model_id)
 
     def decide_fn(schema_dict: dict, context: str, temperature: float | None = 1.0) -> dict:
         schema = StructuredSchema(schema_dict)
-        return run_parallel_generation(model, tokenizer, context, schema, temperature=temperature)
+        return run_parallel_generation(engine, context, schema, temperature=temperature)
 
     server = HTTPServer((host, port), make_handler(decide_fn, model_id, _ServerStats()))
     logger.info("jevmlx serving %s on http://%s:%s", model_id, host, server.server_port)

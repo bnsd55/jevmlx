@@ -124,7 +124,6 @@ class YNLogitModel(FakeModel):
         self.no_logit = no_logit
 
     def __call__(self, tokens, cache=None):
-
         out = super().__call__(tokens, cache)
         return (
             out.at[:, :, _mod97(ord("Y"))]
@@ -155,7 +154,6 @@ class CountCodeModel(FakeModel):
         self.no_logit = no_logit
 
     def __call__(self, tokens, cache=None):
-
         out = super().__call__(tokens, cache)
         for ch, bump in self.count_bias.items():
             # The count codes are read at their divergence tokens: '4' is a
@@ -360,10 +358,56 @@ def make_engine_result(
     }
 
 
+# --------------------------------------------------------- Engine factory --
+
+
+def make_engine(
+    model=None,
+    tokenizer=None,
+    *,
+    model_id: str = "fake-engine",
+    vocab_size: int | None = None,
+):
+    """Build a real :class:`jevmlx.engine.Engine` around (fakes | live parts).
+
+    The ONLY way tests construct engines: every generation
+    entry point takes an Engine; tests that used to pass bare
+    (model, tokenizer) pairs call this instead. Defaults wrap the shared
+    FakeModel/FakeTokenizer; the per-model properties (profile, vocab,
+    weights) resolve here — the engine is built fully loaded, as load_engine
+    would produce it.
+    """
+    from jevmlx.engine import (
+        Engine,
+        _model_weight_bytes,
+        _probe_system_role,
+        _profile_for,
+        _vocab_size_of,
+    )
+
+    if model is None:
+        model = FakeModel()
+    if tokenizer is None:
+        tokenizer = FakeTokenizer()
+    if vocab_size is None:
+        vocab_size = _vocab_size_of(model)
+    return Engine(
+        model=model,
+        tokenizer=tokenizer,
+        model_id=model_id,
+        revision=None,
+        profile=_probe_system_role(tokenizer, _profile_for(model_id)),
+        vocab_size=vocab_size,
+        weight_bytes=_model_weight_bytes(model),
+        cache_capabilities=("KVCache",),
+        width_slope=1.0,
+    )
+
+
 @pytest.fixture(scope="module")
 def engine():
-    """The real 0.5B model, loaded once per module. Shared by every slow
-    test that needs a live engine (test_engine, test_w4b_parity)."""
+    """The real 0.5B model's Engine, loaded once per module. Shared by every
+    slow test that needs a live engine (test_engine, test_w4b_parity)."""
     from jevmlx.engine import load_engine
 
     return load_engine(MODEL_ID)

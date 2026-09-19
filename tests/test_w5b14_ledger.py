@@ -12,7 +12,7 @@
 """
 
 import pytest
-from conftest import FakeModel, FakeTokenizer
+from conftest import FakeModel, make_engine
 
 from jevmlx.engine import run_parallel_generation, run_parallel_generation_batched
 from jevmlx.schema import StructuredSchema
@@ -28,7 +28,7 @@ class TestSingleContextLedger:
     def test_result_keys_are_ledger_derivations(self):
         """The flat keys exist and are consistent with a ledger's
         derivations: total = prior + elapsed; suffix_eval >= lm_head."""
-        res = run_parallel_generation(FakeModel(vocab_size=64), FakeTokenizer(), "ctx", _schema())
+        res = run_parallel_generation(make_engine(model=FakeModel(vocab_size=64)), "ctx", _schema())
         assert res["total_ms"] == pytest.approx(res["elapsed_ms"] + res["prior_ms"], abs=0.05)
         assert res["suffix_eval_ms"] >= res["lm_head_gather_ms"]
         assert res["prefill_ms"] > 0.0
@@ -40,7 +40,7 @@ class TestSingleContextLedger:
         """prior_correction=True: the neutral pass is a PRIOR-phase span and
         its wall time IS prior_ms (total includes it)."""
         res = run_parallel_generation(
-            FakeModel(vocab_size=64), FakeTokenizer(), "ctx", _schema(), prior_correction=True
+            make_engine(model=FakeModel(vocab_size=64)), "ctx", _schema(), prior_correction=True
         )
         assert res["prior_ms"] > 0.0
         assert res["total_ms"] >= res["elapsed_ms"] + res["prior_ms"] - 0.05
@@ -59,7 +59,7 @@ class TestSingleContextLedger:
                 },
             }
         )
-        res = run_parallel_generation(FakeModel(vocab_size=64), FakeTokenizer(), "ctx", schema)
+        res = run_parallel_generation(make_engine(model=FakeModel(vocab_size=64)), "ctx", schema)
         assert res["second_pass_ms"] > 0.0
 
 
@@ -68,7 +68,7 @@ class TestBatchedLedger:
         """group_wall_ms >= per_item_amortized_ms * n (they're the same
         span; amortized = wall / n)."""
         results = run_parallel_generation_batched(
-            FakeModel(vocab_size=64), FakeTokenizer(), ["a", "b", "c"], _schema()
+            make_engine(model=FakeModel(vocab_size=64)), ["a", "b", "c"], _schema()
         )
         n = len(results)
         for res in results:
@@ -79,8 +79,7 @@ class TestBatchedLedger:
         """per_item_end_to_end_ms >= that context's own prefill span (the
         honest per-context latency; no fabricated equal splits)."""
         results = run_parallel_generation_batched(
-            FakeModel(vocab_size=64),
-            FakeTokenizer(),
+            make_engine(model=FakeModel(vocab_size=64)),
             ["longer context with more words in it", "short"],
             _schema(),
         )
@@ -93,7 +92,7 @@ class TestBatchedLedger:
         SpanError on any overlap — here we also assert the interval set is
         non-degenerate)."""
         results = run_parallel_generation_batched(
-            FakeModel(vocab_size=64), FakeTokenizer(), ["a", "b"], _schema()
+            make_engine(model=FakeModel(vocab_size=64)), ["a", "b"], _schema()
         )
         assert len(results) == 2
         # Sanity: assembly happened per context (both got decisions).
@@ -119,8 +118,7 @@ class TestReviewFixes:
         prompts differ in length)."""
         schema = _schema()
         results = run_parallel_generation_batched(
-            FakeModel(vocab_size=64),
-            FakeTokenizer(),
+            make_engine(model=FakeModel(vocab_size=64)),
             ["context one with more text", "short"],
             schema,
         )
@@ -149,7 +147,7 @@ class TestReviewFixes:
         # Equality per review: compare the flat key to the dependency
         # interval on the engine's own ledger (read through the result's
         # timing keys — no Optional public ledger param).
-        res = run_parallel_generation(FakeModel(vocab_size=64), FakeTokenizer(), "ctx", schema)
+        res = run_parallel_generation(make_engine(model=FakeModel(vocab_size=64)), "ctx", schema)
         # The dependency span and the result key derive from the same
         # ledger; equality holds by construction. Assert the KEY is honest
         # against the wall (the span is inside it) and strictly positive.
@@ -166,7 +164,6 @@ class TestReviewFixes:
             _failed = False
 
             def __call__(self, tokens, cache=None):
-
                 # Force the failure on a BATCHED (multi-row) forward only —
                 # the retry path lives in _score_rows; prefill (width 1)
                 # must stay clean.
@@ -177,7 +174,9 @@ class TestReviewFixes:
 
         schema = _schema()
         results = run_parallel_generation_batched(
-            FlakyModel(vocab_size=64), FakeTokenizer(), ["a", "b"], schema
+            make_engine(model=FlakyModel(vocab_size=64)),
+            ["a", "b"],
+            schema,
         )
         assert len(results) == 2
         for res in results:
@@ -193,7 +192,7 @@ class TestReviewFixes:
             {"pick": {"type": "enum", "description": "d", "choices": ["ONLY"]}}
         )
         results = run_parallel_generation_batched(
-            FakeModel(vocab_size=64), FakeTokenizer(), ["a", "b"], schema
+            make_engine(model=FakeModel(vocab_size=64)), ["a", "b"], schema
         )
         assert len(results) == 2
         for res in results:
@@ -210,8 +209,7 @@ class TestReviewFixes:
         group's wall."""
         schema = _schema()
         results = run_parallel_generation_batched(
-            FakeModel(vocab_size=64),
-            FakeTokenizer(),
+            make_engine(model=FakeModel(vocab_size=64)),
             ["ctx one", "ctx two", "ctx three", "ctx four"],
             schema,
         )
@@ -228,8 +226,7 @@ class TestReviewFixes:
         (finding 26)."""
         schema = _schema()
         results = run_parallel_generation_batched(
-            FakeModel(vocab_size=64),
-            FakeTokenizer(),
+            make_engine(model=FakeModel(vocab_size=64)),
             ["ctx one", "ctx two"],
             schema,
             prior_correction=True,

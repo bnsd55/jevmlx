@@ -8,15 +8,15 @@ import enum
 from typing import Literal
 
 import pytest
-from conftest import FakeModel, FakeTokenizer
+from conftest import FakeModel, FakeTokenizer, make_engine
 from pydantic import BaseModel
 
 import jevmlx.api as api
 from jevmlx.engine import (
     PromptProfile,
     _chat_ids,
+    _probe_system_role,
     _profile_for,
-    _resolve_profile,
     _stop_token_ids,
     run_parallel_generation,
 )
@@ -61,12 +61,12 @@ def test_chat_ids_passes_profile_template_kwargs():
     assert seen_kwargs == [{"enable_thinking": False}]
 
 
-def test_resolve_profile_is_self_contained_without_load_engine():
-    # run_parallel_generation / run_naive_generation receive (model,
-    # tokenizer) directly — from eval, serve and tests — often without
-    # load_engine. _resolve_profile must derive the full profile from the
-    # tokenizer alone: Qwen3-named fake gets enable_thinking=False, no
-    # registry, no load.
+def test_profile_resolution_from_tokenizer_probe():
+    # Profile resolution is a tokenizer probe: probe + _profile_for on the
+    # model id. A Qwen3-named tokenizer gets enable_thinking=False; the
+    # Engine build (load_engine / make_engine) runs exactly this.
+    from conftest import make_engine
+
     class Qwen3Fake(FakeTokenizer):
         name_or_path = "mlx-community/Qwen3-8B-Instruct-4bit"
 
@@ -75,11 +75,17 @@ def test_resolve_profile_is_self_contained_without_load_engine():
         ):
             return super().apply_chat_template(messages, add_generation_prompt, tokenize)
 
-    profile = _resolve_profile(Qwen3Fake())
+    profile = _probe_system_role(Qwen3Fake(), _profile_for("mlx-community/Qwen3-8B-Instruct-4bit"))
     assert profile.template_kwargs == {"enable_thinking": False}
     assert profile.supports_system  # FakeTokenizer accepts system role
     ids = _chat_ids(Qwen3Fake(), "u", "s", profile)
     assert isinstance(ids, list) and ids
+    # And the Engine built around it carries that same profile.
+    engine = make_engine(FakeModel(), Qwen3Fake(), model_id="mlx-community/Qwen3-8B-Instruct-4bit")
+    assert engine.profile is profile or (
+        engine.profile.template_kwargs == profile.template_kwargs
+        and engine.profile.supports_system == profile.supports_system
+    )
 
 
 def test_system_role_probe_merged_rendering():
@@ -96,7 +102,7 @@ def test_system_role_probe_merged_rendering():
                 )
             return super().apply_chat_template(messages, add_generation_prompt, tokenize)
 
-    profile = _resolve_profile(Gemma())
+    profile = _probe_system_role(Gemma(), _profile_for("test/gemma"))
     assert not profile.supports_system
     # The probe was exactly one tiny system+user rendering.
     assert [sorted(m["role"] for m in msgs) for msgs in seen] == [["system", "user"]]
@@ -111,9 +117,10 @@ def test_system_role_probe_merged_rendering():
 
 
 def test_parallel_generation_qwen3_named_tokenizer_without_load_engine():
-    """End-to-end WITHOUT load_engine (the eval/serve/test path): a
-    Qwen3-named fake tokenizer's apply_chat_template receives
-    enable_thinking=False through run_parallel_generation."""
+    """A Qwen3-named fake tokenizer's apply_chat_template receives
+    enable_thinking=False through run_parallel_generation: the profile is
+    resolved once when the Engine is built (the factory probes the tokenizer,
+    exactly what load_engine does)."""
     seen_kwargs = []
 
     class Recording(FakeTokenizer):
@@ -126,7 +133,9 @@ def test_parallel_generation_qwen3_named_tokenizer_without_load_engine():
             return super().apply_chat_template(messages, add_generation_prompt, tokenize)
 
     schema = StructuredSchema({"tier": {"type": "enum", "choices": ["A", "B"], "description": "d"}})
-    run_parallel_generation(FakeModel(), Recording(), "ctx", schema)
+    engine = make_engine(FakeModel(), Recording(), model_id="mlx-community/Qwen3-8B-Instruct-4bit")
+    assert engine.profile.template_kwargs == {"enable_thinking": False}
+    run_parallel_generation(engine, "ctx", schema)
     assert seen_kwargs and all(kw == {"enable_thinking": False} for kw in seen_kwargs)
 
 
@@ -254,7 +263,9 @@ def test_naive_generation_signature_has_no_temperature():
     params = inspect.signature(run_naive_generation).parameters
     assert "temperature" not in params
     with pytest.raises(TypeError):
-        run_naive_generation(FakeModel(), FakeTokenizer(), "ctx", None, temperature=0.2)
+        run_naive_generation(
+            make_engine(FakeModel(), FakeTokenizer()), "ctx", None, temperature=0.2
+        )
 
 
 # --- bug 21: naive baseline shows all choices -----------------------------------

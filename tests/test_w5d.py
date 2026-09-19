@@ -14,6 +14,8 @@ Fake-model tests — each asserts behavior that FAILS on 1f9f453:
 
 import math
 
+from conftest import make_engine
+
 from jevmlx import StructuredSchema
 from jevmlx.engine import run_parallel_generation
 from jevmlx.trie import score_trie
@@ -31,7 +33,7 @@ def test_peak_incremental_present_and_consistent():
     model = FakeModel(vocab_size=64)
     tokenizer = FakeTokenizer()
     schema = StructuredSchema({"pick": {"type": "enum", "description": "d", "choices": ["A", "B"]}})
-    result = run_parallel_generation(model, tokenizer, "ctx", schema)
+    result = run_parallel_generation(make_engine(model, tokenizer), "ctx", schema)
     assert "peak_active_bytes" in result
     # W5-D finding 32: the incremental pair exists and never goes negative.
     assert "peak_incremental_bytes" in result
@@ -48,8 +50,8 @@ def test_peak_reset_between_requests():
     model = FakeModel(vocab_size=64)
     tokenizer = FakeTokenizer()
     schema = StructuredSchema({"pick": {"type": "enum", "description": "d", "choices": ["A", "B"]}})
-    first = run_parallel_generation(model, tokenizer, "ctx", schema)
-    second = run_parallel_generation(model, tokenizer, "ctx2", schema)
+    first = run_parallel_generation(make_engine(model, tokenizer), "ctx", schema)
+    second = run_parallel_generation(make_engine(model, tokenizer), "ctx2", schema)
     # The second request resets the peak counter: its incremental peak
     # cannot exceed its own absolute peak.
     assert second["peak_incremental_bytes"] <= second["peak_active_bytes"]
@@ -88,7 +90,9 @@ def test_multi_legal_mass_stats_cardinality_free():
             }
         }
     )
-    result = run_parallel_generation(FakeModel(vocab_size=64), FakeTokenizer(), "ctx", schema)
+    result = run_parallel_generation(
+        make_engine(FakeModel(vocab_size=64), FakeTokenizer()), "ctx", schema
+    )
     tel = result["field_telemetry"]["tags"]
     # The old product-of-masses key is gone for multi; the stable stats are in.
     assert "min_option_legal_mass" in tel
@@ -104,7 +108,9 @@ def test_count_row_legal_mass_exposed():
     schema = StructuredSchema(
         {"tags": {"type": "multi", "description": "d", "choices": ["A", "B", "C"]}}
     )
-    result = run_parallel_generation(FakeModel(vocab_size=64), FakeTokenizer(), "ctx", schema)
+    result = run_parallel_generation(
+        make_engine(FakeModel(vocab_size=64), FakeTokenizer()), "ctx", schema
+    )
     count_tel = result["field_telemetry"].get("tags#count")
     assert count_tel is not None
     assert "legal_mass" in count_tel
@@ -122,7 +128,7 @@ def test_batched_parity_matrix_stable_fake():
 
     model = _StableModel()
     tokenizer = _CountTokenizer()
-    result = check_batched_parity(model, tokenizer, _cases())
+    result = check_batched_parity(make_engine(model, tokenizer), _cases())
     assert result["winners_identical"] is True
     assert result["max_abs_drift_nats"] == 0.0
     assert result["max_raw_row_drift_nats"] == 0.0
@@ -139,13 +145,12 @@ def test_batched_parity_matrix_catches_row_drift():
         """Boosts alias "B" only in batched suffix calls (>1-row chunks)."""
 
         def __call__(self, tokens, cache=None):
-
             out = super().__call__(tokens, cache=cache)
             if tokens.shape[0] > 1 and tokens.shape[1] > 1:
                 out = out.at[:, :, 67].add(5.0)
             return out
 
-    result = check_batched_parity(_RowDriftModel(), _CountTokenizer(), _cases())
+    result = check_batched_parity(make_engine(_RowDriftModel(), _CountTokenizer()), _cases())
     # The raw row-logit comparison catches what the final decision gate
     # (with batch=1 rescoring) would mask.
     assert result["max_raw_row_drift_nats"] > 0.0
@@ -171,7 +176,7 @@ def test_batched_parity_prior_on_matches_independent():
     from jevmlx.parity import check_batched_parity
 
     result = check_batched_parity(
-        _StableModel(), _CountTokenizer(), _cases(), prior_correction=True
+        make_engine(_StableModel(), _CountTokenizer()), _cases(), prior_correction=True
     )
     assert result["winners_identical"] is True
 
@@ -179,21 +184,13 @@ def test_batched_parity_prior_on_matches_independent():
 # --- W5-D review round 2: the width slope is measured, not claimed ---
 
 
-def test_width_slope_floor_until_probe_runs():
-    """SHORTCUT honesty: before any engine load, budgeting uses the
-    ASSUMED floor (1.0) — and the constant's name says assumed, not
-    measured."""
+def test_width_slope_is_an_explicit_budget_parameter():
+    """The tiling slope is a parameter of `_width_bin_max_rows` (carried on
+    the Engine, resolved at load) — not process-global state. The assumed
+    floor constant remains the documented floor."""
     import jevmlx.engine as eng
 
-    # Process-global state: other tests in this session may have loaded an
-    # engine (and measured the slope). Save/restore around the floor check.
-    saved = eng._WIDTH_SLOPE
-    try:
-        eng._WIDTH_SLOPE = None
-        assert eng._width_slope() == eng._ASSUMED_BYTES_PER_ROW_SLOPE == 1.0
-    finally:
-        eng._WIDTH_SLOPE = saved
-    # The budget function reads the live accessor, not a stale constant.
+    assert eng._ASSUMED_BYTES_PER_ROW_SLOPE == 1.0
     schema = StructuredSchema({"pick": {"type": "enum", "description": "d", "choices": ["A", "B"]}})
     model = FakeModel(vocab_size=64)
     tok = FakeTokenizer()
@@ -204,8 +201,11 @@ def test_width_slope_floor_until_probe_runs():
     import mlx.core as mx
 
     model(mx.array([[1, 2, 3]]), cache=cache)
-    cap = eng._width_bin_max_rows(built["rows"], cache, 64, 0, None)
-    assert cap >= 1
+    cap_floor = eng._width_bin_max_rows(built["rows"], cache, 64, 0, 1.0, None)
+    cap_big = eng._width_bin_max_rows(built["rows"], cache, 64, 0, 4.0, None)
+    assert cap_floor >= 1
+    # A larger slope shrinks the per-row budget -> the cap can only tighten.
+    assert cap_big <= cap_floor
 
 
 def test_measure_width_slope_returns_finite_ratio():

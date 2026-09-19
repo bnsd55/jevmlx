@@ -10,7 +10,7 @@ parity_failed in SUMMARY.md and cannot enter the README compat table
 import json
 
 import pytest
-from conftest import PARITY_ATOL
+from conftest import PARITY_ATOL, make_engine
 from conftest import YNLogitModel as _StableModel
 from conftest import _Mod97Tokenizer as _CountTokenizer
 
@@ -22,7 +22,6 @@ class _DriftingModel(_StableModel):
     regardless of atol. Needs >= 2 rows so a batched call happens."""
 
     def __call__(self, tokens, cache=None):
-
         out = super().__call__(tokens, cache=cache)
         if tokens.shape[0] > 1:  # batched suffix pass: boost alias "B"
             out = out.at[:, :, 67].add(5.0)
@@ -62,7 +61,7 @@ def _cases():
 def test_parity_report_passes_on_stable_fake(tmp_path):
     from jevmlx.parity import bundled_preset_specs, parity_report, write_parity_json
 
-    payload = parity_report(_StableModel(), _CountTokenizer(), "fake/stable", _cases())
+    payload = parity_report(make_engine(_StableModel(), _CountTokenizer()), "fake/stable", _cases())
     assert payload["passed"] is True
     assert payload["winners_identical"] is True
     assert payload["max_abs_drift_nats"] == 0.0
@@ -84,7 +83,7 @@ def test_parity_report_passes_on_stable_fake(tmp_path):
 
     # write_parity_json writes the same payload to <dir>/parity.json.
     written = write_parity_json(
-        _StableModel(), _CountTokenizer(), "fake/stable", tmp_path, _cases()
+        make_engine(_StableModel(), _CountTokenizer()), "fake/stable", tmp_path, _cases()
     )
     on_disk = json.loads((tmp_path / "parity.json").read_text(encoding="utf-8"))
     assert on_disk == written
@@ -95,7 +94,7 @@ def test_parity_report_fails_when_winners_flip(tmp_path):
     from jevmlx.parity import write_parity_json
 
     payload = write_parity_json(
-        _DriftingModel(), _CountTokenizer(), "fake/drift", tmp_path, _cases()
+        make_engine(_DriftingModel(), _CountTokenizer()), "fake/drift", tmp_path, _cases()
     )
     assert payload["passed"] is False
     assert payload["winners_identical"] is False
@@ -156,8 +155,7 @@ def test_parity_real_model_twin(engine):
     now through the shared producer (all four bundled presets)."""
     from jevmlx.parity import parity_report
 
-    model, tokenizer = engine
-    payload = parity_report(model, tokenizer, "twin/real-model")
+    payload = parity_report(engine, "twin/real-model")
     assert payload["winners_identical"] is True
     assert payload["max_abs_drift_nats"] < PARITY_ATOL
     assert payload["passed"] is True

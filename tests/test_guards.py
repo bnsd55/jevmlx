@@ -1,6 +1,7 @@
 """Guard tests: temperature validation and the chunking arithmetic. No model."""
 
 import pytest
+from conftest import make_engine
 
 from jevmlx.engine import _rows_per_chunk, run_parallel_generation
 from jevmlx.schema import StructuredSchema
@@ -18,12 +19,14 @@ class TestTemperatureValidation:
         # model/tokenizer are None on purpose: the guard must fire first.
         with pytest.raises(ValueError, match="temperature must be a finite number > 0"):
             run_parallel_generation(
-                None, None, "x", StructuredSchema(SCHEMA), temperature=temperature
+                make_engine(None, None), "x", StructuredSchema(SCHEMA), temperature=temperature
             )
 
     def test_max_rows_zero_raises_before_model_use(self):
         with pytest.raises(ValueError, match="max_rows must be >= 1"):
-            run_parallel_generation(None, None, "x", StructuredSchema(SCHEMA), max_rows=0)
+            run_parallel_generation(
+                make_engine(None, None), "x", StructuredSchema(SCHEMA), max_rows=0
+            )
 
 
 class TestRowsPerChunk:

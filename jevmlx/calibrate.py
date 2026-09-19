@@ -23,10 +23,11 @@ Sample = tuple[list[float], int]  # (per-choice scores at T=1, labeled choice in
 MultiSample = tuple[float, int]  # (raw log-odds yes-no, label 1=yes 0=no)
 
 
-def collect(model, tokenizer, cases: Sequence[dict]) -> list[Sample]:
+def collect(engine, cases: Sequence[dict]) -> list[Sample]:
     """Run run_parallel_generation once per case at T=1 and keep raw scores
-    for every labeled field. Cases: [{"schema": {...}, "context": str,
-    "labels": {field: value}}] (labels may cover a subset of fields).
+    for every labeled field Takes the loaded :class:`Engine`.
+    Cases: [{"schema": {...}, "context": str, "labels": {field: value}}]
+    (labels may cover a subset of fields).
 
     multi fields are skipped with a logged warning: their scores are
     per-option p_true values, not a choice distribution, so NLL fitting
@@ -41,7 +42,7 @@ def collect(model, tokenizer, cases: Sequence[dict]) -> list[Sample]:
     samples: list[Sample] = []
     for case in cases:
         schema = StructuredSchema(case["schema"])
-        result = run_parallel_generation(model, tokenizer, case["context"], schema, temperature=1.0)
+        result = run_parallel_generation(engine, case["context"], schema, temperature=1.0)
         for fname, label in case["labels"].items():
             telemetry = result["field_telemetry"][fname]
             fdef = schema[fname]
@@ -133,7 +134,7 @@ def load_cases(path: str) -> list:
     return cases
 
 
-def collect_multi(model, tokenizer, cases: Sequence[dict]) -> list[MultiSample]:
+def collect_multi(engine, cases: Sequence[dict]) -> list[MultiSample]:
     """Raw multi option log-odds + yes/no labels for the pooled logistic fit.
 
     Same cases shape as :func:`collect`; runs the engine once per case and,
@@ -151,7 +152,7 @@ def collect_multi(model, tokenizer, cases: Sequence[dict]) -> list[MultiSample]:
     samples: list[MultiSample] = []
     for case in cases:
         schema = StructuredSchema(case["schema"])
-        result = run_parallel_generation(model, tokenizer, case["context"], schema, temperature=1.0)
+        result = run_parallel_generation(engine, case["context"], schema, temperature=1.0)
         for fname, label in case["labels"].items():
             fdef = schema[fname]
             if fdef.field_type != "multi":

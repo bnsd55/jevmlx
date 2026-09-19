@@ -6,6 +6,7 @@ from typing import Literal
 
 import pytest
 from conftest import _Mod97Tokenizer as FakeTokenizer
+from conftest import make_engine
 from pydantic import BaseModel, Field
 
 from jevmlx.api import schema_from_model
@@ -199,7 +200,9 @@ def test_multi_engine_result_semantics():
 def run_generation(schema, model, tokenizer, calibration=None):
     from jevmlx.engine import run_parallel_generation
 
-    return run_parallel_generation(model, tokenizer, "ctx", schema, calibration=calibration)
+    return run_parallel_generation(
+        make_engine(model, tokenizer), "ctx", schema, calibration=calibration
+    )
 
 
 def test_multi_threshold_validation():

@@ -9,7 +9,7 @@ F2: decide()/decide_many() accept constraints=, CLI --constraints path, and
 from __future__ import annotations
 
 import pytest
-from conftest import make_engine_result, make_field_telemetry
+from conftest import make_engine, make_engine_result, make_field_telemetry
 
 from jevmlx.constraints import check_constraint, validate_constraints
 from jevmlx.schema import StructuredSchema
@@ -84,8 +84,7 @@ def test_decide_passes_constraints_to_engine(monkeypatch):
     captured = {}
 
     def fake_run_parallel(
-        engine_model,
-        tokenizer,
+        engine,
         context,
         schema,
         *,
@@ -110,8 +109,8 @@ def test_decide_passes_constraints_to_engine(monkeypatch):
     monkeypatch.setattr("jevmlx.api.load_engine", lambda model: (object(), object()))
     monkeypatch.setattr("jevmlx.api.run_parallel_generation", fake_run_parallel)
 
-    def fake_batched(engine, tok, contexts, schema, **k):
-        return [fake_run_parallel(engine, tok, c, schema, **k) for c in contexts]
+    def fake_batched(engine, contexts, schema, **k):
+        return [fake_run_parallel(engine, c, schema, **k) for c in contexts]
 
     monkeypatch.setattr("jevmlx.api.run_parallel_generation_batched", fake_batched)
 
@@ -137,8 +136,7 @@ def test_decide_many_passes_constraints_to_engine(monkeypatch):
     captured = []
 
     def fake_run_parallel(
-        engine_model,
-        tokenizer,
+        engine,
         context,
         schema,
         *,
@@ -162,8 +160,8 @@ def test_decide_many_passes_constraints_to_engine(monkeypatch):
     monkeypatch.setattr("jevmlx.api.load_engine", lambda model: (object(), object()))
     monkeypatch.setattr("jevmlx.api.run_parallel_generation", fake_run_parallel)
 
-    def fake_batched(engine, tok, contexts, schema, **k):
-        return [fake_run_parallel(engine, tok, c, schema, **k) for c in contexts]
+    def fake_batched(engine, contexts, schema, **k):
+        return [fake_run_parallel(engine, c, schema, **k) for c in contexts]
 
     monkeypatch.setattr("jevmlx.api.run_parallel_generation_batched", fake_batched)
 
@@ -203,8 +201,7 @@ def test_evalrun_constraint_violation_rate_zero_with_map(monkeypatch):
     # But we're mocking run_parallel_generation, so we simulate the
     # reconciled output directly: the MAP picks intent=billing, subtype=refund.
     def fake_rpg(
-        model,
-        tokenizer,
+        engine,
         context,
         schema,
         temperature=1.0,
@@ -233,7 +230,7 @@ def test_evalrun_constraint_violation_rate_zero_with_map(monkeypatch):
         )
 
     monkeypatch.setattr(engine_mod, "run_parallel_generation", fake_rpg)
-    decide = er.parallel_decide_fn(model=object(), tokenizer=object())
+    decide = er.parallel_decide_fn(make_engine())
 
     schema_dict = {
         "intent": {"type": "enum", "description": "d", "choices": ["billing", "technical"]},
@@ -286,8 +283,7 @@ def test_evalrun_constraint_violation_without_map(monkeypatch):
     from jevmlx.evalmetrics import constraint_violation_rate
 
     def fake_rpg(
-        model,
-        tokenizer,
+        engine,
         context,
         schema,
         temperature=1.0,
@@ -313,7 +309,7 @@ def test_evalrun_constraint_violation_without_map(monkeypatch):
         )
 
     monkeypatch.setattr(engine_mod, "run_parallel_generation", fake_rpg)
-    decide = er.parallel_decide_fn(model=object(), tokenizer=object())
+    decide = er.parallel_decide_fn(make_engine())
 
     schema_dict = {
         "intent": {"type": "enum", "description": "d", "choices": ["billing", "technical"]},

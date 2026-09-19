@@ -11,10 +11,10 @@ MODEL_ID = "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
 
 @pytest.mark.slow
 def test_fintech_fraud_decisions():
-    model, tokenizer = load_engine(MODEL_ID)
+    engine = load_engine(MODEL_ID)
     preset = load_preset("fintech_fraud")
     schema = StructuredSchema(preset["schema"])
-    result = run_parallel_generation(model, tokenizer, preset["context"], schema)
+    result = run_parallel_generation(engine, preset["context"], schema)
 
     # Every schema key present, every value in its choices.
     for fname, fdef in schema.fields.items():

@@ -130,7 +130,7 @@ def run_timing(
         "presets": {},
     }
 
-    model, tokenizer = load_engine_fn(model_id)
+    engine = load_engine_fn(model_id)
     for rel in presets:
         preset = load_preset_fn(rel)
         from jevmlx.schema import StructuredSchema
@@ -139,8 +139,7 @@ def run_timing(
         rep_rows: list[dict] = []
         for _rep in range(reps):
             result = run_fn(
-                model,
-                tokenizer,
+                engine,
                 preset["context"],
                 schema,
                 temperature=1.0,

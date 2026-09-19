@@ -14,7 +14,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
-from conftest import FakeModel, FakeTokenizer, make_engine_result, make_field_telemetry
+from conftest import FakeModel, FakeTokenizer, make_engine, make_engine_result, make_field_telemetry
 
 from jevmlx import cli
 
@@ -28,9 +28,9 @@ def fake_engine(monkeypatch):
 
     def fake_load_engine(model_id: str):
         calls.append(model_id)
-        return FakeModel(), FakeTokenizer()
+        return make_engine(FakeModel(), FakeTokenizer(), model_id=model_id)
 
-    def fake_rpg(model, tokenizer, context, schema, **kwargs):
+    def fake_rpg(engine, context, schema, **kwargs):
         # The real engine validates the calibration payload before any model
         # work (_load_calibration); the stub mirrors that contract so a bad
         # --calibration FILE fails the same way it does live. (Inline dicts

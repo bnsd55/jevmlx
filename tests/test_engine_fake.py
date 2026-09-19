@@ -7,7 +7,7 @@ uniform probability and every row path executes.
 
 import mlx.core as mx
 import pytest
-from conftest import FakeModel, FakeTokenizer
+from conftest import FakeModel, FakeTokenizer, make_engine
 
 from jevmlx.engine import run_parallel_generation
 from jevmlx.schema import StructuredSchema
@@ -18,7 +18,7 @@ def test_one_choice_enum_returns_prob_one_without_rows():
     model = FakeModel()
     tokenizer = FakeTokenizer()
     schema = StructuredSchema({"only": {"type": "enum", "description": "d", "choices": ["ONLY"]}})
-    result = run_parallel_generation(model, tokenizer, "ctx", schema)
+    result = run_parallel_generation(make_engine(model, tokenizer), "ctx", schema)
 
     assert result["parsed_json"]["only"]["value"] == "ONLY"
     assert result["parsed_json"]["only"]["prob"] == 1.0
@@ -37,7 +37,7 @@ def test_engine_runs_mixed_schema_with_fake_model():
             "flags": {"type": "multi", "description": "d", "choices": ["x", "y"]},
         }
     )
-    result = run_parallel_generation(model, tokenizer, "ctx", schema)
+    result = run_parallel_generation(make_engine(model, tokenizer), "ctx", schema)
 
     assert set(result["parsed_json"]) == {"flag", "action", "flags"}
     assert result["confidence_model"] == "slots"
@@ -55,9 +55,9 @@ def test_prompt_sha256_stable_and_input_sensitive():
     schema = StructuredSchema(
         {"action": {"type": "enum", "description": "d", "choices": ["A", "B"]}}
     )
-    r1 = run_parallel_generation(model, tokenizer, "ctx", schema)
-    r2 = run_parallel_generation(model, tokenizer, "ctx", schema)
-    r3 = run_parallel_generation(model, tokenizer, "different ctx", schema)
+    r1 = run_parallel_generation(make_engine(model, tokenizer), "ctx", schema)
+    r2 = run_parallel_generation(make_engine(model, tokenizer), "ctx", schema)
+    r3 = run_parallel_generation(make_engine(model, tokenizer), "different ctx", schema)
 
     assert r1["prompt_sha256"] == r2["prompt_sha256"]
     assert r1["prompt_sha256"] != r3["prompt_sha256"]
@@ -105,7 +105,7 @@ def test_collision_winner_resolved_by_fake_logits():
             }
         }
     )
-    result = run_parallel_generation(model, tokenizer, "ctx", schema)
+    result = run_parallel_generation(make_engine(model, tokenizer), "ctx", schema)
     assert result["parsed_json"]["action"]["value"] in {
         "BLOCK_TRANSACTION",
         "BLOCK_USER",
@@ -127,7 +127,7 @@ def test_exact_tie_resolved_by_schema_order_and_flagged():
     schema = StructuredSchema(
         {"pick": {"type": "enum", "description": "d", "choices": ["ALPHA", "BETA"]}}
     )
-    result = run_parallel_generation(model, tokenizer, "ctx", schema)
+    result = run_parallel_generation(make_engine(model, tokenizer), "ctx", schema)
 
     telemetry = result["field_telemetry"]["pick"]
     assert telemetry["tie"] is True
@@ -195,7 +195,7 @@ def test_prior_correction_flips_biased_winner_to_evidence_choice():
 
     # Without correction: prior bias (6.0) beats evidence (4.0) -> BETA wins.
     calls["n"] = 0
-    raw = run_parallel_generation(model, tokenizer, "evidence e e", schema)
+    raw = run_parallel_generation(make_engine(model, tokenizer), "evidence e e", schema)
     assert raw["parsed_json"]["pick"]["value"] == "BETA"
     assert "prior_corrected" not in raw["field_telemetry"]["pick"]
 
@@ -203,7 +203,7 @@ def test_prior_correction_flips_biased_winner_to_evidence_choice():
     # subtracted, so ALPHA's evidence lead wins.
     calls["n"] = 0
     corrected = run_parallel_generation(
-        model, tokenizer, "evidence e e", schema, prior_correction=True
+        make_engine(model, tokenizer), "evidence e e", schema, prior_correction=True
     )
     telemetry = corrected["field_telemetry"]["pick"]
     assert telemetry["prior_corrected"] is True
@@ -245,19 +245,19 @@ def test_prior_computed_once_across_calls():
 
     # Plain run: prefill + suffix chunks, no neutral pass.
     calls["n"] = 0
-    run_parallel_generation(model, tokenizer, "one", schema)
+    run_parallel_generation(make_engine(model, tokenizer), "one", schema)
     plain_calls = calls["n"]
 
     # First corrected run: plain calls + the neutral pass.
     calls["n"] = 0
-    run_parallel_generation(model, tokenizer, "one", schema, prior_correction=True)
+    run_parallel_generation(make_engine(model, tokenizer), "one", schema, prior_correction=True)
     first_corrected = calls["n"]
     assert first_corrected > plain_calls
 
     # Second corrected run on a DIFFERENT context: neutral pass is cached,
     # so exactly one prefill + its suffix chunks — the plain-call count.
     calls["n"] = 0
-    run_parallel_generation(model, tokenizer, "two", schema, prior_correction=True)
+    run_parallel_generation(make_engine(model, tokenizer), "two", schema, prior_correction=True)
     second_corrected = calls["n"]
     assert second_corrected == plain_calls
 
@@ -268,12 +268,14 @@ def test_prior_correction_off_by_default_and_telemetry_keys():
     schema = StructuredSchema(
         {"pick": {"type": "enum", "description": "d", "choices": ["ALPHA", "BETA"]}}
     )
-    result = run_parallel_generation(model, tokenizer, "ctx", schema)
+    result = run_parallel_generation(make_engine(model, tokenizer), "ctx", schema)
     assert result["prior_correction"] is False
     assert "prior_log_scores" not in result["field_telemetry"]["pick"]
     assert "prior_corrected" not in result["field_telemetry"]["pick"]
 
-    result_on = run_parallel_generation(model, tokenizer, "ctx", schema, prior_correction=True)
+    result_on = run_parallel_generation(
+        make_engine(model, tokenizer), "ctx", schema, prior_correction=True
+    )
     assert result_on["prior_correction"] is True
     t = result_on["field_telemetry"]["pick"]
     assert t["prior_corrected"] is True
@@ -289,7 +291,9 @@ def test_prior_correction_multi_option_pairs():
     schema = StructuredSchema(
         {"flags": {"type": "multi", "description": "d", "choices": ["red", "blue"]}}
     )
-    result = run_parallel_generation(model, tokenizer, "ctx", schema, prior_correction=True)
+    result = run_parallel_generation(
+        make_engine(model, tokenizer), "ctx", schema, prior_correction=True
+    )
     t = result["field_telemetry"]["flags"]
     assert t["prior_corrected"] is True
     assert set(t["prior_option_pairs"]) == {"red", "blue"}
@@ -319,7 +323,7 @@ def test_prior_cache_keyed_by_live_tokenizer_not_id():
     # Tokenizer A: first corrected run computes the prior (neutral pass runs).
     tokenizer_a = FakeTokenizer()
     calls["n"] = 0
-    run_parallel_generation(model, tokenizer_a, "ctx", schema, prior_correction=True)
+    run_parallel_generation(make_engine(model, tokenizer_a), "ctx", schema, prior_correction=True)
     assert calls["n"] > 0
 
     # Free A, force id reuse pressure.
@@ -334,7 +338,7 @@ def test_prior_cache_keyed_by_live_tokenizer_not_id():
 
     tokenizer_b = ShiftedTokenizer()
     calls["n"] = 0
-    run_parallel_generation(model, tokenizer_b, "ctx", schema, prior_correction=True)
+    run_parallel_generation(make_engine(model, tokenizer_b), "ctx", schema, prior_correction=True)
     # Plain run call count for comparison.
     calls_plain = {"n": 0}
 
@@ -343,7 +347,7 @@ def test_prior_cache_keyed_by_live_tokenizer_not_id():
             calls_plain["n"] += 1
             return super().__call__(tokens, cache)
 
-    run_parallel_generation(PlainModel(), tokenizer_b, "ctx", schema)
+    run_parallel_generation(make_engine(PlainModel(), tokenizer_b), "ctx", schema)
     # B's first corrected run pays the neutral pass again: more calls than plain.
     assert calls["n"] > calls_plain["n"], (
         "prior was served from a stale entry keyed by a reused id(tokenizer)"
@@ -372,7 +376,7 @@ def test_prior_cache_entry_dies_with_tokenizer():
         {"pick": {"type": "enum", "description": "d", "choices": ["ALPHA", "BETA"]}}
     )
     _PRIOR_CACHE.clear()
-    prior = _get_or_compute_prior(model, tokenizer, schema, "slots", None, "neutral")
+    prior = _get_or_compute_prior(make_engine(model, tokenizer), schema, "slots", None, "neutral")
     assert _PRIOR_CACHE, "prior was not cached"
 
     # Find this tokenizer's entry via the weakrefs stored ALONGSIDE the
@@ -418,12 +422,12 @@ def test_prior_cache_registers_one_finalizer_per_tokenizer():
     orig_plan_hash = schema.plan_hash
     schema.plan_hash = lambda tok, mode: "fixed-hash"
     try:
-        _get_or_compute_prior(model, tokenizer, schema, "slots", None, "neutral")
+        _get_or_compute_prior(make_engine(model, tokenizer), schema, "slots", None, "neutral")
         after_store = weakref.getweakrefcount(tokenizer)
         assert after_store >= 1  # the eviction finalizer's weakref
         # Hit path: the count must stay flat (no per-lookup finalizers).
         for _ in range(10):
-            _get_or_compute_prior(model, tokenizer, schema, "slots", None, "neutral")
+            _get_or_compute_prior(make_engine(model, tokenizer), schema, "slots", None, "neutral")
         assert weakref.getweakrefcount(tokenizer) == after_store
     finally:
         schema.plan_hash = orig_plan_hash
@@ -453,7 +457,7 @@ def test_prior_pass_always_runs_at_temperature_one(monkeypatch):
 
     seen: list[float] = []
 
-    def fake_rpg(model, tokenizer, context, schema, *, temperature=1.0, **kwargs):
+    def fake_rpg(engine, context, schema, *, temperature=1.0, **kwargs):
         seen.append(temperature)
         # Minimal result shape for the multi branch of the prior builder.
         return {
@@ -473,7 +477,9 @@ def test_prior_pass_always_runs_at_temperature_one(monkeypatch):
         schema = StructuredSchema(
             {"flags": {"type": "multi", "description": "d", "choices": ["x", "y"]}}
         )
-        eng._get_or_compute_prior(FakeModel(), FakeTokenizer(), schema, "slots", None, "neutral")
+        eng._get_or_compute_prior(
+            make_engine(FakeModel(), FakeTokenizer()), schema, "slots", None, "neutral"
+        )
     finally:
         eng._PRIOR_CACHE.clear()
     assert seen == [1.0]  # never the caller temperature
@@ -487,7 +493,7 @@ def test_prior_multi_option_pairs_are_raw_logits_not_reconstructed(monkeypatch):
 
     captured: dict = {}
 
-    def fake_rpg(model, tokenizer, context, schema, *, temperature=1.0, **kwargs):
+    def fake_rpg(engine, context, schema, *, temperature=1.0, **kwargs):
         captured["temperature"] = temperature
         return {
             "field_telemetry": {
@@ -504,8 +510,7 @@ def test_prior_multi_option_pairs_are_raw_logits_not_reconstructed(monkeypatch):
     eng._PRIOR_CACHE.clear()
     try:
         prior = eng._get_or_compute_prior(
-            FakeModel(),
-            FakeTokenizer(),
+            make_engine(FakeModel(), FakeTokenizer()),
             StructuredSchema(
                 {"flags": {"type": "multi", "description": "d", "choices": ["x", "y"]}}
             ),
@@ -526,7 +531,7 @@ def test_multi_telemetry_carries_option_logit_pairs():
     schema = StructuredSchema(
         {"flags": {"type": "multi", "description": "d", "choices": ["x", "y"]}}
     )
-    result = run_parallel_generation(model, tokenizer, "ctx", schema)
+    result = run_parallel_generation(make_engine(model, tokenizer), "ctx", schema)
     telemetry = result["field_telemetry"]["flags"]
     assert set(telemetry["option_logit_pairs"]) == {"x", "y"}
     assert all(len(pair) == 2 for pair in telemetry["option_logit_pairs"].values())
@@ -546,18 +551,20 @@ def test_timing_split_prior_included_in_total(monkeypatch):
     eng._PRIOR_CACHE.clear()
     try:
         with_prior = eng.run_parallel_generation(
-            model, tokenizer, "ctx", schema, prior_correction=True
+            make_engine(model, tokenizer), "ctx", schema, prior_correction=True
         )
         assert with_prior["prior_ms"] > 0.0
         assert with_prior["total_ms"] >= with_prior["elapsed_ms"]
         assert with_prior["total_ms"] >= with_prior["prior_ms"] + with_prior["prefill_ms"]
         # Warm cache: prior_ms still reported (a cache hit is ~0 but honest),
         # and total == elapsed + prior.
-        warm = eng.run_parallel_generation(model, tokenizer, "ctx", schema, prior_correction=True)
+        warm = eng.run_parallel_generation(
+            make_engine(model, tokenizer), "ctx", schema, prior_correction=True
+        )
         assert warm["prior_ms"] >= 0.0
         assert warm["total_ms"] == pytest.approx(warm["elapsed_ms"] + warm["prior_ms"], abs=0.05)
         # No prior correction: prior_ms is 0.0 and total == elapsed.
-        without = eng.run_parallel_generation(model, tokenizer, "ctx", schema)
+        without = eng.run_parallel_generation(make_engine(model, tokenizer), "ctx", schema)
         assert without["prior_ms"] == 0.0
         assert without["total_ms"] == pytest.approx(without["elapsed_ms"], abs=0.05)
         # Existing keys keep their meaning.
@@ -576,16 +583,16 @@ def test_probability_status_truthful_at_temperature_ne_one():
     schema = StructuredSchema(
         {"action": {"type": "enum", "description": "d", "choices": ["A", "B"]}}
     )
-    at_one = run_parallel_generation(model, tokenizer, "ctx", schema, temperature=1.0)
+    at_one = run_parallel_generation(make_engine(model, tokenizer), "ctx", schema, temperature=1.0)
     assert at_one["probability_status"] == (
         "constrained-path probability at T=1; uncalibrated as decision confidence"
     )
-    at_half = run_parallel_generation(model, tokenizer, "ctx", schema, temperature=0.5)
+    at_half = run_parallel_generation(make_engine(model, tokenizer), "ctx", schema, temperature=0.5)
     status = at_half["probability_status"]
     assert "temperature-scaled" in status
     assert "temperature=0.5" in status
     assert "not a T=1 probability" in status
-    at_two = run_parallel_generation(model, tokenizer, "ctx", schema, temperature=2.0)
+    at_two = run_parallel_generation(make_engine(model, tokenizer), "ctx", schema, temperature=2.0)
     assert "temperature=2.0" in at_two["probability_status"]
 
 
@@ -721,9 +728,9 @@ def test_scoring_parity_batch1_vs_batchN_vs_chunked():
     schema = StructuredSchema(
         {"pick": {"type": "enum", "description": "d", "choices": ["ALPHA", "BETA"]}}
     )
-    one = run_parallel_generation(model, tokenizer, "ctx", schema, max_rows=1)
+    one = run_parallel_generation(make_engine(model, tokenizer), "ctx", schema, max_rows=1)
     model2 = StatefulCacheModel(vocab_size=64)
-    many = run_parallel_generation(model2, tokenizer, "ctx", schema)
+    many = run_parallel_generation(make_engine(model2, tokenizer), "ctx", schema)
     assert one["parsed_json"] == many["parsed_json"]
     # The winner must reflect the BROADCAST extra state (7.0 boost on 'A'
     # alias); a dropped extra (0.0) would leave an exact tie.
@@ -757,10 +764,13 @@ def test_parity_exact_across_chunk_boundaries_real_positions():
             "beta": {"type": "boolean", "description": "d"},
         }
     )
-    full = run_parallel_generation(model, tokenizer, "ctx", schema)
+    full = run_parallel_generation(make_engine(model, tokenizer), "ctx", schema)
     for max_rows in (1, 2, 3):
         again = run_parallel_generation(
-            StatefulCacheModel(vocab_size=64), tokenizer, "ctx", schema, max_rows=max_rows
+            make_engine(StatefulCacheModel(vocab_size=64), tokenizer),
+            "ctx",
+            schema,
+            max_rows=max_rows,
         )
         assert again["parsed_json"] == full["parsed_json"], f"max_rows={max_rows}"
         full_tel = full["field_telemetry"]
@@ -802,9 +812,9 @@ def test_metal_allocation_failure_halves_chunk_and_scores_all_rows():
     )
     # Baseline without failure: same model class, no failure injected.
     clean = StatefulCacheModel(vocab_size=64)
-    expected = run_parallel_generation(clean, tokenizer, "ctx", schema)
+    expected = run_parallel_generation(make_engine(clean, tokenizer), "ctx", schema)
 
-    result = run_parallel_generation(model, tokenizer, "ctx", schema, max_rows=4)
+    result = run_parallel_generation(make_engine(model, tokenizer), "ctx", schema, max_rows=4)
     assert model.failed_once, "the injected allocation failure never fired"
     assert result["parsed_json"] == expected["parsed_json"]
     for fname in expected["field_telemetry"]:
@@ -867,7 +877,7 @@ def test_near_tie_rescores_at_batch1_and_takes_canonical_answer():
     schema = StructuredSchema(
         {"pick": {"type": "enum", "description": "d", "choices": ["AB", "AC", "D"]}}
     )
-    result = run_parallel_generation(model, tokenizer, "ctx", schema, scoring="labels")
+    result = run_parallel_generation(make_engine(model, tokenizer), "ctx", schema, scoring="labels")
     # The rescore ran: the field is in rescored_fields and the canonical
     # (batch=1) answer AB won — the batched near-tie (D) did not.
     assert result["rescored_fields"] == ["pick"]
@@ -890,7 +900,7 @@ def test_decisive_margin_never_rescores():
     schema = StructuredSchema(
         {"pick": {"type": "enum", "description": "d", "choices": ["ALPHA", "BETA"]}}
     )
-    result = run_parallel_generation(model, tokenizer, "ctx", schema)
+    result = run_parallel_generation(make_engine(model, tokenizer), "ctx", schema)
     # Exact tie IS inside the band: rescore runs once, still tied at batch=1
     # (same zero logits), tie=True, and the winner is schema order.
     assert result["rescored_fields"] == ["pick"]
@@ -925,7 +935,7 @@ def test_near_tie_multi_option_rescored_at_batch1():
     schema = StructuredSchema(
         {"tags": {"type": "multi", "description": "d", "choices": ["billing", "fraud"]}}
     )
-    result = run_parallel_generation(model, tokenizer, "ctx", schema, scoring="labels")
+    result = run_parallel_generation(make_engine(model, tokenizer), "ctx", schema, scoring="labels")
     assert result["rescored_fields"] == ["tags"]
     assert result["field_telemetry"]["tags"]["rescored"] is True
     # Both options' Y/N pairs sat 0.01 apart inside the band (batched); the

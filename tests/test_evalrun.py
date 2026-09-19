@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from conftest import make_engine_result, make_field_telemetry
+from conftest import make_engine, make_engine_result, make_field_telemetry
 
 from jevmlx import evalrun
 
@@ -319,8 +319,7 @@ def test_parallel_log_scores_reads_finalized_dict(tmp_path, monkeypatch):
     calls = {}
 
     def fake_rpg(
-        model,
-        tokenizer,
+        engine,
         context,
         schema,
         temperature=1.0,
@@ -344,7 +343,7 @@ def test_parallel_log_scores_reads_finalized_dict(tmp_path, monkeypatch):
     import jevmlx.engine as engine_mod
 
     monkeypatch.setattr(engine_mod, "run_parallel_generation", fake_rpg)
-    decide = er.parallel_decide_fn(model=object(), tokenizer=object())
+    decide = er.parallel_decide_fn(make_engine())
     result = decide({"x": {"type": "enum", "description": "d", "choices": ["A", "B"]}}, "ctx")
     assert result["x"]["log_scores"] == {"A": -0.1, "B": -2.0}
     assert calls["temperature"] == 1.0

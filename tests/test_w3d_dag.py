@@ -13,7 +13,7 @@ Verifies:
 
 from __future__ import annotations
 
-from conftest import FakeModel, FakeTokenizer
+from conftest import FakeModel, FakeTokenizer, make_engine
 
 from jevmlx.engine import run_parallel_generation
 from jevmlx.evalmetrics import oracle_parent_gap
@@ -39,7 +39,7 @@ def test_no_depends_on_is_bit_identical():
     model = FakeModel()
     tokenizer = FakeTokenizer()
     schema = StructuredSchema({"a": {"type": "enum", "description": "d", "choices": ["A", "B"]}})
-    result = run_parallel_generation(model, tokenizer, "ctx", schema)
+    result = run_parallel_generation(make_engine(model, tokenizer), "ctx", schema)
     assert result["rerun_fields"] == []
     assert result["rerun_rows"] == 0
     assert result["second_pass_ms"] == 0.0
@@ -51,7 +51,7 @@ def test_second_pass_telemetry_present():
     model = FakeModel()
     tokenizer = FakeTokenizer()
     schema = StructuredSchema(_make_schema_with_depends())
-    result = run_parallel_generation(model, tokenizer, "ctx", schema)
+    result = run_parallel_generation(make_engine(model, tokenizer), "ctx", schema)
     assert "rerun_fields" in result
     assert "rerun_rows" in result
     assert "second_pass_ms" in result
@@ -75,7 +75,7 @@ def test_second_pass_runs_for_low_margin_child():
     model = FakeModel()
     tokenizer = FakeTokenizer()
     schema = StructuredSchema(_make_schema_with_depends())
-    result = run_parallel_generation(model, tokenizer, "ctx", schema)
+    result = run_parallel_generation(make_engine(model, tokenizer), "ctx", schema)
     # Parent margin is 0 (uniform) < _PARENT_CONFIDENCE_MARGIN(0.3) -> skip.
     assert result["rerun_fields"] == []
     assert result["rerun_rows"] == 0

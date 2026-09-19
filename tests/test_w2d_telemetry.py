@@ -12,7 +12,7 @@ within atol PARITY_ATOL).
 import math
 
 import pytest
-from conftest import FakeModel, FakeTokenizer
+from conftest import FakeModel, FakeTokenizer, make_engine
 
 from jevmlx import StructuredSchema
 from jevmlx.engine import run_parallel_generation
@@ -31,10 +31,7 @@ SCHEMA = StructuredSchema(
 
 def _run():
     return run_parallel_generation(
-        FakeModel(vocab_size=64),
-        FakeTokenizer(),
-        "ctx",
-        SCHEMA,
+        make_engine(FakeModel(vocab_size=64), FakeTokenizer()), "ctx", SCHEMA
     )
 
 

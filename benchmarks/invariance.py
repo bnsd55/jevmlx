@@ -599,7 +599,7 @@ def main(argv: list[str] | None = None) -> int:
     cases = _load_cases(args.data)
     if args.limit:
         cases = cases[: args.limit]
-    decide_fn = parallel_decide_fn(*load_engine(args.model), scoring=args.scoring)
+    decide_fn = parallel_decide_fn(load_engine(args.model), scoring=args.scoring)
 
     out_root = Path(args.out)
     runs: dict[int, list[dict]] = {}
