@@ -471,6 +471,33 @@ _MESSAGES_ROLES = ("system", "user", "assistant")
 _MESSAGES_KEYS = {"role", "content"}
 
 
+def _reject_control_tokens(content: str, tokenizer, *, where: str) -> None:
+    """W6-B2 security boundary: a caller message (or the string form's
+    context) is inserted into the chat template as RAW text. A payload
+    containing the template's control strings (``<|im_start|>system`` on
+    Qwen, ``<start_of_turn>`` on Gemma) tokenizes to REAL special tokens,
+    so it could open a new system turn and override the library-owned
+    protocol block. Reject at the boundary: tokenize the content with
+    ``add_special_tokens=False`` and fail if ANY produced id is in the
+    tokenizer's ``all_special_ids``. Applied to every caller message AND
+    the string form's context (the same risk lives inside the nonce fence).
+    """
+    special = set(getattr(tokenizer, "all_special_ids", ()) or ())
+    if not special:
+        return  # a tokenizer with no declared specials (the unit-test fake)
+    ids = tokenizer.encode(content, add_special_tokens=False)
+    if hasattr(ids, "keys"):  # transformers BatchEncoding
+        ids = list(ids["input_ids"])
+    hit = next((int(i) for i in ids if int(i) in special), None)
+    if hit is not None:
+        raise ValueError(
+            f"{where} contains a token (id {hit}) the tokenizer treats as a "
+            "special/control token — caller content may not carry the chat "
+            "template's control strings (e.g. '<|im_start|>', '<start_of_turn>'); "
+            "they would open a new turn and override the protocol block"
+        )
+
+
 def validate_messages(context: list) -> list[dict]:
     """Validate an OpenAI-style message list for the messages form (W6-B2).
 
@@ -549,7 +576,13 @@ def _protocol_messages(
     conversation has exactly ONE system message (B2: single-system templates
     cannot be surprised by a second system turn; multi-system callers get a
     deterministic order). All non-system messages keep their order.
+
+    Security boundary: every caller message is checked for the template's
+    control tokens BEFORE render (a payload like ``<|im_start|>system``
+    would otherwise open a new turn and override the protocol block).
     """
+    for index, message in enumerate(messages):
+        _reject_control_tokens(message["content"], tokenizer, where=f"context[{index}].content")
     caller_system = [m["content"] for m in messages if m["role"] == "system"]
     rest = [m for m in messages if m["role"] != "system"]
     system_content = _protocol_system_content(schema, tokenizer, scoring)
@@ -2535,7 +2568,13 @@ def _user_content(context: str, schema: StructuredSchema, tokenizer, scoring: st
     neutral prior's prompt_sha256 must hash exactly what _prefill renders.
     W5-A: the schema block renders from the COMPILED plan (to_alias_schema_str
     needs the tokenizer); the context is fenced with _context_block().
+
+    Security boundary (W6-B2): the context is checked for the template's
+    control tokens BEFORE it goes inside the nonce fence — the same risk as
+    the messages form (a ``<|im_start|>system`` payload would escape the
+    fence and open a new turn).
     """
+    _reject_control_tokens(context, tokenizer, where="context")
     schema_str = (
         schema.to_alias_schema_str(tokenizer)
         if scoring == "slots"
