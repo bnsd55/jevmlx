@@ -123,7 +123,13 @@ def test_summarize_gates_parity_failed_rows(tmp_path):
         )
     (model_dir / "parity.json").write_text(
         json.dumps(
-            {"passed": False, "max_abs_drift_nats": 0.9, "atol": 0.05, "winners_identical": False}
+            {
+                "passed": False,
+                "max_abs_drift_nats": 0.9,
+                "atol": 0.05,
+                "raw_atol": 0.2,
+                "winners_identical": False,
+            }
         ),
         encoding="utf-8",
     )
@@ -136,7 +142,13 @@ def test_summarize_gates_parity_failed_rows(tmp_path):
     # Passing parity: numbers survive.
     (model_dir / "parity.json").write_text(
         json.dumps(
-            {"passed": True, "max_abs_drift_nats": 0.01, "atol": 0.05, "winners_identical": True}
+            {
+                "passed": True,
+                "max_abs_drift_nats": 0.01,
+                "atol": 0.05,
+                "raw_atol": 0.2,
+                "winners_identical": True,
+            }
         ),
         encoding="utf-8",
     )

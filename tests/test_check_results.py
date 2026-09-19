@@ -268,6 +268,7 @@ class TestParityGate:
                     "max_abs_drift_nats": 0.027,
                     "max_raw_row_drift_nats": 0.031,
                     "atol": 0.05,
+                    "raw_atol": 0.2,
                     "run_at": "2026-09-18T12:00:00Z",
                 }
             )
@@ -295,6 +296,7 @@ class TestParityGate:
                     "max_abs_drift_nats": 0.15,
                     "max_raw_row_drift_nats": 0.02,
                     "atol": 0.05,
+                    "raw_atol": 0.2,
                     "winners_identical": True,
                     "run_at": "2026-09-18T12:00:00Z",
                 }
@@ -317,6 +319,7 @@ class TestParityGate:
                     "max_abs_drift_nats": 0.01,
                     "max_raw_row_drift_nats": 0.2,
                     "atol": 0.05,
+                    "raw_atol": 0.05,
                     "winners_identical": True,
                 }
             )
@@ -345,6 +348,29 @@ class TestParityGate:
         ok, problems = check_parity(tmp_path)
         assert not ok
         assert any("pre-v2" in p for p in problems)
+
+    def test_missing_raw_atol_key_fails(self, tmp_path):
+        """W5c-1: a v2 payload that carries max_raw_row_drift_nats but is
+        missing raw_atol is a CONTRACT failure (not a fallback to atol) —
+        the raw gate's band is mandatory, not inferred."""
+        from benchmarks.check_results import check_parity
+
+        (tmp_path / "parity.json").write_text(
+            json.dumps(
+                {
+                    "model": "m",
+                    "test": "w1a",
+                    "passed": True,
+                    "max_abs_drift_nats": 0.02,
+                    "max_raw_row_drift_nats": 0.03,
+                    "atol": 0.05,
+                    "run_at": "2026-09-18T12:00:00Z",
+                }
+            )
+        )
+        ok, problems = check_parity(tmp_path)
+        assert not ok
+        assert any("pre-v2" in p and "raw_atol" in p for p in problems)
 
     def test_corrupt_parity_fails(self, tmp_path):
         from benchmarks.check_results import check_parity

@@ -228,7 +228,13 @@ def test_summarize_two_report_files_parity_gate(tmp_path):
     # Failing parity.json: gated with the drift numbers.
     (model_dir / "parity.json").write_text(
         json.dumps(
-            {"passed": False, "max_abs_drift_nats": 0.9, "atol": 0.05, "winners_identical": False}
+            {
+                "passed": False,
+                "max_abs_drift_nats": 0.9,
+                "atol": 0.05,
+                "raw_atol": 0.2,
+                "winners_identical": False,
+            }
         ),
         encoding="utf-8",
     )
@@ -239,7 +245,13 @@ def test_summarize_two_report_files_parity_gate(tmp_path):
     # Passing parity.json: numbers stand.
     (model_dir / "parity.json").write_text(
         json.dumps(
-            {"passed": True, "max_abs_drift_nats": 0.01, "atol": 0.05, "winners_identical": True}
+            {
+                "passed": True,
+                "max_abs_drift_nats": 0.01,
+                "atol": 0.05,
+                "raw_atol": 0.2,
+                "winners_identical": True,
+            }
         ),
         encoding="utf-8",
     )
@@ -783,6 +795,7 @@ def test_parity_note_names_stage_and_drift(tmp_path):
                 "max_abs_drift_nats": 0.01,
                 "max_raw_row_drift_nats": 0.2,
                 "atol": 0.05,
+                "raw_atol": 0.05,
                 "winners_identical": True,
             }
         ),
@@ -796,7 +809,13 @@ def test_parity_note_names_stage_and_drift(tmp_path):
     # Winners stage: final decisions flipped.
     (d / "parity.json").write_text(
         json.dumps(
-            {"passed": False, "winners_identical": False, "atol": 0.05, "max_abs_drift_nats": 0.3}
+            {
+                "passed": False,
+                "winners_identical": False,
+                "atol": 0.05,
+                "raw_atol": 0.2,
+                "max_abs_drift_nats": 0.3,
+            }
         ),
         encoding="utf-8",
     )
@@ -804,5 +823,7 @@ def test_parity_note_names_stage_and_drift(tmp_path):
     assert "winners flipped" in note
 
     # Passing parity: no note.
-    (d / "parity.json").write_text(json.dumps({"passed": True, "atol": 0.05}), encoding="utf-8")
+    (d / "parity.json").write_text(
+        json.dumps({"passed": True, "atol": 0.05, "raw_atol": 0.2}), encoding="utf-8"
+    )
     assert _model_parity_note(d) is None
