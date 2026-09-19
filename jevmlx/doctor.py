@@ -187,32 +187,25 @@ def check_venv() -> list[Check]:
 
 
 def check_editable_install() -> Check:
-    """Editable installs must point at this checkout; package installs are OK.
+    """The imported tree must match the installed tree; package installs OK.
 
     Reads ``direct_url.json`` from the installed jevmlx dist-info. pip
     writes it only for direct-URL installs (``uv pip install -e``) and
     marks them ``dir_info.editable``; a normal wheel install (PyPI) has no
     direct_url.json at all. So: no direct_url.json or not editable -> OK
-    ("installed as a package" — the normal end-user case). Editable -> the
-    package the RUNNING INTERPRETER actually imports must live inside the
-    checkout's editable tree, otherwise the venv imports a different jevmlx
-    tree than the one being tested or benchmarked.
-
-    The comparison uses ``jevmlx.__file__`` — the package location of the
-    running interpreter — not the direct_url.json of whichever dist-info
-    importlib.metadata resolves first. direct_url.json records where
-    ``pip install -e`` RAN; a shared venv across worktrees (editable from
-    ~/git/jevmlx, tests imported from a sibling worktree) still imports the
-    right code as long as sys.path puts this checkout first, which is the
-    thing that matters.
+    ("installed as a package" — the normal end-user case). Editable ->
+    compare the tree the RUNNING INTERPRETER imports (``jevmlx.__file__``)
+    with the tree the venv INSTALLED (the direct_url.json path):
+    - equal -> OK,
+    - different -> FAIL naming both, e.g. a shared venv whose editable
+      install points at worktree A while python runs from worktree B: the
+      benchmarked code is then not the installed code. This FAIL is BY
+      DESIGN — each worktree gets its own venv (see BENCHMARKING.md,
+      Development setup).
     """
     import jevmlx
 
-    running_pkg = Path(jevmlx.__file__).resolve().parent.parent
-    checkout = Path(__file__).resolve().parent.parent
-    # macOS /tmp is a symlink to /private/tmp — resolve() normalises the
-    # /private prefix on ONE side only if the other wasn't resolved. Both
-    # sides are resolved, so compare the resolved paths.
+    imported = Path(jevmlx.__file__).resolve().parent.parent
     try:
         dist = importlib.metadata.distribution("jevmlx")
         raw = dist.read_text("direct_url.json")
@@ -238,15 +231,17 @@ def check_editable_install() -> Check:
             f"editable install url is not a local path: {url}",
             "uv pip install -e '.[dev]' from the checkout you are testing",
         )
-    if running_pkg != checkout:
+    installed = installed.resolve()
+    if imported != installed:
         return _fail(
             "editable-install",
             (
-                f"running interpreter imports jevmlx from {running_pkg}, "
-                f"not this checkout ({checkout})"
+                f"python imports jevmlx from {imported} but the venv installs "
+                f"it editable from {installed} — the tested tree is not the "
+                f"installed tree"
             ),
-            "run pytest with the checkout first on sys.path (e.g. from its "
-            "root) or uv pip install -e '.[dev]' from it",
+            "run from the installed checkout, or uv pip install -e '.[dev]' "
+            "from THIS checkout (one venv per worktree)",
         )
     return _ok("editable-install", f"editable install -> {installed}")
 

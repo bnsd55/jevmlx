@@ -10,6 +10,12 @@ git clone https://github.com/bnsd55/jevmlx && cd jevmlx
 ./setup.sh
 ```
 
+One venv PER checkout/worktree: `./setup.sh` creates `.venv/` inside the
+checkout it runs in. If you run from a git worktree, run `./setup.sh`
+there too — `jevmlx doctor` intentionally FAILS when the python you run
+imports a different jevmlx tree than the one the venv installed (the
+benchmarked code would not be the installed code).
+
 ## 2. Run the bench
 
 ```bash
