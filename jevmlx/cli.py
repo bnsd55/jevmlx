@@ -1,7 +1,7 @@
 """jevmlx command-line interface.
 
 jevmlx decide --preset fintech_fraud
-jevmlx decide --schema FILE --context FILE|-
+jevmlx decide --schema FILE --context FILE|- | --messages FILE|-
 jevmlx decide --json --preset support_triage
 """
 
@@ -267,6 +267,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     decide.add_argument("--schema", help="path to a schema .json file")
     decide.add_argument("--context", help="path to a context .txt file, or - for stdin")
+    decide.add_argument(
+        "--messages",
+        help=(
+            "path to a JSON file of OpenAI-style messages [{role, content}, ...] "
+            "(or - for stdin); roles limited to system/user/assistant. "
+            "Mutually exclusive with --context (W6-B2)."
+        ),
+    )
     decide.add_argument(
         "--json", action="store_true", dest="as_json", help="print the assembled JSON only"
     )
@@ -679,16 +687,22 @@ def _dispatch(argv) -> None:
     configure(level=level, json_mode=os.environ.get("JEVMLX_LOG") == "json")
 
     if args.command == "decide":
-        if args.preset and (args.schema or args.context):
-            ap.error("--preset cannot be combined with --schema/--context")
-        if not args.preset and not (args.schema and args.context):
+        if args.messages and args.context:
+            ap.error("--messages and --context are mutually exclusive")
+        if args.preset and (args.schema or args.context or args.messages):
+            ap.error("--preset cannot be combined with --schema/--context/--messages")
+        if not args.preset and not (args.schema and (args.context or args.messages)):
             missing = [
                 flag
-                for flag, given in (("--schema", args.schema), ("--context", args.context))
+                for flag, given in (
+                    ("--schema", args.schema),
+                    ("--context", args.context),
+                    ("--messages", args.messages),
+                )
                 if not given
             ]
             ap.error(
-                "exactly one of --preset or --schema AND --context is required; "
+                "exactly one of --preset or --schema AND (--context|--messages) is required; "
                 f"missing: {', '.join(missing)}"
             )
 
@@ -700,7 +714,19 @@ def _dispatch(argv) -> None:
         else:
             with open(args.schema, encoding="utf-8") as f:
                 schema_dict = json.load(f)
-            if args.context == "-":
+            if args.messages:
+                # W6-B2: the messages form — a JSON array of {role, content}.
+                if args.messages == "-":
+                    raw = sys.stdin.read()
+                else:
+                    with open(args.messages, encoding="utf-8") as f:
+                        raw = f.read()
+                context = json.loads(raw)
+                if not isinstance(context, list):
+                    ap.error(
+                        f"--messages must be a JSON array of messages, got {type(context).__name__}"
+                    )
+            elif args.context == "-":
                 context = sys.stdin.read()
             else:
                 with open(args.context, encoding="utf-8") as f:

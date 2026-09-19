@@ -109,6 +109,28 @@ CASES: dict[str, dict] = {
         "context": "The applicant disputes one charge.",
         "scoring": "labels",
     },
+    # W6-B2: the messages form (v10-messages). Same schemas as the string
+    # cases, but the input is an OpenAI-style message list — the library
+    # protocol block is a system turn, the nonce fence is absent.
+    "risk_enum_bool_messages": {
+        "schema": {
+            "risk_tier": {
+                "type": "enum",
+                "description": "Credit risk tier",
+                "choices": ["LOW", "MEDIUM", "HIGH"],
+                "choice_descriptions": {
+                    "LOW": "stable income",
+                    "HIGH": "many missed payments",
+                },
+            },
+            "flag": {"type": "boolean", "description": "manually flagged"},
+        },
+        "messages": [
+            {"role": "system", "content": "Be terse."},
+            {"role": "user", "content": "The applicant pays late sometimes."},
+        ],
+        "scoring": "slots",
+    },
 }
 
 # The profiles: engine-resolved from a representative model id. qwen2.5 =
