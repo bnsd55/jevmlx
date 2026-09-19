@@ -1,0 +1,5 @@
+{
+  "version": 1,
+  "edges": [4, 8, 16],
+  "note": "W5c-4 plateau: drift onset at 16 rows, flat to 128. A finer M>16 split (the fp32 bisect jump between M=16 and M=112) lands as a NEW versioned edge set — never an in-place edit, because the edge version rides in the envelope key (records under different edges never mix). This file is the single source of truth the package ships; jevmlx.driftenv.BUCKET_EDGES / BUCKET_EDGES_VERSION mirror it for import-time use."
+}

@@ -12,3 +12,4 @@ dist/
 
 # Lockfile stays local; consumers resolve their own dependencies
 uv.lock
+.venv/

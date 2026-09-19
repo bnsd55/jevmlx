@@ -172,6 +172,21 @@
   naming both when different. The FAIL on a shared venv across worktrees is
   BY DESIGN (each worktree gets its own venv — BENCHMARKING.md).
 
+- **W5c-9 (persisted drift envelope, measured rescore band)** — the near-tie
+  rescore band is no longer a constant: it is INSTABILITY_BAND widened by a
+  PERSISTED, MEASURED drift bound E_bound(M) for the pass's shape bucket.
+  PR #66's drift probe measured pairwise-gap drift (d_gap) up to 0.0625
+  nats at >= 16 merged rows, so a reference near tie could escape the
+  rescore (batch-one margin 0.031, batched margin 0.0625 > 0.05). The
+  envelope is keyed by (model_id, revision, quantization, mlx_version, chip,
+  activation dtype, bucket_edges_version); bucket edges ship as versioned
+  package data (`jevmlx/data/bucket_edges.json`). The engine carries the
+  RECORDS and resolves the band per pass from the MERGED width (decide_many
+  slices per context before assembly, so the band uses n_group*R, not R);
+  M above the largest recorded bucket uses the largest recorded bound. A
+  failed canary / uncovered batched pass RAISES (no constant fallback). The
+  PARITY contract is unchanged (0.05 on d_gap).
+
 ## Released
 
 - The engine is an object: `load_engine` returns a frozen `Engine`

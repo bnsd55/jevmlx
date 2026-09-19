@@ -188,6 +188,17 @@ class CountCodeModel(FakeModel):
         )
 
 
+# ----------------------------------------------- test probes isolation --
+# W5c-9: every test redirects the drift-envelope probes dir to a tmp_path
+# so test records (fake engines) NEVER touch the repo's
+# benchmarks/probes/ (where only REAL model records are committed — PR #66).
+@pytest.fixture(autouse=True)
+def _isolate_drift_probes(tmp_path, monkeypatch):
+    import jevmlx.driftenv as dv
+
+    monkeypatch.setattr(dv, "_PROBES_DIR_OVERRIDE", tmp_path / "probes")
+
+
 # ------------------------------------------------- engine result factories --
 # The FULL result dict `run_parallel_generation` returns (ARCHITECTURE.md
 # 'Engine result dict'), with neutral defaults. These three builders are the
@@ -412,6 +423,13 @@ def make_engine_result(
 
 # --------------------------------------------------------- Engine factory --
 
+# Sentinel for make_engine's drift_envelope default: the Engine field is
+# REQUIRED (never None), but the test helper resolves the default lazily so
+# callers that don't care about the band get the test envelope. The sentinel
+# keeps the parameter typed as a plain dict (not Optional) — matches the
+# Engine contract that an envelope is always present after load.
+_TEST_ENVELOPE_SENTINEL = object()
+
 
 def make_engine(
     model=None,
@@ -419,6 +437,7 @@ def make_engine(
     *,
     model_id: str = "fake-engine",
     vocab_size: int | None = None,
+    drift_envelope: dict = _TEST_ENVELOPE_SENTINEL,
 ):
     """Build a real :class:`jevmlx.engine.Engine` around (fakes | live parts).
 
@@ -428,6 +447,13 @@ def make_engine(
     FakeModel/FakeTokenizer; the per-model properties (profile, vocab,
     weights) resolve here — the engine is built fully loaded, as load_engine
     would produce it.
+
+    W5c-9: ``drift_envelope`` defaults to a TEST envelope (the measured
+    plateau bound 0.0625) so the majority of tests that don't care about
+    the rescore band stay unchanged; tests that DO pass an explicit
+    envelope. The envelope is REQUIRED on the Engine (never None) — the
+    sentinel default resolves to the test envelope, so the signature reads
+    as a required dict, not an Optional.
     """
     from jevmlx.engine import (
         Engine,
@@ -443,6 +469,12 @@ def make_engine(
         tokenizer = FakeTokenizer()
     if vocab_size is None:
         vocab_size = _vocab_size_of(model)
+    if drift_envelope is _TEST_ENVELOPE_SENTINEL:
+        # Test envelope: a single M>16 record at the plateau (0.0625) —
+        # the band every real engine resolves on this machine. Tests that
+        # need the CONSTANT band (no widening) build their own envelope
+        # with a 0.0 record, or call _constant_test_envelope().
+        drift_envelope = _test_envelope()
     return Engine(
         model=model,
         tokenizer=tokenizer,
@@ -453,7 +485,33 @@ def make_engine(
         weight_bytes=_model_weight_bytes(model),
         cache_capabilities=("KVCache",),
         width_slope=1.0,
+        drift_envelope=drift_envelope,
     )
+
+
+def _test_envelope() -> dict:
+    """The default test envelope: a single M>16 record at the plateau
+    (0.0625) — the measured bound on this machine, so the test band is the
+    real production band (0.125), not a synthetic constant."""
+    from jevmlx.driftenv import MAX_GAP_DRIFT_KEY
+
+    return {
+        "key": {"model_id": "fake-engine", "bucket_edges_version": 1},
+        "records": [{"shape_bucket": "M>16", MAX_GAP_DRIFT_KEY: 0.0625, "source": "test"}],
+        "source": "test",
+    }
+
+
+def _constant_test_envelope() -> dict:
+    """A test envelope with a 0.0 bound — the CONSTANT band (0.05), for
+    tests asserting the pre-W5c-9 behavior (no widening)."""
+    from jevmlx.driftenv import MAX_GAP_DRIFT_KEY
+
+    return {
+        "key": {"model_id": "fake-engine", "bucket_edges_version": 1},
+        "records": [{"shape_bucket": "M>16", MAX_GAP_DRIFT_KEY: 0.0, "source": "test"}],
+        "source": "test",
+    }
 
 
 @pytest.fixture(scope="module")
