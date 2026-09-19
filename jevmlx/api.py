@@ -40,6 +40,7 @@ __all__ = [
     "NONE_OF_ABOVE_DESCRIPTION",
     "Decision",
     "FieldResult",
+    "FieldSemantics",
     "decide",
     "decide_many",
     "schema_from_model",
@@ -81,6 +82,44 @@ def _choice_values(name: str, values: list) -> list[str]:
 
 
 @dataclasses.dataclass(frozen=True)
+class FieldSemantics:
+    """How ONE field's reported probabilities were produced (W5b-13, §C9).
+
+    The per-field truth a global ``probability_status`` string cannot
+    carry: a result mixes temperature-scaled scalars, calibrated multi
+    options that ignore the caller temperature, count-row bucket scores,
+    prior-corrected fields, and dependency/oracle re-scores. Each field
+    records its own semantics; the result-level ``probability_status``
+    becomes a summary of these records.
+
+    Attributes:
+        score_source: Which scoring path produced the final evidence:
+            "batched" (batched pass), "rescored_batch1" (canonical batch=1
+            rescore replaced it), "dependency" (second pass conditioned on
+            the parent), "oracle" (forced re-score under oracle_overrides).
+        temperature: The temperature actually applied to the reported
+            distribution. None for count rows (fixed T=1 bucket scores)
+            and for calibrated multi selections (the calibrated log-odds
+            ``a*(yes-no)+b`` cut ignores the caller temperature).
+        calibrator_id: Identity of the CalibrationBundle whose fitted
+            calibrator set the selection (multi only); None = uncalibrated.
+        prior_mode: "off" or "neutral_v1" — whether (and how) the scores
+            were prior-corrected against the neutral-context pass.
+        constraint_changed: A reconciler (count / set constraints / case
+            MAP) overrode the raw winner.
+        dependency_rescored: Re-scored conditioned on the parent value in
+            a dependency wave.
+    """
+
+    score_source: str
+    temperature: float | None
+    calibrator_id: str | None
+    prior_mode: str
+    constraint_changed: bool
+    dependency_rescored: bool
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
 class FieldResult:
     """Provenance for one decided field.
 
@@ -119,6 +158,10 @@ class FieldResult:
             gate (calibrated abstention is a later milestone). The
             only values are None, "none_of_above" and "abstain"; a
             withheld decision is exactly ``reason == "abstain"``.
+        semantics: HOW this field's reported probabilities were produced —
+            see :class:`FieldSemantics`. Required: the engine's stages set
+            the record and _build_field_results coerces it; a telemetry
+            entry without one raises (never a silent None).
     """
 
     value: object
@@ -130,7 +173,8 @@ class FieldResult:
     calibrated: bool
     model: str
     alternatives: tuple[tuple[str, float], ...]
-    reason: str | None = None
+    reason: str | None
+    semantics: FieldSemantics
 
 
 @dataclasses.dataclass
@@ -357,6 +401,19 @@ def _build_field_results(
         # Provenance (the bundle identity) belongs to the telemetry, not to
         # confidence_model: model stays the clean decision-model name.
         calibrated_flag = telemetry.get("calibrated") is not None
+        # W5b-13 step 2: the engine's stages set the semantics record; the
+        # public API coerces it into the frozen FieldSemantics. A telemetry
+        # entry without one is a contract violation — fail loudly, never
+        # ship a None semantics. (This is the boundary CHECK, not a
+        # tolerant read: the index below raises when the record is absent
+        # or not a dict.)
+        sem_dict = telemetry["semantics"]
+        if not isinstance(sem_dict, dict):
+            raise ValueError(
+                f"field telemetry for {name!r} carries no semantics record "
+                "(results-contract violation; engine stages must set "
+                "field_telemetry[fname]['semantics'])"
+            )
         fields[name] = FieldResult(
             value=telemetry["value"],
             score=score,
@@ -368,6 +425,7 @@ def _build_field_results(
             model=confidence_model,
             alternatives=alternatives,
             reason=reason,
+            semantics=FieldSemantics(**sem_dict),
         )
     return fields
 

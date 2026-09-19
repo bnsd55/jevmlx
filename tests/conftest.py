@@ -195,6 +195,27 @@ def _base_field_telemetry() -> dict:
     }
 
 
+def make_field_semantics(
+    score_source: str = "batched",
+    temperature: float | None = 1.0,
+    calibrator_id: str | None = None,
+    prior_mode: str = "off",
+    constraint_changed: bool = False,
+    dependency_rescored: bool = False,
+) -> dict:
+    """W5b-13: the engine's per-field semantics record (the dict the engine
+    stages emit; api.FieldSemantics(**d) coerces it at the public boundary).
+    Same defaults the engine produces on a plain uncorrected fake path."""
+    return {
+        "score_source": score_source,
+        "temperature": temperature,
+        "calibrator_id": calibrator_id,
+        "prior_mode": prior_mode,
+        "constraint_changed": constraint_changed,
+        "dependency_rescored": dependency_rescored,
+    }
+
+
 def make_field_telemetry(
     value: object = "A",
     type_: str = "enum",
@@ -291,6 +312,7 @@ def make_field_telemetry(
             "legal_mass": 1.0,
             "legal_mass_logs": {c: 0.0 for c in opts},
         }
+    entry.setdefault("semantics", make_field_semantics())
     entry.update(overrides)
     return entry
 

@@ -207,7 +207,7 @@ load).
 | `schema_match` | Always True (keys/enums guaranteed by construction). |
 | `confidence_model` | `"slots"` or `"labels"`. |
 | `prompt_sha256` / `prompt_version` | SHA-256 over the full prompt token ids; the version is read from `engine.PROMPT_VERSION` (v8) — never a literal elsewhere. |
-| `probability_status` | How to read the probabilities. |
+| `probability_status` | W5b-13: a SUMMARY over the per-field semantics records — one clause per distinct (score_source, temperature, calibrator_id, prior_mode) group with its field count. Not authoritative for any single field; the per-field truth is `field_telemetry[..]['semantics']`. An empty group set raises (every engine path sets records). |
 | `prior_correction` / `constraints_applied` | Whether the prior pass ran / case-level constraints were applied. |
 | `reconciled_fields` | Fields whose value changed under constrained MAP. |
 | `parsed_json` | `{field: {"value": …, "prob": …}}`. |
@@ -235,6 +235,7 @@ Batched-only keys (`run_parallel_generation_batched`, every result): `group_wall
 | `rows` | Rows the field consumed (0 for cardinality-1 fields). |
 | `tie` / `rescored` | Scalar: whether the top-2 gap is inside `INSTABILITY_BAND` (subsumes exact-equality ties), and whether the batch=1 rescore replaced the batched result. Multi: `rescored` when any option's Y/N pair was rescored. |
 | `evidence_source` | Scalar only (W5-B, PR #45): which scoring path produced the final evidence — `batch` (batched pass), `batch1` (canonical rescore replaced it), `dependency` (second pass), `oracle` (forced re-score). Rides on scalar entries and on second-pass re-decides. |
+| `semantics` | W5b-13: the per-field semantics record (coerced to frozen `api.FieldSemantics` at the public boundary): `score_source` (`batched`/`rescored_batch1`/`dependency`/`oracle`), `temperature` actually applied (None for count rows and calibrated multi selections), `calibrator_id` (bundle identity when a fitted calibrator set the selection), `prior_mode` (`off`/`neutral_v1`), `constraint_changed` (a reconciler overrode the raw winner — an actual selection change, not merely a binding constraint), `dependency_rescored`. REQUIRED on every entry — `_build_field_results` raises without it. |
 | `legal_mass` | Probability the model assigned to the union of allowed continuations at the winner's branch point(s), against the full vocabulary = sum(exp(z_allowed)) / sum(exp(z_vocab)). Per-branch leakage signal — the constrained distribution can confidently pick A over B even when almost all unconstrained mass is on a reasoning token/newline/label text. Product over the winner's branch path (scalar); per-option Y/N branches (multi); the count row has its own (`legal_mass` + `min_option_legal_mass` on the `<field>#count` entry). 1.0 for cardinality-1 fields (nothing branched). Always computed. Raw, pre-prior-correction logits. |
 | `legal_mass_logs` | Per-choice (scalar) / per-option (multi) natural-log legal-mass product along the branch path, keyed by the real choice/option string. Raw, T=1. Calibration feature for the abstention model. The legal-mass callback is LOG-space end to end (W5-D finding 37: `score_trie`'s `legal_mass_at_node` returns natural-log floats; the trie stays MLX-free). |
 | `min_option_legal_mass` / `mean_log_legal_mass` | Multi only (W5-D finding 38): cardinality-free field-level stats replacing the old underflowing, cardinality-confounded product as the headline numbers — the worst option's legal mass in probability space, and the mean per-option log mass (additive, stable). The per-option logs stay on `legal_mass_logs`. |
@@ -255,6 +256,7 @@ Batched-only keys (`run_parallel_generation_batched`, every result): `group_wall
 | `model` | `"slots"` or `"labels"`. |
 | `alternatives` | Top 3 (choice, probability) pairs; multi: per-option (option, P(yes)) sorted desc. |
 | `reason` | None, `"none_of_above"` (caller opted in via `allow_none_of_above=True`, model picked the explicit opt-out → None), or `"abstain"` (`abstain_below_margin` set and the field's margin — `probability_margin` scalar / `threshold_distance` multi — fell below the cut; value withheld from the validated instance, raw kept for provenance). The single source of truth — no separate abstain flag. |
+| `semantics` | Frozen `api.FieldSemantics` (W5b-13): how THIS field's reported probabilities were produced — score_source, the temperature actually applied, the calibrator bundle id, prior_mode, constraint_changed, dependency_rescored. Required, kw-only; coerced from the telemetry record, never None. |
 
 ### Case-level constraints — `constraints.py`, applied by `_constrained_map`
 

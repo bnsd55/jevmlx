@@ -64,9 +64,11 @@ def test_prompt_sha256_stable_and_input_sensitive():
     assert len(r1["prompt_sha256"]) == 64
     # Independent of the schema contents swap? No: same schema, so identical.
     assert r1["prompt_version"] == "jevmlx-parallel-v9"
-    assert (
-        r1["probability_status"]
-        == "constrained-path probability at T=1; uncalibrated as decision confidence"
+    # W5b-13: status = per-group semantics summary (the fake ties ->
+    # rescored_batch1).
+    assert r1["probability_status"] == (
+        "1 field: rescored_batch1; constrained-path probability; "
+        "uncalibrated as decision confidence"
     )
 
 
@@ -588,16 +590,18 @@ def test_probability_status_truthful_at_temperature_ne_one():
         {"action": {"type": "enum", "description": "d", "choices": ["A", "B"]}}
     )
     at_one = run_parallel_generation(make_engine(model, tokenizer), "ctx", schema, temperature=1.0)
+    # W5b-13: the status is the per-group summary. The zero-logit fake ties
+    # inside the band, so its single field's evidence is rescored_batch1.
     assert at_one["probability_status"] == (
-        "constrained-path probability at T=1; uncalibrated as decision confidence"
+        "1 field: rescored_batch1; constrained-path probability; "
+        "uncalibrated as decision confidence"
     )
     at_half = run_parallel_generation(make_engine(model, tokenizer), "ctx", schema, temperature=0.5)
     status = at_half["probability_status"]
     assert "temperature-scaled" in status
-    assert "temperature=0.5" in status
-    assert "not a T=1 probability" in status
+    assert "T=0.5" in status
     at_two = run_parallel_generation(make_engine(model, tokenizer), "ctx", schema, temperature=2.0)
-    assert "temperature=2.0" in at_two["probability_status"]
+    assert "T=2.0" in at_two["probability_status"]
 
 
 class _StatefulFakeCache:
