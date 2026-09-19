@@ -164,7 +164,8 @@ def build_datasets(
         paths_locks[name] = lock
 
     # W6-B5 public gold datasets: two views each (balanced diagnostic /
-    # natural distribution), each view its own cases file + lock.
+    # natural distribution), each view its own cases file + lock. The
+    # verifier re-checks the pinned file sha256s on cache reuse (F5).
     for name in ("ag_news", "boolq", "sst5"):
         if name not in datasets:
             continue
@@ -172,7 +173,12 @@ def build_datasets(
             jsonl = BENCH_CACHE / f"{name}.{view}.jsonl"
             lock = BENCH_CACHE / f"{name}.{view}.dataset.lock.json"
             try:
-                _rebuild_if_needed(jsonl, lock, lambda n=name, v=view: _build_public_view(n, v))
+                _rebuild_if_needed(
+                    jsonl,
+                    lock,
+                    lambda n=name, v=view: _build_public_view(n, v),
+                    verify=_public_pin_problem,
+                )
             except OSError as exc:
                 if offline_ok and not (jsonl.exists() and lock.exists()):
                     print(f"{name}.{view} dataset skipped (offline): {exc}")
@@ -207,12 +213,16 @@ def build_datasets(
     return paths, paths_locks
 
 
-def _rebuild_if_needed(jsonl: Path, lock: Path, build) -> None:
+def _rebuild_if_needed(jsonl: Path, lock: Path, build, verify=None) -> None:
     """Rebuild the dataset when missing, partial, or no longer matching its lock.
 
     The cached cases file is only trusted when it still hashes to the lock's
     ``cases_sha256`` (the same integrity rule the fetchers apply); a
     mismatched pair (truncated write, stale cache, edited file) rebuilds.
+    ``verify`` (a lock -> problem-string-or-None callable) adds an extra
+    validity gate on cache reuse — the public fetchers' pin re-check (F5):
+    a lock whose recorded file sha256 no longer equals the hardcoded
+    expectation forces a rebuild.
     """
     if jsonl.exists() and lock.exists():
         try:
@@ -220,7 +230,13 @@ def _rebuild_if_needed(jsonl: Path, lock: Path, build) -> None:
         except (OSError, json.JSONDecodeError):
             expected = None
         if expected is not None and hashlib.sha256(jsonl.read_bytes()).hexdigest() == expected:
-            return
+            if verify is not None:
+                problem = verify(lock)
+                if problem is None:
+                    return
+                print(f"{jsonl.name}: {problem} — rebuilding...")
+            else:
+                return
         print(f"{jsonl.name}: cached copy does not match its lock — rebuilding...")
     build()
 
@@ -241,6 +257,34 @@ def _build_typesafe() -> None:
     rc = fetch_main(["--out", out])
     if rc != 0:
         raise OSError("typesafe fetch failed")
+
+
+def _public_pin_problem(lock: Path) -> str | None:
+    """F5: on cache reuse, re-check the lock's recorded file sha256s against
+    the hardcoded pin expectations. None = still the pinned bytes."""
+    from benchmarks.public.fetch import DATASETS
+
+    try:
+        data = json.loads(lock.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "lock unreadable"
+    sources = data.get("sources") or []
+    if not sources:
+        return "lock has no sources"
+    source = sources[0]
+    repo_id = source.get("repo_id")
+    ds = next((d for d in DATASETS.values() if d.repo_id == repo_id), None)
+    if ds is None:
+        return f"unknown repo {repo_id}"
+    if source.get("revision") != ds.revision:
+        return f"revision drift: {source.get('revision')} != pin {ds.revision}"
+    for file_path, recorded in (source.get("files") or {}).items():
+        expected = ds.expected_sha256.get(file_path)
+        if expected is None:
+            return f"no pin expectation for {file_path}"
+        if recorded != expected:
+            return f"file sha256 drift for {file_path}"
+    return None
 
 
 def _build_public_view(name: str, view: str) -> None:
@@ -439,11 +483,24 @@ def run_bench(
 
     last_run: dict[str, dict[str, Any]] = {}
     failed_combos: dict[str, str] = {}
+
+    # Bare public names ("ag_news") expand to both views
+    # ("ag_news.balanced", "ag_news.natural") — a bare name alone produces
+    # ZERO combos (its cases live in the view-suffixed files only).
+    def _combo_datasets(names: list[str]) -> list[str]:
+        expanded: list[str] = []
+        for name in names:
+            if name in dataset_paths:
+                expanded.append(name)
+            elif name in ("ag_news", "boolq", "sst5"):
+                expanded.extend(f"{name}.{view}" for view in ("balanced", "natural"))
+        return expanded
+
+    combo_dataset_names = _combo_datasets(datasets)
     combos = [
         (track, scorer, dataset)
         for track, scorer in _track_scorer_grid(tracks, scorers)
-        for dataset in datasets
-        if dataset in dataset_paths
+        for dataset in combo_dataset_names
     ]
     engine_loaded = False
     parity_note: str | None = None  # W4-B: set when the parity check fails
@@ -814,7 +871,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--datasets",
         default="bundled,typesafe,perturbed",
-        help="comma list: bundled,typesafe,typed-decisions,perturbed,synthetic-*",
+        help="comma list: bundled,typesafe,typed-decisions,perturbed,"
+        "synthetic-*,ag_news,ag_news.balanced,ag_news.natural,boolq,"
+        "boolq.balanced,boolq.natural,sst5,sst5.balanced,sst5.natural",
     )
     parser.add_argument("--scorers", default="slots,labels", help="comma list: slots,labels")
     parser.add_argument(

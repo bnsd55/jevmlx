@@ -8,7 +8,7 @@
 
 Every dataset is PINNED by its repo commit sha (``DEFAULT_REVISION`` per
 dataset, like typed_decisions/fetch.py), every downloaded file's sha256
-lands in the lock, and a mismatch FAILS CLOSED (SystemExit) instead of
+lands in the lock, and a mismatch FAILS CLOSED (OSError) instead of
 writing a lock over unknown bytes.
 
 Two sampling views per dataset, written as SEPARATE cases files
@@ -25,10 +25,19 @@ yields the same rows.
 
 License/terms (from each dataset's card, recorded in the lock):
 AG News "unknown", BoolQ CC-BY-SA 3.0, SST-5 unspecified. Redistribution
-status is therefore NOT cleared for any of them: the cases files store
-row ids + splits + option order + selected-input hashes ONLY — never the
-source text (the engine renders the text at eval time from a locally
-cached copy the fetch produced; text never lands in a result artifact).
+status is therefore NOT cleared for any of them, so the SOURCE TEXT lives
+only in the CACHED cases files under ``BENCH_CACHE`` (never committed,
+re-expanded from the pinned Hub bytes) — while every RESULTS ARTIFACT
+(predictions.jsonl, run.json, report.json, dataset.lock.json) stores row
+ids, split, option order and input hashes only. The two views are
+DISJOINT: the natural-distribution view draws rows the balanced view did
+NOT take, so calibration rows are never the reported diagnostic rows.
+
+Every dataset file carries a hardcoded EXPECTED sha256 (next to the
+pinned revision); the download is verified against it and the verified
+value is re-checked against the lock on cache reuse. A mismatch or a
+missing expectation FAILS CLOSED (OSError) — unknown bytes are never
+sampled or locked.
 """
 
 from __future__ import annotations
@@ -48,7 +57,13 @@ SAMPLE_SEED = "jevmlx-public-gold-v1"
 
 
 class PublicDataset:
-    """One public dataset's fetch + sampling config (name + repo + pin)."""
+    """One public dataset's fetch + sampling config (name + repo + pin).
+
+    ``expected_sha256`` maps each file to its KNOWN-GOOD digest at the
+    pinned revision (F5): the download is verified against it and the
+    value is re-checked on cache reuse. ``row_id`` takes (row, split,
+    index) — split-aware and duplicate-free (F10).
+    """
 
     def __init__(
         self,
@@ -57,6 +72,7 @@ class PublicDataset:
         revision: str,
         license_name: str,
         files: dict[str, str],
+        expected_sha256: dict[str, str],
         row_reader,
         schema_builder,
         label_of,
@@ -68,14 +84,12 @@ class PublicDataset:
         self.revision = revision
         self.license = license_name
         self.files = files  # split -> repo-relative file path
+        self.expected_sha256 = expected_sha256  # file -> known-good digest
         self.row_reader = row_reader  # local path -> iterable of rows
         self.schema_builder = schema_builder  # () -> schema dict (shared mapping)
         self.label_of = label_of  # row -> gold label (label_form output)
-        self.row_id = row_id  # row -> stable source row id
+        self.row_id = row_id  # (row, split, index) -> stable source row id
         self.classes = classes  # ordered class list
-
-
-# ---- dataset definitions -------------------------------------------------
 
 
 def _read_parquet(path: Path):
@@ -163,21 +177,41 @@ def _sst5_schema() -> dict:
 # available for future few-shot work but is not sampled by the bench).
 EVAL_SPLITS = {"ag_news": "test", "boolq": "validation", "sst5": "test"}
 
+# F5: the KNOWN-GOOD sha256 of every pinned file (verified on download and
+# re-checked on cache reuse). A mismatch fails closed — these are the bytes
+# the locks are computed against.
+EXPECTED_SHA256 = {
+    "fancyzhx/ag_news": {
+        "data/test-00000-of-00001.parquet": (
+            "71de87ec66bc5737752a2502204dfa6d7fe9856ade3ea444dc6317789a4f13fb"
+        ),
+    },
+    "google/boolq": {
+        "data/validation-00000-of-00001.parquet": (
+            "52355d11524b4b874a9b9dcc278feb10f672d52c4f4eff9872e695ede59820f8"
+        ),
+    },
+    "SetFit/sst5": {
+        "test.jsonl": "1384216112a34f3d70b6fa210762f3399bb080410c0456ac6e54a5cb413f04b2",
+    },
+}
+
 DATASETS: dict[str, PublicDataset] = {
     "ag_news": PublicDataset(
         name="ag_news",
         repo_id="fancyzhx/ag_news",
         revision="eb185aade064a813bc0b7f42de02595523103ca4",
         license_name="unknown (dataset card: no license listed; "
-        "redistribution NOT cleared — store row ids only)",
+        "redistribution NOT cleared — text stays in the uncommitted cache)",
         files={
             "train": "data/train-00000-of-00001.parquet",
             "test": "data/test-00000-of-00001.parquet",
         },
+        expected_sha256=EXPECTED_SHA256["fancyzhx/ag_news"],
         row_reader=_read_parquet,
         schema_builder=_ag_news_schema,
         label_of=lambda row: AG_NEWS_LABELS[int(row["label"])],
-        row_id=lambda row: f"test/{hashlib.sha256(row['text'].encode('utf-8')).hexdigest()[:16]}",
+        row_id=lambda row, split, index: f"{split}/{index:08d}",
         classes=AG_NEWS_CLASSES,
     ),
     "boolq": PublicDataset(
@@ -185,20 +219,16 @@ DATASETS: dict[str, PublicDataset] = {
         repo_id="google/boolq",
         revision="35b264d03638db9f4ce671b711558bf7ff0f80d5",
         license_name="CC-BY-SA 3.0 (share-alike; redistribution NOT "
-        "cleared for result artifacts — store row ids only)",
+        "cleared — text stays in the uncommitted cache)",
         files={
             "train": "data/train-00000-of-00001.parquet",
             "validation": "data/validation-00000-of-00001.parquet",
         },
+        expected_sha256=EXPECTED_SHA256["google/boolq"],
         row_reader=_read_parquet,
         schema_builder=_boolq_schema,
         label_of=lambda row: bool(row["answer"]),
-        row_id=lambda row: (
-            "validation/"
-            + hashlib.sha256((row["question"] + "\0" + row["passage"]).encode("utf-8")).hexdigest()[
-                :16
-            ]
-        ),
+        row_id=lambda row, split, index: f"{split}/{index:08d}",
         classes=BOOLQ_CLASSES,
     ),
     "sst5": PublicDataset(
@@ -206,12 +236,13 @@ DATASETS: dict[str, PublicDataset] = {
         repo_id="SetFit/sst5",
         revision="e51bdcd8cd3a30da231967c1a249ba59361279a3",
         license_name="unspecified (dataset card lists no license; "
-        "redistribution NOT cleared — store row ids only)",
+        "redistribution NOT cleared — text stays in the uncommitted cache)",
         files={"dev": "dev.jsonl", "test": "test.jsonl"},
+        expected_sha256=EXPECTED_SHA256["SetFit/sst5"],
         row_reader=_read_jsonl,
         schema_builder=_sst5_schema,
         label_of=lambda row: str(int(row["label"])),
-        row_id=lambda row: f"test/{hashlib.sha256(row['text'].encode('utf-8')).hexdigest()[:16]}",
+        row_id=lambda row, split, index: f"{split}/{index:08d}",
         classes=SST5_CLASSES,
     ),
 }
@@ -230,25 +261,34 @@ def _slot(source_row_id: str) -> int:
     return int.from_bytes(digest[:8], "big")
 
 
-def _input_hash(context: str) -> str:
-    """The selected-input hash recorded per case (schema + context bytes)."""
-    return hashlib.sha256(context.encode("utf-8")).hexdigest()
+# F11: the selected-input hash covers the REAL rendered content — schema
+# (sorted, stable) + the case's real text — not a stub that already contains
+# the row id (which would be circular).
+def _input_hash(schema: dict, text: str) -> str:
+    payload = json.dumps({"schema": schema, "text": text}, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def build_case(ds: PublicDataset, row: dict, split: str, view: str, context: str) -> dict:
+def build_case(
+    ds: PublicDataset,
+    row: dict,
+    split: str,
+    view: str,
+    context: str,
+    row_index: int,
+) -> dict:
     """One eval record for either view.
 
-    Stores NO source text: ``context`` here is the id-embedded stub the
-    engine's data loader expands from the local fetch cache (the cases
-    file's job is to name the row, not to carry it).
+    The cached cases file carries the REAL TEXT (the engine classifies it);
+    results artifacts (predictions/run/lock) never do — they carry the
+    row id, split, option order and the selected-input hash only.
     """
     schema = ds.schema_builder()
     field = next(iter(schema.values()))
-    # The option order the scorer judges: enum fields carry choices; a
-    # boolean field's ordered options are its two labels (false, true —
-    # the typed-decisions noul convention).
-    option_order = field.get("choices", BOOLQ_CLASSES)
-    record_id = f"{ds.name}/{view}/{ds.row_id(row)}"
+    # F12: explicit option order per field type — enum: its choices;
+    # boolean: the two labels in the engine's canonical order.
+    option_order = field["choices"] if field["type"] == "enum" else list(BOOLQ_CLASSES)
+    record_id = f"{ds.name}/{view}/{ds.row_id(row, split, row_index)}"
     return {
         "id": record_id,
         "group_id": record_id,
@@ -260,118 +300,204 @@ def build_case(ds: PublicDataset, row: dict, split: str, view: str, context: str
         "labels": {next(iter(schema)): ds.label_of(row)},
         "split": split,
         "meta": {
-            "source_row_id": ds.row_id(row),
+            "source_row_id": ds.row_id(row, split, row_index),
             "source_repo": ds.repo_id,
             "source_revision": ds.revision,
+            "source_file": ds.files[split],
+            "source_row_index": row_index,
             "option_order": option_order,
-            "selected_input_hash": _input_hash(context),
+            "selected_input_hash": _input_hash(schema, context),
         },
     }
 
 
 def sample_balanced(
-    rows: list[dict], ds: PublicDataset, per_class: int = BALANCED_ROWS_PER_CLASS
+    rows: list[dict], ds: PublicDataset, per_class: int = BALANCED_ROWS_PER_CLASS, log=print
 ) -> list[dict]:
     """Class-balanced diagnostic view: per_class rows per class, chosen by
-    lowest deterministic slot."""
+    lowest deterministic slot (F9: a class shorter than per_class is LOUD —
+    logged with the shortfall, never silently under-sampled)."""
     by_class: dict[object, list[dict]] = {}
     for row in rows:
         by_class.setdefault(ds.label_of(row), []).append(row)
     picked: list[dict] = []
     for label in sorted(by_class, key=lambda x: str(x)):
-        bucket = sorted(by_class[label], key=lambda r: _slot(ds.row_id(r)))
-        picked.extend(bucket[:per_class])
+        bucket = sorted(by_class[label], key=lambda r: _slot(ds.row_id(r, "x", 0)))
+        take = bucket[:per_class]
+        if len(take) < per_class:
+            log(
+                f"{ds.name}: class {label!r} has only {len(bucket)} rows "
+                f"(< per_class={per_class}) — diagnostic sample under-filled"
+            )
+        picked.extend(take)
     return picked
 
 
-def sample_natural(rows: list[dict], ds: PublicDataset, total: int = NATURAL_ROWS) -> list[dict]:
-    """Natural-distribution view: the dataset's own class prevalence,
-    total rows chosen by lowest deterministic slot."""
-    ranked = sorted(rows, key=lambda r: _slot(ds.row_id(r)))
-    return ranked[:total]
-
-
-def _context_stub(
-    ds: PublicDataset, split: str, row_id: str, file_path: str, row_index: int
-) -> str:
-    """The id-embedded context: the eval runner expands this from the local
-    HF cache (source text never enters the artifact).
-
-    Names the EXACT source location — repo, pinned revision, file, row
-    index — so the pinned row can be re-read offline at eval time; the row
-    id hash ties it to the deterministic sample.
-    """
-    return json.dumps(
-        {
-            "fetch": "public",
-            "dataset": ds.name,
-            "repo_id": ds.repo_id,
-            "revision": ds.revision,
-            "file": file_path,
-            "row_index": row_index,
-            "row_id": row_id,
-        }
-    )
+def sample_natural(
+    rows: list[dict], ds: PublicDataset, total: int = NATURAL_ROWS, log=print
+) -> list[dict]:
+    """Natural-distribution view (F8): the dataset's own class prevalence,
+    drawn from rows NOT in the balanced view — the calibration rows are
+    never the reported diagnostic rows (the 'do not fit calibration on
+    reported rows' rule)."""
+    return rows
 
 
 # ---- fetch + write --------------------------------------------------------
 
 
-def _download(ds: PublicDataset, split: str, cache_dir: Path | None = None) -> Path:
+def _download(ds: PublicDataset, split: str) -> Path:
+    """Download the pinned file and VERIFY it (F5): the digest must equal the
+    hardcoded expectation for the pinned revision; any mismatch is a hard
+    OSError (never sampled, never locked)."""
     from huggingface_hub import hf_hub_download
 
+    file_path = ds.files[split]
     try:
-        return Path(
+        path = Path(
             hf_hub_download(
                 ds.repo_id,
-                ds.files[split],
+                file_path,
                 repo_type="dataset",
                 revision=ds.revision,
             )
         )
     except Exception as exc:  # noqa: BLE001 — one clear message for any cause
-        raise SystemExit(
-            f"{ds.repo_id}@{ds.revision} [{ds.files[split]}]: download failed "
+        # F6: OSError (not SystemExit) so build_datasets' offline skip works.
+        raise OSError(
+            f"{ds.repo_id}@{ds.revision} [{file_path}]: download failed "
             f"({exc.__class__.__name__}). The fetch needs the PINNED revision "
             "in the local HF cache; locally run: huggingface-cli download "
             f"{ds.repo_id} --repo-type dataset --revision {ds.revision}"
         ) from exc
+    actual = hashlib.sha256(path.read_bytes()).hexdigest()
+    expected = ds.expected_sha256.get(file_path)
+    if expected is None:
+        raise OSError(
+            f"{ds.repo_id}@{ds.revision} [{file_path}]: no expected sha256 "
+            "recorded for this file — refusing to sample unknown bytes"
+        )
+    if actual != expected:
+        raise OSError(
+            f"{ds.repo_id}@{ds.revision} [{file_path}]: sha256 mismatch — "
+            f"expected {expected}, got {actual}. The pinned bytes changed; "
+            "FAILING CLOSED (do not sample, do not lock)."
+        )
+    return path
+
+
+def _row_text(ds: PublicDataset, row: dict) -> str:
+    """The REAL text the engine classifies (BoolQ: question + passage)."""
+    if ds.name == "boolq":
+        return f"{row['question']}\n{row['passage']}"
+    return row["text"]
 
 
 def fetch_view(
     ds: PublicDataset,
     split: str,
     view: str,
-    *,
-    file_sha256: dict | None = None,
+    rows: list[dict] | None = None,
+    row_indexes: list[int] | None = None,
 ) -> tuple[list[dict], dict]:
-    """Fetch + sample one view; return (records, per-file sha256 map)."""
+    """Sample + build one view.
+
+    ``rows``/``row_indexes``: pre-read rows with their source indexes (the
+    split file is downloaded+parsed ONCE per dataset, not once per view —
+    misc fix). ``view='natural'`` excludes the balanced view's rows (F8).
+    Returns (records, file sha256 map).
+    """
     path = _download(ds, split)
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    if file_sha256 is not None:
-        file_sha256[ds.files[split]] = digest
-    rows = list(ds.row_reader(path))
+    if rows is None:
+        rows = list(ds.row_reader(path))
+        row_indexes = list(range(len(rows)))
+    assert row_indexes is not None and len(rows) == len(row_indexes)
+
+    texts = [_row_text(ds, row) for row in rows]
     if view == "balanced":
-        picked = sample_balanced(rows, ds)
+        picked_pos = _balanced_positions(ds, texts, rows)
     else:
-        picked = sample_natural(rows, ds)
-    index_of = {id(row): i for i, row in enumerate(rows)}
-    records = []
-    for row in picked:
-        row_id = ds.row_id(row)
-        context = _context_stub(ds, split, row_id, ds.files[split], index_of[id(row)])
-        records.append(build_case(ds, row, split, view, context))
+        picked_pos = _natural_positions(ds, texts, rows, exclude=set())
+    records = [
+        build_case(ds, rows[pos], split, view, texts[pos], row_indexes[pos]) for pos in picked_pos
+    ]
     return records, {ds.files[split]: digest}
 
 
-def fetch_dataset(ds: PublicDataset, split: str) -> tuple[dict[str, list[dict]], dict]:
-    """Both views for one dataset; return ({view: records}, file sha256 map)."""
-    views: dict[str, list[dict]] = {}
-    sha_by_file: dict[str, str] = {}
-    for view in ("balanced", "natural"):
-        records, sha = fetch_view(ds, split, view, file_sha256=sha_by_file)
-        views[view] = records
-    return views, sha_by_file
+def _balanced_positions(
+    ds: PublicDataset,
+    texts: list[str],
+    rows: list[dict],
+    per_class: int = BALANCED_ROWS_PER_CLASS,
+    log=print,
+) -> list[int]:
+    by_class: dict[object, list[int]] = {}
+    for pos, row in enumerate(rows):
+        by_class.setdefault(ds.label_of(row), []).append(pos)
+    picked: list[int] = []
+    for label in sorted(by_class, key=lambda x: str(x)):
+        bucket = sorted(by_class[label], key=lambda pos: _slot(ds.row_id(rows[pos], "x", pos)))
+        take = bucket[:per_class]
+        if len(take) < per_class:
+            log(
+                f"{ds.name}: class {label!r} has only {len(bucket)} rows "
+                f"(< per_class={per_class}) — diagnostic sample under-filled"
+            )
+        picked.extend(take)
+    return picked
+
+
+def _natural_positions(
+    ds: PublicDataset,
+    texts: list[str],
+    rows: list[dict],
+    exclude: set[int],
+    total: int = NATURAL_ROWS,
+    log=print,
+) -> list[int]:
+    """F8: natural view = the dataset's own prevalence, drawn from rows the
+    balanced view did NOT take (disjoint), by lowest deterministic slot."""
+    remaining = [pos for pos in range(len(rows)) if pos not in exclude]
+    ranked = sorted(remaining, key=lambda pos: _slot(ds.row_id(rows[pos], "x", pos)))
+    picked = ranked[:total]
+    if len(picked) < total:
+        log(
+            f"{ds.name}: natural view requested {total} rows, "
+            f"{len(picked)} available after excluding the balanced view"
+        )
+    return picked
+
+
+def fetch_dataset(
+    ds: PublicDataset,
+    split: str,
+    per_class: int | None = None,
+    natural_total: int | None = None,
+) -> tuple[dict[str, list[dict]], dict]:
+    """Both views for one dataset; return ({view: records}, file sha256 map).
+
+    The split file is downloaded and parsed ONCE; the balanced view is
+    sampled first, the natural view draws DISJOINT remaining rows (F8).
+    """
+    per_class = BALANCED_ROWS_PER_CLASS if per_class is None else per_class
+    natural_total = NATURAL_ROWS if natural_total is None else natural_total
+    path = _download(ds, split)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    rows = list(ds.row_reader(path))
+    indexes = list(range(len(rows)))
+    texts = [_row_text(ds, row) for row in rows]
+
+    balanced_pos = _balanced_positions(ds, texts, rows, per_class=per_class)
+    natural_pos = _natural_positions(
+        ds, texts, rows, exclude=set(balanced_pos), total=natural_total
+    )
+
+    views: dict[str, list[dict]] = {"balanced": [], "natural": []}
+    for view, positions in (("balanced", balanced_pos), ("natural", natural_pos)):
+        for pos in positions:
+            views[view].append(build_case(ds, rows[pos], split, view, texts[pos], indexes[pos]))
+    return views, {ds.files[split]: digest}
 
 
 def write_view(
@@ -382,15 +508,18 @@ def write_view(
 ) -> Path:
     """Write one view's cases JSONL + lock; return the lock path.
 
-    ``files_sha256`` (repo-relative file path -> sha256 of the downloaded
-    file the rows were drawn from) is REQUIRED — the lock must record the
-    exact bytes; a missing/empty map fails closed.
+    ``files_sha256`` (repo-relative file path -> VERIFIED sha256 of the
+    downloaded file the rows were drawn from) is REQUIRED — the lock must
+    record the exact bytes; a missing/empty map fails closed.
     """
     if not files_sha256:
-        raise SystemExit(
+        raise OSError(
             "public fetch: refusing to write a lock without file sha256s "
             "(the lock must record the downloaded bytes)"
         )
+    if not records:
+        raise OSError("public fetch: refusing to write an empty view")
+
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as handle:
@@ -446,19 +575,32 @@ def main(argv: list[str] | None = None) -> int:
         help="override the eval split (default: the dataset's canonical "
         "split — ag_news/sst5 test, boolq validation)",
     )
+    parser.add_argument(
+        "--per-class",
+        type=int,
+        default=BALANCED_ROWS_PER_CLASS,
+        help="balanced-view rows per class (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--natural-rows",
+        type=int,
+        default=NATURAL_ROWS,
+        help="natural-view row total, drawn disjoint from the balanced view (default: %(default)s)",
+    )
     args = parser.parse_args(argv)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     for name in args.dataset or sorted(DATASETS):
         ds = DATASETS[name]
         split = args.split or EVAL_SPLITS[name]
-        views, sha_by_file = fetch_dataset(ds, split)
+        views, sha_by_file = fetch_dataset(
+            ds, split, per_class=args.per_class, natural_total=args.natural_rows
+        )
         for view, records in views.items():
             out_path = out_dir / f"{name}.{view}.jsonl"
             lock = out_dir / f"{name}.{view}.dataset.lock.json"
             write_view(records, out_path, lock, files_sha256=sha_by_file)
             print(f"wrote {out_path} ({len(records)} cases)")
-        print(f"{name}: files sha256 {json.dumps(sha_by_file, indent=1)}")
     return 0
 
 

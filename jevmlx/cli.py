@@ -353,7 +353,9 @@ def _dispatch(argv) -> None:
     bench_p.add_argument(
         "--datasets",
         default="bundled,typesafe,perturbed",
-        help="comma list: bundled,typesafe,perturbed",
+        help="comma list: bundled,typesafe,perturbed,typed-decisions,"
+        "synthetic-*,ag_news,boolq,sst5 (public gold: bare name = both "
+        "views, or name.balanced / name.natural)",
     )
     bench_p.add_argument("--scorers", default="slots,labels", help="comma list: slots,labels")
     bench_p.add_argument(

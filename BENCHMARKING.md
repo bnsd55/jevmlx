@@ -69,19 +69,25 @@ Paste `SUMMARY.md` into the PR description and link the machine specs
   (below), and deterministic perturbations of the bundled cases — built
   once into `~/.cache/jevmlx/bench/` and reused while the lock files match.
 - Public gold datasets (W6-B5, pass `--datasets` `ag_news`, `boolq`,
-  `sst5`): AG News (4-class topic enum), BoolQ (yes/no reading
+  `sst5`, or view-suffixed names like `ag_news.balanced`; a bare name
+  runs both views): AG News (4-class topic enum), BoolQ (yes/no reading
   comprehension), SST-5 (ordinal 0-4 sentiment). Each is PINNED to a
-  dataset repo commit sha recorded in its lock, every downloaded file's
-  sha256 is verified, and TWO sampling views are written as separate
-  cases files: `<name>.balanced.jsonl` (class-balanced diagnostic —
+  dataset repo commit sha with a hardcoded per-file EXPECTED sha256:
+  verified on download and re-checked against the lock on cache reuse —
+  a mismatch fails closed (nothing is sampled or locked). TWO DISJOINT
+  sampling views are written as separate cases files:
+  `<name>.balanced.jsonl` (class-balanced diagnostic, 50 rows/class —
   per-class accuracy, macro-F1, confusion, ordinal MAE) and
-  `<name>.natural.jsonl` (the dataset's own class prevalence — the view
-  NLL/Brier/ECE describe; the two views measure different things and are
-  never mixed). Selection is deterministic: `hash(seed, source_row_id)`.
+  `<name>.natural.jsonl` (the dataset's own class prevalence, 500 rows
+  drawn from rows the balanced view did NOT take, so calibration rows
+  are never the reported diagnostic rows — the view NLL/Brier/ECE
+  describe). Selection is deterministic: `hash(seed, source_row_id)`.
   License/terms are recorded per dataset in the lock and redistribution
-  is NOT cleared for any of them: cases files store row ids, split,
-  option order and input hashes — NEVER the source text (the eval runner
-  expands each row from the pinned local HF cache).
+  is NOT cleared for any of them: the cached cases files (under
+  `~/.cache/jevmlx/bench/`, never committed) carry the source text the
+  engine classifies, while every committed RESULT artifact
+  (predictions.jsonl, run.json, report.json, dataset.lock.json) stores
+  row ids, split, option order and input hashes only — never the text.
 - Runs: for every (track, scorer, dataset) — `eval` in-process `--runs` times
   (default 2), last run kept, order-rotation permutations on for the parallel
   track. Writes `predictions.jsonl`, `run.json`, `report.json`, `report.md`
