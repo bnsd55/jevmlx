@@ -79,6 +79,19 @@ PER_ITEM_END_TO_END_KEY = "per_item_end_to_end_ms"
 BATCHED_TIMING_KEYS = ("group_wall_ms", "per_item_amortized_ms")
 RUN_TIMING_KEYS = ("peak_active_bytes", "peak_incremental_bytes", "failed_attempts")
 
+# W5c-6 / B4: token-accounting telemetry — every parallel-track combo must
+# carry these in timing.json's ``median`` block (ride the parallel _meta).
+# The ratio of naive_branch_prompt_tokens to computed_prompt_token_positions
+# is NOT a speedup (a suffix query still attends over the cached prefix).
+TOKEN_ACCOUNTING_KEYS = (
+    "naive_branch_prompt_tokens",
+    "shared_prefix_tokens",
+    "logical_suffix_token_positions",
+    "computed_suffix_token_positions",
+    "computed_prompt_token_positions",
+    "retry_wasted_ms",
+)
+
 
 def _read_predictions_lines(path: Path) -> list[dict]:
     """Load predictions.jsonl, transparently handling a gzipped file."""
@@ -223,6 +236,14 @@ def check_folder(folder: Path) -> tuple[bool, list[str]]:
                         f"{name}: timing.json median peak_incremental_bytes is "
                         f"{peak_incremental!r}, expected a number"
                     )
+                # W5c-6 / B4: token-accounting keys must be present in the
+                # median block (ride the parallel _meta).
+                for key in TOKEN_ACCOUNTING_KEYS:
+                    if key not in median:
+                        problems.append(
+                            f"{name}: timing.json median missing key {key!r} "
+                            "(results contract v2: token-accounting telemetry)"
+                        )
         # Batched-path per-item timing: when the predictions carry
         # batched per-item keys (decide_many), BOTH must be present.
         per_item_keys = {key for key in BATCHED_TIMING_KEYS if any(key in r for r in records)}

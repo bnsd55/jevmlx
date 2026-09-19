@@ -236,3 +236,74 @@ def test_grouped_contexts_prefill_their_own_prompts(monkeypatch):
     for ctx, bat in zip(contexts, batched, strict=True):
         sep = run_parallel_generation(make_engine(FakeModel(vocab_size=64)), ctx, schema)
         assert bat["parsed_json"] == sep["parsed_json"], ctx
+
+
+def test_token_accounting_telemetry_keys_present():
+    """W5c-6 / B4: every result carries the token-accounting keys with
+    honest values — actual rows/branches counted, not fields."""
+    schema = StructuredSchema(
+        {
+            "tier": {"type": "enum", "description": "d", "choices": ["A", "B", "C"]},
+            "flags": {"type": "multi", "description": "d", "choices": ["x", "y"]},
+        }
+    )
+    engine = make_engine(FakeModel(vocab_size=64), FakeTokenizer())
+    result = run_parallel_generation(engine, "ctx", schema)
+
+    for key in (
+        "naive_branch_prompt_tokens",
+        "shared_prefix_tokens",
+        "logical_suffix_token_positions",
+        "computed_suffix_token_positions",
+        "computed_prompt_token_positions",
+        "retry_wasted_ms",
+    ):
+        assert key in result, key
+
+    # shared_prefix_tokens = the prompt length (base_ids).
+    assert result["shared_prefix_tokens"] > 0
+    # naive_branch_prompt_tokens = sum of full prompt length for every
+    # actual scoring row (shared prefix repeated). With 2 multi options +
+    # count rows + 3 enum branches, there are > 2 rows.
+    assert result["naive_branch_prompt_tokens"] > result["shared_prefix_tokens"]
+    # logical_suffix_token_positions = unpadded suffix positions (>= 1 per
+    # row).
+    assert result["logical_suffix_token_positions"] > 0
+    # computed_suffix_token_positions = padded/chunked (>= logical).
+    assert result["computed_suffix_token_positions"] >= result["logical_suffix_token_positions"]
+    # computed_prompt_token_positions = shared + computed.
+    assert (
+        result["computed_prompt_token_positions"]
+        == result["shared_prefix_tokens"] + result["computed_suffix_token_positions"]
+    )
+    # No retries on the fake model — waste is 0.
+    assert result["retry_wasted_ms"] == 0.0
+
+
+def test_batched_token_accounting_per_context_logical_plus_group_computed():
+    """W5c-6 / B4: decide_many reports per-context LOGICAL values +
+    group-level COMPUTED values (the merged pass totals)."""
+    schema = StructuredSchema(
+        {"pick": {"type": "enum", "description": "d", "choices": ["ALPHA", "BETA"]}}
+    )
+    contexts = ["ctx one", "ctx two", "ctx three"]
+    engine = make_engine(FakeModel(vocab_size=64), FakeTokenizer())
+    batched = run_parallel_generation_batched(engine, contexts, schema)
+
+    for res in batched:
+        # Per-context logical values are present and positive.
+        assert res["naive_branch_prompt_tokens"] > 0
+        assert res["shared_prefix_tokens"] > 0
+        assert res["logical_suffix_token_positions"] > 0
+        # Per-context computed (the group's total / n_group).
+        assert res["computed_suffix_token_positions"] > 0
+        # Group-level computed totals.
+        assert res["group_computed_suffix_token_positions"] > 0
+        assert res["group_retry_wasted_ms"] == 0.0
+        # The group total = n_group * per-context (all contexts share row
+        # widths in the merged pass).
+        n = len(contexts)
+        assert (
+            res["group_computed_suffix_token_positions"]
+            == res["computed_suffix_token_positions"] * n
+        )
