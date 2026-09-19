@@ -1,4 +1,4 @@
-"""Fetch ``LocalLLaMA/typed-decisions`` (Hugging Face) as an jevmlx eval JSONL.
+"""Fetch ``LocalLLaMA/typed-decisions`` (Hugging Face) as a jevmlx eval JSONL.
 
 The dataset is the TypeSafe typed-decisions task published as versioned
 parquet: the same four workflows and the same ``noul``/``choice``/``score``
@@ -32,79 +32,42 @@ import json
 from collections.abc import Iterator
 from pathlib import Path
 
+import pyarrow.parquet as pq
+
+from benchmarks.typesafe.questions import (
+    AMBIGUOUS_MARGIN,
+    WORKFLOWS,
+    field_schema,
+)
+from benchmarks.typesafe.questions import (
+    as_obj as _as_obj,
+)
+from benchmarks.typesafe.questions import (
+    label_form as _label,
+)
+from benchmarks.typesafe.questions import (
+    margin_of as _margin,
+)
+
 REPO_ID = "LocalLLaMA/typed-decisions"
 
-WORKFLOWS = (
-    "security_incidents",
-    "agent_trace_observability",
-    "invoice_processing",
-    "customer_service",
-)
 SPLITS = ("train", "test")
 
 # Bump when the conversion semantics change; recorded in dataset.lock.json.
 PARSER_VERSION = "1"
 
-# score questions are answered on a fixed 0-3 scale (criteria is a 4-item list).
-SCORE_CHOICES = ("0", "1", "2", "3")
-
-# Consensus distributions with top1 - top2 below this are marked ambiguous
-# (same threshold as the typesafe fetcher).
-AMBIGUOUS_MARGIN = 0.1
+# F6: results must be reproducible. A floating "current main" revision
+# silently changes the dataset between runs; DEFAULT_REVISION pins the
+# published snapshot this fetcher was written against (resolved once via
+# dataset_info(REPO_ID).sha). --revision overrides it; every value —
+# including a branch name — is resolved to the commit sha via
+# dataset_info(REPO_ID, revision=...).sha (F9), so the lock always records
+# an immutable sha.
+DEFAULT_REVISION = "0af3f0e9dc6d28c2f8f1c9d1ba2e4a55f0e6c9d3"
 
 
 def _parquet_path(workflow: str, split: str) -> str:
     return f"{workflow}/{split}-00000-of-00001.parquet"
-
-
-def _as_obj(value):
-    """Parquet stores the nested columns as JSON strings; accept dicts too."""
-    if isinstance(value, str):
-        return json.loads(value)
-    return value
-
-
-def field_schema(question: dict) -> dict | None:
-    """Map one question to an jevmlx schema field, or None to skip.
-
-    ``noul`` -> boolean; ``choice`` -> enum over the criteria keys (published
-    order); ``score`` -> enum over "0".."3" with the level texts folded into
-    the description. Unknown types are skipped.
-    """
-    instructions = question["instructions"]
-    criteria = question.get("criteria")
-    qtype = question["type"]
-    if qtype == "noul":
-        return {"type": "boolean", "description": instructions}
-    if qtype == "choice":
-        return {"type": "enum", "description": instructions, "choices": list(criteria)}
-    if qtype == "score":
-        levels = "; ".join(f"{i} = {text}" for i, text in enumerate(criteria))
-        return {
-            "type": "enum",
-            "description": f"{instructions} Scale: {levels}.",
-            "choices": list(SCORE_CHOICES),
-        }
-    return None
-
-
-def _label(gold: dict, qtype: str):
-    """Gold label in jevmlx label form (booleans become real bools)."""
-    label = gold.get("label")
-    if label is None:
-        return None
-    if qtype == "noul":
-        if isinstance(label, bool):
-            return label
-        return str(label).lower() == "true"
-    return str(label)
-
-
-def _margin(distribution: dict[str, float]) -> float:
-    probs = sorted((float(p) for p in distribution.values()), reverse=True)
-    if not probs:
-        return 0.0
-    return probs[0] - (probs[1] if len(probs) > 1 else 0.0)
 
 
 def row_to_record(row: dict) -> dict:
@@ -127,7 +90,7 @@ def row_to_record(row: dict) -> dict:
         if field is None or not isinstance(answer, dict):
             skipped += 1
             continue
-        label = _label(answer, question["type"])
+        label = _label(answer.get("label"), question["type"])
         if label is None:
             skipped += 1
             continue
@@ -162,12 +125,21 @@ def row_to_record(row: dict) -> dict:
     }
 
 
-def _download(workflow: str, split: str, revision: str | None) -> tuple[Path, str]:
-    """Download one parquet shard; return (local path, resolved revision sha)."""
-    from huggingface_hub import HfApi, hf_hub_download
+def _resolve_revision(revision: str) -> str:
+    """Resolve any revision (sha, branch, tag) to its immutable commit sha."""
+    from huggingface_hub import HfApi
 
-    if revision is None:
-        revision = HfApi().dataset_info(REPO_ID).sha
+    return HfApi().dataset_info(REPO_ID, revision=revision).sha
+
+
+def _download(workflow: str, split: str, revision: str) -> tuple[Path, str]:
+    """Download one parquet shard; return (local path, resolved revision sha).
+
+    ``revision`` arrives pre-resolved by :func:`_resolve_revision` (or as a
+    sha already); it is passed straight to hf_hub_download.
+    """
+    from huggingface_hub import hf_hub_download
+
     path = hf_hub_download(
         REPO_ID,
         _parquet_path(workflow, split),
@@ -178,19 +150,31 @@ def _download(workflow: str, split: str, revision: str | None) -> tuple[Path, st
 
 
 def iter_rows(path: Path) -> Iterator[dict]:
-    try:
-        import pyarrow.parquet as pq
-    except ImportError as exc:  # pragma: no cover - environment dependent
-        raise SystemExit(
-            "pyarrow is required to read typed-decisions parquet: pip install 'jevmlx[bench]'"
-        ) from exc
     yield from pq.read_table(path).to_pylist()
 
 
 def fetch_all(
-    workflows: list[str], splits: list[str], revision: str | None = None
+    workflows: list[str],
+    splits: list[str],
+    revision: str | None = None,
+    *,
+    resolve_revision=None,
 ) -> tuple[list[dict], dict, dict]:
-    """Fetch every (workflow, split); return (records, summary, source metadata)."""
+    """Fetch every (workflow, split); return (records, summary, source metadata).
+
+    ``revision`` defaults to :data:`DEFAULT_REVISION` (the pinned snapshot)
+    and is resolved — branch name or sha alike — to the dataset's commit
+    sha before downloading, so every shard in one fetch shares one
+    revision and the lock records an immutable sha.
+    ``resolve_revision`` is injectable for tests.
+    """
+    # Look the resolver up as a module global at call time (not via a
+    # default-arg binding) so tests can monkeypatch it.
+    if resolve_revision is None:
+        resolve_revision = _resolve_revision
+    if revision is None:
+        revision = DEFAULT_REVISION
+    revision = resolve_revision(revision)
     records: list[dict] = []
     field_types = {"boolean": 0, "enum": 0, "multi": 0}
     skipped_questions = 0
@@ -264,7 +248,10 @@ def main(argv: list[str] | None = None) -> int:
         help="fetch only this split (repeatable; default: test)",
     )
     parser.add_argument(
-        "--revision", default=None, help="dataset commit sha (default: current main)"
+        "--revision",
+        default=DEFAULT_REVISION,
+        help="dataset revision (sha, branch or tag; resolved to a commit sha; "
+        "default: the pinned DEFAULT_REVISION)",
     )
     args = parser.parse_args(argv)
 

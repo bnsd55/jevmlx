@@ -485,7 +485,7 @@ def test_bench_dry_run_through_cli(fake_engine, monkeypatch, tmp_path):
     """`bench --dry-run` prints the plan and exits 0 without loading."""
     from jevmlx import bench
 
-    monkeypatch.setattr(bench, "build_datasets", lambda datasets: {})
+    monkeypatch.setattr(bench, "build_datasets", lambda datasets: ({}, {}))
     code, out, err = _run(
         [
             "bench",

@@ -10,7 +10,6 @@ import hashlib
 import json
 
 from benchmarks.typed_decisions.fetch import (
-    AMBIGUOUS_MARGIN,
     PARSER_VERSION,
     field_schema,
     row_to_record,
@@ -125,8 +124,7 @@ def test_consensus_margin_and_ambiguity():
     assert meta["consensus"]["action"] == {"continue": 0.52, "stop": 0.48}
     assert abs(meta["margin"]["action"] - 0.04) < 1e-9
     assert abs(meta["margin"]["needs_review"] - 0.8) < 1e-9
-    # action margin 0.04 < AMBIGUOUS_MARGIN -> flagged; the others are not.
-    assert 0.04 < AMBIGUOUS_MARGIN
+    # action margin 0.04 < AMBIGUOUS_MARGIN (0.1) -> flagged; the others are not.
     assert meta["ambiguous"] == ["action"]
     # Dataset-native agreement/factor columns ride along for slicing.
     assert meta["label_agreement"] == {"action": {"argmax_agree": False}}

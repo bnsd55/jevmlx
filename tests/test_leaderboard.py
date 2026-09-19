@@ -195,6 +195,18 @@ def _add_typed_decisions_combo(root: Path) -> None:
     report["metrics"]["agreement"]["n_cases"] = 400
     (dst / "report.json").write_text(json.dumps(report), encoding="utf-8")
     (dst / "predictions.jsonl").write_bytes((src / "predictions.jsonl").read_bytes())
+    lock = {
+        "sources": [
+            {
+                "repo_id": "LocalLLaMA/typed-decisions",
+                "revision": "0af3f0e9dc6d28c2f8f1c9d1ba2e4a55f0e6c9d3",
+            }
+        ],
+        "parser_version": "1",
+        "counts": {},
+        "cases_sha256": "x",
+    }
+    (dst / "typed-decisions.dataset.lock.json").write_text(json.dumps(lock), encoding="utf-8")
 
 
 def test_typed_decisions_rows_render_in_their_own_group(tmp_path):
@@ -214,7 +226,11 @@ def test_typed_decisions_rows_render_in_their_own_group(tmp_path):
     assert lines[group_d + 1].startswith("| fake-1b |") and "60.0%" in lines[group_d + 1]
     assert lines[group_d + 1].rstrip().endswith("| 400 |")
     assert group_d == group_c + 2  # exactly one typesafe row between the headers
-    assert "official `test` split" in table
+    # Caption derives cases from the row and names the pinned revision —
+    # no hardcoded 400/test split.
+    assert "400 cases" in table
+    assert "revision 0af3f0e9dc6d28c2f8f1c9d1ba2e4a55f0e6c9d3" in table
+    assert "official `test` split" not in table
     assert "No local results yet" not in table
 
 

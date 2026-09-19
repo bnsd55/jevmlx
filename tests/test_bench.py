@@ -279,7 +279,7 @@ def _patch_bench_core(monkeypatch, tmp_path, failing_models=()):
 
     run_calls: list[str] = []
 
-    def fake_run_one(model, track, scorer, jsonl, combo_dir):
+    def fake_run_one(model, track, scorer, jsonl, combo_dir, dataset_lock_path=None):
         if model in failing_models:
             raise RuntimeError(f"load failed for {model}")
         run_calls.append(model)
@@ -298,7 +298,14 @@ def _patch_bench_core(monkeypatch, tmp_path, failing_models=()):
         return {"run": {"model": model}}
 
     monkeypatch.setattr(bench, "preflight", lambda force, machine_override: "fake-8gb")
-    monkeypatch.setattr(bench, "build_datasets", lambda datasets: {"bundled": tmp_path / "b.jsonl"})
+    monkeypatch.setattr(
+        bench,
+        "build_datasets",
+        lambda datasets: (
+            {"bundled": tmp_path / "b.jsonl"},
+            {"bundled": tmp_path / "b.dataset.lock.json"},
+        ),
+    )
     monkeypatch.setattr(
         bench, "_load_engine_with_timeout", lambda model, timeout: (object(), object())
     )
@@ -661,7 +668,14 @@ def test_dry_run_prints_plan_and_loads_nothing(tmp_path, monkeypatch, capsys):
 
     _patch_bench_core(monkeypatch, tmp_path)
     monkeypatch.setattr(bench, "_load_engine_with_timeout", explode)
-    monkeypatch.setattr(bench, "build_datasets", lambda datasets: {"bundled": tmp_path / "b.jsonl"})
+    monkeypatch.setattr(
+        bench,
+        "build_datasets",
+        lambda datasets: (
+            {"bundled": tmp_path / "b.jsonl"},
+            {"bundled": tmp_path / "b.dataset.lock.json"},
+        ),
+    )
 
     code = bench.main(
         [

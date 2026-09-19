@@ -1,4 +1,4 @@
-"""Fetch TypeSafe's public evaluation examples as an jevmlx eval JSONL.
+"""Fetch TypeSafe's public evaluation examples as a jevmlx eval JSONL.
 
 This produces a *flattened, TypeSafe-derived* benchmark: each published
 workflow step (reference node) becomes eval fields sharing that step's exact
@@ -31,27 +31,22 @@ import urllib.request
 from collections.abc import Iterator
 from pathlib import Path
 
+from benchmarks.typesafe.questions import (
+    AMBIGUOUS_MARGIN,
+    WORKFLOWS,
+)
+from benchmarks.typesafe.questions import (
+    field_schema as _field_schema,
+)
+from benchmarks.typesafe.questions import (
+    margin_of as _margin_of,
+)
+
 BASE_URL = "https://evals.typesafe.ai"
 CACHE_DIR = Path.home() / ".cache" / "jevmlx" / "typesafe"
 
-# The workflows TypeSafe publishes today. A workflow that disappears from the
-# site fails loudly on download; pass --workflow to fetch a subset.
-WORKFLOWS = (
-    "security_incidents",
-    "agent_trace_observability",
-    "invoice_processing",
-    "customer_service",
-)
-
 # Bump when the conversion semantics change; recorded in dataset.lock.json.
 PARSER_VERSION = "2"
-
-# score questions are answered on a fixed 0-3 scale (their criteria list has
-# one description per level).
-SCORE_CHOICES = ("0", "1", "2", "3")
-
-# Consensus distributions with top1 - top2 below this are marked ambiguous.
-AMBIGUOUS_MARGIN = 0.1
 
 # The site rejects requests with the default Python urllib User-Agent (HTTP 403).
 USER_AGENT = "Mozilla/5.0 (compatible; jevmlx-eval-fetcher)"
@@ -197,8 +192,7 @@ def _consensus(
 
     ordered = _choice_order(qtype, distribution, choices)
     top = max(ordered, key=lambda key: distribution[key])
-    sorted_probs = sorted((distribution[key] for key in ordered), reverse=True)
-    margin = sorted_probs[0] - (sorted_probs[1] if len(sorted_probs) > 1 else 0.0)
+    margin = _margin_of({key: distribution[key] for key in ordered})
     ambiguous = margin < AMBIGUOUS_MARGIN
     label = _label_from_key(top, qtype)
     return label, distribution, margin, ambiguous
@@ -234,34 +228,6 @@ def _label_from_key(key: str, qtype: str):
     if qtype == "noul":
         return key == "true"
     return key
-
-
-def _field_schema(question: dict) -> dict | None:
-    """Map one catalog question to an jevmlx schema field, or None to skip.
-
-    ``noul`` (yes/no) questions become boolean fields. ``choice`` and
-    ``score`` questions become enum fields with the published options as
-    choices. Anything else (free text) is not decidable by the engine and is
-    reported as skipped.
-    """
-    instructions = question["instructions"]
-    criteria = question.get("criteria")
-    if question["type"] == "noul":
-        return {"type": "boolean", "description": instructions}
-    if question["type"] == "choice":
-        return {
-            "type": "enum",
-            "description": instructions,
-            "choices": list(criteria),
-        }
-    if question["type"] == "score":
-        levels = "; ".join(f"{i} = {text}" for i, text in enumerate(criteria))
-        return {
-            "type": "enum",
-            "description": f"{instructions} Scale: {levels}.",
-            "choices": list(SCORE_CHOICES),
-        }
-    return None
 
 
 def _render_doc(doc) -> str:
@@ -452,8 +418,19 @@ def fetch_all(
     return records, summary, sources
 
 
-def write_outputs(records: list[dict], out_path: Path, sources: list[dict], counts: dict) -> Path:
-    """Write cases.jsonl and its dataset.lock.json; return the lock path."""
+def write_outputs(
+    records: list[dict],
+    out_path: Path,
+    sources: list[dict],
+    counts: dict,
+    lock_path: Path | None = None,
+) -> Path:
+    """Write cases.jsonl and its dataset.lock.json; return the lock path.
+
+    ``lock_path`` defaults to ``dataset.lock.json`` next to ``--out`` — the
+    shared loop in ``jevmlx.bench`` reads the lock from there for every
+    fetcher, so the two fetchers must agree on the location.
+    """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as handle:
@@ -467,7 +444,7 @@ def write_outputs(records: list[dict], out_path: Path, sources: list[dict], coun
         "counts": counts,
         "cases_sha256": cases_sha256,
     }
-    lock_path = out_path.parent / "dataset.lock.json"
+    lock_path = Path(lock_path) if lock_path else out_path.parent / "dataset.lock.json"
     lock_path.write_text(json.dumps(lock, indent=1) + "\n", encoding="utf-8")
     return lock_path
 
@@ -478,6 +455,11 @@ def main(argv: list[str] | None = None) -> int:
         description="Fetch TypeSafe's public eval examples as jevmlx eval JSONL.",
     )
     parser.add_argument("--out", required=True, help="output JSONL path")
+    parser.add_argument(
+        "--lock",
+        default=None,
+        help="lock path (default: dataset.lock.json next to --out)",
+    )
     parser.add_argument(
         "--workflow",
         action="append",
@@ -493,7 +475,7 @@ def main(argv: list[str] | None = None) -> int:
 
     workflows = list(args.workflow or WORKFLOWS)
     records, summary, sources = fetch_all(workflows, refresh=args.refresh)
-    lock_path = write_outputs(records, Path(args.out), sources, summary)
+    lock_path = write_outputs(records, Path(args.out), sources, summary, args.lock)
 
     print(f"workflows: {summary['workflows']}")
     print(f"records: {summary['records']}")

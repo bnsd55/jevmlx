@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import hashlib
 import json
 import shutil
 import subprocess
@@ -125,20 +126,25 @@ def model_slug(model_id: str) -> str:
     return model_id.lower().replace("/", "--")
 
 
-def build_datasets(datasets: list[str], offline_ok: bool = True) -> dict[str, Path]:
+def build_datasets(
+    datasets: list[str], offline_ok: bool = True
+) -> tuple[dict[str, Path], dict[str, Path]]:
     """Build eval JSONL datasets into the bench cache, reusing lock matches.
 
-    Returns dataset name -> JSONL path. ``typesafe`` is skipped with a clear
-    message when offline; ``perturbed`` derives from ``bundled``.
+    Returns (dataset name -> JSONL path, dataset name -> lock path).
+    ``typesafe`` is skipped with a clear message when offline; ``perturbed``
+    derives from ``bundled``.
     """
     BENCH_CACHE.mkdir(parents=True, exist_ok=True)
     paths: dict[str, Path] = {}
+    paths_locks: dict[str, Path] = {}
 
     if "bundled" in datasets:
         jsonl = BENCH_CACHE / "bundled.jsonl"
         lock = BENCH_CACHE / "bundled.dataset.lock.json"
         _rebuild_if_needed(jsonl, lock, _build_bundled)
         paths["bundled"] = jsonl
+        paths_locks["bundled"] = lock
 
     for name, build in (("typesafe", _build_typesafe), ("typed-decisions", _build_typed_decisions)):
         if name not in datasets:
@@ -155,12 +161,14 @@ def build_datasets(datasets: list[str], offline_ok: bool = True) -> dict[str, Pa
             else:
                 raise
         paths[name] = jsonl
+        paths_locks[name] = lock
 
     if "perturbed" in datasets:
         jsonl = BENCH_CACHE / "perturbed.jsonl"
         lock = BENCH_CACHE / "perturbed.dataset.lock.json"
         _rebuild_if_needed(jsonl, lock, lambda: _build_perturbed(paths["bundled"]))
         paths["perturbed"] = jsonl
+        paths_locks["perturbed"] = lock
 
     for name in (
         "synthetic-labels",
@@ -174,14 +182,26 @@ def build_datasets(datasets: list[str], offline_ok: bool = True) -> dict[str, Pa
             lock = BENCH_CACHE / f"{set_name}.dataset.lock.json"
             _rebuild_if_needed(jsonl, lock, lambda n=set_name: _build_synthetic(n))
             paths[name] = jsonl
+            paths_locks[name] = lock
 
-    return paths
+    return paths, paths_locks
 
 
 def _rebuild_if_needed(jsonl: Path, lock: Path, build) -> None:
-    """Rebuild the dataset when missing or when the previous build was partial."""
+    """Rebuild the dataset when missing, partial, or no longer matching its lock.
+
+    The cached cases file is only trusted when it still hashes to the lock's
+    ``cases_sha256`` (the same integrity rule the fetchers apply); a
+    mismatched pair (truncated write, stale cache, edited file) rebuilds.
+    """
     if jsonl.exists() and lock.exists():
-        return
+        try:
+            expected = json.loads(lock.read_text(encoding="utf-8")).get("cases_sha256")
+        except (OSError, json.JSONDecodeError):
+            expected = None
+        if expected is not None and hashlib.sha256(jsonl.read_bytes()).hexdigest() == expected:
+            return
+        print(f"{jsonl.name}: cached copy does not match its lock — rebuilding...")
     build()
 
 
@@ -209,10 +229,11 @@ def _build_typed_decisions() -> None:
     out = BENCH_CACHE / "typed-decisions.jsonl"
     lock = BENCH_CACHE / "typed-decisions.dataset.lock.json"
     print("building typed-decisions dataset (downloads from the Hugging Face Hub)...")
-    try:
-        rc = fetch_main(["--out", str(out), "--lock", str(lock)])
-    except Exception as exc:  # noqa: BLE001 — hub errors are not all OSError
-        raise OSError(f"typed-decisions fetch failed: {exc}") from exc
+    # No except-wrapper: hub errors already subclass OSError, so letting them
+    # propagate keeps the real cause visible (a wrapper would misreport every
+    # bug as "offline"). The rc check covers fetchers that return nonzero
+    # instead of raising.
+    rc = fetch_main(["--out", str(out), "--lock", str(lock)])
     if rc != 0:
         raise OSError("typed-decisions fetch failed")
 
@@ -362,7 +383,7 @@ def run_bench(
     tag = preflight(force, machine_override)
     print(f"machine: {tag}")
 
-    dataset_paths = build_datasets(datasets)
+    dataset_paths, dataset_locks = build_datasets(datasets)
     if not dataset_paths:
         raise SystemExit("no datasets selected")
 
@@ -423,7 +444,14 @@ def run_bench(
                         print(f"parity check error: {parity_note}", flush=True)
                 result = None
                 for run_index in range(runs):
-                    result = _run_one(model, track, scorer, dataset_paths[dataset], combo_dir)
+                    result = _run_one(
+                        model,
+                        track,
+                        scorer,
+                        dataset_paths[dataset],
+                        combo_dir,
+                        dataset_lock_path=dataset_locks.get(dataset),
+                    )
                     print(f"  run {run_index + 1}/{runs} done")
                 assert result is not None
                 last_run[combo] = result
@@ -571,7 +599,14 @@ def parse_models_file(path: Path) -> list[str]:
     return models
 
 
-def _run_one(model: str, track: str, scorer: str, jsonl: Path, combo_dir: Path) -> dict:
+def _run_one(
+    model: str,
+    track: str,
+    scorer: str,
+    jsonl: Path,
+    combo_dir: Path,
+    dataset_lock_path: Path | None = None,
+) -> dict:
     """One eval run (in-process) + metrics + report, into combo_dir."""
     cases = _load_cases(jsonl)
     from jevmlx.engine import load_engine
@@ -598,6 +633,9 @@ def _run_one(model: str, track: str, scorer: str, jsonl: Path, combo_dir: Path) 
         extra_config={"scoring": scorer if track == "parallel" else "slots"},
         chat_template=chat_template,
         dataset_path=str(jsonl),
+        # Provenance (F7): the dataset lock's sha256 lands in run.json so
+        # leaderboard rows are traceable to a pinned dataset revision.
+        dataset_lock_path=str(dataset_lock_path) if dataset_lock_path else None,
         # Consensus datasets (typesafe, typed-decisions) carry per-field
         # distributions; lines get theirs so tvd_vs_consensus can run. Other
         # datasets have no meta.consensus and are unaffected.
@@ -697,7 +735,7 @@ def dry_run(
     tag = machine_tag(machine_override)
     print(f"machine: {tag}")
     print("datasets:")
-    cached = build_datasets(datasets) if datasets else {}
+    cached, _locks = build_datasets(datasets) if datasets else ({}, {})
     for name in datasets:
         path = cached.get(name)
         state = "cached" if path is not None and Path(path).is_file() else "to build"

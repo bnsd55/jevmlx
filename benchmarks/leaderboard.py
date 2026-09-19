@@ -239,6 +239,10 @@ def _local_rows(results_root: Path) -> list[dict]:
             rows.append(
                 {
                     "dataset": dataset_name,
+                    # Provenance (F7): the revision recorded in the copied
+                    # <name>.dataset.lock.json (run.json carries the same
+                    # lock's sha256). Rows are grouped per revision below.
+                    "revision": _lock_revision(combo, dataset_name),
                     "model": model,
                     "source": "local",
                     "scorer": scorer,
@@ -256,6 +260,42 @@ def _local_rows(results_root: Path) -> list[dict]:
                 }
             )
     return rows
+
+
+def _lock_revision(combo: Path, dataset_name: str) -> str | None:
+    """The dataset revision recorded in the copied <name>.dataset.lock.json."""
+    lock_path = combo / f"{dataset_name}.dataset.lock.json"
+    if not lock_path.exists():
+        return None
+    try:
+        sources = json.loads(lock_path.read_text(encoding="utf-8")).get("sources", [])
+    except (OSError, json.JSONDecodeError):
+        return None
+    for source in sources:
+        revision = source.get("revision")
+        if revision:
+            return str(revision)
+    return None
+
+
+def _refuse_mixed_revisions(rows: list[dict]) -> None:
+    """Fail when a dataset's local rows span more than one dataset revision.
+
+    Grouping accuracies across revisions would average numbers measured on
+    different data; the bench pins one revision per folder, so a mixed set
+    is a broken results tree, not a mergeable one.
+    """
+    by_dataset: dict[str, set[str | None]] = {}
+    for row in rows:
+        if row.get("source") == "local" and row.get("revision") is not None:
+            by_dataset.setdefault(row["dataset"], set()).add(row["revision"])
+    for dataset, revisions in by_dataset.items():
+        if len(revisions) > 1:
+            raise ValueError(
+                f"{dataset}: local rows span {len(revisions)} dataset revisions "
+                f"({', '.join(sorted(r or 'none' for r in revisions))}) — group or "
+                "rerun per revision; refusing to average across revisions"
+            )
 
 
 def _row_line(r: dict) -> str:
@@ -285,6 +325,7 @@ def build_table(
     official_models, retrieved = _load_official(official_path)
     published_models, published_subset = _load_published(published_path)
     local_rows = _local_rows(results_root) if results_root else []
+    _refuse_mixed_revisions(local_rows)
 
     lines: list[str] = []
     lines.append(_HEADER)
@@ -363,12 +404,20 @@ def build_table(
         "the 20 public example cases, so the numbers are indicative, not the "
         "same test._"
     )
-    if any(r.get("dataset") == "typed-decisions" for r in local_rows):
+    typed_rows = [r for r in local_rows if r.get("dataset") == "typed-decisions"]
+    if typed_rows:
+        n_cases = sorted({r["cases"] for r in typed_rows if r.get("cases") is not None})
+        cases_txt = f"{n_cases[0]} cases" if len(n_cases) == 1 else f"{n_cases} cases per row"
+        revisions = sorted({r.get("revision") or "unpinned" for r in typed_rows})
+        rev_txt = (
+            f"revision {revisions[0]} pinned in each folder's dataset.lock.json"
+            if len(revisions) == 1
+            else "revisions pinned in each folder's dataset.lock.json"
+        )
         lines.append(
-            "_typed-decisions rows are on the official `test` split of "
-            "[LocalLLaMA/typed-decisions]"
+            "_typed-decisions rows are on LocalLLaMA/typed-decisions"
             "(https://huggingface.co/datasets/LocalLLaMA/typed-decisions) "
-            "(400 cases), revision pinned in each folder's dataset.lock.json._"
+            f"({cases_txt}), {rev_txt}._"
         )
     lines.append(
         "_Consensus label = the agreement of GPT-6 Astra + Claude Fable 5.1 "
