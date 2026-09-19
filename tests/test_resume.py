@@ -1114,3 +1114,159 @@ class TestReviewRound4:
         assert (combo / "predictions.jsonl").exists()
         # The file was rewritten (--fresh removed the dir).
         assert (combo / "predictions.jsonl").stat().st_mtime >= old_mtime
+
+
+class TestW5c12RepeatRuns:
+    """W5c-12: bench --runs N repeat runs start from a clean combo dir."""
+
+    def _decide(self):
+        def decide(schema_dict, context, **kwargs):
+            return {
+                "verdict": {
+                    "prediction": "yes",
+                    "valid": True,
+                    "log_scores": {"yes": 0.0, "no": -1.0},
+                    "probability": {"yes": 0.7, "no": 0.3},
+                    "type": "enum",
+                },
+                "_meta": {"latency_ms": 1.0, "prompt_sha256": "a" * 64},
+            }
+
+        return decide
+
+    def _cases(self, n=3):
+        return [
+            {
+                "id": f"case-{i}",
+                "schema": {"verdict": {"type": "enum", "choices": ["yes", "no"]}},
+                "context": f"Evidence block {i}.",
+                "labels": {"verdict": "yes" if i % 2 == 0 else "no"},
+                "split": "train",
+            }
+            for i in range(n)
+        ]
+
+    def _setup_bench_mocks(self, monkeypatch, tmp_path):
+        """Mock only the engine load path; run_bench/_run_one/run_eval unmocked."""
+        import benchmarks.summarize_results as sr_mod
+        import jevmlx.engine as engine_mod
+        from jevmlx import bench
+
+        jsonl = tmp_path / "data.jsonl"
+        jsonl.write_text(
+            "\n".join(json.dumps(c) for c in self._cases()) + "\n",
+            encoding="utf-8",
+        )
+        lock = tmp_path / "data.dataset.lock.json"
+        lock.write_text(
+            json.dumps({"name": "data", "sha256": "deadbeef", "files": {}}),
+            encoding="utf-8",
+        )
+
+        class _FakeTokenizer:
+            chat_template = None
+
+        class _FakeEngine:
+            tokenizer = _FakeTokenizer()
+
+        monkeypatch.setattr(bench, "preflight", lambda force, machine_override: "test-machine")
+        monkeypatch.setattr(
+            bench,
+            "build_datasets",
+            lambda datasets: ({"data": jsonl}, {"data": lock}),
+        )
+        monkeypatch.setattr(
+            bench, "_load_engine_with_timeout", lambda model, timeout: _FakeEngine()
+        )
+        monkeypatch.setattr(bench, "_run_model_parity", lambda model, engine, folder: None)
+        monkeypatch.setattr(engine_mod, "load_engine", lambda model: _FakeEngine())
+        monkeypatch.setattr(
+            bench,
+            "parallel_decide_fn",
+            lambda engine, scoring="slots", prior_correction=False: self._decide(),
+        )
+        monkeypatch.setattr(sr_mod, "summarize", lambda folder, parity_note=None: None)
+        return bench, jsonl, lock
+
+    def test_runs2_completes_and_holds_one_run(self, tmp_path, monkeypatch):
+        """runs=2: run 2 starts from a clean combo dir (rmtree), both runs
+        complete, and the folder holds exactly one run's predictions (no
+        duplication, no merge)."""
+        bench, _, _ = self._setup_bench_mocks(monkeypatch, tmp_path)
+
+        out = tmp_path / "results"
+        result = bench.run_bench(
+            model="test/model",
+            datasets=["data"],
+            scorers=["slots"],
+            tracks=["parallel"],
+            out=out,
+            runs=2,
+        )
+        assert result.exists()
+        combo = result / "parallel-slots-data"
+        assert (combo / "predictions.jsonl").exists()
+        # Exactly one run's worth of prediction lines (3 cases x 2 variants = 6).
+        lines = (combo / "predictions.jsonl").read_text().strip().splitlines()
+        assert len(lines) == 6, f"expected 6 lines (one run), got {len(lines)}"
+        # run.json exists (run 2's, the last one kept).
+        assert (combo / "run.json").exists()
+        # Only ONE timing.segment file (run 1's was rmtree'd).
+        import glob
+
+        segments = glob.glob(str(combo / "timing.segment-*.json"))
+        assert len(segments) == 1, f"expected 1 timing segment, got {len(segments)}: {segments}"
+        # Only ONE manifest (run 2's, not run 1's merged).
+        manifest = json.loads((combo / "manifest.json").read_text())
+        # sessions list has exactly one entry (run 2's fresh start).
+        assert len(manifest.get("sessions", [])) == 1, (
+            f"expected 1 session, got {len(manifest.get('sessions', []))}"
+        )
+
+    def test_runs2_with_manifest_resumes_run1_then_run2_fresh(self, tmp_path, monkeypatch):
+        """runs=2 with an existing manifest: run 1 resumes (manifest present
+        -> resume), run 2 starts fresh (rmtree + clean)."""
+        bench, jsonl, lock = self._setup_bench_mocks(monkeypatch, tmp_path)
+        from jevmlx.evalrun import run_eval
+
+        out = tmp_path / "results"
+        combo_dir = out / "test-machine-test--model" / "parallel-slots-data"
+        combo_dir.mkdir(parents=True)
+
+        # Do a REAL partial run (2 of 3 cases) so the manifest is valid.
+        run_eval(
+            self._cases()[:2],
+            self._decide(),
+            track="parallel",
+            model="test/model",
+            out_dir=str(combo_dir),
+            run_id="prior-run",
+            permutations="rotations",
+            chat_template=None,
+            dataset_lock_path=str(lock),
+        )
+        # Verify partial state.
+        assert (combo_dir / "manifest.json").exists()
+        prior_lines = len((combo_dir / "predictions.jsonl").read_text().strip().splitlines())
+        assert prior_lines < 6  # not all cases done
+
+        result = bench.run_bench(
+            model="test/model",
+            datasets=["data"],
+            scorers=["slots"],
+            tracks=["parallel"],
+            out=out,
+            runs=2,
+        )
+        assert result.exists()
+        combo = result / "parallel-slots-data"
+        # Run 2's predictions exist (run 1's were rmtree'd).
+        assert (combo / "predictions.jsonl").exists()
+        lines = (combo / "predictions.jsonl").read_text().strip().splitlines()
+        assert len(lines) == 6, f"expected 6 lines (run 2 only), got {len(lines)}"
+        # Run 2's manifest is fresh (sessions has 1 entry, not merged).
+        manifest = json.loads((combo / "manifest.json").read_text())
+        assert len(manifest.get("sessions", [])) == 1
+        # Run 2's run_id is NOT 'prior-run' (fresh start).
+        run_json = json.loads((combo / "run.json").read_text())
+        assert run_json["run_id"] != "prior-run"
