@@ -3583,7 +3583,6 @@ def finalize_public_result(
     # W5c-6 / B4: token-accounting telemetry. Count actual rows/branches
     # (multi option rows, count rows, trie branches), not fields.
     rows = built["rows"]
-    lead_in_len = len(built.get("lead_in", []))
     shared_prefix_tokens = len(base_ids)
     # naive_branch_prompt_tokens: the FULL prompt length for every actual
     # scoring row (shared prefix repeated) — the work a naive one-row-at-a-
