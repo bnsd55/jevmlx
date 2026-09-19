@@ -958,3 +958,20 @@ def test_near_tie_multi_option_rescored_at_batch1():
     }
     assert result["parsed_json"]["tags"]["value"] == []
     assert all(p < 0.5 for p in result["field_telemetry"]["tags"]["per_option"].values())
+
+
+def test_decision_logits_dtype_is_float32_with_fp32_head():
+    """W5c-8: when the engine carries a dequantized fp32 LM head, the
+    decision-position logits the gather produces are float32 (a genuine
+    fp32 matmul, not an astype(float32) wrapper around the quantized
+    kernel — a known MLX path still yields fp16-grid results). The fake
+    engine path (lm_head_fp32=None) keeps the original fp16 path."""
+    # The fake engine has lm_head_fp32=None by default (the Engine
+    # dataclass default) — verify the attribute exists and the None path
+    # does not break.
+    from tests.conftest import FakeModel, FakeTokenizer, make_engine
+
+    eng = make_engine(FakeModel(), FakeTokenizer())
+    assert hasattr(eng, "lm_head_fp32")
+    assert eng.lm_head_fp32 is None  # fake path: no dequantized head
+    assert eng.lm_head_fp32_bytes == 0

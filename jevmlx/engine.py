@@ -149,6 +149,15 @@ class Engine:
     weight_bytes: int
     cache_capabilities: tuple[str, ...]
     width_slope: float
+    # W5c-8: a TRUE fp32 decision-token head. The quantized LM head leaves
+    # logits in fp16; batched gap drift (0.0625 on the 0.5B) is fp16 output
+    # rounding selected by kernel shape. This branch REPLACES the head for
+    # decision positions: the transformer body runs to the final-normalized
+    # hidden state, then the decision-position hidden vectors matmul against
+    # this dequantized fp32 weight. None on models without a dequantizable
+    # head (the fake engine path).
+    lm_head_fp32: Any = None
+    lm_head_fp32_bytes: int = 0
 
 
 # mlx imports are deferred so this module imports cleanly on a machine
@@ -265,6 +274,13 @@ def _load_engine_resolved(model_id: str):
     vocab_size = _vocab_size_of(model)
     weight_bytes = _model_weight_bytes(model)
     cache_capabilities = tuple(sorted({type(c).__name__ for c in make_prompt_cache(model)}))
+    # W5c-8: dequantize the LM head ONCE into true fp32. For tied
+    # embeddings that is embed_tokens; for a separate lm_head, that.
+    # An astype(float32) on the input of the quantized kernel does NOT
+    # count (a known MLX path still yields fp16-grid results) — this is a
+    # genuine dequantize + fp32 matmul.
+    lm_head_fp32, lm_head_fp32_bytes = _dequantize_lm_head_fp32(model)
+    logger.info("LM head dequantized to fp32: %.1f MB", lm_head_fp32_bytes / 1e6)
     engine = Engine(
         model=model,
         tokenizer=tokenizer,
@@ -275,6 +291,8 @@ def _load_engine_resolved(model_id: str):
         weight_bytes=weight_bytes,
         cache_capabilities=cache_capabilities,
         width_slope=width_slope,
+        lm_head_fp32=lm_head_fp32,
+        lm_head_fp32_bytes=lm_head_fp32_bytes,
     )
     logger.info(
         "Engine ready: %s rev=%s vocab=%d weights=%.1fMB caches=%s",
@@ -520,6 +538,36 @@ def _vocab_size_of(model) -> int:
 def _model_weight_bytes(model) -> int:
     """Total bytes of all model parameters (quantized weights included)."""
     return sum(int(p.nbytes) for _, p in tree_flatten(model.parameters()))
+
+
+def _dequantize_lm_head_fp32(model):
+    """W5c-8: dequantize the LM head ONCE into true fp32.
+
+    For tied embeddings (``tie_word_embeddings``) that is
+    ``model.model.embed_tokens``; for a separate head, ``model.lm_head``.
+    Returns ``(weight_fp32, nbytes)`` or ``(None, 0)`` when the head is not
+    a quantized linear (the fake engine path, or an already-fp32 model).
+
+    An ``astype(float32)`` on the INPUT of the quantized kernel does NOT
+    count — a known MLX path still yields fp16-grid results. This is a
+    genuine ``mx.dequantize`` into fp32, so the decision-position dot is a
+    true fp32 matmul.
+    """
+    # Find the head linear: tied embeddings use embed_tokens.as_linear.
+    tied = bool(getattr(getattr(model, "args", None), "tie_word_embeddings", False))
+    head = model.model.embed_tokens if tied else getattr(model, "lm_head", None)
+    if head is None:
+        return None, 0
+    w = head.weight
+    # Only dequantize quantized weights (uint32 packed + scales/biases).
+    if not (hasattr(head, "scales") and hasattr(head, "biases")):
+        return None, 0
+    group_size = getattr(head, "group_size", 64)
+    bits = getattr(head, "bits", 4)
+    deq = mx.dequantize(
+        w, scales=head.scales, biases=head.biases, group_size=group_size, bits=bits
+    ).astype(mx.float32)
+    return deq, int(deq.nbytes)
 
 
 def _cache_nbytes(cache) -> int:
@@ -1377,6 +1425,7 @@ def _score_rows(
     auto_max_rows: int,
     ledger: "Ledger",
     cache_slots: list | None = None,
+    lm_head_fp32=None,
 ) -> ScoreRowsResult:
     """Run batched suffix forward passes over prefill cache and gather logits.
 
@@ -1472,7 +1521,17 @@ def _score_rows(
                 # N7: with-form — a failed forward unwinds through the span
                 # (no interval recorded), the retry catches outside.
                 with ledger.span("transformer"):
-                    out = model(padded, cache=b_cache)
+                    # W5c-8: when the fp32 head is active, run the transformer
+                    # BODY only (model.model) — the final-normalized hidden
+                    # state, BEFORE the quantized LM head. The decision-position
+                    # logits are computed in true fp32 in the gather block.
+                    # When lm_head_fp32 is None, fall back to the full model()
+                    # call (the quantized head path — the fake engine path).
+                    out = (
+                        model.model(padded, cache=b_cache)
+                        if lm_head_fp32 is not None
+                        else model(padded, cache=b_cache)
+                    )
                     mx.eval(out)  # W5b-14 review F8: the span covers the sync
             except Exception as exc:  # noqa: BLE001
                 del b_cache
@@ -1500,17 +1559,41 @@ def _score_rows(
             # N7: with-form — a failed gather eval unwinds through the
             # span (no interval), the retry catches outside.
             with ledger.span("gather"):
-                rows_at_pos = out[mx.arange(chunk_len), positions]
-                flat_idx = mx.array(
-                    [
-                        i * vocab_size + tok
-                        for i, d in enumerate(chunk_decisions)
-                        for tok in (d[1] + [d[1][0]] * (max_allowed - len(d[1])))
-                    ],
-                    dtype=mx.int32,
-                )
-                gathered = mx.take(rows_at_pos.reshape(-1), flat_idx)
-                row_vocab_lse = mx.logsumexp(rows_at_pos, axis=1)
+                if lm_head_fp32 is not None:
+                    # W5c-8: TRUE fp32 decision-token head. The transformer
+                    # body ran to the final-normalized hidden state (below);
+                    # take the decision-position hidden vectors and matmul
+                    # against the dequantized fp32 LM head weight. The dot is
+                    # a genuine fp32 matmul — not an astype(float32) wrapper
+                    # around the quantized kernel (a known MLX path still
+                    # yields fp16-grid results). The gather-only decision
+                    # logits path stays the ONLY path; legal mass is fp32.
+                    rows_at_pos = out[mx.arange(chunk_len), positions].astype(
+                        mx.float32
+                    )  # (chunk_len, hidden_dim)
+                    full_logits = rows_at_pos @ lm_head_fp32.T  # (chunk_len, vocab)
+                    flat_idx = mx.array(
+                        [
+                            i * vocab_size + tok
+                            for i, d in enumerate(chunk_decisions)
+                            for tok in (d[1] + [d[1][0]] * (max_allowed - len(d[1])))
+                        ],
+                        dtype=mx.int32,
+                    )
+                    gathered = mx.take(full_logits.reshape(-1), flat_idx)
+                    row_vocab_lse = mx.logsumexp(full_logits, axis=1)
+                else:
+                    rows_at_pos = out[mx.arange(chunk_len), positions]
+                    flat_idx = mx.array(
+                        [
+                            i * vocab_size + tok
+                            for i, d in enumerate(chunk_decisions)
+                            for tok in (d[1] + [d[1][0]] * (max_allowed - len(d[1])))
+                        ],
+                        dtype=mx.int32,
+                    )
+                    gathered = mx.take(rows_at_pos.reshape(-1), flat_idx)
+                    row_vocab_lse = mx.logsumexp(rows_at_pos, axis=1)
                 try:
                     mx.eval(gathered, row_vocab_lse)
                 except Exception as exc:  # noqa: BLE001
@@ -1706,6 +1789,7 @@ def _selective_second_pass(
     constraints: list[dict] | None = None,
     compiled_constraints: "CompiledConstraints | None" = None,
     oracle_overrides: dict[str, object] | None = None,
+    lm_head_fp32=None,
 ) -> dict[str, Any]:
     """W3-D part 2, rebuilt on the shared finalizer (W5-B review 3-10).
 
@@ -1899,6 +1983,7 @@ def _selective_second_pass(
             pad_id,
             max(1, len(conditioned_rows)),
             ledger,
+            lm_head_fp32=lm_head_fp32,
         )
         all_conditioned_rows += len(conditioned_rows)
 
@@ -2063,6 +2148,7 @@ def _rescore_rows_batch1(
     vocab_size: int,
     pad_id: int,
     ledger: "Ledger",
+    lm_head_fp32=None,
 ) -> dict:
     """Rescore one field's rows at batch=1 (W3-E, the canonical shape).
 
@@ -2089,6 +2175,7 @@ def _rescore_rows_batch1(
         pad_id,
         1,
         ledger,
+        lm_head_fp32=lm_head_fp32,
     )
     node_logits: dict[int, dict[int, list[float]]] = {}
     node_legal_mass_log: dict[int, Any] = {}
@@ -2460,6 +2547,7 @@ def run_parallel_generation(
             built["pad_id"],
             auto_max_rows,
             ledger,
+            lm_head_fp32=engine.lm_head_fp32,
         )
         return _assemble(
             model,
@@ -2516,6 +2604,7 @@ def run_parallel_generation(
         built["pad_id"],
         auto_max_rows,
         ledger,
+        lm_head_fp32=engine.lm_head_fp32,
     )
     return _assemble(
         model,
@@ -2608,6 +2697,7 @@ def _make_rescore_evidence_fn(
     vocab_size: int,
     pad_id: int,
     ledger: "Ledger",
+    lm_head_fp32=None,
 ) -> "Callable[[list[int]], ScalarEvidence]":
     """The batch=1 canonical re-measure for ONE scalar field (W3-E).
 
@@ -2632,6 +2722,7 @@ def _make_rescore_evidence_fn(
             vocab_size,
             pad_id,
             ledger,
+            lm_head_fp32=lm_head_fp32,
         )
         rs_logits: dict[int, list[float]] = {}
         rs_mass: dict[int, float] = {}
@@ -2744,6 +2835,7 @@ def score_scalar_field(
     vocab_size: int,
     pad_id: int,
     ledger: "Ledger",
+    lm_head_fp32=None,
 ) -> FieldOutcome:
     """Stage 2 (W5b-10 C1): finalize ONE scalar (enum/boolean) field.
 
@@ -2782,6 +2874,7 @@ def score_scalar_field(
         vocab_size,
         pad_id,
         ledger,
+        lm_head_fp32=lm_head_fp32,
     )
 
     evidence = ScalarEvidence(
@@ -3086,6 +3179,7 @@ def _rescore_multi_options(
     vocab_size: int,
     pad_id: int,
     ledger: "Ledger",
+    lm_head_fp32=None,
 ) -> tuple[list[int], bool]:
     """W3-E band rescore for a multi field's near-threshold options.
 
@@ -3115,6 +3209,7 @@ def _rescore_multi_options(
         vocab_size,
         pad_id,
         ledger,
+        lm_head_fp32=lm_head_fp32,
     )
     for _oi, ridx in zip(rescored_oids, rescore_ridxs, strict=True):
         # Replace the option's raw Y/N pair with the canonical (batch=1)
@@ -3249,6 +3344,7 @@ def score_multi_field(
     vocab_size: int,
     pad_id: int,
     ledger: "Ledger",
+    lm_head_fp32=None,
 ) -> FieldOutcome:
     """Stage 3 (W5b-10 C1): finalize ONE multi field.
 
@@ -3274,7 +3370,15 @@ def score_multi_field(
     # batch=1 and replace their raw pairs BEFORE the scoring loop, so prior
     # + softmax + selection all see the canonical result.
     rescored_oids, multi_rescored = _rescore_multi_options(
-        model, cache, built, dispatch, idxs, vocab_size, pad_id, ledger
+        model,
+        cache,
+        built,
+        dispatch,
+        idxs,
+        vocab_size,
+        pad_id,
+        ledger,
+        lm_head_fp32=lm_head_fp32,
     )
     for oi, ridx in enumerate(idxs):
         pair = list(dispatch.option_pair[ridx])
@@ -3439,6 +3543,7 @@ def run_dependency_waves(
     compiled_constraints: "CompiledConstraints | None" = None,
     oracle_overrides: dict[str, object] | None,
     ledger: "Ledger",
+    lm_head_fp32=None,
 ) -> tuple[AssembledState, dict[str, Any]]:
     """Stage 5 (W5b-10 C1): the selective parent-conditioned second pass.
 
@@ -3467,6 +3572,7 @@ def run_dependency_waves(
         constraints=list(constraints) if constraints is not None else None,
         compiled_constraints=compiled_constraints,
         oracle_overrides=oracle_overrides,
+        lm_head_fp32=lm_head_fp32,
     )
     return state, telemetry
 
@@ -3692,6 +3798,7 @@ def _score_all_fields(
     vocab_size: int,
     pad_id: int,
     ledger: "Ledger",
+    lm_head_fp32=None,
 ) -> tuple[AssembledState, list[str]]:
     """Stage 2 (W5b-10 C1): first-pass scoring of EVERY field.
 
@@ -3725,6 +3832,7 @@ def _score_all_fields(
                 vocab_size=vocab_size,
                 pad_id=pad_id,
                 ledger=ledger,
+                lm_head_fp32=lm_head_fp32,
             )
             if outcome.rescored:
                 rescored_fields.append(fname)
@@ -3751,6 +3859,7 @@ def _score_all_fields(
                 vocab_size=vocab_size,
                 pad_id=pad_id,
                 ledger=ledger,
+                lm_head_fp32=lm_head_fp32,
             )
             if outcome.rescored:
                 rescored_fields.append(fname)
@@ -3788,6 +3897,7 @@ def _assemble(
     active_start: int = 0,
     _prior_mode: bool = False,
     ledger: "Ledger",
+    lm_head_fp32=None,
 ) -> dict[str, Any]:
     """Assemble per-field decisions from the scored rows (W3-F stage 3).
 
@@ -3834,6 +3944,7 @@ def _assemble(
             vocab_size=vocab_size,
             pad_id=pad_id,
             ledger=ledger,
+            lm_head_fp32=lm_head_fp32,
         )
 
     # W3-D: constrained MAP. W5-B (review 43): PRIOR MODE STOPS HERE — the
@@ -3867,6 +3978,7 @@ def _assemble(
                     compiled_constraints=compiled_constraints,
                     oracle_overrides=oracle_overrides,
                     ledger=ledger,
+                    lm_head_fp32=lm_head_fp32,
                 )
         else:
             state, second_pass_telemetry = run_dependency_waves(
@@ -3884,6 +3996,7 @@ def _assemble(
                 compiled_constraints=compiled_constraints,
                 oracle_overrides=oracle_overrides,
                 ledger=ledger,
+                lm_head_fp32=lm_head_fp32,
             )
     else:
         second_pass_telemetry = {"rerun_fields": [], "rerun_rows": 0}
@@ -4141,6 +4254,7 @@ def run_parallel_generation_batched(
                         oracle_overrides=oracle_overrides,
                         active_start=active_start,
                         ledger=ctx_ledger,
+                        lm_head_fp32=engine.lm_head_fp32,
                     )
                 prefill_iv = prefill_iv_by_idx[idx]
                 assembly_iv = ctx_ledger.last_interval("assembly")
@@ -4177,6 +4291,7 @@ def run_parallel_generation_batched(
             auto_max_rows,
             group_ledger,
             cache_slots=cache_slots,
+            lm_head_fp32=engine.lm_head_fp32,
         )
 
         # 5. Split per context (re-key row indexes to 0..R-1) and assemble.
@@ -4224,6 +4339,7 @@ def run_parallel_generation_batched(
                     oracle_overrides=oracle_overrides,
                     active_start=active_start,
                     ledger=ctx_ledger,
+                    lm_head_fp32=engine.lm_head_fp32,
                 )
             prefill_iv = prefill_iv_by_idx[idx]
             assembly_iv = ctx_ledger.last_interval("assembly")
