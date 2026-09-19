@@ -77,6 +77,7 @@ __all__ = [
     "envelope_key",
     "envelope_for_engine",
     "recorded_envelope_records",
+    "probes_dir_for_record",
     "CANARY_SCHEMA",
     "run_canary",
 ]
@@ -95,6 +96,11 @@ MAX_GAP_DRIFT_KEY = "max_gap_drift_nats"
 # folder in the repo is the durable copy; this is the machine-local cache
 # the engine reads at load).
 _ENVELOPE_CACHE = Path.home() / ".cache" / "jevmlx" / "driftenv"
+
+# The repo probes dir (where REAL model records are committed — PR #66).
+# Tests monkeypatch this to a tmp_path so test records never touch the
+# repo. None => the caller resolves the default (benchmarks/probes/).
+_PROBES_DIR_OVERRIDE: Path | None = None
 
 
 class DriftEnvelopeError(RuntimeError):
@@ -186,6 +192,32 @@ def shape_bucket(m_rows: int) -> str:
 def round_up_lattice(x: float) -> float:
     """Round UP to the next multiple of 1/64 nat (the drift lattice)."""
     return math.ceil(x * DRIFT_LATTICE) / DRIFT_LATTICE
+
+
+def _slug(model_id: str) -> str:
+    """A filesystem-safe slug for a model id (mirrors parity._slug)."""
+    import re
+
+    return re.sub(r"[^a-zA-Z0-9]+", "-", model_id).strip("-").lower() or "model"
+
+
+def probes_dir_for_record(model_id: str = "", *, chip: str = "") -> Path | None:
+    """The probes dir for a record write. Real model records go to the repo's
+    ``benchmarks/probes/<chip>--<slug>/`` (committed — PR #66); tests
+    monkeypatch ``_PROBES_DIR_OVERRIDE`` to a tmp_path so test records never
+    touch the repo. Returns None when the repo path does not exist (a
+    non-repo install)."""
+    if _PROBES_DIR_OVERRIDE is not None:
+        return _PROBES_DIR_OVERRIDE
+    try:
+        from jevmlx.bench import HERE
+
+        if not Path(HERE).exists():
+            return None
+        sub = f"{chip or 'unknown-chip'}--{_slug(model_id)}" if model_id else ""
+        return Path(HERE) / "probes" / sub if sub else Path(HERE) / "probes"
+    except Exception:  # noqa: BLE001 — best-effort
+        return None
 
 
 def envelope_cache_path(key: dict[str, Any]) -> Path:
@@ -450,7 +482,7 @@ def recorded_envelope_records(engine: Any) -> list[dict[str, Any]]:
     return records if isinstance(records, list) else []
 
 
-def envelope_for_engine(engine: Any) -> dict[str, Any]:
+def envelope_for_engine(engine: Any, *, probes_dir: Path | None = None) -> dict[str, Any]:
     """Resolve the envelope for a loaded engine: the tuple's RECORDS,
     augmented by the canary when nothing is recorded.
 
@@ -465,6 +497,10 @@ def envelope_for_engine(engine: Any) -> dict[str, Any]:
     record — the next load finds it), a warning logs that the envelope was
     unrecorded, and the canary's record joins the records list. The canary
     MEASURES; on failure the load RAISES (no constant fallback — H3).
+
+    ``probes_dir`` defaults to the repo's ``benchmarks/probes/`` (where real
+    model records are committed — see PR #66); tests pass a tmp_path so test
+    records never touch the repo.
     """
     key = envelope_key(engine)
     cached = load_envelope_record(key)
@@ -485,9 +521,10 @@ def envelope_for_engine(engine: Any) -> dict[str, Any]:
         raise DriftEnvelopeError(
             f"canary probe failed for {key.get('model_id')}/{key.get('chip')}: {exc}"
         ) from exc
-    from jevmlx.bench import HERE
-
-    probes_dir = Path(HERE) / "probes" if Path(HERE).exists() else None
+    if probes_dir is None:
+        probes_dir = probes_dir_for_record(
+            key.get("model_id") or "", chip=key.get("chip") or ""
+        )
     record_envelope(record, probes_dir=probes_dir)
     # Read back the merged store (the write may have hit a covering bucket
     # already; the canary's own bucket is M<=16).

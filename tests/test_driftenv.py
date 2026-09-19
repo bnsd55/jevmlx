@@ -353,7 +353,7 @@ def test_envelope_for_engine_runs_canary_when_missing(tmp_path, monkeypatch):
         }
 
     monkeypatch.setattr(dv, "run_canary", _fake_canary)
-    res = dv.envelope_for_engine(_FakeEngineForKey())
+    res = dv.envelope_for_engine(_FakeEngineForKey(), probes_dir=tmp_path / "probes")
     assert res["source"] == "canary"
     assert dv.bound_from_records(res["records"], "M<=16") == pytest.approx(0.0625)
     # The canary WROTE its record: the next load finds it.
@@ -401,7 +401,7 @@ def test_readonly_cache_keeps_in_memory_no_constant(tmp_path, monkeypatch):
         raise PermissionError("read-only")
 
     monkeypatch.setattr(dv.Path, "write_text", _raise)
-    res = dv.envelope_for_engine(_FakeEngineForKey())
+    res = dv.envelope_for_engine(_FakeEngineForKey(), probes_dir=tmp_path / "probes")
     # The canary's record rides in-memory despite the read-only cache.
     assert dv.bound_from_records(res["records"], "M<=16") == pytest.approx(0.0625)
 

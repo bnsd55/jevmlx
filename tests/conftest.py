@@ -188,6 +188,17 @@ class CountCodeModel(FakeModel):
         )
 
 
+# ----------------------------------------------- test probes isolation --
+# W5c-9: every test redirects the drift-envelope probes dir to a tmp_path
+# so test records (fake engines) NEVER touch the repo's
+# benchmarks/probes/ (where only REAL model records are committed — PR #66).
+@pytest.fixture(autouse=True)
+def _isolate_drift_probes(tmp_path, monkeypatch):
+    import jevmlx.driftenv as dv
+
+    monkeypatch.setattr(dv, "_PROBES_DIR_OVERRIDE", tmp_path / "probes")
+
+
 # ------------------------------------------------- engine result factories --
 # The FULL result dict `run_parallel_generation` returns (ARCHITECTURE.md
 # 'Engine result dict'), with neutral defaults. These three builders are the

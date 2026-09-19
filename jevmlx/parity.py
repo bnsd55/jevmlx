@@ -386,9 +386,14 @@ def _record_envelope_from_report(
     envelope is an optimization for the band, not a gate input.
     """
     try:
-        from pathlib import Path
 
-        from jevmlx.driftenv import MAX_GAP_DRIFT_KEY, envelope_key, record_envelope, shape_bucket
+        from jevmlx.driftenv import (
+            MAX_GAP_DRIFT_KEY,
+            envelope_key,
+            probes_dir_for_record,
+            record_envelope,
+            shape_bucket,
+        )
 
         key = envelope_key(engine)
         bucket = shape_bucket(merged_rows)  # the real merged pass M (C4)
@@ -400,15 +405,7 @@ def _record_envelope_from_report(
             "model": model_id,
             "matrix_rows": 4,
         }
-        probes_dir = None
-        try:
-            from jevmlx.bench import HERE
-
-            probes_dir = (
-                Path(HERE) / "probes" / f"{key.get('chip') or 'unknown-chip'}--{_slug(model_id)}"
-            )
-        except Exception:  # noqa: BLE001 — best-effort persistence
-            probes_dir = None
+        probes_dir = probes_dir_for_record(model_id, chip=key.get("chip") or "")
         record_envelope(record, probes_dir=probes_dir)
         from jevmlx.driftenv import rescore_band
 
