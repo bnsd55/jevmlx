@@ -64,9 +64,32 @@ Paste `SUMMARY.md` into the PR description and link the machine specs
 
 - Preflight: Apple Silicon check; refuses on battery or when another process
   holds significant Metal memory (`--force` overrides with a printed warning).
-- Datasets: bundled cases, TypeSafe's public set (skipped offline), and
-  deterministic perturbations of the bundled cases — built once into
-  `~/.cache/jevmlx/bench/` and reused while the lock files match.
+- Datasets: bundled cases, TypeSafe's public set (skipped offline), the
+  typed-decisions Hugging Face mirror, the three PUBLIC gold datasets
+  (below), and deterministic perturbations of the bundled cases — built
+  once into `~/.cache/jevmlx/bench/` and reused while the lock files match.
+- Public gold datasets (W6-B5, pass `--datasets` `ag_news`, `boolq`,
+  `sst5`, or view-suffixed names like `ag_news.balanced`; a bare name
+  runs both views): AG News (4-class topic enum), BoolQ (yes/no reading
+  comprehension), SST-5 (ordinal 0-4 sentiment). Each is PINNED to a
+  dataset repo commit sha with a hardcoded per-file EXPECTED sha256:
+  verified on download, and re-checked on cache reuse by comparing the
+  LOCK's recorded sha256 against the pin (the cached cases bytes are
+  covered by the lock's own cases_sha256) — a mismatch fails closed
+  (nothing is sampled or locked). TWO DISJOINT
+  sampling views are written as separate cases files:
+  `<name>.balanced.jsonl` (class-balanced diagnostic, 50 rows/class —
+  per-class accuracy, macro-F1, confusion, ordinal MAE) and
+  `<name>.natural.jsonl` (the dataset's own class prevalence, 500 rows
+  drawn from rows the balanced view did NOT take, so calibration rows
+  are never the reported diagnostic rows — the view NLL/Brier/ECE
+  describe). Selection is deterministic: `hash(seed, source_row_id)`.
+  License/terms are recorded per dataset in the lock and redistribution
+  is NOT cleared for any of them: the cached cases files (under
+  `~/.cache/jevmlx/bench/`, never committed) carry the source text the
+  engine classifies, while every committed RESULT artifact
+  (predictions.jsonl, run.json, report.json, dataset.lock.json) stores
+  row ids, split, option order and input hashes only — never the text.
 - Runs: for every (track, scorer, dataset) — `eval` in-process `--runs` times
   (default 2), last run kept, order-rotation permutations on for the parallel
   track. Writes `predictions.jsonl`, `run.json`, `report.json`, `report.md`
