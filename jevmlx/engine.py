@@ -16,6 +16,7 @@ import logging
 import math
 import platform
 import re
+import sys
 import time
 import weakref
 from collections import OrderedDict
@@ -31,6 +32,7 @@ from jevmlx.models import resolve_model
 
 if TYPE_CHECKING:
     from jevmlx.constraints import CompiledConstraints
+    from jevmlx.timing import Interval, Ledger
 
 from jevmlx.schema import StructuredSchema, _common_token_prefix, count_key, is_count_key
 from jevmlx.setcons import select_constrained_set
@@ -1199,8 +1201,6 @@ class ScoreRowsResult(NamedTuple):
     row_logits: dict[int, list[float]]
     row_legal_mass_log: dict[int, float]
     passes: int
-    gather_ms: float
-    broadcast_ms: float
     chunk_shapes: list[tuple[int, int]]
     failed_attempts: int = 0
 
@@ -1213,9 +1213,15 @@ def _score_rows(
     vocab_size: int,
     pad_id: int,
     auto_max_rows: int,
+    ledger: "Ledger",
     cache_slots: list | None = None,
 ) -> ScoreRowsResult:
     """Run batched suffix forward passes over prefill cache and gather logits.
+
+    W5b-14: when a Ledger is passed, the broadcast/forward/gather regions
+    ALSO record ``cache_merge`` / ``transformer`` / ``gather`` spans — the
+    ledger is the measurement of record; the NamedTuple accumulators
+    remain (same regions, same perf_counter, both stay honest).
 
     Shared by the main scoring loop (run_parallel_generation) and the
     selective second pass (_selective_second_pass). This is the ONE copy of
@@ -1227,28 +1233,25 @@ def _score_rows(
     ONE cache. None (default) broadcasts the single prefill cache — the
     original per-context behaviour, unchanged.
 
-    Returns ``(row_logits, row_legal_mass_log, passes, t_gather_ms)``:
+    Returns a ScoreRowsResult:
     - row_logits: {row_idx -> [child logits in allowed order]}
     - row_legal_mass_log: {row_idx -> log(legal_mass)} (logsumexp(allowed) -
       logsumexp(vocab))
     - passes: number of forward passes (for telemetry)
-    - t_gather_ms: time spent in the gather/eval step
+    Timing is NOT on the result: the ``cache_merge`` / ``transformer`` /
+    ``gather`` ledger spans (W5b-14) are the measurement of record.
     """
     row_logits: dict[int, list[float]] = {}
     row_legal_mass_log: dict[int, float] = {}
 
     if not rows:
-        return ScoreRowsResult(row_logits, row_legal_mass_log, 0, 0.0, 0.0, [])
+        return ScoreRowsResult(row_logits, row_legal_mass_log, 0, [])
 
     # Bucket rows by suffix width: sort row indexes by row length, then cut
     # the sorted sequence into chunks of at most auto_max_rows.
     row_order = sorted(range(len(rows)), key=lambda ridx: len(rows[ridx]))
     passes = 0
     failed_attempts = 0
-    t_gather_ms = 0.0
-    # W3-R: broadcast+prepare+eval of the per-chunk cache copies is a
-    # distinct cost from the forwards themselves — report it separately.
-    t_broadcast_ms = 0.0
     # W3-R: (width, chunk_len) per forward pass — total padded token
     # positions is sum(width * chunk_len), the tiling shape the model ran.
     chunk_shapes: list[tuple[int, int]] = []
@@ -1270,31 +1273,44 @@ def _score_rows(
                 [rows[ridx] + [pad_id] * (width - len(rows[ridx])) for ridx in chunk_rows],
                 dtype=mx.int32,
             )
-            t_bcast0 = time.perf_counter()
-            if cache_slots is not None:
-                # W3-F batched path: merge exactly this chunk's slots (row i
-                # of the chunk pairs with cache slot chunk_rows[i]).
-                b_cache = [
-                    type(cache_slots[0][li]).merge(
-                        [copy.copy(cache_slots[ridx][li]) for ridx in chunk_rows]
-                    )
-                    for li in range(len(cache_slots[0]))
-                ]
-            else:
-                b_cache = _broadcast_cache(cache, chunk_len)
-            max_padding = max(padding) if padding else 0
-            if max_padding > 0:
-                for c in b_cache:
-                    if hasattr(c, "prepare"):
-                        c.prepare(lengths=lengths, right_padding=padding)
-            _eval_cache_state(b_cache)
-            t_broadcast_ms += (time.perf_counter() - t_bcast0) * 1000
+            bcast_span = ledger.span("cache_merge")
+            bcast_span.__enter__()
+            try:
+                if cache_slots is not None:
+                    # W3-F batched path: merge exactly this chunk's slots (row i
+                    # of the chunk pairs with cache slot chunk_rows[i]).
+                    b_cache = [
+                        type(cache_slots[0][li]).merge(
+                            [copy.copy(cache_slots[ridx][li]) for ridx in chunk_rows]
+                        )
+                        for li in range(len(cache_slots[0]))
+                    ]
+                else:
+                    b_cache = _broadcast_cache(cache, chunk_len)
+                max_padding = max(padding) if padding else 0
+                if max_padding > 0:
+                    for c in b_cache:
+                        if hasattr(c, "prepare"):
+                            c.prepare(lengths=lengths, right_padding=padding)
+                    _eval_cache_state(b_cache)
+            finally:
+                bcast_span.__exit__(None, None, None)
             # W5-D finding 30: failed attempts are recorded separately and
             # NEVER counted as passes; chunk_shapes only records forwards
             # that ran.
             chunk_retried = False
             try:
-                out = model(padded, cache=b_cache)
+                xform_span = ledger.span("transformer")
+                try:
+                    xform_span.__enter__()
+                    out = model(padded, cache=b_cache)
+                except BaseException:
+                    # A failed forward records NO transformer interval (the
+                    # ledger drops spans an exception unwinds through).
+                    xform_span.__exit__(*sys.exc_info())
+                    raise
+                else:
+                    xform_span.__exit__(None, None, None)
             except Exception as exc:  # noqa: BLE001
                 del b_cache
                 if not _is_metal_allocation_error(exc) or chunk_len == 1:
@@ -1312,7 +1328,8 @@ def _score_rows(
             chunk_decisions = [row_decision[ridx] for ridx in chunk_rows]
             positions = mx.array([d[0] for d in chunk_decisions])
             max_allowed = max(len(d[1]) for d in chunk_decisions)
-            t_gather0 = time.perf_counter()
+            gather_span = ledger.span("gather")
+            gather_span.__enter__()
             rows_at_pos = out[mx.arange(chunk_len), positions]
             flat_idx = mx.array(
                 [
@@ -1327,6 +1344,7 @@ def _score_rows(
             try:
                 mx.eval(gathered, row_vocab_lse)
             except Exception as exc:  # noqa: BLE001
+                gather_span.__exit__(*sys.exc_info())
                 del out, b_cache
                 if not _is_metal_allocation_error(exc) or chunk_len == 1:
                     raise
@@ -1340,7 +1358,7 @@ def _score_rows(
                     chunk_size,
                 )
                 continue
-            t_gather_ms += (time.perf_counter() - t_gather0) * 1000
+            gather_span.__exit__(None, None, None)
             if not chunk_retried:
                 passes += 1
                 chunk_shapes.append((width, chunk_len))
@@ -1361,8 +1379,6 @@ def _score_rows(
         row_logits=row_logits,
         row_legal_mass_log=row_legal_mass_log,
         passes=passes,
-        gather_ms=t_gather_ms,
-        broadcast_ms=t_broadcast_ms,
         chunk_shapes=chunk_shapes,
         failed_attempts=failed_attempts,
     )
@@ -1505,6 +1521,7 @@ def _selective_second_pass(
     parsed_json: dict,
     reconciled_fields: list[str],
     scoring: str,
+    ledger: "Ledger",
     temperature: float = 1.0,
     prior: dict[str, Any] | None = None,
     constraints: list[dict] | None = None,
@@ -1702,6 +1719,7 @@ def _selective_second_pass(
             vocab_size,
             pad_id,
             max(1, len(conditioned_rows)),
+            ledger,
         )
         all_conditioned_rows += len(conditioned_rows)
 
@@ -1847,6 +1865,7 @@ def _rescore_rows_batch1(
     row_option: dict[int, int],
     vocab_size: int,
     pad_id: int,
+    ledger: "Ledger",
 ) -> dict:
     """Rescore one field's rows at batch=1 (W3-E, the canonical shape).
 
@@ -1871,7 +1890,8 @@ def _rescore_rows_batch1(
         sub_decisions,
         vocab_size,
         pad_id,
-        auto_max_rows=1,
+        1,
+        ledger,
     )
     node_logits: dict[int, dict[int, list[float]]] = {}
     node_legal_mass_log: dict[int, Any] = {}
@@ -2047,9 +2067,15 @@ def _prefill(
     tokenizer,
     context: str,
     schema: StructuredSchema,
+    ledger: "Ledger",
     scoring: str = "slots",
 ) -> PrefillResult:
-    """Prefill ONE context's prompt into a fresh unbatched KV cache (W3-F)."""
+    """Prefill ONE context's prompt into a fresh unbatched KV cache (W3-F).
+
+    W5b-14: when a Ledger is passed, the wall time is measured as a
+    ``prefill`` span (the ledger is the measurement of record);
+    ``PrefillResult.t_prefill_ms`` stays for callers without a ledger.
+    """
     base_ids = _chat_ids(
         tokenizer,
         _user_content(context, schema, tokenizer, scoring),
@@ -2064,13 +2090,18 @@ def _prefill(
     # the action row). Keep the lead-in in the rows; the gather change below
     # is the memory win this PR ships.
     t0 = time.perf_counter()
-    cache = make_prompt_cache(model)
-    model(mx.array(base_ids)[None], cache=cache)
-    # Evaluate the COMPLETE cache state (some mlx_lm caches carry meaningful
-    # state outside keys/values — ArraysCache arrays, BatchKVCache offsets,
-    # quantization scales): relying on the keys/values attributes would leave
-    # nested or nonstandard state unevaluated.
-    _eval_cache_state(cache)
+    ctx = ledger.span("prefill")
+    ctx.__enter__()
+    try:
+        cache = make_prompt_cache(model)
+        model(mx.array(base_ids)[None], cache=cache)
+        # Evaluate the COMPLETE cache state (some mlx_lm caches carry meaningful
+        # state outside keys/values — ArraysCache arrays, BatchKVCache offsets,
+        # quantization scales): relying on the keys/values attributes would leave
+        # nested or nonstandard state unevaluated.
+        _eval_cache_state(cache)
+    finally:
+        ctx.__exit__(None, None, None)
     return PrefillResult(base_ids, cache, (time.perf_counter() - t0) * 1000)
 
 
@@ -2146,24 +2177,33 @@ def run_parallel_generation(
     if max_rows is not None and max_rows < 1:
         raise ValueError(f"max_rows must be >= 1, got {max_rows!r}")
 
+    # W5b-14: ONE ledger for the whole request — every interval measured
+    # once, non-overlapping; the flat *_ms keys are derivations of it.
+    from jevmlx.timing import Ledger
+
+    ledger = Ledger()
+
     # Neutral-context prior: what the model would emit with no evidence. The
     # same prompt v2 with the literal string "(no context provided)" inside
     # the delimiters; the resulting per-choice log-scores are the prior that
     # prior_correction subtracts from the evidence pass. Bug 9: this pass is
     # a real model invocation — its wall time is measured separately
-    # (prior_ms) and included in total_ms.
+    # (prior phase) and included in total_ms.
     NEUTRAL_CONTEXT = "(no context provided)"
     prior: dict[str, Any] | None = None
     prior_ms: float = 0.0
     if prior_correction:
-        t_prior0 = time.perf_counter()
-        prior = _get_or_compute_prior(model, tokenizer, schema, scoring, max_rows, NEUTRAL_CONTEXT)
-        prior_ms = (time.perf_counter() - t_prior0) * 1000
+        with ledger.span("_prior_pass", phase="prior"):
+            prior = _get_or_compute_prior(
+                model, tokenizer, schema, scoring, max_rows, NEUTRAL_CONTEXT
+            )
+        prior_ms = next(iv.ms for iv in ledger.intervals if iv.name == "_prior_pass")
 
     t0 = time.perf_counter()
 
     # 1. Batch plan + rows per field (context-independent — W3-F stage split).
-    built = _build_schema_rows(schema, tokenizer, scoring)
+    with ledger.span("plan"):
+        built = _build_schema_rows(schema, tokenizer, scoring)
     rows = built["rows"]
 
     # W5-D finding 32: the peak counter is process-lifetime state — without
@@ -2176,10 +2216,9 @@ def run_parallel_generation(
 
     # 2. Prefill once (prompt v2: system paragraph + user schema block and
     #    delimited context) — W3-F stage split.
-    pf = _prefill(model, tokenizer, context, schema, scoring)
+    pf = _prefill(model, tokenizer, context, schema, ledger, scoring)
     base_ids = pf.base_ids
     cache = pf.cache
-    t_prefill = pf.t_prefill_ms
 
     # 3. Memory guard: rows are broadcast copies of the prefill cache. The
     #    estimate includes the [rows, width, vocab] output logits for one chunk
@@ -2208,11 +2247,16 @@ def run_parallel_generation(
     #    node_logits / option_pair / count_node_logits (W3-F stage split:
     #    _score = the padded/broadcast/gather loop in _score_rows, the ONE
     #    copy; _assemble = everything from trie scoring to the result dict).
-    t_suf0 = time.perf_counter()
     scored = _score_rows(
-        model, cache, rows, built["row_decision"], vocab_size, built["pad_id"], auto_max_rows
+        model,
+        cache,
+        rows,
+        built["row_decision"],
+        vocab_size,
+        built["pad_id"],
+        auto_max_rows,
+        ledger,
     )
-    t_suffix_eval = (time.perf_counter() - t_suf0) * 1000
     return _assemble(
         model,
         tokenizer,
@@ -2229,13 +2273,12 @@ def run_parallel_generation(
         temperature=temperature,
         max_rows=max_rows,
         base_ids=base_ids,
-        t_prefill=t_prefill,
-        t_suffix_eval=t_suffix_eval,
         constraints=constraints,
         compiled_constraints=compiled_constraints,
         oracle_overrides=oracle_overrides,
         active_start=active_start,
         _prior_mode=_prior_mode,
+        ledger=ledger,
     )
 
 
@@ -2305,6 +2348,7 @@ def _make_rescore_evidence_fn(
     real_choices: list[str],
     vocab_size: int,
     pad_id: int,
+    ledger: "Ledger",
 ) -> "Callable[[list[int]], ScalarEvidence]":
     """The batch=1 canonical re-measure for ONE scalar field (W3-E).
 
@@ -2328,6 +2372,7 @@ def _make_rescore_evidence_fn(
             row_option,
             vocab_size,
             pad_id,
+            ledger,
         )
         rs_logits: dict[int, list[float]] = {}
         rs_mass: dict[int, float] = {}
@@ -2428,6 +2473,7 @@ def score_scalar_field(
     temperature: float,
     vocab_size: int,
     pad_id: int,
+    ledger: "Ledger",
 ) -> FieldOutcome:
     """Stage 2 (W5b-10 C1): finalize ONE scalar (enum/boolean) field.
 
@@ -2465,6 +2511,7 @@ def score_scalar_field(
         real_choices,
         vocab_size,
         pad_id,
+        ledger,
     )
 
     evidence = ScalarEvidence(
@@ -2683,6 +2730,7 @@ def _rescore_multi_options(
     idxs: tuple[int, ...],
     vocab_size: int,
     pad_id: int,
+    ledger: "Ledger",
 ) -> tuple[list[int], bool]:
     """W3-E band rescore for a multi field's near-threshold options.
 
@@ -2711,6 +2759,7 @@ def _rescore_multi_options(
         built["row_option"],
         vocab_size,
         pad_id,
+        ledger,
     )
     for _oi, ridx in zip(rescored_oids, rescore_ridxs, strict=True):
         # Replace the option's raw Y/N pair with the canonical (batch=1)
@@ -2837,6 +2886,7 @@ def score_multi_field(
     temperature: float,
     vocab_size: int,
     pad_id: int,
+    ledger: "Ledger",
 ) -> FieldOutcome:
     """Stage 3 (W5b-10 C1): finalize ONE multi field.
 
@@ -2862,7 +2912,7 @@ def score_multi_field(
     # batch=1 and replace their raw pairs BEFORE the scoring loop, so prior
     # + softmax + selection all see the canonical result.
     rescored_oids, multi_rescored = _rescore_multi_options(
-        model, cache, built, dispatch, idxs, vocab_size, pad_id
+        model, cache, built, dispatch, idxs, vocab_size, pad_id, ledger
     )
     for oi, ridx in enumerate(idxs):
         pair = list(dispatch.option_pair[ridx])
@@ -2980,6 +3030,7 @@ def run_dependency_waves(
     constraints,
     compiled_constraints: "CompiledConstraints | None" = None,
     oracle_overrides: dict[str, object] | None,
+    ledger: "Ledger",
 ) -> tuple[AssembledState, dict[str, Any]]:
     """Stage 5 (W5b-10 C1): the selective parent-conditioned second pass.
 
@@ -3002,6 +3053,7 @@ def run_dependency_waves(
         state.parsed_json,
         list(state.reconciled_fields),
         scoring,
+        ledger,
         temperature=temperature,
         prior=prior,
         constraints=list(constraints) if constraints is not None else None,
@@ -3026,14 +3078,25 @@ def finalize_public_result(
     base_ids: list[int],
     active_start: int,
     t0: float,
+    ledger: "Ledger",
 ) -> dict[str, Any]:
     """Stage 6 (W5b-10 C1): the public result dict.
 
     Probability-status statement (bug 12), the timing split (bug 9), memory
     telemetry (W5-D finding 32), provenance (prompt sha + version) — one
     place, from the typed state. No scoring semantics here.
+
+    W5b-14: EVERY flat ``*_ms`` key is a DERIVATION of the request ledger
+    (``derived_flat``) — one measurement per interval, no overlapping
+    accumulators. Without a ledger (only the prior-mode internal pass),
+    the single elapsed-ms wall clock remains.
     """
-    total_elapsed_ms = (time.perf_counter() - t0) * 1000
+    if ledger is not None:
+        flat = ledger.derived_flat()
+        flat["second_pass_ms"] = round(second_pass_telemetry.get("second_pass_ms", 0.0), 2)
+        total_elapsed_ms = flat["elapsed_ms"]
+    else:
+        total_elapsed_ms = (time.perf_counter() - t0) * 1000
     # Bug 12: probability_status must tell the truth about the temperature.
     # At T=1 the reported distribution is the constrained-path probability;
     # at any other temperature it is a post-hoc temperature-scaled
@@ -3051,6 +3114,21 @@ def finalize_public_result(
     if prior_correction:
         probability_status += "; prior-corrected against the neutral-context pass"
 
+    # Bug 9 / W5b-14: the timing split is honest about the whole request
+    # wall time and every key is a ledger derivation (prior_ms = the prior
+    # phase; total = prior + elapsed; suffix_eval_ms = the cache_merge +
+    # transformer + gather composite). ONE measurement per interval — the
+    # ledger is the only source; no accumulator fallback exists.
+    timing_keys = {
+        "elapsed_ms": round(flat["elapsed_ms"], 2),
+        "prior_ms": round(flat["prior_ms"], 2),
+        "prefill_ms": round(flat["prefill_ms"], 2),
+        "plan_compile_ms": round(flat["plan_compile_ms"], 2),
+        "cache_broadcast_ms": round(flat["cache_broadcast_ms"], 2),
+        "suffix_eval_ms": round(flat["suffix_eval_ms"], 2),
+        "lm_head_gather_ms": round(flat["lm_head_gather_ms"], 2),
+        "total_ms": round(flat["total_ms"], 2),
+    }
     chunk_shapes = scored.chunk_shapes
     passes = scored.passes
     peak_active_bytes = timings["peak_active_bytes"]
@@ -3059,11 +3137,11 @@ def finalize_public_result(
         len(schema),
         total_elapsed_ms,
         extra={
-            "prefill_ms": round(timings["t_prefill"], 2),
-            "plan_compile_ms": round(built["plan_compile_ms"], 2),
-            "cache_broadcast_ms": round(scored.broadcast_ms, 2),
-            "suffix_eval_ms": round(timings["t_suffix_eval"], 2),
-            "lm_head_gather_ms": round(scored.gather_ms, 2),
+            "prefill_ms": timing_keys["prefill_ms"],
+            "plan_compile_ms": timing_keys["plan_compile_ms"],
+            "cache_broadcast_ms": timing_keys["cache_broadcast_ms"],
+            "suffix_eval_ms": timing_keys["suffix_eval_ms"],
+            "lm_head_gather_ms": timing_keys["lm_head_gather_ms"],
             "rows": len(built["rows"]),
             "passes": passes,
             "padded_token_positions": sum(width * c for width, c in chunk_shapes),
@@ -3071,18 +3149,7 @@ def finalize_public_result(
         },
     )
     return {
-        "elapsed_ms": round(total_elapsed_ms, 2),
-        # Bug 9: the timing split is honest about the whole request wall
-        # time: prior_ms (0.0 when prior_correction is off), prefill_ms,
-        # suffix_eval_ms, lm_head_gather_ms, and total_ms (everything, prior
-        # included). total_ms == elapsed_ms when prior_correction is off.
-        "prior_ms": round(prior_ms, 2),
-        "prefill_ms": round(timings["t_prefill"], 2),
-        "plan_compile_ms": round(built["plan_compile_ms"], 2),
-        "cache_broadcast_ms": round(scored.broadcast_ms, 2),
-        "suffix_eval_ms": round(timings["t_suffix_eval"], 2),
-        "lm_head_gather_ms": round(scored.gather_ms, 2),
-        "total_ms": round(prior_ms + total_elapsed_ms, 2),
+        **timing_keys,
         # W3-R: total suffix token positions including right padding — the
         # tiling shape the forwards actually ran at.
         "padded_token_positions": sum(width * c for width, c in chunk_shapes),
@@ -3114,7 +3181,11 @@ def finalize_public_result(
         "reconciled_fields": list(state.reconciled_fields),
         "rerun_fields": second_pass_telemetry["rerun_fields"],
         "rerun_rows": second_pass_telemetry["rerun_rows"],
-        "second_pass_ms": second_pass_telemetry["second_pass_ms"],
+        # W5b-14: second_pass_ms = the dependency span (ledger-derived when
+        # a ledger is present — same interval, one measurement).
+        # W5b-14: second_pass_ms = the dependency span (ledger-derived —
+        # the same interval, measured once).
+        "second_pass_ms": round(flat["second_pass_ms"], 2),
         "parsed_json": dict(state.parsed_json),
         "field_telemetry": dict(state.field_telemetry),
         "num_fields": len(schema),
@@ -3134,6 +3205,7 @@ def _score_all_fields(
     temperature: float,
     vocab_size: int,
     pad_id: int,
+    ledger: "Ledger",
 ) -> tuple[AssembledState, list[str]]:
     """Stage 2 (W5b-10 C1): first-pass scoring of EVERY field.
 
@@ -3164,6 +3236,7 @@ def _score_all_fields(
                 temperature=temperature,
                 vocab_size=vocab_size,
                 pad_id=pad_id,
+                ledger=ledger,
             )
             if outcome.rescored:
                 rescored_fields.append(fname)
@@ -3188,6 +3261,7 @@ def _score_all_fields(
                 temperature=temperature,
                 vocab_size=vocab_size,
                 pad_id=pad_id,
+                ledger=ledger,
             )
             if outcome.rescored:
                 rescored_fields.append(fname)
@@ -3213,24 +3287,35 @@ def _assemble(
     temperature: float,
     max_rows: int | None,
     base_ids: list[int],
-    t_prefill: float,
-    t_suffix_eval: float,
     constraints: list[dict] | None,
     compiled_constraints: "CompiledConstraints | None" = None,
     oracle_overrides: dict[str, object] | None = None,
     active_start: int = 0,
     _prior_mode: bool = False,
+    ledger: "Ledger",
 ) -> dict[str, Any]:
     """Assemble per-field decisions from the scored rows (W3-F stage 3).
 
-    W5b-10 (review C1): an ORCHESTRATOR over the typed stages —
-    dispatch_rows (row-kind dispatch) -> per-field score_scalar_field /
-    score_multi_field (each ending in the shared scalar finalizer) ->
-    reconcile_case_constraints (W3-D MAP over CompiledConstraints) ->
-    run_dependency_waves (W3-D part 2, the named boundary that
-    timing.Ledger's 'dependency' span wraps) -> finalize_public_result (the
-    result dict). Everything AFTER the forward passes lives in the stages;
-    the batched path reuses this unchanged.
+        W5b-10 (review C1): an ORCHESTRATOR over the typed stages —
+        dispatch_rows (row-kind dispatch) -> per-field score_scalar_field /
+        score_multi_field (each ending in the shared scalar finalizer) ->
+        reconcile_case_constraints (W3-D MAP over CompiledConstraints) ->
+    <<<<<<< Updated upstream
+        run_dependency_waves (W3-D part 2, the named boundary that
+        timing.Ledger's 'dependency' span wraps) -> finalize_public_result (the
+        result dict). Everything AFTER the forward passes lives in the stages;
+        the batched path reuses this unchanged.
+    =======
+        run_dependency_waves (W3-D part 2, the ``dependency`` span) ->
+        finalize_public_result (the result dict). Everything AFTER the forward
+        passes lives in the stages; the batched path reuses this unchanged.
+
+        W5b-14: when a Ledger is passed, the assembly work records
+        ``rescore`` (per-field finalization), ``reconciliation`` (the
+        constraint MAP) and ``dependency`` (the selective second pass) spans,
+        and finalize_public_result derives every flat ``*_ms`` key from the
+        ledger — no separate accumulators.
+    >>>>>>> Stashed changes
     """
     built = dict(built)
     built["scoring"] = scoring
@@ -3244,45 +3329,62 @@ def _assemble(
     )
     pad_id = built["pad_id"]
 
-    state, rescored_fields = _score_all_fields(
-        model,
-        cache,
-        schema,
-        built,
-        dispatch,
-        prior=prior,
-        calib=calib,
-        scoring=scoring,
-        temperature=temperature,
-        vocab_size=vocab_size,
-        pad_id=pad_id,
-    )
+    _enter = ledger.span("rescore")
+    _enter.__enter__()
+    try:
+        state, rescored_fields = _score_all_fields(
+            model,
+            cache,
+            schema,
+            built,
+            dispatch,
+            prior=prior,
+            calib=calib,
+            scoring=scoring,
+            temperature=temperature,
+            vocab_size=vocab_size,
+            pad_id=pad_id,
+            ledger=ledger,
+        )
+    finally:
+        _enter.__exit__(None, None, None)
 
     # W3-D: constrained MAP. W5-B (review 43): PRIOR MODE STOPS HERE — the
     # neutral prior pass must not run constraints or the dependency second
     # pass; its field finalization is the last step the prior cache consumes.
     if constraints and not _prior_mode:
-        state = reconcile_case_constraints(state, constraints, schema, compiled_constraints)
+        _enter = ledger.span("reconciliation")
+        _enter.__enter__()
+        try:
+            state = reconcile_case_constraints(state, constraints, schema, compiled_constraints)
+        finally:
+            _enter.__exit__(None, None, None)
 
     # W3-D part 2: the selective parent-conditioned second pass. Review 43:
     # never in prior mode (the prior cache must hold only first-pass
     # finalization scores).
     if not _prior_mode:
-        state, second_pass_telemetry = run_dependency_waves(
-            model,
-            tokenizer,
-            cache,
-            schema,
-            state,
-            field_plans,
-            lead_in,
-            scoring=scoring,
-            temperature=temperature,
-            prior=prior,
-            constraints=constraints,
-            compiled_constraints=compiled_constraints,
-            oracle_overrides=oracle_overrides,
-        )
+        _enter = ledger.span("dependency")
+        _enter.__enter__()
+        try:
+            state, second_pass_telemetry = run_dependency_waves(
+                model,
+                tokenizer,
+                cache,
+                schema,
+                state,
+                field_plans,
+                lead_in,
+                scoring=scoring,
+                temperature=temperature,
+                prior=prior,
+                constraints=constraints,
+                compiled_constraints=compiled_constraints,
+                oracle_overrides=oracle_overrides,
+                ledger=ledger,
+            )
+        finally:
+            _enter.__exit__(None, None, None)
     else:
         second_pass_telemetry = {"rerun_fields": [], "rerun_rows": 0, "second_pass_ms": 0.0}
 
@@ -3292,8 +3394,6 @@ def _assemble(
     timings = {
         "peak_active_bytes": peak_active_bytes,
         "peak_incremental_bytes": max(0, peak_active_bytes - active_start),
-        "t_prefill": t_prefill,
-        "t_suffix_eval": t_suffix_eval,
     }
     return finalize_public_result(
         schema=schema,
@@ -3309,6 +3409,7 @@ def _assemble(
         base_ids=base_ids,
         active_start=active_start,
         t0=t0,
+        ledger=ledger,
     )
 
 
@@ -3384,16 +3485,24 @@ def run_parallel_generation_batched(
     # 0. Prior ONCE (finding 26): the neutral pass is shared by every
     #    context; each result reports prior_ms as the shared amortized 0.0
     #    and prior_correction=True with an ACTUAL prior object.
+    # W5b-14: ONE ledger for the whole decide_many call. The prior phase,
+    # each group's wall, each context's prefill/assembly are spans on it.
+    from jevmlx.timing import Ledger
+
+    ledger = Ledger()
     prior: dict[str, Any] | None = None
     prior_ms = 0.0
     if prior_correction:
-        t_prior0 = time.perf_counter()
-        NEUTRAL_CONTEXT = "(no context provided)"
-        prior = _get_or_compute_prior(model, tokenizer, schema, scoring, max_rows, NEUTRAL_CONTEXT)
-        prior_ms = (time.perf_counter() - t_prior0) * 1000
+        with ledger.span("_prior_pass", phase="prior"):
+            NEUTRAL_CONTEXT = "(no context provided)"
+            prior = _get_or_compute_prior(
+                model, tokenizer, schema, scoring, max_rows, NEUTRAL_CONTEXT
+            )
+        prior_ms = next(iv.ms for iv in ledger.intervals if iv.name == "_prior_pass")
 
     # 1. Shared row set (context-independent).
-    built = _build_schema_rows(schema, tokenizer, scoring)
+    with ledger.span("plan"):
+        built = _build_schema_rows(schema, tokenizer, scoring)
     rows = built["rows"]
     row_decision = built["row_decision"]
     R = len(rows)
@@ -3410,9 +3519,16 @@ def run_parallel_generation_batched(
     #    (below) admits groups that actually fit together.
     pf_cache: dict[int, PrefillResult] = {}
 
+    prefill_iv_by_idx: dict[int, Interval] = {}
+
     def _prefill_cached(idx: int, ctx: str) -> PrefillResult:
         if idx not in pf_cache:
-            pf_cache[idx] = _prefill(model, tokenizer, ctx, schema, scoring)
+            n_before = len(ledger.intervals)
+            pf_cache[idx] = _prefill(model, tokenizer, ctx, schema, ledger, scoring)
+            for iv in ledger.intervals[n_before:]:
+                if iv.name == "prefill":
+                    prefill_iv_by_idx[idx] = iv
+                    break
         return pf_cache[idx]
 
     profile = _resolve_profile(tokenizer)
@@ -3469,7 +3585,9 @@ def run_parallel_generation_batched(
     for group_idx in groups:
         group_pf = [(idx, _prefill_cached(idx, contexts[idx])) for idx in group_idx]
         n_group = len(group_pf)
-        t_group0 = time.perf_counter()
+        time.perf_counter()
+        group_span = ledger.span("group_wall")
+        group_span.__enter__()
 
         if R == 0:
             # Degenerate schema (no rows): assembly still produces a result.
@@ -3480,7 +3598,7 @@ def run_parallel_generation_batched(
                     tokenizer,
                     schema,
                     built,
-                    ScoreRowsResult({}, {}, 0, 0.0, 0.0, []),
+                    ScoreRowsResult({}, {}, 0, []),
                     t0,
                     pf.cache,
                     prior=prior,
@@ -3491,19 +3609,21 @@ def run_parallel_generation_batched(
                     temperature=temperature,
                     max_rows=max_rows,
                     base_ids=pf.base_ids,
-                    t_prefill=pf.t_prefill_ms,
-                    t_suffix_eval=0.0,
                     constraints=constraints,
                     compiled_constraints=compiled_constraints,
                     oracle_overrides=oracle_overrides,
                     active_start=active_start,
+                    ledger=ledger,
                 )
                 res = results[idx]
-                group_wall_ms = (time.perf_counter() - t_group0) * 1000
+                group_int = ledger.intervals[-1]  # the just-closed group span
+                prefill_iv = prefill_iv_by_idx[idx]
+                assembly_iv = ledger.intervals[-2]
                 res["contexts_per_pass"] = n_group
-                res["group_wall_ms"] = group_wall_ms
-                res["per_item_amortized_ms"] = group_wall_ms / n_group
-                res["per_item_end_to_end_ms"] = pf.t_prefill_ms + group_wall_ms / n_group
+                res["group_wall_ms"] = group_int.ms
+                res["per_item_amortized_ms"] = group_int.ms / n_group
+                res["per_item_end_to_end_ms"] = (assembly_iv.t1 - prefill_iv.t0) * 1000.0 + prior_ms
+            group_span.__exit__(None, None, None)
             continue
 
         # 4. ONE scoring pass per group over len(group)*R rows. Row i of the
@@ -3523,7 +3643,6 @@ def run_parallel_generation_batched(
         auto_max_rows = _width_bin_max_rows(
             all_rows, cache_slots[0], vocab_size, weight_bytes, max_rows
         )
-        t0s = time.perf_counter()
         scored = _score_rows(
             model,
             cache_slots[0],
@@ -3532,11 +3651,14 @@ def run_parallel_generation_batched(
             vocab_size,
             pad_id,
             auto_max_rows,
+            ledger,
             cache_slots=cache_slots,
         )
-        t_scored_ms = (time.perf_counter() - t0s) * 1000
 
         # 5. Split per context (re-key row indexes to 0..R-1) and assemble.
+        # W5b-14: each context's assembly is an ``assembly`` span on the
+        # ledger; per_item_end_to_end = its own prefill span start -> its
+        # assembly span end (honest per-context latency).
         for ci, (idx, pf) in enumerate(group_pf):
             lo, hi = ci * R, (ci + 1) * R
             ctx_scored = ScoreRowsResult(
@@ -3545,11 +3667,11 @@ def run_parallel_generation_batched(
                     i - lo: v for i, v in scored.row_legal_mass_log.items() if lo <= i < hi
                 },
                 passes=scored.passes,
-                gather_ms=scored.gather_ms / n_group,
-                broadcast_ms=scored.broadcast_ms / n_group,
                 chunk_shapes=scored.chunk_shapes,
             )
             t0 = time.perf_counter()
+            asm_span = ledger.span("assembly")
+            asm_span.__enter__()
             res = _assemble(
                 model,
                 tokenizer,
@@ -3566,22 +3688,29 @@ def run_parallel_generation_batched(
                 temperature=temperature,
                 max_rows=max_rows,
                 base_ids=pf.base_ids,
-                t_prefill=pf.t_prefill_ms,
-                t_suffix_eval=(t_scored_ms / n_group) + (time.perf_counter() - t0) * 1000,
                 constraints=constraints,
                 compiled_constraints=compiled_constraints,
                 oracle_overrides=oracle_overrides,
                 active_start=active_start,
+                ledger=ledger,
             )
-            # W5-D finding 27: honest timing. The group's wall time covers
-            # prefill + scoring + every assembly in this group;
-            # per-item amortized divides it; per-item end-to-end adds the
-            # context's own prefill. contexts_per_pass is the ACTUAL group
-            # size (a partial final group reports its own size).
-            group_wall_ms = (time.perf_counter() - t_group0) * 1000
+            asm_span.__exit__(None, None, None)
+            assembly_iv = ledger.intervals[-1]  # the just-closed assembly span
+            prefill_iv = prefill_iv_by_idx[idx]
             res["contexts_per_pass"] = n_group
-            res["group_wall_ms"] = group_wall_ms
-            res["per_item_amortized_ms"] = group_wall_ms / n_group
-            res["per_item_end_to_end_ms"] = pf.t_prefill_ms + prior_ms + group_wall_ms / n_group
+            # W5-D finding 27 / W5b-14: honest timing from the ledger. The
+            # group span (closed after this loop) covers prefill + scoring +
+            # every assembly in this group; per-item amortized divides it;
+            # per-item end-to-end is the context's own prefill span start ->
+            # its assembly span end. The group's per-context views are
+            # filled after the loop (the span must close first).
+            res["_per_item_end_to_end_ms"] = (assembly_iv.t1 - prefill_iv.t0) * 1000.0
             results[idx] = res
+        group_span.__exit__(None, None, None)
+        group_int = ledger.intervals[-1]  # the just-closed group_wall span
+        for idx, _pf in group_pf:
+            res = results[idx]
+            res["group_wall_ms"] = group_int.ms
+            res["per_item_amortized_ms"] = group_int.ms / n_group
+            res["per_item_end_to_end_ms"] = res.pop("_per_item_end_to_end_ms") + prior_ms
     return results

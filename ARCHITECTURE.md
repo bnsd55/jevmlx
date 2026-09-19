@@ -28,7 +28,7 @@ trust the code over this document when they drift.
 | [`jevmlx/openai_slots.py`](jevmlx/openai_slots.py) | OpenAI-compatible slot backend: one request per option, top-k logprobs with an explicit floor and a `truncated` flag. |
 | [`jevmlx/bench.py`](jevmlx/bench.py) | Dataset × scorer × track matrix runner writing results directories; writes `parity.json` per model folder right after the engine load. |
 | [`jevmlx/log.py`](jevmlx/log.py) | Logging configuration (`-v`, `JEVMLX_LOG=json`). |
-| [`jevmlx/timing.py`](jevmlx/timing.py) | W5b-8 event ledger for engine timing (`Ledger`, `Interval`, `SpanError`): non-overlapping named spans in two phases (`prior`, `main`), with `Ledger.derived_flat` deriving today's `*_ms` result keys (`plan_compile_ms`, `prefill_ms`, `cache_broadcast_ms`, composite `suffix_eval_ms`, `lm_head_gather_ms`, `second_pass_ms`, `prior_ms`, `elapsed_ms`, `total_ms`) and `Ledger.batched_views` producing `group_wall` / `per_item_amortized` / `per_item_end_to_end`. Standalone — pure Python, no mlx import, NO engine wiring yet: the engine's ad-hoc timers are untouched until W6 adoption. |
+| [`jevmlx/timing.py`](jevmlx/timing.py) | W5b-8 event ledger for engine timing (`Ledger`, `Interval`, `SpanError`): non-overlapping named spans in two phases (`prior`, `main`), with `Ledger.derived_flat` deriving today's `*_ms` result keys (`plan_compile_ms`, `prefill_ms`, `cache_broadcast_ms`, composite `suffix_eval_ms`, `lm_head_gather_ms`, `second_pass_ms`, `prior_ms`, `elapsed_ms`, `total_ms`) and `Ledger.batched_views` producing `group_wall` / `per_item_amortized` / `per_item_end_to_end`. Pure Python, no mlx import. W5b-14: ADOPTED by the engine — every stage records ledger spans and the result dict's `*_ms` keys are pure `derived_flat()` derivations; the ad-hoc `*_ms` accumulators are gone. |
 | [`jevmlx/adapters.py`](jevmlx/adapters.py) | W6-1 LM-head adapters (`LMHeadAdapter` protocol, `adapter_for`, `UnsupportedModelError`, `list_supported_model_types`): backbone/lm_head split per installed mlx_lm family (untied `lm_head`, tied `embed_tokens.as_linear`, gemma3 always-head, biased phi head, mistral3 delegation). Registry-only — NO engine wiring yet; engine call sites adopt it in W6-2+. |
 | [`benchmarks/to_jsonl.py`](benchmarks/to_jsonl.py) | Bundled `cases.json` → eval JSONL (+ lock). |
 | [`benchmarks/typesafe/fetch.py`](benchmarks/typesafe/fetch.py) | TypeSafe public pages → eval JSONL (+ lock, `benchmark_only`). |
@@ -116,8 +116,10 @@ assembly  (winners → typed values via alias_map; multi = per-option Y/N
   │    codes at T=1; row codes '00','01',… map back to choices)
   ▼
 result dict  {parsed_json, field_telemetry, prompt_sha256, full timing
-  │    split incl. plan_compile_ms / cache_broadcast_ms / padded_token_positions,
-  │    peak_active_bytes + peak_incremental_bytes, failed_attempts, …}
+  │    split derived from the request's timing.Ledger (one measurement per
+  │    interval; suffix_eval_ms = the cache_merge+transformer+gather
+  │    composite), padded_token_positions, peak_active_bytes +
+  │    peak_incremental_bytes, failed_attempts, …}
   │
   ├──► api.Decision / FieldResult        (Python)
   └──► evalrun predictions.jsonl lines   (eval) / CLI table       (decide)
@@ -155,7 +157,7 @@ load).
 | Key | Meaning |
 |---|---|
 | `elapsed_ms` | Wall clock for the decision (excludes the prior pass). |
-| `prior_ms` / `prefill_ms` / `plan_compile_ms` / `cache_broadcast_ms` / `suffix_eval_ms` / `lm_head_gather_ms` / `total_ms` | The honest timing split: neutral prior pass (0.0 when `prior_correction` is off), prefill, plan compilation (plan cache makes it ~0 warm), broadcast+prepare+eval of the per-chunk cache copies (distinct from the forwards), batched suffix, decision gather inside the suffix window, and everything (`total_ms == elapsed_ms + prior_ms`). |
+| `prior_ms` / `prefill_ms` / `plan_compile_ms` / `cache_broadcast_ms` / `suffix_eval_ms` / `lm_head_gather_ms` / `total_ms` | The honest timing split (W5b-14: ledger-derived — one measurement per interval, no overlapping accumulators): neutral prior pass (0.0 when `prior_correction` is off), prefill, plan compilation (plan cache makes it ~0 warm), the per-chunk cache merge/broadcast spans (distinct from the forwards), the batched suffix (`suffix_eval_ms` = the cache_merge + transformer + gather composite, marked derived), the decision gather inside the suffix window, and everything (`total_ms == elapsed_ms + prior_ms`). |
 | `second_pass_ms` / `rerun_fields` / `rerun_rows` | The `depends_on` second pass: wall time, which fields were re-decided, how many conditioned rows ran (0.0/[] when no `depends_on`). |
 | `padded_token_positions` | W3-R: total suffix token positions including right padding — sum of (chunk width x chunk rows), the tiling shape the forwards actually ran at. |
 | `rescored_fields` | Fields whose batched result was replaced by the batch=1 canonical rescore. |

@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- W5b-14 engine timing ledger adoption: one `jevmlx.timing.Ledger` per
+  request measures every interval ONCE (plan, prefill, cache_merge,
+  transformer, gather, rescore, reconciliation, dependency spans; the
+  neutral prior pass in the `prior` phase). The result dict's `*_ms` keys
+  are pure `Ledger.derived_flat()` derivations — same keys, no overlapping
+  accumulators (`ScoreRowsResult.gather_ms`/`broadcast_ms` deleted;
+  `suffix_eval_ms` stays the documented cache_merge+transformer+gather
+  composite). Batched `decide_many` derives `group_wall_ms` /
+  `per_item_amortized_ms` / `per_item_end_to_end_ms` from the same ledger;
+  per-item end-to-end is the context's own prefill-span start to its
+  assembly-span end.
 - W5b-9 CLI error contract: user-input failures (missing file, bad JSON,
   schema/constraint rejection, engine environment errors) exit 1 with the
   full error message on stderr — no traceback (`-v` re-raises for debug);

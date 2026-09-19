@@ -289,7 +289,9 @@ def check_batched_parity(
                 if hasattr(model_obj, "args") and hasattr(model_obj.args, "vocab_size")
                 else model_obj.model.embed_tokens.weight.shape[0]
             )
-            pf = _prefill(model_obj, tokenizer, context, schema, "slots")
+            from jevmlx.timing import Ledger
+
+            pf = _prefill(model_obj, tokenizer, context, schema, Ledger(), "slots")
             # The reference is the CANONICAL batch=1 shape (one row per
             # forward) — the same shape the near-tie rescore trusts. The
             # batched side runs 4 context-copies of the rows in merged
@@ -307,6 +309,7 @@ def check_batched_parity(
                 vocab_size,
                 built["pad_id"],
                 1,
+                Ledger(),
             )
             # The batched side runs 4 context-copies of the rows in merged
             # chunks (the decide_many row shape — one merged pass per
@@ -323,6 +326,7 @@ def check_batched_parity(
                 vocab_size,
                 built["pad_id"],
                 max(2, 4 * len(built["rows"])),
+                Ledger(),
                 cache_slots=cache_slots,
             )
             for ridx in range(len(built["rows"])):
