@@ -412,6 +412,13 @@ def make_engine_result(
 
 # --------------------------------------------------------- Engine factory --
 
+# Sentinel for make_engine's drift_envelope default: the Engine field is
+# REQUIRED (never None), but the test helper resolves the default lazily so
+# callers that don't care about the band get the test envelope. The sentinel
+# keeps the parameter typed as a plain dict (not Optional) — matches the
+# Engine contract that an envelope is always present after load.
+_TEST_ENVELOPE_SENTINEL = object()
+
 
 def make_engine(
     model=None,
@@ -419,7 +426,7 @@ def make_engine(
     *,
     model_id: str = "fake-engine",
     vocab_size: int | None = None,
-    drift_envelope: dict | None = None,
+    drift_envelope: dict = _TEST_ENVELOPE_SENTINEL,
 ):
     """Build a real :class:`jevmlx.engine.Engine` around (fakes | live parts).
 
@@ -430,10 +437,12 @@ def make_engine(
     weights) resolve here — the engine is built fully loaded, as load_engine
     would produce it.
 
-    W5c-9: ``drift_envelope`` defaults to a TEST envelope (constant band,
-    0.05 — the historical behavior) so the majority of tests that don't
-    care about the rescore band stay unchanged; tests that DO pass an
-    explicit envelope. The envelope is REQUIRED on the Engine (no None).
+    W5c-9: ``drift_envelope`` defaults to a TEST envelope (the measured
+    plateau bound 0.0625) so the majority of tests that don't care about
+    the rescore band stay unchanged; tests that DO pass an explicit
+    envelope. The envelope is REQUIRED on the Engine (never None) — the
+    sentinel default resolves to the test envelope, so the signature reads
+    as a required dict, not an Optional.
     """
     from jevmlx.engine import (
         Engine,
@@ -449,7 +458,7 @@ def make_engine(
         tokenizer = FakeTokenizer()
     if vocab_size is None:
         vocab_size = _vocab_size_of(model)
-    if drift_envelope is None:
+    if drift_envelope is _TEST_ENVELOPE_SENTINEL:
         # Test envelope: a single M>16 record at the plateau (0.0625) —
         # the band every real engine resolves on this machine. Tests that
         # need the CONSTANT band (no widening) build their own envelope
