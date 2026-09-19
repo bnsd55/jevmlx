@@ -216,6 +216,15 @@ def parallel_decide_fn(engine, scoring: str = "slots", prior_correction: bool = 
                 "per_option": telemetry.get("per_option"),
                 "type": telemetry.get("type") or (field.field_type if field else None),
             }
+            # W6-B1: ordered enums carry the scale (choice order = level
+            # order) + the derived ordinal telemetry, so ordinal metrics can
+            # be computed from the predictions file alone.
+            if field is not None and field.ordered:
+                entry["ordered"] = True
+                entry["ordinal_choices"] = list(field.choices)
+                ord_record = telemetry.get("ordinal")
+                if isinstance(ord_record, dict):
+                    entry["ordinal"] = ord_record
             if field is not None and field.field_type != "multi":
                 raw = telemetry.get("log_scores")
                 if isinstance(raw, dict):
@@ -526,6 +535,9 @@ def run_eval(
             for fname, res in results.items():
                 field_def = schema.fields.get(fname)
                 prediction = res.get("prediction")
+                # W6-B1: ordered-enum lines carry the scale + telemetry.
+                ordinal_choices = res.get("ordinal_choices")
+                ordinal_record = res.get("ordinal")
                 # Rotated variants reorder the SAME canonical choice strings,
                 # so a prediction string is already canonical; the remap seam
                 # only validates membership (and would translate a positional
@@ -564,6 +576,10 @@ def run_eval(
                     "salvage_prediction": res.get("salvage_prediction"),
                     "oracle_prediction": oracle_results.get(fname),
                 }
+                if ordinal_choices:
+                    line["ordinal_choices"] = ordinal_choices
+                    if ordinal_record is not None:
+                        line["ordinal"] = ordinal_record
                 if carry_perturbation:
                     line["perturbation"] = (case.get("meta") or {}).get("perturbation")
                 if carry_consensus:

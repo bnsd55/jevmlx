@@ -72,6 +72,15 @@ Read the result. `decide(...)` returns a `Decision`: `.value` (a validated
   P(yes)), `score`, `model` (`"slots"`/`"labels"`), `calibrated`, `legal_mass`
   (probability mass in allowed continuations at the branch points — a leakage
   signal when low despite a confident decision).
+- `ordinal` (ordered enums only, `None` otherwise): an enum field may declare
+  itself an ORDINAL scale — `Field(json_schema_extra={"ordered": True})` (or
+  bare `Ordered()`); the choices' declaration order is the scale order. The
+  decided value stays the winning level; ordering only adds derived
+  telemetry — `argmax_level` (winning index), `expected_index` (Σ pᵢ·i), its
+  `variance`, and `expected_score_normalized` in [0, 1] — computed from the
+  finalized distribution, no extra model call. Eval runs on ordered fields
+  also report `ordinal_mae` (mean |argmax − gold|), `ordinal_mae_expected`
+  (soft, |E − gold|) and an ordinal confusion matrix.
 - `semantics` (a frozen `FieldSemantics`): how THIS field's reported
   probabilities were produced — which scoring path (`score_source`:
   `batched` / `rescored_batch1` / `dependency` / `oracle`), the temperature

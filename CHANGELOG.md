@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- W6-B1: ordered-enum telemetry. An enum field may declare `ordered: True`
+  (schema dict) / `Field(json_schema_extra={"ordered": True})` or bare
+  `Ordered()` (Pydantic) — the choices' declaration order is the ordinal
+  scale. NO new public field type: the decided value stays the winning
+  level. `finalize_scalar_evidence` derives — after prior correction and
+  temperature — `argmax_level`, `expected_index` (Σ pᵢ·i), `variance` and
+  `expected_score_normalized` in [0, 1] into an `ordinal` sub-record
+  (`api.OrdinalFieldRecord`; engine `OrdinalTelemetry`) — `None`/absent for
+  unordered fields, no extra model call. evalmetrics adds `ordinal_mae`
+  (mean |argmax − gold|), `ordinal_mae_expected` (soft, |E − gold|) and an
+  ordinal confusion matrix, computed only for ordered fields; prediction
+  lines carry additive `ordinal_choices`/`ordinal` keys on every track
+  (results contract v2). The shared TypeSafe `score` mapping emits ordered
+  enums (SST-5's 0..4 rides the same branch). Ordering on boolean/multi
+  fields raises at compile time.
 - **W6-B5 (public gold datasets, pre-M5)** — three public datasets join the
   bench: AG News (4-class enum), BoolQ (boolean noul), SST-5 (ordinal 0-4
   enum, the B1 ordered-enum derivation — no new engine field type). Pinned

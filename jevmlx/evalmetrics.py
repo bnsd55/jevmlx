@@ -334,6 +334,96 @@ def macro_f1(records: list[dict]) -> dict[str, float | None]:
     return result
 
 
+# ------------------------------------------------------- ordinal (W6-B1)
+
+
+def _ordinal_lines(records: list[dict]) -> list[tuple[str, dict, list[str], dict]]:
+    """Ordered-enum prediction lines: (field, record, choices, ordinal).
+
+    A line is ordinal when the schema declared it ordered (the prediction
+    line carries ``ordinal_choices``) AND the engine derived telemetry
+    (``ordinal``) — unordered fields never enter the ordinal metrics.
+    """
+    lines = []
+    for record in records:
+        choices = record.get("ordinal_choices")
+        ordinal = record.get("ordinal")
+        if not isinstance(choices, list) or not isinstance(ordinal, dict):
+            continue
+        lines.append((record.get("field", ""), record, list(choices), ordinal))
+    return lines
+
+
+def _level_index(choices: list[str], value) -> int | None:
+    """Index of value in the scale order, or None when absent/invalid."""
+    if value is None:
+        return None
+    text = str(value)
+    try:
+        return choices.index(text)
+    except ValueError:
+        return None
+
+
+def ordinal_mae(records: list[dict]) -> dict[str, float | None]:
+    """Per ordered-enum field: mean |argmax_level - gold_level| (W6-B1).
+
+    The DECIDED value's distance from the gold level on the scale — the
+    headline ordinal error. Unordered fields are absent (never zero-filled);
+    a prediction whose value is not on the scale (invalid) counts at the
+    worst level distance (len-1), matching the invalid-is-wrong rule.
+    """
+    per_field: dict[str, list[float]] = defaultdict(list)
+    for field, record, choices, _ordinal in _ordinal_lines(records):
+        gold = _level_index(choices, record.get("label"))
+        if gold is None:
+            continue
+        predicted = _level_index(choices, record.get("prediction"))
+        if predicted is None:
+            # Invalid or off-scale: count at the worst distance.
+            predicted = len(choices) - 1
+        per_field[field].append(abs(predicted - gold))
+    return {field: _mean(gaps) for field, gaps in sorted(per_field.items())}
+
+
+def ordinal_mae_expected(records: list[dict]) -> dict[str, float | None]:
+    """Per ordered-enum field: mean |expected_index - gold_level| (W6-B1).
+
+    The DISTRIBUTION's mean position vs gold — the soft ordinal error the
+    hard argmax MAE cannot express (a 50/50 split between levels 0 and 2
+    sits at expected 1.0: zero soft error against gold 1, two hard).
+    """
+    per_field: dict[str, list[float]] = defaultdict(list)
+    for field, record, choices, ordinal in _ordinal_lines(records):
+        gold = _level_index(choices, record.get("label"))
+        if gold is None:
+            continue
+        expected = ordinal.get("expected_index")
+        if not isinstance(expected, (int, float)):
+            continue
+        per_field[field].append(abs(float(expected) - gold))
+    return {field: _mean(gaps) for field, gaps in sorted(per_field.items())}
+
+
+def ordinal_confusion(records: list[dict]) -> dict[str, dict[str, dict[str, int]]]:
+    """Per ordered-enum field: gold x predicted level confusion counts.
+
+    Shape: {field: {gold_level: {predicted_level: count}}} — levels named by
+    their scale STRING (the choices themselves), so the matrix reads against
+    the cases file directly. Unordered fields are absent.
+    """
+    matrices: dict[str, dict[str, dict[str, int]]] = {}
+    for field, record, choices, _ordinal in _ordinal_lines(records):
+        gold = _level_index(choices, record.get("label"))
+        if gold is None:
+            continue
+        predicted = _level_index(choices, record.get("prediction"))
+        predicted_name = choices[predicted] if predicted is not None else "<invalid>"
+        row = matrices.setdefault(field, {}).setdefault(choices[gold], {})
+        row[predicted_name] = row.get(predicted_name, 0) + 1
+    return matrices
+
+
 # ------------------------------------------------------- perturbation flips
 
 
@@ -968,4 +1058,14 @@ def compute_metrics(records: list[dict], schema=None) -> dict:
     flips = order_flip_rate(records)
     if flips:
         metrics["order_flip_rate"] = flips
+    # W6-B1: ordinal metrics for ordered-enum fields (absent when none).
+    o_mae = ordinal_mae(records)
+    if o_mae:
+        metrics["ordinal_mae"] = o_mae
+    o_mae_e = ordinal_mae_expected(records)
+    if o_mae_e:
+        metrics["ordinal_mae_expected"] = o_mae_e
+    o_conf = ordinal_confusion(records)
+    if o_conf:
+        metrics["ordinal_confusion"] = o_conf
     return metrics

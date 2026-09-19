@@ -171,6 +171,7 @@ def test_pep604_literal_optional_schema_identical():
                 "choices": ["A", "B"],
                 "description": "x",
                 "choice_descriptions": {},
+                "ordered": False,
             }
         }
     )
