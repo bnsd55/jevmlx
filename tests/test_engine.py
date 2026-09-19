@@ -471,7 +471,7 @@ def test_w1a_scoring_parity_batch_vs_chunked_real_model(engine):
     W3-C's measurement on this machine: since W2-B shortened the slot rows
     to 4 tokens the observed worst drift is ~0.029 nats on the fintech_fraud
     preset (winner stable) — hence the shared PARITY_ATOL constant in
-    conftest.py, coordinated with coder3's W2-D tolerance change. The
+    conftest.py (the shared W2-D tolerance). The
     invariant that MATTERS is the decision: the same winner per field, and
     log_scores that agree to within FP tolerance. Exact equality is still
     asserted on the FakeModel path (test_engine_fake.py) where the model is

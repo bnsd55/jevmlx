@@ -82,7 +82,7 @@ def test_close_ordering_nested():
 
 def test_derived_flat_keys_match_engine_contract():
     """The derived flat keys are pure functions of the interval set and
-    match today's result-key semantics (coder6's mapping)."""
+    match the engine's result-key semantics."""
     ledger = Ledger()
     with ledger.span("prior_pass", phase="prior"):
         pass

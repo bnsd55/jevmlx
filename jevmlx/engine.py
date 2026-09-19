@@ -2915,15 +2915,15 @@ def reconcile_case_constraints(
     state: AssembledState,
     constraints,
     schema: StructuredSchema,
-    compiled_constraints: "CompiledConstraints | None" = None,
+    compiled_constraints: CompiledConstraints,
 ) -> AssembledState:
     """Stage 4 (W5b-10 C1): constrained MAP over the first-pass decisions.
 
-    Consumes CompiledConstraints (W5b-11, coder4 — compiled by
-    validate_constraints_for_schema/compile_constraints) and re-picks the
-    joint assignment maximizing summed per-field log scores subject to the
-    case-level constraints. Telemetry is updated in place for changed
-    fields (value + probability from the winning score key).
+    Consumes the request's CompiledConstraints (W5b-11 — compiled once by
+    compile_constraints) and re-picks the joint assignment maximizing
+    summed per-field log scores subject to the case-level constraints.
+    Telemetry is updated in place for changed fields (value + probability
+    from the winning score key).
 
     Returns the updated AssembledState carrying the SAME rescored_fields
     plus the reconciled names (parsed_json / field_telemetry are the SAME
@@ -2934,10 +2934,6 @@ def reconcile_case_constraints(
         return AssembledState(
             state.parsed_json, state.field_telemetry, state.rescored_fields, tuple()
         )
-    if compiled_constraints is None:
-        from jevmlx.constraints import compile_constraints
-
-        compiled_constraints = compile_constraints(constraints, schema)
     parsed_json = state.parsed_json
     field_telemetry = state.field_telemetry
     field_log_scores = {
@@ -2987,8 +2983,8 @@ def run_dependency_waves(
     A NAMED boundary over _selective_second_pass (the wave loop stays there):
     takes the post-MAP AssembledState, returns the updated state (parsed /
     telemetry mutated in place by the waves) plus the second-pass telemetry
-    dict. coder4 wires jevmlx.timing.Ledger's 'dependency' span around this
-    call — it is the only dependency-stage boundary.
+    dict. jevmlx.timing.Ledger's 'dependency' span wraps this call — it is
+    the only dependency-stage boundary.
     """
     if not any(f.depends_on is not None for f in schema.fields.values()):
         return state, {"rerun_fields": [], "rerun_rows": 0, "second_pass_ms": 0.0}
@@ -3228,8 +3224,8 @@ def _assemble(
     dispatch_rows (row-kind dispatch) -> per-field score_scalar_field /
     score_multi_field (each ending in the shared scalar finalizer) ->
     reconcile_case_constraints (W3-D MAP over CompiledConstraints) ->
-    run_dependency_waves (W3-D part 2, the named boundary coder4 wraps in
-    timing.Ledger's 'dependency' span) -> finalize_public_result (the
+    run_dependency_waves (W3-D part 2, the named boundary that
+    timing.Ledger's 'dependency' span wraps) -> finalize_public_result (the
     result dict). Everything AFTER the forward passes lives in the stages;
     the batched path reuses this unchanged.
     """
