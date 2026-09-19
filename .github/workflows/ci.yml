@@ -30,3 +30,11 @@ jobs:
 
       - name: Fast tests (no model downloads)
         run: .venv/bin/pytest -m "not slow" -q
+
+      - name: Golden prompt vectors (W5c-5)
+        # Fails when the committed prompt vectors no longer match the live
+        # renderer (prompt-version or template drift). Tokenizer-only: no
+        # model download, CPU-only (the qwen2.5/gemma vectors load the
+        # cached tokenizers via transformers; CI has no HF cache, so the
+        # real-tokenizer vectors download tokenizer files only).
+        run: .venv/bin/python -m benchmarks.golden_prompts --check
