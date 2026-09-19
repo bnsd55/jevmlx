@@ -520,6 +520,287 @@ def followup_gemm_isolation(
     }
 
 
+def _forward_to_layer_input(model, padded, cache, n_layers: int):
+    """Run embed + full blocks for layers [0, n_layers) and return the
+    residual input TO layer n_layers (the h feeding its attention)."""
+    m = model.model
+    h = m.embed_tokens(padded)
+    mask = _create_attention_mask(h, cache[0])
+    for li in range(n_layers):
+        layer = m.layers[li]
+        x = h
+        r = layer.self_attn(layer.input_layernorm(x), mask, cache[li])
+        h = x + r
+        h = h + layer.mlp(layer.post_attention_layernorm(h))
+    return h, mask
+
+
+def _run_attention_substeps(layer, x_norm, mask, cache_l):
+    """Run the attention block's sub-steps individually, returning the
+    intermediate tensors at each stage:
+      qkv    : (q, k, v) after projection GEMMs (pre-RoPE, pre-cache)
+      qk_rope: (q, k) after RoPE (pre-cache-fetch)
+      sdpa   : the scaled_dot_product_attention output
+      out    : the o_proj output (full attention result)
+    """
+    from mlx_lm.models.base import scaled_dot_product_attention as _sdpa
+
+    B, L, D = x_norm.shape
+    queries = layer.q_proj(x_norm)
+    keys = layer.k_proj(x_norm)
+    values = layer.v_proj(x_norm)
+    q_pre = queries.reshape(B, L, layer.n_heads, -1).transpose(0, 2, 1, 3)
+    k_pre = keys.reshape(B, L, layer.n_kv_heads, -1).transpose(0, 2, 1, 3)
+    v_pre = values.reshape(B, L, layer.n_kv_heads, -1).transpose(0, 2, 1, 3)
+
+    if cache_l is not None:
+        q_rope = layer.rope(q_pre, offset=cache_l.offset)
+        k_rope = layer.rope(k_pre, offset=cache_l.offset)
+        k_fetch, v_fetch = cache_l.update_and_fetch(k_rope, v_pre)
+    else:
+        q_rope = layer.rope(q_pre)
+        k_rope = layer.rope(k_pre)
+        k_fetch, v_fetch = k_rope, v_pre
+
+    sdpa_out = _sdpa(q_rope, k_fetch, v_fetch, cache=cache_l, scale=layer.scale, mask=mask)
+    sdpa_out = sdpa_out.transpose(0, 2, 1, 3).reshape(B, L, -1)
+    o_out = layer.o_proj(sdpa_out)
+    return {
+        "qkv": (q_pre, k_pre, v_pre),
+        "qk_rope": (q_rope, k_rope),
+        "sdpa": sdpa_out,
+        "out": o_out,
+    }
+
+
+def followup_attention_isolation(
+    model,
+    built: dict,
+    pf_cache_list: list,
+    pad_id: int,
+    widths: tuple[int, ...],
+) -> dict[str, Any]:
+    """(1)+(2) Attention isolation at L03: full-batch vs row-by-row, split
+    into qkv proj / RoPE qk / sdpa / o_proj. Which sub-step first differs.
+
+    For each M in widths: forward to L03's input (h), then run L03's
+    attention (a) on the full batch and (b) row by row on the SAME h,
+    comparing each sub-step's output at decision positions."""
+    from jevmlx.engine import _broadcast_cache, _eval_cache_state
+
+    m = model.model
+    layer3 = m.layers[3]
+    results = {}
+    for n in widths:
+        rows_n, decisions_n = _rows_for_width(built, n)
+        widths_r = [len(r) for r in rows_n]
+        width = max(widths_r)
+        padded = mx.array([r + [pad_id] * (width - len(r)) for r in rows_n], dtype=mx.int32)
+        positions = mx.array([d[0] for d in decisions_n], dtype=mx.int32)
+        b_cache = _broadcast_cache(pf_cache_list, n)
+        max_padding = max(width - w for w in widths_r) if widths_r else 0
+        if max_padding > 0:
+            for c in b_cache:
+                if hasattr(c, "prepare"):
+                    c.prepare(lengths=widths_r, right_padding=[width - w for w in widths_r])
+        _eval_cache_state(b_cache)
+
+        # Forward to L03 input (h) — full batch.
+        h_full, mask_full = _forward_to_layer_input(model, padded, b_cache, 3)
+        x_norm_full = layer3.input_layernorm(h_full)
+        # (a) full-batch attention sub-steps.
+        full_steps = _run_attention_substeps(layer3.self_attn, x_norm_full, mask_full, b_cache[3])
+        mx.eval(full_steps["out"])
+
+        # (b) row-by-row attention on the SAME h (one row at a time).
+        # Use h_full[i:i+1] (the identical batched hidden state sliced to
+        # one row) with a fresh batch=1 cache broadcast so cache contents
+        # match, but run the attention op at batch=1 — isolating whether
+        # the attention GEMM/SDPA path changes with M.
+        chunk_len = padded.shape[0]
+        row_steps = {k: [] for k in ("qkv", "qk_rope", "sdpa", "out")}
+        for i in range(chunk_len):
+            h_one = h_full[i : i + 1]  # (1, width, D) — SAME h, one row
+            x_norm_one = layer3.input_layernorm(h_one)
+            # Fresh cache broadcast for this single row (same KV contents).
+            rc = _broadcast_cache(pf_cache_list, 1)
+            _eval_cache_state(rc)
+            mask_one = _create_attention_mask(h_one, rc[0])
+            steps = _run_attention_substeps(layer3.self_attn, x_norm_one, mask_one, rc[3])
+            pos_i = positions[i].item()
+            for k in row_steps:
+                # qkv/qk_rope are (B, H, L, head_dim) after transpose;
+                # sdpa/out are (B, L, D) after reshape. Index the L axis.
+                if k == "qkv":
+                    q, kk, v = steps[k]
+                    row_steps[k].append((q[0, :, pos_i, :], kk[0, :, pos_i, :], v[0, :, pos_i, :]))
+                elif k == "qk_rope":
+                    q, kk = steps[k]
+                    row_steps[k].append((q[0, :, pos_i, :], kk[0, :, pos_i, :]))
+                else:
+                    # sdpa/out are (B, L, D)
+                    row_steps[k].append(steps[k][0, pos_i, :])
+
+        # Compare full vs row at decision positions.
+        # qkv/qk_rope are (B, H, L, head_dim); sdpa/out are (B, L, D).
+        cl = chunk_len
+        pos_list = positions.tolist()
+
+        def _gather_pos(t, _cl=cl, _pos=pos_list):
+            parts = []
+            for b in range(_cl):
+                if t.ndim == 4:
+                    parts.append(t[b, :, _pos[b], :])  # (H, head_dim)
+                else:
+                    parts.append(t[b, _pos[b], :])  # (D,)
+            return mx.stack(parts, axis=0)
+
+        steps_diff = {}
+        for k in ("qkv", "qk_rope", "sdpa", "out"):
+            if k == "qkv":
+                # 3 tensors (q, k, v)
+                diffs = []
+                mags = []
+                for ti in range(3):
+                    full_t = _gather_pos(full_steps[k][ti])
+                    row_t = mx.stack([r[ti] for r in row_steps[k]], axis=0)
+                    d = float(
+                        mx.max(mx.abs(full_t.astype(mx.float32) - row_t.astype(mx.float32))).item()
+                    )
+                    mg = float(mx.max(mx.abs(full_t.astype(mx.float32))).item())
+                    diffs.append(d)
+                    mags.append(mg)
+                steps_diff[k] = {
+                    "sub": ["q_proj", "k_proj", "v_proj"],
+                    "max_abs_diff": diffs,
+                    "max_abs_activation": mags,
+                    "relative_diff": [
+                        d / m if m > 0 else 0.0 for d, m in zip(diffs, mags, strict=True)
+                    ],
+                }
+            elif k == "qk_rope":
+                diffs = []
+                mags = []
+                for ti in range(2):
+                    full_t = _gather_pos(full_steps[k][ti])
+                    row_t = mx.stack([r[ti] for r in row_steps[k]], axis=0)
+                    d = float(
+                        mx.max(mx.abs(full_t.astype(mx.float32) - row_t.astype(mx.float32))).item()
+                    )
+                    mg = float(mx.max(mx.abs(full_t.astype(mx.float32))).item())
+                    diffs.append(d)
+                    mags.append(mg)
+                steps_diff[k] = {
+                    "sub": ["q_rope", "k_rope"],
+                    "max_abs_diff": diffs,
+                    "max_abs_activation": mags,
+                    "relative_diff": [
+                        d / m if m > 0 else 0.0 for d, m in zip(diffs, mags, strict=True)
+                    ],
+                }
+            else:
+                full_t = _gather_pos(full_steps[k])
+                row_t = mx.stack(row_steps[k], axis=0)
+                d = float(
+                    mx.max(mx.abs(full_t.astype(mx.float32) - row_t.astype(mx.float32))).item()
+                )
+                mg = float(mx.max(mx.abs(full_t.astype(mx.float32))).item())
+                steps_diff[k] = {
+                    "max_abs_diff": d,
+                    "max_abs_activation": mg,
+                    "relative_diff": d / mg if mg > 0 else 0.0,
+                }
+        results[f"M={n}"] = steps_diff
+        print(f"  attn isolation M={n}:", flush=True)
+        for k, v in steps_diff.items():
+            if "sub" in v:
+                for si, sub in enumerate(v["sub"]):
+                    print(
+                        f"    {k}/{sub}: abs={v['max_abs_diff'][si]:.6f} "
+                        f"mag={v['max_abs_activation'][si]:.6f} "
+                        f"rel={v['relative_diff'][si]:.6f}",
+                        flush=True,
+                    )
+            else:
+                print(
+                    f"    {k}: abs={v['max_abs_diff']:.6f} "
+                    f"mag={v['max_abs_activation']:.6f} rel={v['relative_diff']:.6f}",
+                    flush=True,
+                )
+    return results
+
+
+def followup_cache_and_mask_info(
+    model,
+    built: dict,
+    pf_cache_list: list,
+    pad_id: int,
+    widths: tuple[int, ...],
+) -> dict[str, Any]:
+    """(3)+(4) KV cache dtype + mask object type/shape + which mlx function
+    is called for attention + argument shapes, at each M."""
+
+    from jevmlx.engine import _broadcast_cache, _eval_cache_state
+
+    m = model.model
+    # Cache dtype from the prefill cache.
+    cache_dtype = str(pf_cache_list[0].keys.dtype)
+    cache_type = type(pf_cache_list[0]).__name__
+    has_bits = hasattr(pf_cache_list[0], "bits")
+    # Which function sdpa delegates to.
+    sdpa_func = (
+        "quantized_scaled_dot_product_attention"
+        if has_bits
+        else "mx.fast.scaled_dot_product_attention"
+    )
+
+    out = {
+        "cache_type": cache_type,
+        "cache_dtype": cache_dtype,
+        "cache_has_bits": has_bits,
+        "sdpa_function": sdpa_func,
+    }
+    per_m = {}
+    for n in widths:
+        rows_n, decisions_n = _rows_for_width(built, n)
+        widths_r = [len(r) for r in rows_n]
+        width = max(widths_r)
+        padded = mx.array([r + [pad_id] * (width - len(r)) for r in rows_n], dtype=mx.int32)
+        b_cache = _broadcast_cache(pf_cache_list, n)
+        max_padding = max(width - w for w in widths_r) if widths_r else 0
+        if max_padding > 0:
+            for c in b_cache:
+                if hasattr(c, "prepare"):
+                    c.prepare(lengths=widths_r, right_padding=[width - w for w in widths_r])
+        _eval_cache_state(b_cache)
+        # Forward to L03 input to get the mask.
+        h, mask = _forward_to_layer_input(model, padded, b_cache, 3)
+        mask_type = type(mask).__name__ if mask is not None else "None"
+        mask_shape = tuple(int(s) for s in mask.shape) if mask is not None else None
+        # The sdpa argument shapes: q, k, v after reshape+rope+fetch.
+        attn3 = m.layers[3].self_attn
+        x_norm = m.layers[3].input_layernorm(h)
+        B, L, D = x_norm.shape
+        q = attn3.q_proj(x_norm).reshape(B, L, attn3.n_heads, -1).transpose(0, 2, 1, 3)
+        k = attn3.k_proj(x_norm).reshape(B, L, attn3.n_kv_heads, -1).transpose(0, 2, 1, 3)
+        v = attn3.v_proj(x_norm).reshape(B, L, attn3.n_kv_heads, -1).transpose(0, 2, 1, 3)
+        q = attn3.rope(q, offset=b_cache[3].offset)
+        k = attn3.rope(k, offset=b_cache[3].offset)
+        k_fetch, v_fetch = b_cache[3].update_and_fetch(k, v)
+        per_m[f"M={n}"] = {
+            "mask_type": mask_type,
+            "mask_shape": mask_shape,
+            "q_shape": tuple(int(s) for s in q.shape),
+            "k_shape": tuple(int(s) for s in k_fetch.shape),
+            "v_shape": tuple(int(s) for s in v_fetch.shape),
+            "cache_offset": [int(x) for x in b_cache[3].offset.tolist()]
+            if hasattr(b_cache[3].offset, "tolist")
+            else int(b_cache[3].offset),
+        }
+    out["per_M"] = per_m
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Reporting
 # ---------------------------------------------------------------------------
@@ -624,6 +905,16 @@ def main() -> int:
     print(f"  (3.3) GEMM isolation at jump M={jump_m}...", flush=True)
     gemm_iso = followup_gemm_isolation(engine.model, built, pf_cache_list, pad_id, jump_m)
 
+    print("  (3.4) attention isolation (full vs row, 4-way split)...", flush=True)
+    attn_iso = followup_attention_isolation(
+        engine.model, built, pf_cache_list, pad_id, (16, 32, 112)
+    )
+
+    print("  (3.5) cache dtype + mask + sdpa path info...", flush=True)
+    cache_info = followup_cache_and_mask_info(
+        engine.model, built, pf_cache_list, pad_id, (16, 32, 112)
+    )
+
     print()
     print("## Table 1: drift by layer (fp16 body)")
     print()
@@ -678,6 +969,52 @@ def main() -> int:
         f"{gemm_iso['gemm_path_changes_with_M']} |"
     )
 
+    # --- Attention isolation table ---
+    print()
+    print("## Table 6: attention isolation at L03 (full-batch vs row-by-row)")
+    print()
+    print("| M | step | sub | max_abs_diff | max_abs_activation | relative_diff |")
+    print("|---|---|---|---|---|---|")
+    for mkey in ("M=16", "M=32", "M=112"):
+        steps = attn_iso[mkey]
+        for step in ("qkv", "qk_rope", "sdpa", "out"):
+            s = steps[step]
+            if "sub" in s:
+                for si, sub in enumerate(s["sub"]):
+                    print(
+                        f"| {mkey} | {step} | {sub} | "
+                        f"{s['max_abs_diff'][si]:.6f} | "
+                        f"{s['max_abs_activation'][si]:.6f} | "
+                        f"{s['relative_diff'][si]:.6f} |"
+                    )
+            else:
+                print(
+                    f"| {mkey} | {step} | - | "
+                    f"{s['max_abs_diff']:.6f} | "
+                    f"{s['max_abs_activation']:.6f} | "
+                    f"{s['relative_diff']:.6f} |"
+                )
+
+    # --- Cache/mask/sdpa info table ---
+    print()
+    print("## Table 7: cache dtype + mask + sdpa path info")
+    print()
+    print(
+        f"cache_type={cache_info['cache_type']}  cache_dtype={cache_info['cache_dtype']}  "
+        f"cache_has_bits={cache_info['cache_has_bits']}  "
+        f"sdpa_function={cache_info['sdpa_function']}"
+    )
+    print()
+    print("| M | mask_type | mask_shape | q_shape | k_shape | v_shape | cache_offset |")
+    print("|---|---|---|---|---|---|---|")
+    for mkey in ("M=16", "M=32", "M=112"):
+        pm = cache_info["per_M"][mkey]
+        print(
+            f"| {mkey} | {pm['mask_type']} | {pm['mask_shape']} | "
+            f"{pm['q_shape']} | {pm['k_shape']} | {pm['v_shape']} | "
+            f"{pm['cache_offset']} |"
+        )
+
     # Write JSON.
     out_dir = Path(args.out) if args.out else Path("benchmarks/probes") / _probe_dir(args.model)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -694,6 +1031,8 @@ def main() -> int:
                 "fp32_width_curve": width_curve,
                 "fp32_relative_diff": rel_diff,
                 "fp32_gemm_isolation": gemm_iso,
+                "fp32_attention_isolation": attn_iso,
+                "fp32_cache_mask_info": cache_info,
             },
             indent=2,
         )
