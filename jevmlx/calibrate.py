@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 Sample = tuple[list[float], int]  # (per-choice scores at T=1, labeled choice index)
 MultiSample = tuple[float, int]  # (raw log-odds yes-no, label 1=yes 0=no)
@@ -218,6 +219,139 @@ def calibrated_log_odds(a: float, b: float, log_odds: float) -> float:
     """Apply the pooled calibration: a * log_odds + b. Selection rule:
     calibrated value > 0."""
     return a * log_odds + b
+
+
+@dataclass(frozen=True)
+class CalibrationBundle:
+    """Typed calibration artifact (W5-C finding 22).
+
+    One object carries every fitted calibrator plus the provenance it is
+    valid under. The engine derives the scalar temperature and the multi
+    (a, b) from the bundle and REJECTS a request the bundle does not
+    describe (wrong prompt version, scoring mode, prior mode, or model
+    revision) instead of silently applying numbers fitted elsewhere.
+
+    ``prior_mode`` records which input the multi calibrator was fitted on
+    (finding 21): ``"off"`` = raw evidence log-odds; ``"neutral_v1"`` =
+    prior-corrected log-odds (the neutral-context pass subtracted). Fit and
+    apply must use the same input — the engine enforces it.
+
+    ``load`` reads the ONE bundle shape ``jevmlx calibrate --out`` writes:
+    ``{"model_revision", "prompt_version", "scoring", "prior_mode", "scalar":
+    {"temperature"}, "multi": {"a", "b"}}`` — the CLI writes it and the
+    engine reads it; there is no other shape.
+    """
+
+    temperature: float | None = None
+    multi_a: float | None = None
+    multi_b: float | None = None
+    model_revision: str | None = None
+    prompt_version: str | None = None
+    scoring: str | None = None
+    prior_mode: str = "off"
+
+    def __post_init__(self) -> None:
+        if self.temperature is not None and (
+            not math.isfinite(self.temperature) or self.temperature <= 0
+        ):
+            raise ValueError(f"bundle temperature must be finite > 0, got {self.temperature!r}")
+        for name, val in (("multi_a", self.multi_a), ("multi_b", self.multi_b)):
+            if val is not None and not math.isfinite(val):
+                raise ValueError(f"bundle {name} must be finite, got {val!r}")
+        if (self.multi_a is None) != (self.multi_b is None):
+            raise ValueError("bundle multi calibration needs BOTH a and b")
+        if self.prior_mode not in ("off", "neutral_v1"):
+            raise ValueError(
+                f"bundle prior_mode must be 'off' or 'neutral_v1', got {self.prior_mode!r}"
+            )
+        if self.scoring is not None and self.scoring not in ("slots", "labels"):
+            raise ValueError(f"bundle scoring must be 'slots' or 'labels', got {self.scoring!r}")
+
+    @classmethod
+    def from_payload(cls, payload: dict) -> CalibrationBundle:
+        """Parse THE bundle JSON shape (model_revision, prompt_version,
+        scoring, prior_mode, scalar.temperature, multi.a/b) — the one shape
+        ``jevmlx calibrate --out`` writes."""
+        if not isinstance(payload, dict):
+            raise ValueError(f"calibration payload must be a dict, got {type(payload).__name__}")
+        model_revision = payload.get("model_revision")
+        prompt_version = payload.get("prompt_version")
+        scoring = payload.get("scoring")
+        prior_mode = payload.get("prior_mode", "off")
+        temperature = None
+        scalar = payload.get("scalar")
+        if isinstance(scalar, dict):
+            try:
+                temperature = float(scalar["temperature"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    f'calibration["scalar"] must carry numeric "temperature": {exc}'
+                ) from exc
+        elif "scalar" in payload and scalar is not None:
+            raise ValueError('calibration["scalar"] must be a dict {"temperature": ..}')
+        if temperature is None and "temperature" in payload:
+            # The legacy top-level-temperature shape is NOT the bundle shape —
+            # reject it loudly so a stale file never half-loads.
+            raise ValueError(
+                'calibration["temperature"] is the retired CLI shape; the bundle '
+                'shape is {"scalar": {"temperature": ..}} (jevmlx calibrate --out writes it)'
+            )
+        multi_a = multi_b = None
+        multi = payload.get("multi")
+        if multi is not None:
+            if not isinstance(multi, dict):
+                raise ValueError('calibration["multi"] must be a dict {"a": .., "b": ..}')
+            try:
+                multi_a, multi_b = float(multi["a"]), float(multi["b"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    f'calibration["multi"] must carry numeric "a" and "b": {exc}'
+                ) from exc
+        return cls(
+            temperature=temperature,
+            multi_a=multi_a,
+            multi_b=multi_b,
+            model_revision=str(model_revision) if model_revision is not None else None,
+            prompt_version=str(prompt_version) if prompt_version is not None else None,
+            scoring=str(scoring) if scoring is not None else None,
+            prior_mode=str(prior_mode),
+        )
+
+    @classmethod
+    def load(cls, path: str) -> CalibrationBundle:
+        """Load and validate a calibration JSON file (file I/O lives here,
+        at the boundary — never inside the engine's hot path)."""
+        try:
+            with open(path, encoding="utf-8") as f:
+                payload = json.load(f)
+        except FileNotFoundError as exc:
+            raise ValueError(f"calibration file not found: {path}") from exc
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"calibration file is not valid JSON: {path}: {exc}") from exc
+        try:
+            return cls.from_payload(payload)
+        except ValueError as exc:
+            raise ValueError(f"calibration file {path}: {exc}") from exc
+
+    @property
+    def has_multi(self) -> bool:
+        return self.multi_a is not None
+
+    @property
+    def has_scalar(self) -> bool:
+        return self.temperature is not None
+
+    def identity(self) -> str:
+        """Stable short provenance id for telemetry: revision + prompt +
+        scoring + prior mode. Empty segments collapse to 'anon' so the id
+        is still informative for ad-hoc inline bundles."""
+        parts = [
+            self.model_revision or "anon",
+            self.prompt_version or "anon",
+            self.scoring or "anon",
+            self.prior_mode,
+        ]
+        return "/".join(parts)
 
 
 def accuracy(samples: Sequence[Sample]) -> float:

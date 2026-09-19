@@ -25,6 +25,7 @@ from collections.abc import Sequence
 
 from pydantic import BaseModel
 
+from jevmlx.calibrate import CalibrationBundle
 from jevmlx.engine import (
     load_engine,
     run_parallel_generation,
@@ -350,6 +351,12 @@ def _build_field_results(
             margin = probability_margin if log_scores else threshold_distance
             if margin is not None and margin < abstain_below_margin:
                 reason = "abstain"
+        # W5-C finding 23: calibrated reflects the APPLIED calibrator for
+        # THIS field — scalar fields carry {"temperature": T} when the
+        # fitted temperature was applied, multi fields the (a, b) pair.
+        # Provenance (the bundle identity) belongs to the telemetry, not to
+        # confidence_model: model stays the clean decision-model name.
+        calibrated_flag = telemetry.get("calibrated") is not None
         fields[name] = FieldResult(
             value=telemetry["value"],
             score=score,
@@ -357,7 +364,7 @@ def _build_field_results(
             probability_margin=probability_margin,
             threshold_distance=threshold_distance,
             probability=probability,
-            calibrated=False,
+            calibrated=calibrated_flag,
             model=confidence_model,
             alternatives=alternatives,
             reason=reason,
@@ -374,7 +381,7 @@ def _decide_once[T: BaseModel](
     scoring: str = "slots",
     allow_none_of_above: bool = False,
     abstain_below_margin: float | None = None,
-    calibration: str | dict | None = None,
+    calibration: str | dict | CalibrationBundle | None = None,
     prior_correction: bool = False,
     constraints: list[dict] | None = None,
 ) -> Decision[T]:
@@ -386,7 +393,7 @@ def _decide_once[T: BaseModel](
         schema,
         temperature=temperature,
         scoring=scoring,
-        calibration=calibration,
+        calibration=_resolve_calibration(calibration),
         prior_correction=prior_correction,
         constraints=constraints,
     )
@@ -440,10 +447,61 @@ def _assemble_decision[T: BaseModel](
     )
 
 
+def _resolve_calibration(
+    calibration: str | CalibrationBundle | dict | None,
+) -> CalibrationBundle | None:
+    """W5-C F3 boundary: load/construct the bundle HERE, before the engine.
+
+    ``decide``/``decide_many`` accept a JSON file path (what ``jevmlx
+    calibrate --out`` writes), an inline dict, or a constructed bundle; the
+    ENGINE itself takes only ``CalibrationBundle | None`` — no file I/O, no
+    duck typing. One helper, one load, shared by all entry points.
+    """
+    if calibration is None or isinstance(calibration, CalibrationBundle):
+        return calibration
+    if isinstance(calibration, str):
+        try:
+            return CalibrationBundle.load(calibration)
+        except ValueError as exc:
+            raise ValueError(f"calibration bundle invalid: {exc}") from exc
+    if isinstance(calibration, dict):
+        try:
+            return CalibrationBundle.from_payload(calibration)
+        except ValueError as exc:
+            raise ValueError(f"calibration bundle invalid: {exc}") from exc
+    raise TypeError(
+        "calibration must be a JSON file path, a dict payload, a "
+        f"CalibrationBundle, or None, got {type(calibration).__name__}"
+    )
+
+
 def _check_abstain_margin(abstain_below_margin: float | None) -> None:
     """Validate the abstention cut: None (disabled) or a float in [0, 1)."""
     if abstain_below_margin is not None and not 0.0 <= abstain_below_margin < 1.0:
         raise TypeError("abstain_below_margin must be in [0, 1) or None")
+
+
+def _check_abstention_schema[T: BaseModel](model_cls: type[T]) -> None:
+    """W5-C finding 25: abstention maps a withheld field to None — that is
+    only representable when the field's annotation is Optional. A
+    non-Optional field with abstain_below_margin set would fail Pydantic
+    validation AFTER inference (the worst possible time). The contract is
+    enforced at decide() start: every field of the model must be Optional
+    (any spelling) or the request is a usage error naming the first
+    offending field."""
+    for name, info in model_cls.model_fields.items():
+        ann = info.annotation
+        origin = typing.get_origin(ann)
+        is_optional = origin in (typing.Union, types.UnionType) and type(None) in typing.get_args(
+            ann
+        )
+        if not is_optional:
+            raise TypeError(
+                f"Field '{name}': abstain_below_margin requires every field to be "
+                f"Optional (e.g. {name}: ... | None) so a withheld field can map "
+                "to None; abstention would otherwise fail validation after "
+                "inference"
+            )
 
 
 def _prepare_schema(model_cls: type[BaseModel], allow_none_of_above: bool) -> StructuredSchema:
@@ -488,7 +546,7 @@ def decide[T: BaseModel](
     scoring: str = "slots",
     allow_none_of_above: bool = False,
     abstain_below_margin: float | None = None,
-    calibration: str | dict | None = None,
+    calibration: str | dict | CalibrationBundle | None = None,
     prior_correction: bool = False,
     constraints: list[dict] | None = None,
 ) -> Decision[T]:
@@ -525,6 +583,8 @@ def decide[T: BaseModel](
     # engine: a usage error must not pay for a model load (same rule as
     # decide_many's input validation).
     _check_abstain_margin(abstain_below_margin)
+    if abstain_below_margin is not None:
+        _check_abstention_schema(model_cls)
     schema = _prepare_schema(model_cls, allow_none_of_above)
     engine = load_engine(model)
     return _decide_once(
@@ -536,7 +596,7 @@ def decide[T: BaseModel](
         scoring=scoring,
         allow_none_of_above=allow_none_of_above,
         abstain_below_margin=abstain_below_margin,
-        calibration=calibration,
+        calibration=_resolve_calibration(calibration),
         prior_correction=prior_correction,
         constraints=constraints,
     )
@@ -551,7 +611,7 @@ def decide_many[T: BaseModel](
     scoring: str = "slots",
     allow_none_of_above: bool = False,
     abstain_below_margin: float | None = None,
-    calibration: str | dict | None = None,
+    calibration: str | dict | CalibrationBundle | None = None,
     prior_correction: bool = False,
     constraints: list[dict] | None = None,
 ) -> list[Decision[T]]:
@@ -582,6 +642,8 @@ def decide_many[T: BaseModel](
         return []
 
     _check_abstain_margin(abstain_below_margin)
+    if abstain_below_margin is not None:
+        _check_abstention_schema(model_cls)
     schema = _prepare_schema(model_cls, allow_none_of_above)
     engine = load_engine(model)
     # W3-F: batch the contexts (one merged scoring pass per context group).
@@ -594,7 +656,7 @@ def decide_many[T: BaseModel](
         schema,
         temperature=temperature,
         scoring=scoring,
-        calibration=calibration,
+        calibration=_resolve_calibration(calibration),
         prior_correction=prior_correction,
         constraints=constraints,
     )

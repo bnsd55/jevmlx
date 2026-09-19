@@ -22,6 +22,7 @@ import math
 import time
 from typing import Any
 
+from jevmlx.calibrate import CalibrationBundle
 from jevmlx.engine import PROMPT_V2_SYSTEM, _context_block
 from jevmlx.http import ChatCompletionsError, chat_completions_raw
 from jevmlx.json_text import json_text
@@ -209,7 +210,7 @@ def _decide_multi_field(
     name: str,
     field,
     timeout: float,
-    calibration: dict | None,
+    calibration: CalibrationBundle | None,
     tokenizer,
 ) -> tuple[dict, dict, int]:
     """One Y/N request per option. Returns (parsed, telemetry, n_requests)."""
@@ -248,9 +249,14 @@ def _decide_multi_field(
     # (log p - log(1-p)), calibrated a*log_odds + b, and selected when > 0;
     # without it the fixed P(yes) >= 0.5 rule stands. The raw probabilities
     # stay in per_option either way.
-    multi_ab = calibration.get("multi") if calibration else None
+    # W5-C finding 22: calibration is a typed CalibrationBundle.
+    multi_ab = (
+        (calibration.multi_a, calibration.multi_b)
+        if calibration is not None and calibration.has_multi
+        else None
+    )
     if multi_ab is not None:
-        a_coef, b_coef = multi_ab["a"], multi_ab["b"]
+        a_coef, b_coef = multi_ab
         calibrated = {}
         for option, p in per_option.items():
             p_clamped = min(max(p, 1e-12), 1.0 - 1e-12)
@@ -271,7 +277,7 @@ def _decide_multi_field(
         "alternatives": tuple(ranked),
         "rows": len(field.choices),
         "truncated": truncated_any,
-        "calibrated": {"a": multi_ab["a"], "b": multi_ab["b"]} if multi_ab else None,
+        "calibrated": {"a": multi_ab[0], "b": multi_ab[1]} if multi_ab else None,
     }
     return parsed, telemetry, n_requests
 
@@ -285,7 +291,7 @@ def decide_openai(
     tokenizer,
     *,
     timeout: float = 120.0,
-    calibration: str | dict | None = None,
+    calibration: str | dict | CalibrationBundle | None = None,
 ) -> dict[str, Any]:
     """Decide every schema field through an OpenAI-compatible endpoint.
 
@@ -298,9 +304,22 @@ def decide_openai(
     by calibrated log-odds > 0, exactly like the native engine. Raises
     ChatCompletionsError on non-2xx responses.
     """
-    from jevmlx.engine import _load_calibration
+    # F3 boundary: the openai path resolves the calibration HERE (path ->
+    # CalibrationBundle.load, dict -> from_payload) and hands the engine
+    # and _decide_multi_field a constructed bundle only.
+    from jevmlx.calibrate import CalibrationBundle
 
-    calib = _load_calibration(calibration)
+    if calibration is None or isinstance(calibration, CalibrationBundle):
+        calib = calibration
+    elif isinstance(calibration, str):
+        calib = CalibrationBundle.load(calibration)
+    elif isinstance(calibration, dict):
+        calib = CalibrationBundle.from_payload(calibration)
+    else:
+        raise TypeError(
+            "calibration must be a JSON file path, a dict payload, a "
+            f"CalibrationBundle, or None, got {type(calibration).__name__}"
+        )
     t0 = time.perf_counter()
     parsed_json: dict[str, Any] = {}
     field_telemetry: dict[str, Any] = {}

@@ -22,19 +22,23 @@ from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple
+from types import MappingProxyType
+from typing import Any, NamedTuple
 
 from jinja2.exceptions import TemplateError
 
+from jevmlx.calibrate import CalibrationBundle
 from jevmlx.constraints import CompiledConstraints
 from jevmlx.models import resolve_model
+from jevmlx.schema import (
+    COUNT_CODES,
+    StructuredSchema,
+    _common_token_prefix,
+    count_key,
+    is_count_key,
+)
+from jevmlx.setcons import is_feasible, select_constrained_set
 from jevmlx.timing import Interval, Ledger
-
-if TYPE_CHECKING:
-    from jevmlx.constraints import CompiledConstraints
-
-from jevmlx.schema import StructuredSchema, _common_token_prefix, count_key, is_count_key
-from jevmlx.setcons import select_constrained_set
 from jevmlx.trie import build_trie, logsumexp, score_trie, softmax
 
 logger = logging.getLogger(__name__)
@@ -46,7 +50,7 @@ logger = logging.getLogger(__name__)
 # the displayed aliases — finding 1), bounded codebook search (finding 2),
 # one canonical JSON serializer (ensure_ascii=False everywhere — finding
 # 39), and the nonce context delimiter (finding 44).
-PROMPT_VERSION = "jevmlx-parallel-v8"
+PROMPT_VERSION = "jevmlx-parallel-v9"
 
 
 # W2-E step 3: the count row's answer is trusted over the per-option rule
@@ -614,44 +618,94 @@ def run_naive_generation(
     }
 
 
-def _load_calibration(calibration: str | dict | None) -> dict | None:
-    """Resolve the ``calibration`` argument to the {"multi": {"a", "b"}} dict.
+def _load_calibration(
+    calibration: CalibrationBundle | None,
+    *,
+    temperature: float = 1.0,
+    scoring: str = "slots",
+    prior_correction: bool = False,
+) -> tuple[CalibrationBundle | None, float]:
+    """Validate the ``calibration`` bundle against this request (W5-C F22/F3).
 
-    Accepts a JSON file path (what ``jevmlx calibrate --out`` writes) or an
-    inline dict of the same shape. None -> None (uncalibrated path).
-    Raises ValueError on unreadable JSON, a wrong-shaped payload, or
-    non-finite coefficients.
+    The engine takes a CONSTRUCTED :class:`~jevmlx.calibrate.CalibrationBundle`
+    or None — nothing else, no file I/O here. Public boundaries own the
+    load: ``decide``/``decide_many`` and the CLI call
+    :meth:`CalibrationBundle.load` (or ``from_payload``) BEFORE the engine
+    runs, so the engine's hot path is pure provenance checking.
+
+    Provenance (finding 21/22): a bundle that names a prompt_version,
+    scoring mode, prior_mode, or model_revision the request does not match
+    is REJECTED — never silently applied. The scalar temperature is derived
+    from the bundle; an explicit caller temperature conflicting with it
+    (not equal within 1e-9) is an error. prior_mode 'neutral_v1' requires
+    prior_correction=True and vice versa on the multi path.
+
+    Returns ``(bundle_or_None, effective_temperature)``.
     """
     if calibration is None:
-        return None
-    if isinstance(calibration, str):
-        try:
-            with open(calibration, encoding="utf-8") as f:
-                payload = json.load(f)
-        except FileNotFoundError as exc:
-            raise ValueError(f"calibration file not found: {calibration}") from exc
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"calibration file is not valid JSON: {calibration}: {exc}") from exc
-    elif isinstance(calibration, dict):
-        payload = calibration
-    else:
-        raise ValueError(
-            f"calibration must be a JSON file path, a dict, or None, "
-            f"got {type(calibration).__name__}"
+        return None, temperature
+    if not isinstance(calibration, CalibrationBundle) and not (
+        type(calibration).__name__ == "CalibrationBundle"
+        and all(
+            hasattr(calibration, attr)
+            for attr in (
+                "temperature",
+                "multi_a",
+                "multi_b",
+                "prompt_version",
+                "scoring",
+                "prior_mode",
+                "has_scalar",
+                "has_multi",
+                "identity",
+            )
         )
-    multi = payload.get("multi") if isinstance(payload, dict) else None
-    if not isinstance(multi, dict):
-        raise ValueError(
-            'calibration payload must be {"multi": {"a": ..., "b": ...}}; '
-            f"got {json.dumps(payload)[:120]}"
+    ):
+        # F3: strict typing — construct the bundle at the boundary (from a
+        # path: CalibrationBundle.load; from a dict: from_payload). The
+        # shape clause keeps a valid bundle valid across module-reload
+        # isolation (nominal isinstance alone goes stale when
+        # jevmlx.calibrate is re-imported while this module survives).
+        raise TypeError(
+            "calibration must be a CalibrationBundle or None; load the file "
+            "with CalibrationBundle.load(path) (or from_payload) before calling "
+            f"the engine, got {type(calibration).__name__}"
         )
-    try:
-        a, b = float(multi["a"]), float(multi["b"])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError(f'calibration["multi"] must carry numeric "a" and "b": {exc}') from exc
-    if not (math.isfinite(a) and math.isfinite(b)):
-        raise ValueError(f"calibration coefficients must be finite, got a={a!r}, b={b!r}")
-    return {"multi": {"a": a, "b": b}}
+    bundle = calibration
+
+    # Provenance checks (finding 21/22): reject a bundle that does not
+    # describe this request.
+    if bundle.prompt_version is not None and bundle.prompt_version != PROMPT_VERSION:
+        raise ValueError(
+            f"calibration bundle prompt_version {bundle.prompt_version!r} does not "
+            f"match this engine's {PROMPT_VERSION!r}; the fitted coefficients do not apply"
+        )
+    if bundle.scoring is not None and bundle.scoring != scoring:
+        raise ValueError(
+            f"calibration bundle scoring {bundle.scoring!r} does not match the "
+            f"request scoring {scoring!r}"
+        )
+    if bundle.prior_mode == "neutral_v1" and not prior_correction:
+        raise ValueError(
+            "calibration bundle prior_mode='neutral_v1' was fitted on "
+            "prior-corrected log-odds; the request runs prior_correction=False"
+        )
+    if bundle.prior_mode == "off" and prior_correction and bundle.has_multi:
+        raise ValueError(
+            "calibration bundle prior_mode='off' was fitted on raw evidence "
+            "log-odds; the request runs prior_correction=True. Fit and apply "
+            "must use the same input (finding 21)"
+        )
+    effective_temperature = temperature
+    if bundle.has_scalar:
+        if abs(temperature - 1.0) > 1e-9 and abs(temperature - bundle.temperature) > 1e-9:
+            raise ValueError(
+                f"explicit temperature={temperature} conflicts with the "
+                f"calibration bundle's fitted temperature={bundle.temperature}; "
+                "pass temperature=1.0 to defer to the bundle"
+            )
+        effective_temperature = bundle.temperature
+    return bundle, effective_temperature
 
 
 def _fold_multi(probs_true: dict[str, float]) -> tuple[list[str], float | None, float]:
@@ -660,12 +714,20 @@ def _fold_multi(probs_true: dict[str, float]) -> tuple[list[str], float | None, 
     Returns (selected options, field probability, margin): an option is
     selected when its p_yes >= 0.5 (the fixed uncalibrated rule). No
     field-level probability is claimed (an exact-set probability would need
-    a separate calibrator); the margin is min |p_yes - 0.5| over ALL options
-    — how close the closest yes/no decision was (probability units, same
-    scale the abstention gate consumes).
+    a separate calibrator); the margin is min over ALL options of the
+    per-option distance from its threshold side (W5-C finding 20: floored
+    at 0 — an option on its decided side always contributes its distance;
+    a forced-against-side option contributes 0 after reconciliation, which
+    recomputes this same formula over the final set).
     """
     selected = [option for option, p_yes in probs_true.items() if p_yes >= 0.5]
-    margin = min((abs(p_yes - 0.5) for p_yes in probs_true.values()), default=0.0)
+    margin = min(
+        (
+            max(0.0, p_yes - 0.5) if p_yes >= 0.5 else max(0.0, 0.5 - p_yes)
+            for p_yes in probs_true.values()
+        ),
+        default=0.0,
+    )
     return selected, None, margin
 
 
@@ -730,6 +792,9 @@ class AssembledState:
     field_telemetry: Mapping[str, Any]
     rescored_fields: tuple[str, ...]
     reconciled_fields: tuple[str, ...] = ()
+    # W5-C finding 24: internal scoring rows ('<field>#count') — separate
+    # from field_telemetry so public API construction never sees them.
+    internal_telemetry: Mapping[str, Any] = MappingProxyType({})
 
 
 class InternalConstraintViolationError(RuntimeError):
@@ -1212,17 +1277,19 @@ def _get_or_compute_prior(
     tok_ref = weakref.ref(tokenizer)
 
     prior: dict[str, Any] = {}
-    for fname, telemetry in result["field_telemetry"].items():
+    # W5-C finding 24: ONE location — count rows live under
+    # internal_telemetry and the prior reader reads them there. No dual
+    # reading of field_telemetry for count rows.
+    for fname, telemetry in result["internal_telemetry"].items():
         if is_count_key(fname):
-            # W2-E step 3: count rows surface in telemetry under
-            # '<field>#count' as scalar-type entries — cache their
-            # log_scores verbatim (the evidence path subtracts them like
-            # any scalar prior).
             prior[fname] = {
                 "type": "scalar",
                 "log_scores": dict(telemetry["log_scores"]),
             }
-        elif telemetry["type"] == "multi":
+    for fname, telemetry in result["field_telemetry"].items():
+        if is_count_key(fname):
+            raise AssertionError("count row leaked into field_telemetry (finding 24)")
+        if telemetry["type"] == "multi":
             # Raw Y/N logits at T=1, carried on the telemetry by the engine's
             # option-row loop (option_logit_pairs). Additive prior in log
             # space on the Y/N pair — same units as the evidence logits.
@@ -2234,7 +2301,12 @@ def run_parallel_generation(
         from jevmlx.constraints import compile_constraints
 
         compiled_constraints = compile_constraints(constraints, schema)
-    calib = _load_calibration(calibration)
+    calib, temperature = _load_calibration(
+        calibration,
+        temperature=temperature,
+        scoring=scoring,
+        prior_correction=prior_correction,
+    )
     if max_rows is not None and max_rows < 1:
         raise ValueError(f"max_rows must be >= 1, got {max_rows!r}")
 
@@ -2585,6 +2657,7 @@ def score_scalar_field(
     prior: dict | None,
     scoring: str,
     temperature: float,
+    calib: CalibrationBundle | None,
     vocab_size: int,
     pad_id: int,
     ledger: "Ledger",
@@ -2650,11 +2723,21 @@ def score_scalar_field(
     if fdef.field_type == "boolean" and isinstance(val, str):
         val = val.lower() == "true"
 
+    # W5-C finding 23 (scalar half): when a fitted scalar temperature was
+    # APPLIED to this field's final distribution, the telemetry says so —
+    # FieldResult.calibrated must reflect the applied calibrator per field,
+    # with the bundle identity riding alongside (same contract as multi).
+    scalar_calibrated = (
+        {"temperature": calib.temperature} if calib is not None and calib.has_scalar else None
+    )
+    calibration_id = calib.identity() if scalar_calibrated is not None else None
     telemetry = {
         "value": val,
         "type": fdef.field_type,
         "probability": w_prob,
         "cardinality": fdef.cardinality,
+        "calibrated": scalar_calibrated,
+        "calibration_id": calibration_id,
         # Constrained-path log-probabilities at T=1, keyed by the real
         # choice string (the contract calibrate.collect reads). Temperature
         # is applied once, to the final distribution. With prior_correction
@@ -2741,17 +2824,33 @@ def solve_multi_set(
     # to a [0, 1) cut) — min |sigmoid(c) - 0.5|; the raw calibrated
     # log-odds ride telemetry as calibrated_log_odds. Without calibration
     # the fixed P(yes) >= 0.5 rule stands.
+    # W2-E step 2 selection: with calibration, calibrated log-odds
+    # (a * (yes - no) + b) > 0 picks the option. The margin stays in
+    # PROBABILITY units on both paths (F1: the abstention gate compares it
+    # to a [0, 1) cut). W5-C finding 20: the margin is min over ALL options
+    # of the per-option distance from its threshold side, floored at 0 —
+    # recomputed after every reconciler below. Without calibration the
+    # fixed P(yes) >= 0.5 rule stands (_fold_multi carries the same
+    # margin contract).
     if multi_ab is not None:
-        a_coef, b_coef = multi_ab["a"], multi_ab["b"]
+        a_coef, b_coef = multi_ab
         calibrated = {
             option: a_coef * (pair[0] - pair[1]) + b_coef for option, pair in raw_pairs.items()
         }
         probs_yes = {option: 1.0 / (1.0 + math.exp(-c)) for option, c in calibrated.items()}
         selected = [option for option, c in calibrated.items() if c > 0]
-        margin = min((abs(p - 0.5) for p in probs_yes.values()), default=0.0)
+        selected_set = set(selected)
+        margin = min(
+            (
+                max(0.0, probs_yes[o] - 0.5) if o in selected_set else max(0.0, 0.5 - probs_yes[o])
+                for o in probs_yes
+            ),
+            default=0.0,
+        )
         calibrated_log_odds: dict[str, float] | None = calibrated
     else:
         selected, _prob, margin = _fold_multi(probs_yes)
+        selected_set = set(selected)
         calibrated_log_odds = None
 
     # W2-E step 3 reconciliation: the count row ALWAYS ran (no flag), scored
@@ -2766,46 +2865,88 @@ def solve_multi_set(
         else float("inf")
     )
     reconciled_by = "per_option"
+    # W5-C finding 19: the '4' bucket means AT LEAST FOUR, not exactly
+    # four. Internally it becomes an at-least-4 constraint in the joint
+    # optimization below (finding 18), never k=4.
+    count_is_at_least_4 = count_choice == COUNT_CODES[-1]
+    count_k = 4 if count_is_at_least_4 else int(count_choice)
+    # W5-C finding 18: ONE optimization. A trusted count becomes a
+    # constraint (exact-k for buckets 0-3, at-least-4 for the '4' bucket)
+    # inside the same solver that applies the schema's set constraints —
+    # never two reconcilers in sequence (the old code let the set solver
+    # erase a trusted count). The count evidence enters as a synthetic
+    # constraint alongside the schema's set constraints.
+    trusted_count_constraints: list[dict] = []
+    count_dropped_reason: str | None = None
     if count_margin > COUNT_MARGIN_MIN:
-        # Confident count: pick top-k by calibrated log-odds when a
-        # calibrator ran, else by P(yes) (monotone in log-odds — same
-        # ordering). k comes from the count bucket, capped at the field's
-        # option count ('4' = four or more).
-        k = min(4 if count_choice == "4" else int(count_choice), len(options))
-        if calibrated_log_odds is not None:
-            ranked_by = sorted(calibrated_log_odds.items(), key=lambda kv: -kv[1])
+        capped_k = min(count_k, len(options))
+        if count_is_at_least_4:
+            # at-least-4 as a constraint: synthesize at_least_k over ALL
+            # options. The solver maximizes within it.
+            trusted_count_constraints = [
+                {"type": "at_least_k", "options": list(options), "k": min(4, len(options))}
+            ]
         else:
-            ranked_by = sorted(probs_yes.items(), key=lambda kv: -kv[1])
-        selected = [option for option, _score in ranked_by[:k]]
-        reconciled_by = "count"
-    else:
-        reconciled_by = "per_option"
-
-    # W2-SETCONS: hard set constraints applied LAST — after the threshold
-    # rule and the count reconciliation have proposed. The solver selects
-    # the score-maximizing set under the constraints (calibrated log-odds
-    # when a calibrator ran, else RAW yes/no log-odds — monotone in P(yes)
-    # either way, so a non-binding constraint set reproduces the proposal).
-    if set_constraints:
+            trusted_count_constraints = [
+                {"type": "exact_k", "options": list(options), "k": capped_k}
+            ]
+        # Precedence: schema constraints are HARD (user-declared); the
+        # count is evidence. When they are jointly infeasible the count is
+        # unreliable and drops — the same solver, unscored, decides this
+        # before the single scored run. The drop is RECORDED (count
+        # telemetry carries dropped_reason) and logged with the field name.
+        if trusted_count_constraints and not is_feasible(
+            list(options), [*set_constraints, *trusted_count_constraints]
+        ):
+            trusted_count_constraints = []
+            count_dropped_reason = "infeasible_with_set_constraints"
+            logger.warning(
+                "multi field options %r: trusted count %s dropped — jointly infeasible "
+                "with the schema's set constraints; per-option rule decides",
+                options,
+                count_choice,
+            )
+        else:
+            reconciled_by = "count"
+    # W2-SETCONS + W5-C finding 18: one optimization over the schema's set
+    # constraints AND the trusted-count constraint. The solver selects the
+    # score-maximizing set satisfying both (calibrated log-odds when a
+    # calibrator ran, else RAW yes/no log-odds — monotone in P(yes) either
+    # way, so a non-binding constraint set reproduces the proposal).
+    joint_constraints = [*set_constraints, *trusted_count_constraints]
+    if joint_constraints:
         if calibrated_log_odds is not None:
             option_scores = dict(calibrated_log_odds)
         else:
             option_scores = {option: float(pair[0] - pair[1]) for option, pair in raw_pairs.items()}
         selected, setcons_rule = select_constrained_set(
-            list(options), option_scores, set_constraints, set(selected)
+            list(options), option_scores, joint_constraints, selected_set
         )
-        # The closest decision AFTER reconciliation: min |p_yes - 0.5| over
-        # the FINAL set's boundary options (an option forced in against its
-        # p_yes has margin 0 — the truth-telling signal).
+        reconciled_by = "count" if trusted_count_constraints else setcons_rule
+        # W5-C finding 20: the margin is min over ALL options of the
+        # per-option distance from its threshold side, recomputed after
+        # EVERY reconciler. An option forced against its threshold side
+        # (selected with p_yes < 0.5, or excluded with p_yes > 0.5) gets
+        # margin 0 — the truth-telling signal. F16: one set() build,
+        # outside the generator.
         final_set = set(selected)
-        margins = [abs(probs_yes[o] - 0.5) for o in options if o in final_set]
-        margin = min(margins, default=margin)
+        margin = min(
+            (
+                max(0.0, probs_yes[o] - 0.5) if o in final_set else max(0.0, 0.5 - probs_yes[o])
+                for o in options
+            ),
+            default=margin,
+        )
     else:
+        # No constraints at all (neither schema nor trusted count): the
+        # threshold proposal stands untouched.
         setcons_rule = None
 
     count_telemetry = _count_telemetry(
         count_codes, count_scores, count_legal_mass_logs, count_choice, count_margin
     )
+    if count_dropped_reason is not None:
+        count_telemetry["dropped_reason"] = count_dropped_reason
     telemetry = {
         "margin": margin,
         "reconciled_by": reconciled_by,
@@ -2819,10 +2960,10 @@ def solve_multi_set(
         ),
         **(
             {
-                "set_constraints": [dict(c) for c in set_constraints],
+                "set_constraints": [dict(c) for c in joint_constraints],
                 "set_selection": setcons_rule,
             }
-            if set_constraints
+            if joint_constraints
             else {}
         ),
     }
@@ -2938,9 +3079,11 @@ def _multi_telemetry(
     multi_rescored: bool,
     prior_entry: dict | None,
     prior_pairs: dict | None,
+    selected: list[str],
 ) -> dict[str, Any]:
-    """A multi field's telemetry entry (W2-E/W2-SETCONS/W5-D keys)."""
+    """A multi field's telemetry entry (W2-E/W2-SETCONS/W5-D/W5-C keys)."""
     telemetry = {
+        "value": selected,
         "type": "multi",
         "probability": None,
         # No 'scores'/'log_scores' key for multi: log P(choice) does not
@@ -2955,9 +3098,14 @@ def _multi_telemetry(
         "alternatives": tuple(ranked),
         "top_choices": [{"choice": option, "probability": p_yes} for option, p_yes in ranked],
         "rows": len(idxs),
-        "calibrated": {"a": calib["multi"]["a"], "b": calib["multi"]["b"]}
-        if calib is not None
+        "calibrated": {"a": calib.multi_a, "b": calib.multi_b}
+        if calib is not None and calib.has_multi
         else None,
+        # W5-C finding 23: FieldResult.calibrated must reflect the APPLIED
+        # calibrator per field — the identity rides the telemetry (bundle
+        # provenance: prior_mode the calibrator was fitted under, per
+        # finding 21). calib is a typed CalibrationBundle.
+        "calibration_id": calib.identity() if calib is not None and calib.has_multi else None,
         # W5-D finding 38: cardinality-free field-level stats + the
         # per-option logs (raw, T=1), keyed by the option string.
         "min_option_legal_mass": (
@@ -3052,7 +3200,7 @@ def score_multi_field(
         count_codes=list(p["count"]["codes"]),
         count_scores=count_scores,
         count_legal_mass_logs=list(count_legal_mass_logs),
-        multi_ab=calib["multi"] if calib is not None else None,
+        multi_ab=(calib.multi_a, calib.multi_b) if calib is not None and calib.has_multi else None,
         set_constraints=fdef.set_constraints,
     )
 
@@ -3068,6 +3216,7 @@ def score_multi_field(
         multi_rescored,
         prior_entry,
         prior_pairs,
+        selected,
     )
     return FieldOutcome(
         fname,
@@ -3099,7 +3248,11 @@ def reconcile_case_constraints(
     """
     if not constraints:
         return AssembledState(
-            state.parsed_json, state.field_telemetry, state.rescored_fields, tuple()
+            parsed_json=state.parsed_json,
+            field_telemetry=state.field_telemetry,
+            rescored_fields=state.rescored_fields,
+            reconciled_fields=tuple(),
+            internal_telemetry=state.internal_telemetry,
         )
     parsed_json = state.parsed_json
     field_telemetry = state.field_telemetry
@@ -3122,10 +3275,11 @@ def reconcile_case_constraints(
                         field_log_scores[fname][str(val)]
                     )
     return AssembledState(
-        parsed_json,
-        field_telemetry,
-        state.rescored_fields,
-        tuple(reconciled_fields),
+        parsed_json=parsed_json,
+        field_telemetry=field_telemetry,
+        rescored_fields=state.rescored_fields,
+        reconciled_fields=tuple(reconciled_fields),
+        internal_telemetry=state.internal_telemetry,
     )
 
 
@@ -3297,6 +3451,9 @@ def finalize_public_result(
         "second_pass_ms": round(flat["second_pass_ms"], 2),
         "parsed_json": dict(state.parsed_json),
         "field_telemetry": dict(state.field_telemetry),
+        # W5-C finding 24: internal rows ('<field>#count') — separate from
+        # field_telemetry so public API construction never sees them.
+        "internal_telemetry": dict(state.internal_telemetry),
         "num_fields": len(schema),
     }
 
@@ -3320,12 +3477,14 @@ def _score_all_fields(
 
     Routes each field to score_scalar_field or score_multi_field by its
     plan shape and collects the outcomes into the AssembledState. The
-    batched path reuses this unchanged.
+    batched path reuses this unchanged. W5-C finding 24: count rows land
+    in internal_telemetry, never field_telemetry.
     """
     layout = field_rows_of(built)
     field_plans = built["field_plans"]
     parsed_json: dict[str, Any] = {}
     field_telemetry: dict[str, Any] = {}
+    internal_telemetry: dict[str, Any] = {}
     rescored_fields: list[str] = []
     for fname, fdef in schema.fields.items():
         p = field_plans[fname]
@@ -3352,10 +3511,10 @@ def _score_all_fields(
             parsed_json[fname] = dict(outcome.parsed)
             field_telemetry[fname] = dict(outcome.telemetry)
             if outcome.count_telemetry is not None:
-                # W2-E step 3: the count row surfaces as its own scalar-type
-                # telemetry entry keyed '<field>#count' (the prior pass reads
-                # it; parsed_json stays multi-field only).
-                field_telemetry[count_key(fname)] = dict(outcome.count_telemetry)
+                # W5-C finding 24: the count row is INTERNAL telemetry keyed
+                # '<field>#count' — the prior pass reads it there; public API
+                # construction iterates field_telemetry only.
+                internal_telemetry[count_key(fname)] = dict(outcome.count_telemetry)
         else:
             outcome = score_scalar_field(
                 model,
@@ -3368,6 +3527,7 @@ def _score_all_fields(
                 prior=prior,
                 scoring=scoring,
                 temperature=temperature,
+                calib=calib,
                 vocab_size=vocab_size,
                 pad_id=pad_id,
                 ledger=ledger,
@@ -3376,7 +3536,14 @@ def _score_all_fields(
                 rescored_fields.append(fname)
             parsed_json[fname] = dict(outcome.parsed)
             field_telemetry[fname] = dict(outcome.telemetry)
-    return AssembledState(parsed_json, field_telemetry, tuple(rescored_fields)), rescored_fields
+    state = AssembledState(
+        parsed_json=parsed_json,
+        field_telemetry=field_telemetry,
+        rescored_fields=tuple(rescored_fields),
+        reconciled_fields=(),
+        internal_telemetry=MappingProxyType(dict(internal_telemetry)),
+    )
+    return state, rescored_fields
 
 
 def _assemble(
@@ -3390,7 +3557,7 @@ def _assemble(
     prior: dict[str, Any] | None,
     prior_ms: float,
     prior_correction: bool,
-    calib: dict | str | None,
+    calib: CalibrationBundle | None,
     scoring: str,
     temperature: float,
     max_rows: int | None,
@@ -3634,6 +3801,15 @@ def run_parallel_generation_batched(
     #    should have similar cache sizes so the incremental budget check
     #    (below) admits groups that actually fit together.
     pf_cache: dict[int, PrefillResult] = {}
+    # W5-C finding 22: resolve the calibration bundle ONCE (provenance
+    # validated against this request) and hand the same object to every
+    # _assemble — no repeated file parsing, no per-group re-resolution.
+    calib_resolved, temperature = _load_calibration(
+        calibration,
+        temperature=temperature,
+        scoring=scoring,
+        prior_correction=prior_correction,
+    )
 
     # W5b-14 GAP A: ONE ledger PER CONTEXT — its prefill and assembly-side
     # spans land there, so every result's flat keys are that context's own
@@ -3734,7 +3910,7 @@ def run_parallel_generation_batched(
                         prior=prior,
                         prior_ms=prior_ms,
                         prior_correction=prior_correction,
-                        calib=_load_calibration(calibration),
+                        calib=calib_resolved,
                         scoring=scoring,
                         temperature=temperature,
                         max_rows=max_rows,
@@ -3810,7 +3986,7 @@ def run_parallel_generation_batched(
                     prior=prior,
                     prior_ms=prior_ms,
                     prior_correction=prior_correction,
-                    calib=_load_calibration(calibration),
+                    calib=calib_resolved,
                     scoring=scoring,
                     temperature=temperature,
                     max_rows=max_rows,

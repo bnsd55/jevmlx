@@ -236,7 +236,7 @@ def test_nonce_is_deterministic_and_context_derived():
     assert _context_nonce("abc") == "C" + hashlib.sha256(b"abc").hexdigest()[:16]
 
 
-def test_prompt_version_v8():
+def test_prompt_version_v9():
     from jevmlx.engine import PROMPT_VERSION
 
-    assert PROMPT_VERSION == "jevmlx-parallel-v8"
+    assert PROMPT_VERSION == "jevmlx-parallel-v9"
