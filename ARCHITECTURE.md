@@ -58,6 +58,7 @@ callers pass around:
 | `vocab_size` / `weight_bytes` | the logits-slab sizing + memory-budget inputs |
 | `cache_capabilities` | the cache classes the model's layers produce (the `merge` broadcast gate reads them) |
 | `width_slope` | the MEASURED B=1/B=2 tiling slope (W5-D), read by `_width_bin_max_rows` |
+| `lm_head_fp32` / `lm_head_fp32_bytes` | W5c-8: a TRUE fp32 decision-token head — the LM head dequantized ONCE at load into fp32 (545 MB on the 0.5B, ~2.2 GB on the 7B). `_score_rows` runs the transformer BODY to the final-normalized hidden state, then matmuls the decision-position hidden vectors against this weight in genuine fp32 (not an `astype(float32)` wrapper around the quantized kernel — a known MLX path still yields fp16-grid results). None on the fake engine path. The driftprobe found this does NOT collapse the batched gap drift (0.064 at M=112) — the drift originates upstream in the transformer body, not the LM head. This branch stays OPEN as 'HOLD (M5 A/B): fp32 decision head' for the 7B A/B. |
 
 Every per-model property is resolved exactly once, here. The hot paths read
 `engine.profile` / `engine.vocab_size` / `engine.weight_bytes` /

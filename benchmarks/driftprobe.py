@@ -150,6 +150,7 @@ def _score_rows_at(
         max(1, len(rows_n)),
         ledger,
         cache_slots=slots,
+        lm_head_fp32=engine.lm_head_fp32,
     )
     return dict(scored.row_logits)
 
@@ -168,6 +169,7 @@ def _batch1_reference(engine: Engine, built: dict, pf_cache_list: list) -> dict[
         built["pad_id"],
         1,
         ledger,
+        lm_head_fp32=engine.lm_head_fp32,
     )
     return dict(scored.row_logits)
 
