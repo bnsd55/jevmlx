@@ -1347,6 +1347,15 @@ class ScoreRowsResult(NamedTuple):
     ``failed_attempts`` (W5-D finding 30): Metal allocation failures that
     were retried at a smaller chunk size. Never folded into ``passes`` — a
     pass is a forward that produced rows.
+
+    ``retry_wasted_ms`` (W5c-6 / B4): wall time of failed Metal attempts.
+    The ledger drops the failed span (the with-form unwinds on exception),
+    so the waste is invisible in the stage split — this makes it visible.
+
+    ``computed_suffix_positions`` (W5c-6 / B4): padded/chunked suffix token
+    positions INCLUDING retries (failed attempts' positions too). Distinct
+    from ``chunk_shapes`` (successful passes only) and from the existing
+    ``padded_token_positions`` derivation (also successful only).
     """
 
     row_logits: dict[int, list[float]]
@@ -1354,6 +1363,8 @@ class ScoreRowsResult(NamedTuple):
     passes: int
     chunk_shapes: list[tuple[int, int]]
     failed_attempts: int = 0
+    retry_wasted_ms: float = 0.0
+    computed_suffix_positions: int = 0
 
 
 def _score_rows(
@@ -1403,6 +1414,11 @@ def _score_rows(
     row_order = sorted(range(len(rows)), key=lambda ridx: len(rows[ridx]))
     passes = 0
     failed_attempts = 0
+    # W5c-6 / B4: retry waste + computed (padded, incl. retries) suffix
+    # positions. The ledger drops failed spans (the with-form unwinds on
+    # exception); we measure the waste explicitly so it is never hidden.
+    retry_wasted_ms = 0.0
+    computed_suffix_positions = 0
     # W3-R: (width, chunk_len) per forward pass — total padded token
     # positions is sum(width * chunk_len), the tiling shape the model ran.
     chunk_shapes: list[tuple[int, int]] = []
@@ -1416,6 +1432,10 @@ def _score_rows(
         chunk_size = min(bucket_len, auto_max_rows)
         while bucket_pos < bucket_len:
             chunk_rows = bucket[bucket_pos : bucket_pos + chunk_size]
+            # W5c-6 / B4: capture the attempt start so a failed forward's
+            # wall time is recoverable (the ledger span is dropped on
+            # exception — the waste would otherwise be invisible).
+            _attempt_t0 = time.perf_counter()
             chunk_len = len(chunk_rows)
             width = max(len(rows[ridx]) for ridx in chunk_rows)
             lengths = [len(rows[ridx]) for ridx in chunk_rows]
@@ -1460,6 +1480,12 @@ def _score_rows(
                     raise
                 failed_attempts += 1
                 chunk_retried = True
+                # W5c-6 / B4: the failed attempt's wall time is invisible
+                # in the ledger (the span dropped); record it as waste.
+                retry_wasted_ms += (time.perf_counter() - _attempt_t0) * 1000.0
+                # The failed chunk's padded positions count toward computed
+                # suffix positions too (the work ran, then threw).
+                computed_suffix_positions += width * chunk_len
                 chunk_size = max(1, chunk_len // 2)
                 logger.warning(
                     "Chunk allocation failed (%s); retrying %d rows as %d",
@@ -1494,6 +1520,10 @@ def _score_rows(
                         raise
                     failed_attempts += 1
                     chunk_retried = True
+                    # W5c-6 / B4: the failed gather's wall time is
+                    # invisible in the ledger; record it as waste.
+                    retry_wasted_ms += (time.perf_counter() - _attempt_t0) * 1000.0
+                    computed_suffix_positions += width * chunk_len
                     chunk_size = max(1, chunk_len // 2)
                     logger.warning(
                         "Chunk gather eval failed (%s); retrying %d rows as %d",
@@ -1505,6 +1535,10 @@ def _score_rows(
             if not chunk_retried:
                 passes += 1
                 chunk_shapes.append((width, chunk_len))
+                # W5c-6 / B4: the successful chunk's padded positions count
+                # toward computed suffix positions (incl. padding, the
+                # actual tiling shape the forward ran at).
+                computed_suffix_positions += width * chunk_len
             gathered = gathered.tolist()
             row_vocab_lse = row_vocab_lse.tolist()
             for i, ridx in enumerate(chunk_rows):
@@ -1524,6 +1558,8 @@ def _score_rows(
         passes=passes,
         chunk_shapes=chunk_shapes,
         failed_attempts=failed_attempts,
+        retry_wasted_ms=retry_wasted_ms,
+        computed_suffix_positions=computed_suffix_positions,
     )
 
 
@@ -3544,6 +3580,24 @@ def finalize_public_result(
     }
     chunk_shapes = scored.chunk_shapes
     passes = scored.passes
+    # W5c-6 / B4: token-accounting telemetry. Count actual rows/branches
+    # (multi option rows, count rows, trie branches), not fields.
+    rows = built["rows"]
+    lead_in_len = len(built.get("lead_in", []))
+    shared_prefix_tokens = len(base_ids)
+    # naive_branch_prompt_tokens: the FULL prompt length for every actual
+    # scoring row (shared prefix repeated) — the work a naive one-row-at-a-
+    # time path would do. Row length = lead_in + suffix; the full prompt
+    # for the row = base_ids (the prefill) + the row's lead_in + suffix.
+    naive_branch_prompt_tokens = sum(shared_prefix_tokens + len(r) for r in rows)
+    # logical_suffix_token_positions: unpadded suffix content — the sum
+    # of each row's length (each row IS the suffix pass content: lead_in +
+    # suffix ids, all beyond the shared prefill prefix). "Unpadded" = the
+    # actual token count before right-padding to the chunk's max width.
+    logical_suffix_token_positions = sum(len(r) for r in rows)
+    # computed_suffix_token_positions: padded/chunked suffix positions,
+    # INCLUDING retries (failed attempts' positions too).
+    computed_suffix_token_positions = scored.computed_suffix_positions
     peak_active_bytes = timings["peak_active_bytes"]
     logger.info(
         "Decided %d fields in %.1f ms",
@@ -3564,8 +3618,27 @@ def finalize_public_result(
     return {
         **timing_keys,
         # W3-R: total suffix token positions including right padding — the
-        # tiling shape the forwards actually ran at.
+        # tiling shape the forwards actually ran at (successful passes only).
         "padded_token_positions": sum(width * c for width, c in chunk_shapes),
+        # W5c-6 / B4: token-accounting telemetry. naive_branch_prompt_tokens
+        # is the sum of full prompt lengths for every actual scoring row
+        # (shared prefix repeated); shared_prefix_tokens is the prompt every
+        # row starts from; logical_suffix_token_positions are unpadded
+        # suffix positions (decision position + 1 per row);
+        # computed_suffix_token_positions are padded/chunked positions
+        # INCLUDING retries; computed_prompt_token_positions =
+        # shared_prefix_tokens + computed_suffix_token_positions.
+        # The ratio of naive to computed is NOT a speedup — a suffix query
+        # still attends over the cached prefix, and token-position savings
+        # do not map linearly to latency.
+        "naive_branch_prompt_tokens": naive_branch_prompt_tokens,
+        "shared_prefix_tokens": shared_prefix_tokens,
+        "logical_suffix_token_positions": logical_suffix_token_positions,
+        "computed_suffix_token_positions": computed_suffix_token_positions,
+        "computed_prompt_token_positions": shared_prefix_tokens + computed_suffix_token_positions,
+        # W5c-6 / B4: wall time of failed Metal attempts — the ledger drops
+        # the failed span; total wall survives; this makes the waste visible.
+        "retry_wasted_ms": round(scored.retry_wasted_ms, 2),
         "total_tokens_generated": 0,
         "peak_active_bytes": peak_active_bytes,
         # W5-D finding 32: peak memory ATTRIBUTABLE to this request. Never
@@ -4037,9 +4110,10 @@ def run_parallel_generation_batched(
         group_pf: list[tuple[int, PrefillResult]],
         n_group: int,
         group_ledger: Ledger,
-    ) -> None:
+    ) -> ScoreRowsResult:
         """One context group under the caller's group_wall span (F11: the
-        span is a `with` here)."""
+        span is a `with` here). Returns the group's ScoreRowsResult so the
+        caller can read group-level computed token positions + retry waste."""
         if R == 0:
             # Degenerate schema (no rows): assembly still produces a result.
             # NO inner group_wall here — the caller's span already covers
@@ -4076,7 +4150,7 @@ def run_parallel_generation_batched(
                 # amortized group share; prior_ms stays separate).
                 res["_per_item_own_ms"] = prefill_iv.ms + assembly_iv.ms
                 results[idx] = res
-            return
+            return ScoreRowsResult({}, {}, 0, [])
 
         # 4. ONE scoring pass per group over len(group)*R rows (group-level
         #    spans on the group ledger).
@@ -4117,6 +4191,13 @@ def run_parallel_generation_batched(
                 passes=scored.passes,
                 chunk_shapes=scored.chunk_shapes,
                 failed_attempts=scored.failed_attempts,
+                # W5c-6 / B4: per-context computed suffix positions = the
+                # group's total / n_group (all contexts in a group share
+                # the same row widths; the merged pass tiles them
+                # identically). The group-level total is added separately
+                # after the group span closes.
+                retry_wasted_ms=scored.retry_wasted_ms / n_group,
+                computed_suffix_positions=scored.computed_suffix_positions // n_group,
             )
             ctx_ledger = ctx_ledger_by_idx[idx]
             # F4 (one amortization rule): the group's merged-pass spans stay
@@ -4153,13 +4234,14 @@ def run_parallel_generation_batched(
             # closes (a context never carries other groups' wall time).
             res["_per_item_own_ms"] = prefill_iv.ms + assembly_iv.ms
             results[idx] = res
+        return scored
 
     for group_idx in groups:
         group_pf = [(idx, _prefill_cached(idx, contexts[idx])) for idx in group_idx]
         n_group = len(group_pf)
         group_ledger = Ledger()  # group-level spans (wall, merged pass)
         with group_ledger.span("group_wall"):
-            _run_group(group_idx, group_pf, n_group, group_ledger)
+            group_scored = _run_group(group_idx, group_pf, n_group, group_ledger)
         # F4/N5: the amortized share is ONE derived number from the group
         # ledger (batched_views) — no second hand-computed amortization.
         group_int = group_ledger.last_interval("group_wall")
@@ -4168,6 +4250,15 @@ def run_parallel_generation_batched(
             res = results[idx]
             res["group_wall_ms"] = views["group_wall_ms"][0]
             res["per_item_amortized_ms"] = amortized
+            # W5c-6 / B4: group-level computed token positions + retry
+            # waste — the GROUP's merged pass totals (all n_group contexts'
+            # rows in one pass). Per-context logical values
+            # (naive_branch_prompt_tokens, shared_prefix_tokens,
+            # logical_suffix_token_positions) are already per-context (each
+            # context's _assemble computed them from its own R rows +
+            # base_ids); the computed values are the group-level totals.
+            res["group_computed_suffix_token_positions"] = group_scored.computed_suffix_positions
+            res["group_retry_wasted_ms"] = round(group_scored.retry_wasted_ms, 2)
             # N6: per_item_end_to_end_ms = OWN prefill span + the amortized
             # group share + OWN assembly span (a sum of intervals, not
             # t1 - t0) — a context in group k never carries another group's

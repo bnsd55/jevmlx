@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- W5c-6 / B4: token-accounting telemetry. Every engine result (single and
+  batched) and timing.json now carry: `naive_branch_prompt_tokens` (sum of
+  full prompt length for every actual scoring row, shared prefix repeated),
+  `shared_prefix_tokens` (the prompt every row starts from),
+  `logical_suffix_token_positions` (unpadded suffix content per row),
+  `computed_suffix_token_positions` (padded/chunked, including retries),
+  `computed_prompt_token_positions` (= shared + computed), and
+  `retry_wasted_ms` (wall time of failed Metal attempts — the ledger drops
+  the failed span; total wall survives; the waste is now visible). Actual
+  rows/branches are counted (multi option rows, count rows, trie branches),
+  not fields. `decide_many` reports per-context logical values + group-level
+  computed values (`group_computed_suffix_token_positions`,
+  `group_retry_wasted_ms`). The ratio of naive to computed is NOT presented
+  as a speedup anywhere — a suffix query still attends over the cached
+  prefix, and token-position savings do not map linearly to latency.
+  `check_results` contract v2 enforces the new keys in timing.json's
+  median block.
 - **W5-C** — set constraints, joint count + set optimization, typed
   calibration, internal telemetry, abstention contract (PROMPT_VERSION
   `jevmlx-parallel-v9`). The set-constraint solver is exact: connected

@@ -247,6 +247,13 @@ def parallel_decide_fn(engine, scoring: str = "slots", prior_correction: bool = 
             "peak_active_bytes": result["peak_active_bytes"],
             "peak_incremental_bytes": result["peak_incremental_bytes"],
             "padded_token_positions": result["padded_token_positions"],
+            # W5c-6 / B4: token-accounting telemetry in timing.json.
+            "naive_branch_prompt_tokens": result["naive_branch_prompt_tokens"],
+            "shared_prefix_tokens": result["shared_prefix_tokens"],
+            "logical_suffix_token_positions": result["logical_suffix_token_positions"],
+            "computed_suffix_token_positions": result["computed_suffix_token_positions"],
+            "computed_prompt_token_positions": result["computed_prompt_token_positions"],
+            "retry_wasted_ms": result["retry_wasted_ms"],
             "rescored_fields_count": len(result["rescored_fields"]),
             "rerun_fields_count": len(result["rerun_fields"]),
             "num_fields": result["num_fields"],

@@ -357,6 +357,13 @@ def make_engine_result(
         # W5c-3: the single path's per-request end-to-end (elapsed - plan).
         "per_item_end_to_end_ms": 4.9,
         "padded_token_positions": 6,
+        # W5c-6 / B4: token-accounting telemetry.
+        "naive_branch_prompt_tokens": 100,
+        "shared_prefix_tokens": 50,
+        "logical_suffix_token_positions": 10,
+        "computed_suffix_token_positions": 12,
+        "computed_prompt_token_positions": 62,
+        "retry_wasted_ms": 0.0,
         "total_tokens_generated": 0,
         "peak_active_bytes": 1024,
         # W5-D finding 32: incremental peak over the request's starting

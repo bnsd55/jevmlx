@@ -143,7 +143,10 @@ result dict  {parsed_json, field_telemetry, prompt_sha256, full timing
   │    split derived from the request's timing.Ledger (one measurement per
   │    interval; suffix_eval_ms = the cache_merge+transformer+gather
   │    composite), padded_token_positions, peak_active_bytes +
-  │    peak_incremental_bytes, failed_attempts, …}
+  │    peak_incremental_bytes, failed_attempts, token-accounting
+  │    (naive_branch_prompt_tokens, shared_prefix_tokens,
+  │    logical/computed_suffix_token_positions,
+  │    computed_prompt_token_positions, retry_wasted_ms), …}
   │
   ├──► api.Decision / FieldResult        (Python)
   └──► evalrun predictions.jsonl lines   (eval) / CLI table       (decide)
