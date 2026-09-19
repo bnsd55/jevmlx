@@ -232,7 +232,8 @@ def test_summarize_two_report_files_parity_gate(tmp_path):
                 "passed": False,
                 "max_abs_drift_nats": 0.9,
                 "atol": 0.05,
-                "raw_atol": 0.2,
+                "max_gap_drift_nats": 0.01,
+                "max_margin_drift_nats": 0.01,
                 "winners_identical": False,
             }
         ),
@@ -249,7 +250,7 @@ def test_summarize_two_report_files_parity_gate(tmp_path):
                 "passed": True,
                 "max_abs_drift_nats": 0.01,
                 "atol": 0.05,
-                "raw_atol": 0.2,
+                "max_gap_drift_nats": 0.01,
                 "winners_identical": True,
             }
         ),
@@ -782,7 +783,7 @@ def test_load_engine_with_timeout_happy_path():
 
 def test_parity_note_names_stage_and_drift(tmp_path):
     """Contract v2: the parity_failed reason shows max drift AND which stage
-    failed (winners / final log-score drift / raw pre-rescore row drift)."""
+    failed (winners / final log-score drift / batched pairwise gap drift)."""
     from benchmarks.summarize_results import _model_parity_note
 
     d = tmp_path / "m5-32gb-x"
@@ -795,14 +796,15 @@ def test_parity_note_names_stage_and_drift(tmp_path):
                 "max_abs_drift_nats": 0.01,
                 "max_raw_row_drift_nats": 0.2,
                 "atol": 0.05,
-                "raw_atol": 0.05,
+                "max_gap_drift_nats": 0.2,
+                "max_margin_drift_nats": 0.01,
                 "winners_identical": True,
             }
         ),
         encoding="utf-8",
     )
     note = _model_parity_note(d)
-    assert "raw pre-rescore row-logit drift" in note
+    assert "batched pairwise gap drift" in note
     assert "max_raw_row_drift_nats=0.2" in note
     assert "max_abs_drift_nats=0.01" in note
 
@@ -813,7 +815,8 @@ def test_parity_note_names_stage_and_drift(tmp_path):
                 "passed": False,
                 "winners_identical": False,
                 "atol": 0.05,
-                "raw_atol": 0.2,
+                "max_gap_drift_nats": 0.01,
+                "max_margin_drift_nats": 0.01,
                 "max_abs_drift_nats": 0.3,
             }
         ),
@@ -824,6 +827,6 @@ def test_parity_note_names_stage_and_drift(tmp_path):
 
     # Passing parity: no note.
     (d / "parity.json").write_text(
-        json.dumps({"passed": True, "atol": 0.05, "raw_atol": 0.2}), encoding="utf-8"
+        json.dumps({"passed": True, "atol": 0.05, "max_gap_drift_nats": 0.01}), encoding="utf-8"
     )
     assert _model_parity_note(d) is None

@@ -89,14 +89,18 @@ than 5 MB total are gzipped automatically (the folder README says so).
       AND the batched matrix (W5-D findings 40/42: batched-vs-independent
       finals plus the raw pre-rescore row-logit gate). A model cannot
       enter the README leaderboard without it; `check_results` rejects a
-      payload without `max_raw_row_drift_nats` as pre-v2. The gate covers
-      winners, the single-context drift (atol) and the batched raw row
-      drift (raw_atol — the raw gate is a batch-shape stress with its own
-      documented band, not the single-context atol). Schema:
-      `{"model": "...", "test": "test_w1a_...", "passed": true,
-      "max_abs_drift_nats": 0.027, "max_raw_row_drift_nats": 0.125,
+      payload without `max_raw_row_drift_nats` / `max_gap_drift_nats` as
+      pre-v2. The gate is FAIL-CLOSED at the fixed atol (review: no
+      widening): winners identical, single-context drift, batched pairwise
+      GAP drift and top-two margin drift — all under atol. Raw-logit drift
+      is a DIAGNOSTIC only (raw logits carry an arbitrary additive
+      offset). Schema:
+      `{"model": "...", "test": "test_w1a_...", "passed": false,
+      "max_abs_drift_nats": 0.044, "max_raw_row_drift_nats": 0.125,
+      "max_gap_drift_nats": 0.070, "max_margin_drift_nats": 0.063,
       "max_batched_drift_nats": 0.05, "winners_identical": true,
-      "atol": 0.05, "raw_atol": 0.2, "run_at": "..."}`
+      "atol": 0.05, "rescore_gate": {...}, "environment": {...},
+      "run_at": "..."}`
 - [ ] `SUMMARY.md` pasted into the PR description
 - [ ] Machine specs (chip, RAM, macOS) mentioned in the PR body
 - [ ] No hand-edited numbers — recompute instead of fixing up
