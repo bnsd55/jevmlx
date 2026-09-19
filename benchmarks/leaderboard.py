@@ -82,6 +82,38 @@ def _fmt_pct(value) -> str:
     return str(value)
 
 
+def _agreement_ci(accuracy, n) -> dict | None:
+    """W6-B6b/F1: Wilson CI on the agreement accuracy.
+
+    ``accuracy`` is a 0..1 ratio; ``n`` is the case count. Returns the Wilson
+    interval dict, or None when n is too small (the leaderboard prints
+    'n too small' instead of a bare percentage).
+    """
+    from jevmlx.evalmetrics import wilson_interval
+
+    if accuracy is None or n is None or n <= 0:
+        return None
+    k = round(accuracy * n)
+    return wilson_interval(k, n)
+
+
+def _fmt_pct_with_ci(value, ci) -> str:
+    """A percentage with its Wilson interval, or 'n too small'.
+
+    F1: every accuracy on the leaderboard shows the interval next to the
+    point estimate. No CI = 'n too small', not an unqualified number.
+    Official cited rows (no CI key at all) show the bare percentage.
+    """
+    pct = _fmt_pct(value)
+    if isinstance(ci, dict) and ci.get("ci_low") is not None and ci.get("ci_high") is not None:
+        return f"{pct} [{ci['ci_low'] * 100:.1f}%, {ci['ci_high'] * 100:.1f}%]"
+    if ci is None:
+        # No CI key at all (official cited data) — bare percentage.
+        return pct
+    # CI key is present but None (bootstrap ran, too few cases).
+    return f"{pct} (n too small)"
+
+
 def _fmt_seconds(value) -> str:
     if value is None:
         return "—"
@@ -249,6 +281,10 @@ def _local_rows(results_root: Path) -> list[dict]:
                     "scorer": scorer,
                     "machine": machine,
                     "accuracy": agreement,
+                    # W6-B6b/F1: Wilson CI on the agreement accuracy.
+                    "accuracy_ci": _agreement_ci(
+                        agreement, n_cases if n_cases is not None else n_fields
+                    ),
                     "by_workflow": {
                         "customer_service": by_workflow.get("customer_service"),
                         "agent_trace_observability": by_workflow.get("agent_trace_observability"),
@@ -307,7 +343,7 @@ def _row_line(r: dict) -> str:
     cost_cell = cost if isinstance(cost, str) else _fmt_cost(cost)
     return (
         f"| {r['model']} | {r['source']} | {r.get('scorer', '—')} | "
-        f"{r.get('machine', '—')} | {_fmt_pct(r.get('accuracy'))} | "
+        f"{r.get('machine', '—')} | {_fmt_pct_with_ci(r.get('accuracy'), r.get('accuracy_ci'))} | "
         f"{' | '.join(wf_cells)} | "
         f"{_fmt_seconds(r.get('time_per_case_s'))} | "
         f"{cost_cell} | "

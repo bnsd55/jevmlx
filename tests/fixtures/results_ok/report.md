@@ -19,26 +19,21 @@
 
 | metric | value |
 | --- | --- |
-| accuracy | 0.5000 |
+| accuracy | 0.5000 [0.0000, 1.0000] (case_cluster_bootstrap) |
 | case_exact_match | 0.5000 |
-| brier | 0.7736 |
-| log_loss | 1.0894 |
+| brier | 0.7736 [0.0339, 1.5134] (case_cluster_bootstrap) |
+| log_loss | 1.0894 [0.1394, 2.0394] (case_cluster_bootstrap) |
 | correctness_auroc | 1.0000 |
 | ece_5bin_equal_mass | 0.3000 |
 | tie_rate | 0.0000 |
-| accuracy_cluster_bootstrap[accuracy] | 0.5000 |
-| accuracy_cluster_bootstrap[ci_high] | 1.0000 |
-| accuracy_cluster_bootstrap[ci_low] | 0.0000 |
-| accuracy_cluster_bootstrap[draws] | 1000 |
-| accuracy_cluster_bootstrap[n_cases] | 2 |
-| accuracy_cluster_bootstrap[n_fields] | 2 |
-| accuracy_cluster_bootstrap[seed] | 0 |
 | balanced_accuracy[risk] | 0.5000 |
 | exact_record_accuracy | 0.5000 |
 | macro_f1[risk] | 0.3333 |
 | majority_class_baseline[risk] | 0.5000 |
+| valid_accuracy | 0.5000 |
 
 ## Per-field accuracy
 
 | field | n | accuracy |
 | --- | --- | --- |
+| risk | 2 | 0.5000 [0.0945, 0.9055] (wilson) |

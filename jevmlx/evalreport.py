@@ -110,11 +110,17 @@ def _metric_rows(run: dict) -> list[tuple]:
     Scalar metrics become one row; dicts of scalars become ``name[key]`` rows
     (e.g. majority_class_baseline per field); list-valued or nested metrics
     (risk_coverage curve) stay JSON-only to keep the table readable.
+
+    W6-B6b: when a ``<metric>_ci`` key exists alongside the point estimate,
+    the row shows ``point [ci_low, ci_high] (method)`` instead of the bare
+    number. No CI => the row shows the bare number (the JSON carries the
+    interval; the table is a summary).
     """
     metrics = run.get("metrics") or {}
     rows: list[tuple] = []
+    # W6-B6b: accuracy row carries its CI when present.
     if "accuracy" in metrics:
-        rows.append(("accuracy", metrics["accuracy"]))
+        rows.append(("accuracy", _with_ci("accuracy", metrics)))
     for type_name in sorted(run.get("per_type") or {}):
         entry = run["per_type"][type_name]
         accuracy = entry.get("accuracy") if isinstance(entry, dict) else entry
@@ -130,8 +136,12 @@ def _metric_rows(run: dict) -> list[tuple]:
     )
     for key in ordered:
         if key in metrics:
-            rows.append((key, metrics[key]))
+            rows.append((key, _with_ci(key, metrics)))
     handled = set(ordered) | {"accuracy", "risk_coverage"}
+    # W6-B6b: the _ci keys are rendered alongside their point estimate,
+    # not as standalone rows; per_field_accuracy has its own table.
+    handled |= {k for k in metrics if k.endswith("_ci")}
+    handled |= {"valid_accuracy", "per_field_accuracy"}
     for key in sorted(set(metrics) - handled):
         value = metrics[key]
         if isinstance(value, dict):
@@ -140,10 +150,36 @@ def _metric_rows(run: dict) -> list[tuple]:
                     rows.append((f"{key}[{sub_key}]", sub_value))
         elif isinstance(value, (int, float)):
             rows.append((key, value))
+    # valid_accuracy appears after the ordered metrics.
+    if "valid_accuracy" in metrics:
+        rows.append(("valid_accuracy", metrics["valid_accuracy"]))
     for key in ("latency_ms_p50", "latency_ms_p90"):
         if key in metrics:
             rows.append((key, metrics[key]))
     return rows
+
+
+def _with_ci(metric_key: str, metrics: dict) -> str:
+    """Format a metric value with its CI: '0.850 [0.720, 0.930] (bootstrap)'.
+
+    F6: when the metric exists but its CI is None (too few cases for a
+    bootstrap), returns 'n too small' — not a bare number that looks
+    precise without an interval.
+    """
+    value = metrics.get(metric_key)
+    ci = metrics.get(f"{metric_key}_ci")
+    if isinstance(ci, dict):
+        if value is None or ci.get("ci_low") is None or ci.get("ci_high") is None:
+            return "n too small"
+        method = ci.get("method", "ci")
+        return f"{value:.4f} [{ci['ci_low']:.4f}, {ci['ci_high']:.4f}] ({method})"
+    # F6: the CI key is absent. If the metric itself is absent, return None
+    # (the row won't render). If the metric is present but has no CI key at
+    # all (old data), return the bare value. If the CI key is explicitly
+    # None, the bootstrap ran but returned None (too few cases) -> 'n too small'.
+    if f"{metric_key}_ci" in metrics and metrics[f"{metric_key}_ci"] is None:
+        return "n too small"
+    return value
 
 
 def _agreement_table(run: dict) -> list[tuple]:
@@ -192,7 +228,7 @@ def _to_markdown(run: dict) -> str:
     }
     environment_info = {**environment_info, **provenance}
     per_field = sorted(
-        run.get("per_field") or [],
+        (run.get("per_field") or (run.get("metrics") or {}).get("per_field_accuracy") or []),
         key=lambda row: (_accuracy(row.get("accuracy")), str(row.get("field", ""))),
     )
     parts = [
@@ -223,11 +259,28 @@ def _to_markdown(run: dict) -> str:
         "",
         _table(
             ["field", "n", "accuracy"],
-            [(row.get("field"), row.get("n"), row.get("accuracy")) for row in per_field],
+            [(row.get("field"), row.get("n"), _per_field_accuracy_cell(row)) for row in per_field],
         ),
         "",
     ]
     return "\n".join(parts)
+
+
+def _per_field_accuracy_cell(row: dict) -> object:
+    """Per-field accuracy with its Wilson interval, or 'n too small'.
+
+    W6-B6b: per-field rows carry a ``ci`` dict (Wilson) when the field has
+    enough labelled cases; otherwise the cell says 'n too small' rather than
+    an unqualified number.
+    """
+    ci = row.get("ci")
+    accuracy = row.get("accuracy")
+    if not isinstance(ci, dict):
+        return accuracy
+    if accuracy is None or ci.get("ci_low") is None or ci.get("ci_high") is None:
+        return "n too small"
+    method = ci.get("method", "ci")
+    return f"{accuracy:.4f} [{ci['ci_low']:.4f}, {ci['ci_high']:.4f}] ({method})"
 
 
 def write_report(path: str | Path, run: dict) -> None:

@@ -199,3 +199,54 @@ batch-vs-chunked parity tests use the same tolerance but only on the two
 `fintech_fraud` / `support_triage` presets (smaller drift), so they stay on
 all models; if a parity model ever drifts past `PARITY_ATOL` there, raise
 the constant in `jevmlx/engine.py` (it is shared by the engine's tie flag).
+
+## Statistics (W6-B6b)
+
+Every accuracy number in `report.json` and the markdown summary carries a
+confidence interval. No interval = the row says "n too small" rather than
+an unqualified number.
+
+### Wilson interval (single Bernoulli per independent case)
+
+`wilson_interval(k, n, z=1.96)` — used ONLY for per-field accuracy where
+each case is an independent Bernoulli trial. No continuity correction.
+Not sufficient for correlated fields, balanced sampling, or macro-averaged
+ tasks. Canonical lines only — permutation/rotation rows are excluded so n
+is not inflated ~3x.
+
+### Case-cluster bootstrap (the default CI)
+
+`cluster_bootstrap_ci(records, metric_fn, draws=2000, seed=0)` — resamples
+whole cases (all their fields move together) B=2000 times with a fixed
+seed. This is the DEFAULT CI for aggregate accuracy, macro-F1, NLL, Brier,
+and ECE everywhere fields are correlated within a case or sampling is
+balanced. The seed is fixed for reproducibility — same seed → identical CI.
+
+### Paired comparison (McNemar + paired bootstrap)
+
+`paired_bootstrap_difference(records_a, records_b, draws=2000, seed=0)` —
+for two conditions on the SAME cases (perturbation tracks, A/B branches).
+Returns the accuracy difference CI plus the exact McNemar test
+(`mcnemar_exact(b, c)`) on the correct→wrong vs wrong→correct discordance
+counts. The exact two-sided p-value is the binomial tail under H₀: Binom(b+c, 0.5);
+no continuity correction. The McNemar discordance is per case; the paired
+bootstrap difference is per line (the two are aligned by case_id but the
+units differ — documented here, not reconciled).
+
+### Valid-only accuracy
+
+`valid_accuracy` — excludes invalid predictions from the denominator
+(denominator = labelled AND valid lines), alongside `field_accuracy`
+(failure-inclusive: invalid counts as wrong, denominator = all labelled).
+The gap between the two is the invalid-prediction rate — if they're equal,
+every prediction was valid.
+
+### Report contract
+
+Results contract v2 (additive keys): `accuracy_ci`, `log_loss_ci`,
+`brier_ci`, `ece_ci`, `macro_f1_ci` are additive — they ride alongside the
+point estimates. `per_field_accuracy` carries a `ci` (Wilson) per field.
+`valid_accuracy` is the valid-only companion to `field_accuracy`.
+`check_results` enforces `REQUIRED_CI_KEYS` (accuracy_ci, valid_accuracy,
+per_field_accuracy). The leaderboard prints the interval next to every
+point or 'n too small'.

@@ -11,6 +11,7 @@ import json
 import math
 import random
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from pathlib import Path
 
 __all__ = [
@@ -26,6 +27,11 @@ __all__ = [
     "child_accuracy_given_parent_correct",
     "oracle_parent_gap",
     "order_flip_rate",
+    "wilson_interval",
+    "cluster_bootstrap_ci",
+    "mcnemar_exact",
+    "paired_bootstrap_difference",
+    "valid_accuracy",
 ]
 
 
@@ -600,42 +606,209 @@ def risk_coverage_curve(records: list[dict], points: int = 10) -> list[dict]:
 # ------------------------------------------------------------------ bootstrap
 
 
-def accuracy_cluster_bootstrap(
+# ------------------------------------------------------------- W6-B6b stats
+
+
+def wilson_interval(k: int, n: int, z: float = 1.96) -> dict | None:
+    """Wilson score interval for a single Bernoulli proportion.
+
+    Used ONLY where cases are independent and unstratified — one Bernoulli
+    decision per case. For correlated fields, balanced sampling, macro-
+    averaged tasks, or paired comparisons, use ``cluster_bootstrap_ci`` or
+    ``mcnemar_exact`` instead (B6 statistics: Wilson is fine for a single
+    Bernoulli per independent case, not sufficient otherwise).
+
+    Returns None when ``n`` is 0 (no interval, not a vacuous [0,0]).
+    """
+    if n <= 0:
+        return None
+    p = k / n
+    denom = 1 + z * z / n
+    center = (p + z * z / (2 * n)) / denom
+    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denom
+    return {
+        "point": p,
+        "ci_low": max(0.0, center - half),
+        "ci_high": min(1.0, center + half),
+        "method": "wilson",
+        "n": n,
+        "k": k,
+        "z": z,
+    }
+
+
+_MIN_BOOTSTRAP_CASES = 2
+
+
+def cluster_bootstrap_ci(
     records: list[dict],
-    draws: int = 1000,
+    metric_fn: Callable[[list[dict]], float | None],
+    *,
+    draws: int = 2000,
     seed: int = 0,
     confidence: float = 0.95,
+    metric_name: str = "metric",
 ) -> dict | None:
-    """Case-level cluster bootstrap CI for field accuracy.
+    """Case-cluster bootstrap CI for ANY aggregate metric.
 
-    Resamples whole cases (all their fields move together) ``draws`` times and
-    returns point estimate plus the central percentile interval.
+    Resamples whole cases (all their fields move together) ``draws`` times
+    and returns the point estimate plus the central percentile interval.
+    This is the DEFAULT CI everywhere fields are correlated within a case or
+    sampling is balanced — accuracy, macro-F1, NLL, Brier, ECE all use this.
+
+    Returns None when there are too few cases (< 2) or the metric is None on
+    the full set. A metric that is None on some resamples is skipped (the
+    interval reflects the cases where it is defined).
     """
     by_case: dict[str, list[dict]] = defaultdict(list)
-    for record in _labelled(records):
-        by_case[record["case_id"]].append(record)
+    for record in records:
+        by_case[record.get("case_id", "")].append(record)
     case_ids = sorted(by_case)
-    if not case_ids:
+    if len(case_ids) < _MIN_BOOTSTRAP_CASES:
         return None
-    point = field_accuracy(records)
+    point = metric_fn(records)
+    if point is None:
+        return None
     rng = random.Random(seed)
-    stats = []
+    stats: list[float] = []
     for _ in range(draws):
         sample = [r for case in rng.choices(case_ids, k=len(case_ids)) for r in by_case[case]]
-        stats.append(field_accuracy(sample))
+        value = metric_fn(sample)
+        if value is not None and math.isfinite(value):
+            stats.append(value)
+    if len(stats) < _MIN_BOOTSTRAP_CASES:
+        return None
     stats.sort()
     alpha = (1.0 - confidence) / 2
-    lower_index = math.floor(alpha * (draws - 1))
-    upper_index = math.ceil((1 - alpha) * (draws - 1))
+    lower_index = math.floor(alpha * (len(stats) - 1))
+    upper_index = math.ceil((1 - alpha) * (len(stats) - 1))
     return {
-        "accuracy": point,
+        metric_name: point,
         "ci_low": stats[lower_index],
         "ci_high": stats[upper_index],
+        "method": "case_cluster_bootstrap",
         "n_cases": len(case_ids),
-        "n_fields": sum(len(v) for v in by_case.values()),
         "draws": draws,
         "seed": seed,
     }
+
+
+def mcnemar_exact(b: int, c: int) -> dict:
+    """Exact McNemar test (binomial) on a 2x2 discordance table.
+
+    ``b`` = correct->wrong (condition A right, B wrong); ``c`` = wrong->correct
+    (A wrong, B right). The exact two-sided p-value is the binomial tail:
+    under the null, b and c are binomial(b+c, 0.5); the two-sided p is
+    2 * P(X <= min(b,c)) (capped at 1.0).
+
+    Used for paired comparisons of two conditions on the SAME cases
+    (perturbation tracks, A/B branches) — correct->wrong vs wrong->correct.
+    """
+    n = b + c
+    if n == 0:
+        return {"statistic": 0.0, "p_value": 1.0, "b": b, "c": c, "n": n, "method": "mcnemar_exact"}
+    # Exact two-sided binomial test: P(X <= min(b,c)) under Binom(n, 0.5),
+    # doubled. Use math.comb for the exact PMF.
+    from math import comb
+
+    smaller = min(b, c)
+    tail = sum(comb(n, i) for i in range(smaller + 1)) / (2**n)
+    p_value = min(1.0, 2 * tail)
+    return {
+        "statistic": abs(b - c),
+        "p_value": p_value,
+        "b": b,
+        "c": c,
+        "n": n,
+        "method": "mcnemar_exact",
+    }
+
+
+def paired_bootstrap_difference(
+    records_a: list[dict],
+    records_b: list[dict],
+    *,
+    draws: int = 2000,
+    seed: int = 0,
+    confidence: float = 0.95,
+) -> dict | None:
+    """Paired bootstrap CI of the accuracy difference (A - B).
+
+    ``records_a`` and ``records_b`` are two conditions on the SAME cases
+    (paired by case_id). Resamples whole cases ``draws`` times and computes
+    the accuracy difference in each resample. Returns the point estimate
+    (accuracy_a - accuracy_b), the percentile CI, and the exact McNemar
+    test on the discordance counts.
+    """
+    by_case_a: dict[str, list[dict]] = defaultdict(list)
+    for r in _labelled(records_a):
+        by_case_a[r["case_id"]].append(r)
+    by_case_b: dict[str, list[dict]] = defaultdict(list)
+    for r in _labelled(records_b):
+        by_case_b[r["case_id"]].append(r)
+    paired_ids = sorted(set(by_case_a) & set(by_case_b))
+    if len(paired_ids) < _MIN_BOOTSTRAP_CASES:
+        return None
+    acc_a = field_accuracy(records_a)
+    acc_b = field_accuracy(records_b)
+    if acc_a is None or acc_b is None:
+        return None
+    # Discordance counts for McNemar: per case, did A and B agree?
+    b_disc = 0  # A right, B wrong
+    c_disc = 0  # A wrong, B right
+    for cid in paired_ids:
+        a_correct = all(_valid_correct(r) for r in by_case_a[cid])
+        b_correct = all(_valid_correct(r) for r in by_case_b[cid])
+        if a_correct and not b_correct:
+            b_disc += 1
+        elif b_correct and not a_correct:
+            c_disc += 1
+    mcnemar = mcnemar_exact(b_disc, c_disc)
+    rng = random.Random(seed)
+    diffs: list[float] = []
+    for _ in range(draws):
+        sample = rng.choices(paired_ids, k=len(paired_ids))
+        recs_a = [r for cid in sample for r in by_case_a[cid]]
+        recs_b = [r for cid in sample for r in by_case_b[cid]]
+        va = field_accuracy(recs_a)
+        vb = field_accuracy(recs_b)
+        if va is not None and vb is not None:
+            diffs.append(va - vb)
+    if len(diffs) < _MIN_BOOTSTRAP_CASES:
+        return None
+    diffs.sort()
+    alpha = (1.0 - confidence) / 2
+    lower_index = math.floor(alpha * (len(diffs) - 1))
+    upper_index = math.ceil((1 - alpha) * (len(diffs) - 1))
+    return {
+        "difference": acc_a - acc_b,
+        "accuracy_a": acc_a,
+        "accuracy_b": acc_b,
+        "ci_low": diffs[lower_index],
+        "ci_high": diffs[upper_index],
+        "method": "paired_bootstrap",
+        "mcnemar": mcnemar,
+        "n_cases": len(paired_ids),
+        "draws": draws,
+        "seed": seed,
+    }
+
+
+def valid_accuracy(records: list[dict]) -> float | None:
+    """Valid-only accuracy: correct / (labelled AND valid lines).
+
+    Alongside ``field_accuracy`` (failure-inclusive: invalid predictions
+    count as wrong, denominator = all labelled lines), this EXCLUDES invalid
+    lines from the denominator entirely. The gap between the two is the
+    invalid-prediction rate — if they're equal, every prediction was valid.
+    This is NOT a duplicate of field_accuracy: field_accuracy counts invalid
+    as wrong (denominator = all labelled); valid_accuracy excludes them
+    (denominator = labelled AND valid).
+    """
+    valid_labelled = [r for r in _labelled(records) if r.get("valid", True)]
+    if not valid_labelled:
+        return None
+    return sum(1 for r in valid_labelled if _valid_correct(r)) / len(valid_labelled)
 
 
 # ------------------------------------------------------------------- assembly
@@ -1004,6 +1177,33 @@ def compute_metrics(records: list[dict], schema=None) -> dict:
     accuracy = field_accuracy(records)
     if accuracy is not None:
         metrics["accuracy"] = accuracy
+    # W6-B6b: per-field accuracy with Wilson intervals (independent-case
+    # Bernoulli per field). F4: filter to CANONICAL lines only — permutation
+    # rows (choice rotations) would inflate n by ~3x and narrow the interval
+    # ~1.7x. The report's per-field table shows the interval or 'n too small'.
+    by_field: dict[str, list[dict]] = defaultdict(list)
+    for record in _labelled(records):
+        if record.get("permutation") not in (None, "canonical"):
+            continue  # rotation/fieldperm rows are order probes, not independent trials
+        by_field[record.get("field", "")].append(record)
+    per_field_ci: list[dict] = []
+    for field in sorted(by_field):
+        field_records = by_field[field]
+        n = len(field_records)
+        k = sum(1 for r in field_records if _valid_correct(r))
+        ci = wilson_interval(k, n)
+        entry = {"field": field, "n": n, "accuracy": k / n if n else None}
+        if ci:
+            entry["ci"] = ci
+        per_field_ci.append(entry)
+    if per_field_ci:
+        metrics["per_field_accuracy"] = per_field_ci
+    # W6-B6b: valid-only accuracy (denominator = labelled AND valid lines;
+    # invalid predictions excluded). The gap to field_accuracy (failure-
+    # inclusive: invalid counts as wrong) is the invalid-prediction rate.
+    va = valid_accuracy(records)
+    if va is not None:
+        metrics["valid_accuracy"] = va
     exact = case_exact_match(records)
     if exact is not None:
         metrics["case_exact_match"] = exact
@@ -1037,15 +1237,39 @@ def compute_metrics(records: list[dict], schema=None) -> dict:
     tvds = mean_tvd_across_permutations(records)
     if tvds:
         metrics["mean_tvd"] = tvds
-    bootstrap = accuracy_cluster_bootstrap(records)
-    if bootstrap:
-        metrics["accuracy_cluster_bootstrap"] = bootstrap
+    # W6-B6b: case-cluster bootstrap CIs (B=2000, seed fixed, resample
+    # cases not lines) on accuracy, macro-F1, NLL, Brier, ECE. This is the
+    # DEFAULT CI everywhere fields are correlated within a case or sampling
+    # is balanced. The old accuracy_cluster_bootstrap (1000 draws) is
+    # replaced by the generalized cluster_bootstrap_ci.
+    acc_ci = cluster_bootstrap_ci(records, field_accuracy, metric_name="accuracy")
+    if acc_ci:
+        metrics["accuracy_ci"] = acc_ci
+    nll_ci = cluster_bootstrap_ci(records, log_loss, metric_name="log_loss")
+    if nll_ci:
+        metrics["log_loss_ci"] = nll_ci
+    brier_ci = cluster_bootstrap_ci(records, brier_score, metric_name="brier")
+    if brier_ci:
+        metrics["brier_ci"] = brier_ci
+    ece_ci = cluster_bootstrap_ci(records, lambda rs: ece_equal_mass(rs, bins=5), metric_name="ece")
+    if ece_ci:
+        metrics["ece_ci"] = ece_ci
     balanced = balanced_accuracy(records)
     if any(value is not None for value in balanced.values()):
         metrics["balanced_accuracy"] = balanced
     f1 = macro_f1(records)
     if any(value is not None for value in f1.values()):
         metrics["macro_f1"] = f1
+        # macro-F1 is a dict (per field); bootstrap the macro mean.
+        macro_f1_mean = _mean([v for v in f1.values() if v is not None])
+        if macro_f1_mean is not None:
+            f1_ci = cluster_bootstrap_ci(
+                records,
+                lambda rs: _mean([v for v in macro_f1(rs).values() if v is not None]),
+                metric_name="macro_f1",
+            )
+            if f1_ci:
+                metrics["macro_f1_ci"] = f1_ci
     flips = perturbation_flip_rate(records)
     if flips is not None:
         metrics["perturbation_flip_rate"] = flips

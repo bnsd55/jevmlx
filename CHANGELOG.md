@@ -60,6 +60,24 @@
   ("failure is a result" policy). `run_eval` now writes predictions
   per-case (under the lock) instead of all-at-once at the end.
 
+- W6-B6b: eval statistics (bootstrap CI, McNemar, Wilson). Every accuracy
+  number in report.json/summary gets ci_low/ci_high/method. Wilson interval
+  (no continuity correction) for single-Bernoulli-per-independent-case
+  per-field accuracy (canonical lines only — permutation/rotation rows are
+  excluded so n is not inflated ~3x); case-cluster bootstrap (B=2000, seed
+  fixed, resample cases not lines) as the DEFAULT CI for aggregate accuracy,
+  macro-F1, NLL, Brier, ECE; exact McNemar test (two-sided binomial, no
+  continuity correction; discordance is per case) + paired bootstrap CI
+  (difference is per line) for two conditions on the same cases.
+  `valid_accuracy` (denominator = labelled AND valid lines; invalid
+  predictions excluded) alongside `field_accuracy` (failure-inclusive:
+  invalid counts as wrong). The old `accuracy_cluster_bootstrap` (1000
+  draws) is deleted; replaced by `accuracy_ci` (B=2000). No interval = 'n
+  too small', not an unqualified number. Results contract v2: additive keys
+  only (accuracy_ci, log_loss_ci, brier_ci, ece_ci, macro_f1_ci,
+  per_field_accuracy with Wilson ci, valid_accuracy). check_results enforces
+  the CI keys (REQUIRED_CI_KEYS). Leaderboard prints the interval next to
+  every point or 'n too small'.
 - **W6-B5 (public gold datasets, pre-M5)** — three public datasets join the
   bench: AG News (4-class enum), BoolQ (boolean noul), SST-5 (ordinal 0-4
   enum, the B1 ordered-enum derivation — no new engine field type). Pinned
