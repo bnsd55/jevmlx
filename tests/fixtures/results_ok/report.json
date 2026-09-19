@@ -13,30 +13,82 @@
   },
   "metrics": {
     "accuracy": 0.5,
-    "accuracy_cluster_bootstrap": {
+    "accuracy_ci": {
       "accuracy": 0.5,
       "ci_high": 1.0,
       "ci_low": 0.0,
-      "draws": 1000,
+      "draws": 2000,
+      "method": "case_cluster_bootstrap",
       "n_cases": 2,
-      "n_fields": 2,
       "seed": 0
     },
     "balanced_accuracy": {
       "risk": 0.5
     },
     "brier": 0.773639481476138,
+    "brier_ci": {
+      "brier": 0.773639481476138,
+      "ci_high": 1.5134225327501423,
+      "ci_low": 0.03385643020213375,
+      "draws": 2000,
+      "method": "case_cluster_bootstrap",
+      "n_cases": 2,
+      "seed": 0
+    },
     "case_exact_match": 0.5,
     "correctness_auroc": 1.0,
     "ece_5bin_equal_mass": 0.30000000000000004,
+    "ece_ci": {
+      "ci_high": 0.30000000000000004,
+      "ci_low": 0.3,
+      "draws": 2000,
+      "ece": 0.30000000000000004,
+      "method": "case_cluster_bootstrap",
+      "n_cases": 2,
+      "seed": 0
+    },
     "exact_record_accuracy": 0.5,
     "log_loss": 1.0893867582829604,
+    "log_loss_ci": {
+      "ci_high": 2.0393867582829603,
+      "ci_low": 0.13938675828296063,
+      "draws": 2000,
+      "log_loss": 1.0893867582829604,
+      "method": "case_cluster_bootstrap",
+      "n_cases": 2,
+      "seed": 0
+    },
     "macro_f1": {
       "risk": 0.3333333333333333
+    },
+    "macro_f1_ci": {
+      "ci_high": 1.0,
+      "ci_low": 0.0,
+      "draws": 2000,
+      "macro_f1": 0.3333333333333333,
+      "method": "case_cluster_bootstrap",
+      "n_cases": 2,
+      "seed": 0
     },
     "majority_class_baseline": {
       "risk": 0.5
     },
+    "per_field_accuracy": [
+      {
+        "accuracy": 0.5,
+        "ci": {
+          "ci_high": 0.9054713451991339,
+          "ci_low": 0.09452865480086614,
+          "k": 1,
+          "method": "wilson",
+          "n": 2,
+          "point": 0.5,
+          "z": 1.96
+        },
+        "field": "risk",
+        "n": 2
+      }
+    ],
     "risk_coverage": [
       {
         "coverage": 0.1,
@@ -89,6 +141,7 @@
         "risk": 0.5
       }
     ],
-    "tie_rate": 0.0
+    "tie_rate": 0.0,
+    "valid_accuracy": 0.5
   }
 }

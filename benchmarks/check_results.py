@@ -92,6 +92,16 @@ TOKEN_ACCOUNTING_KEYS = (
     "retry_wasted_ms",
 )
 
+# W6-B6b/F2: results contract v2 — every report.json metrics dict must carry
+# these CI keys (additive; they ride alongside the point estimates). The
+# _metrics_match key-set check catches a missing key, but this explicit
+# list documents the contract and produces a clear error message.
+REQUIRED_CI_KEYS = (
+    "accuracy_ci",
+    "valid_accuracy",
+    "per_field_accuracy",
+)
+
 
 def _read_predictions_lines(path: Path) -> list[dict]:
     """Load predictions.jsonl, transparently handling a gzipped file."""
@@ -292,6 +302,13 @@ def check_folder(folder: Path) -> tuple[bool, list[str]]:
         committed_metrics = committed_report.get("metrics", {})
         if not _metrics_match(recomputed, committed_metrics, name, problems):
             pass  # problems already appended by _metrics_match
+        # W6-B6b/F2: results contract v2 — the CI keys must be present.
+        for key in REQUIRED_CI_KEYS:
+            if key not in committed_metrics:
+                problems.append(
+                    f"{name}: report.json metrics missing key {key!r} "
+                    "(results contract v2: CI keys required)"
+                )
 
     return len(problems) == 0, problems
 

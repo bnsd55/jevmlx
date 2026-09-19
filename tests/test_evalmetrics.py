@@ -5,11 +5,11 @@ import math
 import pytest
 
 from jevmlx.evalmetrics import (
-    accuracy_cluster_bootstrap,
     any_flip_rate,
     balanced_accuracy,
     brier_score,
     case_exact_match,
+    cluster_bootstrap_ci,
     compute_metrics,
     correctness_auroc,
     ece_equal_mass,
@@ -337,13 +337,12 @@ class TestRiskCoverage:
 
 class TestBootstrap:
     def test_cluster_bootstrap_moves_whole_cases(self):
-        result = accuracy_cluster_bootstrap(P, draws=200, seed=7)
+        result = cluster_bootstrap_ci(P, field_accuracy, metric_name="accuracy", draws=200, seed=7)
         assert result["n_cases"] == 4
-        assert result["n_fields"] == 6
         assert result["accuracy"] == 0.5
         assert 0.0 <= result["ci_low"] <= result["accuracy"] <= result["ci_high"] <= 1.0
         # deterministic given the seed
-        again = accuracy_cluster_bootstrap(P, draws=200, seed=7)
+        again = cluster_bootstrap_ci(P, field_accuracy, metric_name="accuracy", draws=200, seed=7)
         assert (again["ci_low"], again["ci_high"]) == (result["ci_low"], result["ci_high"])
 
 
@@ -361,7 +360,11 @@ class TestAssembly:
             "ece_5bin_equal_mass",
             "tie_rate",
             "risk_coverage",
-            "accuracy_cluster_bootstrap",
+            # W6-B6b: the old accuracy_cluster_bootstrap (1000 draws) is
+            # replaced by accuracy_ci (case-cluster bootstrap, B=2000).
+            "accuracy_ci",
+            "valid_accuracy",
+            "per_field_accuracy",
         }
         assert expected_keys <= set(metrics)
 
@@ -723,3 +726,218 @@ class TestTypesafeReportTable:
 
         md = evalreport._to_markdown({"environment": {}, "config": {}, "metrics": {}})
         assert "Agreement" not in md
+
+
+# ---------------------------------------------------------------------------
+# W6-B6b: statistics (Wilson, cluster bootstrap, McNemar, paired)
+# ---------------------------------------------------------------------------
+
+
+class TestWilsonInterval:
+    def test_known_small_case(self):
+        """Hand-computed Wilson for k=7, n=10, z=1.96."""
+        from jevmlx.evalmetrics import wilson_interval
+
+        ci = wilson_interval(7, 10, z=1.96)
+        assert ci is not None
+        assert ci["point"] == 0.7
+        # Wilson center = (p + z^2/2n) / (1 + z^2/n)
+        # = (0.7 + 3.8416/20) / (1 + 3.8416/10)
+        # = (0.7 + 0.19208) / 1.38416 = 0.6443
+        # Half-width: z * sqrt(p(1-p)/n + z^2/4n^2) / denom
+        # = 1.96 * sqrt(0.21/10 + 3.8416/400) / 1.38416
+        # = 1.96 * sqrt(0.021 + 0.009604) / 1.38416
+        # = 1.96 * 0.17493 / 1.38416 = 0.2476
+        # ci_low ~ 0.397, ci_high ~ 0.892
+        assert abs(ci["ci_low"] - 0.3967) < 0.01
+        assert abs(ci["ci_high"] - 0.8920) < 0.01
+        assert ci["method"] == "wilson"
+
+    def test_n_zero_returns_none(self):
+        from jevmlx.evalmetrics import wilson_interval
+
+        assert wilson_interval(0, 0) is None
+
+    def test_all_correct(self):
+        from jevmlx.evalmetrics import wilson_interval
+
+        ci = wilson_interval(10, 10)
+        assert ci["point"] == 1.0
+        assert ci["ci_high"] == 1.0
+        assert ci["ci_low"] < 1.0  # not a vacuous [1,1]
+
+    def test_all_wrong(self):
+        from jevmlx.evalmetrics import wilson_interval
+
+        ci = wilson_interval(0, 10)
+        assert ci["point"] == 0.0
+        assert ci["ci_low"] == 0.0
+        assert ci["ci_high"] > 0.0
+
+
+class TestClusterBootstrapCI:
+    def test_reproducible_with_seed(self):
+        """Same seed -> identical CI (the seed is fixed)."""
+        from jevmlx.evalmetrics import cluster_bootstrap_ci, field_accuracy
+
+        ci1 = cluster_bootstrap_ci(P, field_accuracy, metric_name="accuracy", draws=200, seed=42)
+        ci2 = cluster_bootstrap_ci(P, field_accuracy, metric_name="accuracy", draws=200, seed=42)
+        assert ci1 == ci2
+        assert ci1["ci_low"] <= ci1["accuracy"] <= ci1["ci_high"]
+        assert ci1["method"] == "case_cluster_bootstrap"
+        assert ci1["draws"] == 200
+        assert ci1["seed"] == 42
+
+    def test_different_seeds_may_differ(self):
+        from jevmlx.evalmetrics import cluster_bootstrap_ci, field_accuracy
+
+        ci1 = cluster_bootstrap_ci(P, field_accuracy, draws=200, seed=1)
+        ci2 = cluster_bootstrap_ci(P, field_accuracy, draws=200, seed=2)
+        # Different seeds usually produce slightly different intervals.
+        assert ci1 is not None and ci2 is not None
+        assert ci1["seed"] == 1 and ci2["seed"] == 2
+
+    def test_too_few_cases_returns_none(self):
+        from jevmlx.evalmetrics import cluster_bootstrap_ci, field_accuracy
+
+        # Single case -> not enough for a bootstrap.
+        single = [r for r in P if r["case_id"] == "c1"]
+        assert cluster_bootstrap_ci(single, field_accuracy) is None
+
+    def test_b2000_default(self):
+        """The default is B=2000 (the B6 spec)."""
+        from jevmlx.evalmetrics import cluster_bootstrap_ci, field_accuracy
+
+        ci = cluster_bootstrap_ci(P, field_accuracy)
+        assert ci["draws"] == 2000
+
+
+class TestMcNemarExact:
+    def test_textbook_2x2(self):
+        """Exact McNemar on a textbook discordance table.
+
+        b=3 (A right, B wrong), c=7 (A wrong, B right), n=10.
+        Under H0: Binom(10, 0.5). P(X<=3) = sum C(10,i)/2^10 for i=0..3
+        = (1+10+45+120)/1024 = 176/1024 = 0.1719.
+        Two-sided p = 2 * 0.1719 = 0.3438.
+        """
+        from jevmlx.evalmetrics import mcnemar_exact
+
+        result = mcnemar_exact(3, 7)
+        assert result["b"] == 3
+        assert result["c"] == 7
+        assert result["n"] == 10
+        assert result["method"] == "mcnemar_exact"
+        assert abs(result["p_value"] - 0.3438) < 0.001
+
+    def test_no_discordance_p_is_1(self):
+        from jevmlx.evalmetrics import mcnemar_exact
+
+        result = mcnemar_exact(0, 0)
+        assert result["p_value"] == 1.0
+        assert result["n"] == 0
+
+    def test_symmetric(self):
+        """b,c and c,b give the same p-value (two-sided test)."""
+        from jevmlx.evalmetrics import mcnemar_exact
+
+        assert mcnemar_exact(2, 8)["p_value"] == mcnemar_exact(8, 2)["p_value"]
+
+
+class TestPairedBootstrap:
+    def test_paired_difference_and_mcnemar(self):
+        """Two conditions on the same cases: diff CI + McNemar."""
+        from jevmlx.evalmetrics import paired_bootstrap_difference
+
+        # P has cases c1, c2. Build B as a slightly different condition.
+        records_b = [dict(r) for r in P]
+        # Flip one prediction in c2 to create discordance.
+        for r in records_b:
+            if r["case_id"] == "c2" and r["field"] == "action":
+                r["prediction"] = "DEFER" if r.get("prediction") != "DEFER" else "APPROVE"
+                r["correct"] = not r.get("correct", False)
+        result = paired_bootstrap_difference(P, records_b, draws=200, seed=0)
+        assert result is not None
+        assert "difference" in result
+        assert "ci_low" in result
+        assert "ci_high" in result
+        assert result["method"] == "paired_bootstrap"
+        assert "mcnemar" in result
+        assert result["mcnemar"]["method"] == "mcnemar_exact"
+
+
+class TestValidAccuracy:
+    def test_valid_accuracy_excludes_invalid_lines(self):
+        """valid_accuracy excludes invalid lines from the denominator;
+        field_accuracy counts them as wrong. They differ when invalid
+        predictions exist."""
+        from jevmlx.evalmetrics import field_accuracy, valid_accuracy
+
+        records = [
+            {
+                "case_id": "c1",
+                "field": "f",
+                "label": "A",
+                "prediction": "A",
+                "valid": True,
+                "correct": True,
+            },
+            {
+                "case_id": "c1",
+                "field": "g",
+                "label": "B",
+                "prediction": "X",
+                "valid": False,
+                "correct": False,
+            },
+        ]
+        # field_accuracy: 1 correct / 2 labelled = 0.5 (invalid counts wrong).
+        # valid_accuracy: 1 correct / 1 valid = 1.0 (invalid excluded).
+        assert field_accuracy(records) == 0.5
+        assert valid_accuracy(records) == 1.0
+
+    def test_valid_equals_field_when_all_valid(self):
+        """When every prediction is valid, the two metrics are equal."""
+        from jevmlx.evalmetrics import field_accuracy, valid_accuracy
+
+        records = [
+            {
+                "case_id": "c1",
+                "field": "f",
+                "label": "A",
+                "prediction": "A",
+                "valid": True,
+                "correct": True,
+            },
+            {
+                "case_id": "c1",
+                "field": "g",
+                "label": "B",
+                "prediction": "B",
+                "valid": True,
+                "correct": True,
+            },
+        ]
+        assert field_accuracy(records) == valid_accuracy(records) == 1.0
+
+
+class TestReportCIs:
+    def test_report_markdown_shows_ci_next_to_accuracy(self):
+        """The metrics table prints the interval next to the point."""
+        from jevmlx import evalreport
+
+        metrics = compute_metrics(P)
+        md = evalreport._to_markdown({"environment": {}, "config": {}, "metrics": metrics})
+        # The accuracy row shows [ci_low, ci_high] (bootstrap).
+        assert "accuracy" in md
+        assert "[" in md and "]" in md
+        assert "case_cluster_bootstrap" in md
+
+    def test_per_field_table_shows_wilson_or_n_too_small(self):
+        from jevmlx import evalreport
+
+        metrics = compute_metrics(P)
+        md = evalreport._to_markdown({"environment": {}, "config": {}, "metrics": metrics})
+        assert "Per-field accuracy" in md
+        # Wilson intervals appear in the per-field table.
+        assert "wilson" in md
