@@ -193,11 +193,26 @@ def check_editable_install() -> Check:
     writes it only for direct-URL installs (``uv pip install -e``) and
     marks them ``dir_info.editable``; a normal wheel install (PyPI) has no
     direct_url.json at all. So: no direct_url.json or not editable -> OK
-    ("installed as a package" — the normal end-user case). Editable -> its
-    ``url`` must be the current checkout, otherwise the venv imports a
-    different jevmlx tree than the one being tested or benchmarked.
+    ("installed as a package" — the normal end-user case). Editable -> the
+    package the RUNNING INTERPRETER actually imports must live inside the
+    checkout's editable tree, otherwise the venv imports a different jevmlx
+    tree than the one being tested or benchmarked.
+
+    The comparison uses ``jevmlx.__file__`` — the package location of the
+    running interpreter — not the direct_url.json of whichever dist-info
+    importlib.metadata resolves first. direct_url.json records where
+    ``pip install -e`` RAN; a shared venv across worktrees (editable from
+    ~/git/jevmlx, tests imported from a sibling worktree) still imports the
+    right code as long as sys.path puts this checkout first, which is the
+    thing that matters.
     """
+    import jevmlx
+
+    running_pkg = Path(jevmlx.__file__).resolve().parent.parent
     checkout = Path(__file__).resolve().parent.parent
+    # macOS /tmp is a symlink to /private/tmp — resolve() normalises the
+    # /private prefix on ONE side only if the other wasn't resolved. Both
+    # sides are resolved, so compare the resolved paths.
     try:
         dist = importlib.metadata.distribution("jevmlx")
         raw = dist.read_text("direct_url.json")
@@ -223,11 +238,15 @@ def check_editable_install() -> Check:
             f"editable install url is not a local path: {url}",
             "uv pip install -e '.[dev]' from the checkout you are testing",
         )
-    if installed.resolve() != checkout.resolve():
+    if running_pkg != checkout:
         return _fail(
             "editable-install",
-            f"venv installs jevmlx editable from {installed}, not this checkout ({checkout})",
-            "uv pip install -e '.[dev]' from the checkout you are testing",
+            (
+                f"running interpreter imports jevmlx from {running_pkg}, "
+                f"not this checkout ({checkout})"
+            ),
+            "run pytest with the checkout first on sys.path (e.g. from its "
+            "root) or uv pip install -e '.[dev]' from it",
         )
     return _ok("editable-install", f"editable install -> {installed}")
 

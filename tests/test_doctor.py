@@ -454,11 +454,16 @@ class TestEditableInstall:
         fake = tmp_path / "other-checkout"
         fake.mkdir()
         payload = json.dumps({"url": fake.as_uri(), "dir_info": {"editable": True}})
+        # The running interpreter's jevmlx is patched to resolve inside the
+        # fake tree (check compares jevmlx.__file__'s checkout, not the
+        # dist-info url — a shared venv is legitimate, a wrong import is
+        # not).
         monkeypatch.setattr(
             doctor.importlib.metadata,
             "distribution",
             lambda name: types.SimpleNamespace(read_text=lambda _n: payload),
         )
+        monkeypatch.setattr("jevmlx.__file__", str(fake / "jevmlx" / "__init__.py"))
         check = check_editable_install()
         assert check.status == "FAIL"
         assert "not this checkout" in check.detail
@@ -486,20 +491,31 @@ class TestEditableInstall:
 
     def test_file_url_with_spaces_unquoted(self, monkeypatch, tmp_path):
         checkout = tmp_path / "my checkout"
-        checkout.mkdir()
+        (checkout / "jevmlx").mkdir(parents=True)
+        (checkout / "jevmlx" / "__init__.py").write_text("")
+        payload = json.dumps({"url": checkout.as_uri(), "dir_info": {"editable": True}})
+        # Patch the DIST-INFO source AND monkeypatch chdir to the fake tree
+        # so the running-interpreter comparison resolves there. The dist-info
+        # url carries %20; the resolved package path must keep the space.
         monkeypatch.setattr(
             doctor.importlib.metadata,
             "distribution",
-            lambda name: types.SimpleNamespace(
-                read_text=lambda _n: json.dumps(
-                    {"url": checkout.as_uri(), "dir_info": {"editable": True}}
-                )
-            ),
+            lambda name: types.SimpleNamespace(read_text=lambda _n: payload),
         )
-        # The installed url points at a different tree than this test file's
-        # checkout, and the space in the path must survive unquoting.
+        # The running interpreter imports from the spaced tree AND the
+        # doctor module itself is "in" that tree: patch BOTH jevmlx.__file__
+        # and doctor.__file__ so running_pkg == checkout. tmp_path is
+        # /var/folders/... while resolve() yields /private/var/folders/...
+        # (macOS tmp symlink) — patch with the RESOLVED path so both sides
+        # compare equal. The dist-info url keeps %20; _direct_url_path must
+        # unquote it.
+        fake_init = (checkout / "jevmlx" / "__init__.py").resolve()
+        monkeypatch.setattr("jevmlx.__file__", str(fake_init))
+        monkeypatch.setattr(
+            doctor, "__file__", str(fake_init.parent.parent / "jevmlx" / "doctor.py")
+        )
         check = check_editable_install()
-        assert check.status == "FAIL"
+        assert check.status == "OK"
         assert "my checkout" in check.detail
 
 
