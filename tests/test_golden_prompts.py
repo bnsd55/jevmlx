@@ -125,6 +125,7 @@ def test_multi_vector_renders_count_and_yn_menu():
     assert "Y" in rendered and "N" in rendered
 
 
+@network
 def test_cold_offline_cache_miss_is_a_clear_error(capsys):
     """F3: a cache miss exits with a clear message (and the local remedy),
     never a raw traceback."""
@@ -135,21 +136,25 @@ def test_cold_offline_cache_miss_is_a_clear_error(capsys):
     assert "huggingface-cli download" in message
 
 
-def test_vector_detects_a_renderer_change(tmp_path, monkeypatch):
+def test_vector_detects_a_renderer_change(monkeypatch):
     """A renderer change must make --check fail (the diff is the alarm, not
-    a silent regen)."""
+    a silent regen). Uses ONLY fake-profile vectors (drift applied to qwen3,
+    whose vector never touches the Hub) so this runs in the offline fast
+    suite."""
     real = gp.build_vector
 
     def drifted_build_vector(profile, case, tok, revision):
         vector = real(profile, case, tok, revision)
-        vector["rendered_text"] = vector["rendered_text"] + "\nDRIFT"
+        if profile == "qwen3":  # the fake-profile vector: no Hub access
+            vector["rendered_text"] = vector["rendered_text"] + "\nDRIFT"
         return vector
 
     monkeypatch.setattr(gp, "build_vector", drifted_build_vector)
-    problems = gp.check_vectors()
+    problems = [p for p in gp.check_vectors() if "qwen3" in p]
     assert problems and all("stale" in p and "rendered_text" in p for p in problems)
 
 
+@network
 def test_stale_revision_vector_fails_check(tmp_path):
     """A committed vector from a revision the renderer no longer resolves is
     stale by definition: --check must fail, not silently ignore it."""

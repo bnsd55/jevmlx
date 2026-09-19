@@ -131,7 +131,13 @@ def _token_ids_sha256(ids: list[int]) -> str:
 
 def _conftest_fake(profile: str):
     """The fake tokenizer from tests/conftest (extended for **kwargs and the
-    Gemma-style no-system rejection) — one fake, no duplicate here."""
+    Gemma-style no-system rejection) — one fake, no duplicate here.
+
+    Note: benchmarks importing tests/conftest via sys.path is unusual
+    (conftest is not a package); accepted here because the fake tokenizers
+    must be the EXACT objects the tests use — a second copy would defeat
+    the one-fake rule.
+    """
     import sys
 
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tests"))
@@ -255,7 +261,12 @@ def _protocol_sections() -> dict[str, str]:
             text = vector["rendered_text"]
         except (OSError, json.JSONDecodeError, KeyError):
             continue
-        rendered.append(f"**{label}** — `{path.name}`:\n\n```text\n{text}```")
+        # Fence safety (re-review a): rendered_text may not end with a
+        # newline (the qwen3 fake vectors end mid-line), so a bare ``` fence
+        # would land ON the last text line and swallow the rest of the doc
+        # into the code block. Normalize to exactly one trailing newline
+        # before closing the fence.
+        rendered.append(f"**{label}** — `{path.name}`:\n\n```text\n{text.rstrip(chr(10))}\n```")
 
     return {
         "system_block": f"```text\n{system_block}\n```",
@@ -296,6 +307,17 @@ def check_protocol() -> list[str]:
         fresh = sections[name]
         if committed != fresh:
             problems.append(f"PROMPT_PROTOCOL.md[{name}]: stale — regenerate with --write")
+    # Fence sanity (re-review a): every generated code block must OPEN and
+    # CLOSE — an odd fence count means a closing fence landed on a text
+    # line and the rest of the doc renders inside a code block.
+    fence_count = sum(
+        1 for line in doc.splitlines() if line.strip() == "```" or line.strip() == "```text"
+    )
+    if fence_count % 2 != 0:
+        problems.append(
+            f"PROMPT_PROTOCOL.md: {fence_count} code fences (odd) — a closing "
+            "fence landed on a text line; regenerate with --write"
+        )
     return problems
 
 

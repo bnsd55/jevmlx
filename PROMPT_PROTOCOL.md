@@ -36,13 +36,10 @@ You are a classifier. For every field, answer with exactly one of the options li
 One system message, engine-owned, not caller-controlled. Profiles whose
 template rejects a system role (Gemma-style, probed ONCE at engine load
 by `_probe_system_role`) merge this text into the user turn with the
-delimiter `
-
-` (system first): a single user message
-`{system}
-
-{user}` — see the `gemma` vector, whose `supports_system`
-is `false`.
+delimiter `\n\n` (a literal backslash-n backslash-n: two LF characters,
+written escaped here so the markdown stays valid). System first: a single
+user message `{system}\n\n{user}` — see the `gemma` vector, whose
+`supports_system` is `false`.
 
 ### 2. Schema block — rendered from the COMPILED plan
 
@@ -260,7 +257,8 @@ Classify the following fields.
 
 <<<CONTEXT:C389525abe2404839
 The applicant pays late sometimes.
-CONTEXT:C389525abe2404839>>>```
+CONTEXT:C389525abe2404839>>>
+```
 
 **qwen3 / risk_enum_bool_labels (labels)** — `qwen3__fake__risk_enum_bool_labels.json`:
 
@@ -273,7 +271,8 @@ Classify the following fields.
 
 <<<CONTEXT:C389525abe2404839
 The applicant pays late sometimes.
-CONTEXT:C389525abe2404839>>>```
+CONTEXT:C389525abe2404839>>>
+```
 
 **qwen3 / tags_multi (slots)** — `qwen3__fake__tags_multi.json`:
 
@@ -285,7 +284,8 @@ Classify the following fields.
 
 <<<CONTEXT:C44c3491180a14d31
 The applicant disputes one charge.
-CONTEXT:C44c3491180a14d31>>>```
+CONTEXT:C44c3491180a14d31>>>
+```
 <!-- /generated:rendered_vectors -->
 
 ## The tokenizer-only real-model vector
