@@ -16,6 +16,9 @@
   parse, 429/413/503/400/500 errors, timeout, env-var base URL, external
   AbortSignal). CI: `js-client` job pins Node 20 (`npm ci` + `npm run build`
   + `npm test`). No npm publish. Top-level README HTTP section + `js/README.md`.
+- Removed lineage credits and NOTICE file (no code from credited projects
+  ever entered this repo). Removed local coordination paths from benchmark
+  docs.
 
 ## 0.1.0 - unreleased
 

@@ -191,8 +191,6 @@ The model prefills once and the KV cache is shared. One scoring row per field (e
 
 Code and docs: [CONTRIBUTING.md](CONTRIBUTING.md) · benchmark results: [BENCHMARKING.md](BENCHMARKING.md).
 
-## Credits and license
+## License
 
-jevmlx started from [rorshopping/jev-on-a-laptop](https://github.com/rorshopping/jev-on-a-laptop) (parallel constrained decoding on a laptop) and descends from [harshatheg/Qwen-2.5-1B-RLCD](https://huggingface.co/harshatheg/Qwen-2.5-1B-RLCD), an MLX demo of the technique. jevmlx is the maintained, generic version — any MLX instruct model or OpenAI-compatible server, multi-select, none-of-the-above and abstention, per-field probability, an eval harness.
-
-Not affiliated with TypeSafe. MIT — see [LICENSE](LICENSE); third-party credits in [NOTICE](NOTICE).
+Not affiliated with TypeSafe AI. MIT, see [LICENSE](LICENSE).

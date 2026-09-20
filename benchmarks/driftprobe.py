@@ -38,8 +38,7 @@ Every metric is per-row and separated (GPT-REVIEW-3 §2):
 
 Run (model-loading — MUST go through the shared slot lock):
 
-    ~/git/jev-on-a-laptop/.agent-mail/slowtest.sh \
-        .venv/bin/python benchmarks/driftprobe.py [--model ID] [--quick]
+    .venv/bin/python benchmarks/driftprobe.py [--model ID] [--quick]
 
 Outputs: benchmarks/probes/<machine>--<model-slug>/driftprobe.json + .md
 (diagnostic artifacts OUTSIDE the results contract — benchmarks/results/ is
