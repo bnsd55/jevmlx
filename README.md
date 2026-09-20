@@ -2,32 +2,26 @@
 
 [![CI](https://github.com/bnsd55/jevmlx/actions/workflows/ci.yml/badge.svg)](https://github.com/bnsd55/jevmlx/actions/workflows/ci.yml) [![Build](https://github.com/bnsd55/jevmlx/actions/workflows/build.yml/badge.svg)](https://github.com/bnsd55/jevmlx/actions/workflows/build.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE) [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](pyproject.toml)
 
-Typed decisions from a local model on Apple Silicon. One batched forward pass, every field at once, with a probability per field.
+jevmlx turns a schema of fields (booleans, enums, multi-selects) and a context string into a single batched forward pass on a local Apple Silicon model. Every allowed option for every field is scored from logits in one prefill — no text generation — and the JSON is assembled from the winners, with a probability per field.
 
-Asking an LLM for JSON means parsing what it wrote and retrying until it parses. jevmlx takes a schema of booleans, enums, and multi-selects, scores every allowed answer for every field in one forward pass, and assembles the JSON itself — valid by construction, every field with a probability.
+## Quickstart
 
 ```bash
-pip install git+https://github.com/bnsd55/jevmlx
-jevmlx decide --preset fintech_fraud --json
+git clone https://github.com/bnsd55/jevmlx && cd jevmlx && ./setup.sh
+jevmlx decide --preset support_triage --json          # one decision, CLI
+jevmlx serve --model fast --port 8000                  # HTTP server
+curl -s localhost:8000/decide -d '{"schema":{"x":{"type":"enum","choices":["a","b"],"description":"d"}},"context":"pick one"}'
 ```
 
-```json
-{
-  "is_fraudulent": {"value": true, "prob": 0.6077},
-  "risk_tier": {"value": "HIGH", "prob": 0.8392},
-  "recommended_action": {"value": "CHALLENGE_2FA", "prob": 0.8891}
-}
-```
+Requires an Apple Silicon Mac (M1+) and Python 3.12+. First use of a model alias downloads weights (~2 GB `fast`, ~4.5 GB `quality`).
 
 ## Install
 
 ```bash
-pip install git+https://github.com/bnsd55/jevmlx   # library
-uv tool install git+https://github.com/bnsd55/jevmlx   # CLI only
+pip install git+https://github.com/bnsd55/jevmlx          # library
+uv tool install git+https://github.com/bnsd55/jevmlx     # CLI only
 git clone https://github.com/bnsd55/jevmlx && cd jevmlx && ./setup.sh   # dev
 ```
-
-Requires an Apple Silicon Mac (M1 or later) and Python 3.12+.
 
 ### Model aliases
 
@@ -37,11 +31,18 @@ Requires an Apple Silicon Mac (M1 or later) and Python 3.12+.
 | `fast` | `mlx-community/Qwen2.5-3B-Instruct-4bit` | lower latency |
 | `test` | `mlx-community/Qwen2.5-1.5B-Instruct-4bit` | tests only (too small for production) |
 
-```bash
-jevmlx decide --model quality --schema ticket.json --context ticket.txt   # or --model fast
-```
+A full Hub id also works (`--model mlx-community/Llama-3.2-3B-Instruct-4bit`).
 
-A full Hub id also works (`--model mlx-community/Llama-3.2-3B-Instruct-4bit`); first use downloads the weights (~4.5 GB `quality`, ~2 GB `fast`).
+## Why not structured output
+
+Structured output asks the model to write the JSON, token by token, then parses it and retries on failure. When the answer set is known and finite, that is the wrong tool. jevmlx reads one logits vector per field, applies a restricted softmax over the allowed options, and assembles the JSON itself — valid by construction, every field scored in one forward pass. When free text must be written (a summary, a rewrite), use generation; when the answer is one of N known choices, use scoring.
+
+## Design your schema
+
+- **Options must be mutually exclusive.** A restricted softmax puts all probability mass on the listed options. If two can both be true, split into separate boolean fields or use a multi-select.
+- **Add an escape option when the list may not be exhaustive.** A restricted softmax cannot say "none of these" unless you give it one. Add an `other` or `escalate` choice, or use `allow_none_of_above=True` (adds an explicit NONE_OF_ABOVE that maps to `None`; the field must be `Optional`).
+- **Use `ordered=True` for scales.** An enum declared `ordered` (schema `"ordered": True`, or Pydantic `Field(json_schema_extra={"ordered": True})`) adds ordinal telemetry — `argmax_level`, `expected_index` (Σ pᵢ·i), `expected_score_normalized` — with no extra model call. Use it for severity, priority, or any monotonic scale.
+- **Set review thresholds from labeled data.** `abstain_below_margin=X` withholds a field whose `probability_margin` (top1 − top2) falls below the cut. Fit the threshold on labeled examples — not by feel — so the abstention rate matches your review capacity. `probability_margin` and `threshold_distance` (multi) are on every `FieldResult`.
 
 ## Use it from Python
 
@@ -65,134 +66,75 @@ for name, f in result.fields.items():
     print(f"{name}: {f.value} (p={f.probability})")
 ```
 
-Read the result. `decide(...)` returns a `Decision`: `.value` (a validated
-`Ticket`), `.latency_ms`, `.fields` — one `FieldResult` per field:
+`decide(...)` returns a `Decision`: `.value` (a validated `Ticket`), `.latency_ms`, `.fields` — one `FieldResult` per field with `value`, `probability`, `alternatives` (top 3), `probability_margin`, `legal_mass` (probability mass in allowed continuations — a leakage signal when low), `ordinal` (ordered enums only), and `semantics` (how the probability was produced). See [ARCHITECTURE.md](ARCHITECTURE.md) for the full `FieldResult` contract.
 
-- `value`, `probability`, `alternatives` (top 3, winner first; multi: per-option
-  P(yes)), `score`, `model` (`"slots"`/`"labels"`), `calibrated`, `legal_mass`
-  (probability mass in allowed continuations at the branch points — a leakage
-  signal when low despite a confident decision).
-- `ordinal` (ordered enums only, `None` otherwise): an enum field may declare
-  itself an ORDINAL scale — `Field(json_schema_extra={"ordered": True})` (or
-  bare `Ordered()`); the choices' declaration order is the scale order. The
-  decided value stays the winning level; ordering only adds derived
-  telemetry — `argmax_level` (winning index), `expected_index` (Σ pᵢ·i), its
-  `variance`, and `expected_score_normalized` in [0, 1] — computed from the
-  finalized distribution (after prior correction and temperature), no extra
-  model call. Eval runs on ordered fields
-  also report `ordinal_mae` (mean |argmax − gold|), `ordinal_mae_expected`
-  (soft, |E − gold|) and an ordinal confusion matrix.
-- `semantics` (a frozen `FieldSemantics`): how THIS field's reported
-  probabilities were produced — which scoring path (`score_source`:
-  `batched` / `rescored_batch1` / `dependency` / `oracle`), the temperature
-  actually applied (`None` for count rows and calibrated multi selections,
-  whose log-odds cut ignores the caller temperature), the calibrator bundle
-  id when a fitted calibrator set the selection, the prior mode
-  (`off`/`neutral_v1`), and whether a constraint or a dependency wave
-  overrode the raw winner. The result-level `probability_status` summarizes
-  the distinct semantic groups (one clause per
-  `(score_source, temperature, calibrator_id, prior_mode)` group with its
-  field count) and is not authoritative for any single field.
-- Margins, one per field: `log_score_margin` / `probability_margin` (scalar,
-  top1-top2 gap in log/probability units), `threshold_distance` (multi, how
-  close the closest yes/no call sat to the cut). Multi fields carry
-  `probability=None` — only per-option decisions are claimed.
-- `reason`: None, `"none_of_above"` (`allow_none_of_above=True` adds an explicit
-  NONE_OF_ABOVE choice that maps to `None`; fields must be Optional), or
-  `"abstain"` (`abstain_below_margin=X` withholds fields whose margin falls
-  below the cut; the raw value stays on the FieldResult).
-- Options: `decide_many(model_cls, contexts)` for batches (one prior pass, one merged scoring pass per context group — results match separate `decide` calls within `PARITY_ATOL`); `constraints=[...]`
-  reconciles the joint answer by constrained MAP (implies / excludes /
-  requires_parent / exclusivity; plus `depends_on` / `set_constraints` in the
-  schema); `calibration=<path-or-dict>` (from `jevmlx calibrate --out`) selects
-  multi options by fitted log-odds with the always-on count row reconciling to
-  top-k above `COUNT_MARGIN_MIN` (0.7 nats); `prior_correction=True` subtracts
-  the neutral-context prior; timing: `latency_ms` here, the full split
-  (prior / prefill / plan compile / cache broadcast / suffix eval / lm-head
-  gather / second pass) plus `peak_active_bytes`/`peak_incremental_bytes` and
-  `failed_attempts` on the engine result, per-combo `timing.json` in bench
-  output.
+Options: `decide_many(model_cls, contexts)` for batches; `constraints=[...]` for constrained MAP (implies / excludes / requires_parent); `calibration=<path>` for fitted multi-selection; `prior_correction=True` to subtract the neutral-context prior.
 
 ### One-question helpers
 
-For a single-field decision you don't need a Pydantic model — `choose`,
-`judge`, and `rate` synthesize a one-field schema and return the field's
-`FieldResult` directly (no `Decision` wrapper). They reuse the exact
-`decide` engine path — no second prompt renderer, no new prompt version.
+For a single-field decision you don't need a Pydantic model — `choose`, `judge`, and `rate` synthesize a one-field schema and return a `FieldResult` directly.
 
 ```python
 from jevmlx import choose, judge, rate
 
-# one-field enum: pick one of N options (dict = name -> description)
-f = choose(
-    "The optician ordered replacement lenses. They have not been fitted.",
-    {
-        "supported": "evidence establishes the claim",
-        "insufficient": "evidence does not establish either",
-        "contradicted": "evidence establishes the opposite",
-    },
-    instructions="Assess the claim: the lenses have been fitted.",
-)
+# enum: pick one of N (dict = name -> description)
+f = choose(context, {"supported": "evidence supports", "contradicted": "evidence refutes"})
 print(f.value, f.probability, f.probability_margin)
 
-# one-field boolean: yes/no for a question (probability of True is f.probability)
+# boolean: yes/no (probability of True is f.probability)
 f = judge(passage, "Is the claim supported by the passage?")
 
-# one-field ORDINAL: rate on a scale (declaration order = scale order;
-# the FieldResult carries an OrdinalFieldRecord — argmax_level,
-# expected_index, expected_score_normalized)
+# ordinal: rate on a scale (declaration order = scale order)
 f = rate(review, {"low": "poor", "medium": "ok", "high": "great"})
 print(f.ordinal.argmax_level, f.ordinal.expected_score_normalized)
 ```
 
-`options`/`levels` accept a dict (name -> description) or a list of names
-(the description defaults to the name). `choose` and `rate` require >= 2
-unique names; `rate` marks the field `ordered=True`. All three pass through
-the same `model` / `temperature` / `scoring` / `prior_correction` kwargs as
-`decide`.
-
-CLI verbs mirror them: `jevmlx choose --context ctx.txt --option
-name=description ...`, `jevmlx judge --context ctx.txt --question "..."`,
-`jevmlx rate --context ctx.txt --level name=description ...` — each prints
-the FieldResult as JSON (value, prob, margins, alternatives, ordinal for
-`rate`).
+CLI mirrors: `jevmlx choose --context ctx.txt --option name=description ...`, `jevmlx judge --context ctx.txt --question "..."`, `jevmlx rate --context ctx.txt --level name=description ...`.
 
 ## Use it from any OpenAI-compatible server
 
-Instead of loading a model on this Mac, jevmlx can send the same prompts to a chat server that returns logprobs: Ollama, oMLX, MTPLX, vLLM.
+Instead of loading a model locally, jevmlx can send the same prompts to a chat server that returns logprobs (Ollama, vLLM, etc.):
 
 ```bash
 jevmlx decide --backend openai --base-url http://localhost:11434/v1 --api-model llama3.2 --schema ticket.json --context ticket.txt
 ```
 
-Two tradeoffs: one request per field (slower than one pass), and only the server's top-k logprobs are visible — options missing from that list get a floor probability and the telemetry flags `truncated: true`.
+Tradeoff: one request per field (slower than one pass), and only the server's top-k logprobs are visible — options missing from that list get a floor probability and `truncated: true` in the telemetry.
 
 ## Serve over HTTP
 
-`jevmlx serve` loads a model once and exposes `POST /decide`, `GET /health`, and `GET /ready` on a local port. One Metal GPU, one serial worker, a bounded admission queue in front.
+`jevmlx serve` loads a model once and serves decisions on a local port. One Metal GPU, one serial worker, a bounded admission queue in front.
 
 ```bash
-jevmlx serve --model mlx-community/Qwen2.5-1.5B-Instruct-4bit --port 8000
+jevmlx serve --model fast --port 8000
 ```
-
-**Endpoints**
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/decide` | `{"schema": {...}, "context": "...", "temperature": 1.0}` -> the per-field result dict |
-| `POST` | `/v1/systemone` | `{"state": str|object, "questions": {id: {type, instructions, criteria}}}` -> `{model, answers: {id: ChoiceAnswer\|NoulAnswer\|ScoreAnswer}, usage}` (maps questions to one schema, same queue/backpressure as /decide) |
-| `GET` | `/v1/models` | `{"data": [{"id": <resolved model id>, "owned_by": "jevmlx"}]}` (advertises only our model) |
-| `GET` | `/health` | Process liveness (always 200). Carries `queue_depth`, `queue_capacity`, `worker_alive`, `requests_served` |
-| `GET` | `/ready` | `503` until model load + warm-up complete AND the worker is alive, then `200` |
+| `POST` | `/decide` | `{"schema": {...}, "context": "...", "temperature": 1.0}` -> per-field result dict |
+| `POST` | `/v1/systemone` | `{"state": str\|object, "questions": {id: {type, instructions, criteria}}}` -> `{model, answers, usage}` (maps to one schema, same queue as /decide) |
+| `GET` | `/v1/models` | `{"data": [{"id": <model id>, "owned_by": "jevmlx"}]}` |
+| `GET` | `/health` | Process liveness (always 200). Carries `queue_depth`, `queue_capacity`, `worker_alive` |
+| `GET` | `/ready` | `503` until model load + warm-up complete AND worker alive, then `200` |
 
-**Backpressure + admission limits** (W6-B7):
+Backpressure: **429 + `Retry-After`** when the queue is full (`--queue-size`, default 16); **413** when a request exceeds `--max-rows` (default 2048) or `--max-prompt-tokens` (default 8192), before any model work. The client's `X-Request-Id` is echoed; `queue_depth` and `queue_wait_ms` ride every response.
 
-- **429 + `Retry-After`** when the admission queue is full (not 529). `--queue-size` (default 16). The server is a `ThreadingHTTPServer`; one thread per connection, but a single serial worker processes GPU work — two decide calls never overlap.
-- **413** when a request exceeds a hard limit, before any model work: `--max-rows` (expanded scoring rows, default 2048; O(schema) arithmetic on the raw dict, not `_build_schema_rows`), `--max-prompt-tokens` (default 8192). The projected-memory limit was dropped — the engine already chunks rows to its measured width-bin budget, so a whole-request projection describes memory the engine never allocates.
-- **Request id**: the client's `X-Request-Id` is echoed in the response header + body; if absent one is generated.
-- **Queue telemetry**: `queue_depth` and `queue_wait_ms` ride every `/decide` response; `queue_depth` + `queue_capacity` ride `/health`.
-- **Worker resilience**: an exception in the decide worker is a 500 to that request; the worker catches it and continues (it does not die). `/ready` goes 503 if the worker dies.
-- **Ready vs live**: the port binds BEFORE warm-up, so `/ready` is reachable during warm-up (a 503 is a real response, not a connection refusal).
+### Bundled presets
+
+`decide --preset <name>` loads a bundled schema + context:
+
+| Preset | Fields | Description |
+|---|---|---|
+| `fintech_fraud` | 28 | Financial fraud detection, sanctions verification, autonomous containment |
+| `support_triage` | 30 | Enterprise incident triage and routing (includes ordered `frustration_level` and `churn_risk`) |
+| `code_security` | 28 | SAST/DAST pull-request vulnerability triage |
+| `high_cardinality_255` | 4 | 255-choice customs tariff router (latency scaling demo) |
+| `content_moderation` | 20 | Trust-and-safety policy enforcement (violation category, ordered severity) |
+| `inbound_email` | 19 | Email routing, spam/phishing detection, ordered reply priority |
+
+## What the numbers mean
+
+[BENCHMARKING.md](BENCHMARKING.md) documents the eval methodology: accuracy against the TypeSafe public consensus, the majority baseline, and exact-record agreement; parity (batched vs. single-call within `PARITY_ATOL`); and the drift band (log-score and probability-margin drift between runs). The leaderboard below cites official TypeSafe accuracies; local rows are measured by contributors on the 20 public examples.
 
 ## Leaderboard
 
@@ -209,7 +151,8 @@ Agreement with the TypeSafe public eval consensus. Official rows are cited from 
 | GPT-5.6 Sol | official (cited) | — | — | 74.1% | — | — | — | — | 23.3s | $0.0836 | — |
 | Claude Haiku 4.5 | official (cited) | — | — | 53.6% | — | — | — | — | 12.5s | $0.0195 | — |
 
-_Official accuracies: TypeSafe's full private eval; ours: the 20 public examples — indicative, not the same test. Consensus = GPT-6 Astra + Claude Fable 5.1._
+_Official accuracies are on TypeSafe's full private eval; ours are on the 20 public example cases, so the numbers are indicative, not the same test._
+_Consensus label = the agreement of GPT-6 Astra + Claude Fable 5.1 (TypeSafe's reference)._
 
 No local results yet — contribute one with `jevmlx bench`.
 <!-- leaderboard:end -->
@@ -217,44 +160,30 @@ No local results yet — contribute one with `jevmlx bench`.
 ## Run the benchmark on your Mac
 
 ```bash
-git clone https://github.com/bnsd55/jevmlx && cd jevmlx && ./setup.sh
 .venv/bin/jevmlx bench --model quality   # commit the results folder, open a PR
 ```
-[BENCHMARKING.md](BENCHMARKING.md) has the model list, what the command does, and the PR checklist.
 
 ## CLI
 
 | Command | What it does |
 |---|---|
-| `decide` | Decide a preset or schema + context, print the JSON with probabilities; `--model fast/quality/…`, `--scoring slots/labels`, `--constraints`, `--calibration`, `--prior-correction`, `--backend openai` |
-| `serve` | Serve decisions over HTTP (`POST /decide`, one Metal GPU, serial) |
+| `decide` | Decide a preset or schema + context, print JSON with probabilities |
+| `choose` / `judge` / `rate` | One-field helpers (enum / boolean / ordinal) |
+| `serve` | Serve decisions over HTTP (one Metal GPU, serial worker) |
 | `validate` | Lint a schema for engine-visible problems (no model download) |
-| `calibrate` | Fit a temperature + pooled multi calibrator on labeled JSONL, report ECE, `--out` writes what `decide --calibration` reads |
-| `eval` | Run labeled cases through a track (`parallel`/`naive_local`/`api_baseline`/`openai_slots`), with optional permutations; writes `predictions.jsonl` + `run.json` + per-combo `timing.json` |
-| `report` | Build a JSON + markdown eval report from `predictions.jsonl` (offline) |
-| `bench` | Full benchmark: all (track, scorer, dataset) combos for one or more models, parity gate + one `SUMMARY.md` |
-| `doctor` | Environment checks (platform, versions, venv/conda + subprocess hang, editable-install checkout, memory, power, Metal, model cache, network): run before filing an issue or a bench run |
+| `calibrate` | Fit a temperature + multi calibrator on labeled JSONL |
+| `eval` | Run labeled cases through a track, write predictions + timing |
+| `report` | Build a JSON + markdown eval report from predictions (offline) |
+| `bench` | Full benchmark: all combos, parity gate, `SUMMARY.md` |
+| `doctor` | Environment checks before filing an issue or a bench run |
 
 `-v` for progress logs; `JEVMLX_LOG=json` for machine-readable logs.
 
-### Bundled presets
-
-`decide --preset <name>` loads a bundled schema + context:
-
-| Preset | Fields | Description |
-|---|---|---|
-| `fintech_fraud` | 28 | Real-time financial fraud detection, sanctions verification, and autonomous containment |
-| `support_triage` | 30 | Enterprise incident triage and routing (includes ordered `frustration_level` and `churn_risk`) |
-| `code_security` | 28 | SAST/DAST pull-request vulnerability triage |
-| `high_cardinality_255` | 4 | 255-choice customs tariff router (latency scaling demo) |
-| `content_moderation` | 20 | Trust-and-safety policy enforcement (violation category, ordered severity, human-review flag) |
-| `inbound_email` | 19 | Email routing, spam/phishing detection, ordered reply priority |
-
 ## How it works
 
-The schema compiles per tokenizer: a bounded codebook search picks the neutral alias codes whose candidate rows tokenize most cleanly, and the prompt renders FROM the compiled plan — the model is taught exactly the protocol the scorer judges. The context is fenced with a per-context nonce, so no interior line can impersonate the closing fence. The rendered prompt is a tested contract: [PROMPT_PROTOCOL.md](PROMPT_PROTOCOL.md) documents it, and committed golden vectors (`benchmarks/golden_prompts.py --check`, run in CI) fail on any renderer drift.
+The schema compiles per tokenizer: a codebook search picks the neutral alias codes whose candidate rows tokenize most cleanly, and the prompt renders from the compiled plan. The context is fenced with a per-context nonce so no interior line can impersonate the closing fence. The rendered prompt is a tested contract — [PROMPT_PROTOCOL.md](PROMPT_PROTOCOL.md) documents it, and golden vectors (`benchmarks/golden_prompts.py --check`, run in CI) fail on any renderer drift.
 
-The model prefills once and the KV cache is shared. One scoring row per field (extra trie rows for multi-token options), a restricted softmax over each field's allowed options, and the JSON is assembled from the winners — with a probability per field. Chunks are sized by a measured active-memory budget (the B=1/B=2 tiling slope is probed at engine load; Metal allocation failures halve the chunk and retry, counted in `failed_attempts`). Temperature is applied once at the end; ties resolve deterministically. Batched `decide_many` runs one prior pass and one merged scoring pass per context group. [ARCHITECTURE.md](ARCHITECTURE.md) has the full picture.
+The model prefills once and the KV cache is shared. One scoring row per field (extra trie rows for multi-token options), a restricted softmax over each field's allowed options, and the JSON is assembled from the winners. Chunks are sized by a measured active-memory budget; Metal allocation failures halve the chunk and retry. Temperature is applied once at the end; ties resolve deterministically. [ARCHITECTURE.md](ARCHITECTURE.md) has the full picture.
 
 ## Contributing
 
