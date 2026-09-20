@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from conftest import make_engine, make_engine_result, make_field_telemetry
 
 from jevmlx import evalrun
@@ -244,6 +245,70 @@ def test_split_and_dataset_lock(tmp_path):
     assert all(line["label"] is None and line["correct"] is None for line in lines)
     config = json.load(open(tmp_path / "run.json"))["config"]
     assert len(config["dataset_lock_sha256"]) == 64
+
+
+def test_dataset_lock_sha256_is_the_lock_file_hash(tmp_path):
+    """W5c-17: run.json's dataset_lock_sha256 == sha256 of the exact lock
+    file that was passed in (was silently null when the bench registered a
+    lock path nothing had written)."""
+    import hashlib
+
+    cases = [
+        {
+            "id": "c1",
+            "group_id": "g",
+            "source": "custom",
+            "workflow": None,
+            "schema": {"f": {"type": "boolean", "description": "d"}},
+            "context": "x",
+            "labels": {"f": True},
+            "split": "train",
+            "meta": {},
+        }
+    ]
+    lock = tmp_path / "bundled.dataset.lock.json"
+    lock.write_text('{"cases_sha256": "abc"}', encoding="utf-8")
+
+    run = evalrun.run_eval(
+        cases,
+        lambda s, c: {name: {"prediction": True} for name in s},
+        track="parallel",
+        model="m",
+        out_dir=str(tmp_path),
+        dataset_lock_path=str(lock),
+    )
+    expected = hashlib.sha256(lock.read_bytes()).hexdigest()
+    assert run["config"]["dataset_lock_sha256"] == expected
+    written = json.load(open(tmp_path / "run.json"))["config"]["dataset_lock_sha256"]
+    assert written == expected
+
+
+def test_missing_dataset_lock_is_an_error_not_null(tmp_path):
+    """W5c-17: a non-None dataset_lock_path whose file does not exist must
+    raise OSError — a silent null in run.json breaks the provenance chain
+    (leaderboard rows could not be traced to a dataset revision)."""
+    cases = [
+        {
+            "id": "c1",
+            "group_id": "g",
+            "source": "custom",
+            "workflow": None,
+            "schema": {"f": {"type": "boolean", "description": "d"}},
+            "context": "x",
+            "labels": {"f": True},
+            "split": "train",
+            "meta": {},
+        }
+    ]
+    with pytest.raises(OSError, match="dataset lock file not found"):
+        evalrun.run_eval(
+            cases,
+            lambda s, c: {name: {"prediction": True} for name in s},
+            track="parallel",
+            model="m",
+            out_dir=str(tmp_path),
+            dataset_lock_path=str(tmp_path / "nope.dataset.lock.json"),
+        )
 
 
 def test_naive_invalid_prediction_counts_wrong(tmp_path):

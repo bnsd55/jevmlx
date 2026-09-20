@@ -28,6 +28,15 @@ def main(argv: list[str] | None = None) -> int:
         description="Convert benchmarks/cases.json to eval JSONL + dataset.lock.json.",
     )
     parser.add_argument("--out", required=True, help="output JSONL path")
+    parser.add_argument(
+        "--lock",
+        default=None,
+        help=(
+            "lock path (default: <out dir>/dataset.lock.json). Pass a "
+            "per-dataset name when several datasets share one cache dir — "
+            "the bench registers <name>.dataset.lock.json next to the jsonl."
+        ),
+    )
     args = parser.parse_args(argv)
 
     with open(CASES, encoding="utf-8") as f:
@@ -68,7 +77,7 @@ def main(argv: list[str] | None = None) -> int:
         "cases_sha256": hashlib.sha256(open(out_path, "rb").read()).hexdigest(),
         "fetched_at": datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"),
     }
-    lock_path = os.path.join(os.path.dirname(out_path) or ".", "dataset.lock.json")
+    lock_path = args.lock or os.path.join(os.path.dirname(out_path) or ".", "dataset.lock.json")
     with open(lock_path, "w", encoding="utf-8") as f:
         json.dump(lock, f, indent=1)
         f.write("\n")

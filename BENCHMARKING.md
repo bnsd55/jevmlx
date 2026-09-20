@@ -105,6 +105,10 @@ Paste `SUMMARY.md` into the PR description and link the machine specs
   engine classifies, while every committed RESULT artifact
   (predictions.jsonl, run.json, report.json, dataset.lock.json) stores
   row ids, split, option order and input hashes only — never the text.
+  Each combo's run.json carries `dataset_lock_sha256`: the sha256 of the
+  dataset lock file for the combo's dataset (provenance: leaderboard rows
+  trace to a pinned dataset revision; a missing lock aborts the run with
+  an error, it never records null).
 - Runs: for every (track, scorer, dataset) — `eval` in-process `--runs` times
   (default 2), last run kept, order-rotation permutations on for the parallel
   track. Writes `predictions.jsonl`, `run.json`, `report.json`, `report.md`
