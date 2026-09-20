@@ -117,6 +117,28 @@ def read_models_file(path: str | Path) -> list[str]:
     return models
 
 
+def _resolve_ab_ref(branch: str) -> str:
+    """Resolve an A/B branch to a ref ``git worktree add`` can check out.
+
+    The M5 clone frequently has the A/B branch only as a remote-tracking ref
+    (``origin/<branch>``), not a local branch. Pass a bare local name (e.g.
+    ``w2a-field-local``) and this returns whichever of ``<branch>`` or
+    ``origin/<branch>`` resolves via ``git rev-parse --verify``. Falls back
+    to the bare name if neither resolves (so ``git worktree add`` emits the
+    real error — a missing ref, not our guess).
+    """
+    for candidate in (branch, f"origin/{branch}"):
+        proc = subprocess.run(
+            ["git", "rev-parse", "--verify", candidate],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode == 0:
+            return candidate
+    return branch
+
+
 def plan_steps(
     out: Path,
     *,
@@ -245,11 +267,17 @@ def plan_steps(
     if ab_branch is not None:
         worktree = out / "ab-worktree"
         venv_python = worktree / ".venv" / "bin" / "python"
+        # B2: resolve the A/B branch ref. The M5 clone often has the branch
+        # only as a remote-tracking ref (origin/<branch>), not a local
+        # branch. Try the local branch first, then origin/<branch>; the
+        # resolved ref is what ``git worktree add`` gets. One resolver,
+        # no dual code paths.
+        ab_ref = _resolve_ab_ref(ab_branch)
         steps.append(
             Step(
                 id="ab-setup",
                 title=f"A/B setup: worktree + venv for {ab_branch}",
-                argv=("git", "worktree", "add", "--detach", str(worktree), ab_branch),
+                argv=("git", "worktree", "add", "--detach", str(worktree), ab_ref),
                 extra_argv=(
                     (
                         shutil.which("uv") or "uv",
@@ -377,11 +405,13 @@ def _now() -> str:
 
 
 def runbook_append(
-    out: Path, index: int, step: Step, *, rc: int | None, secs: float | None
+    out: Path, index: int, step: Step, *, rc: int | None, secs: float | None, skipped: bool = False
 ) -> None:
     """One RUNBOOK.md section per step, appended as the step completes."""
     lines = [f"## {index}. {step.title}"]
-    if rc is None:
+    if skipped:
+        lines[0] += " — skipped: A/B setup failed"
+    elif rc is None:
         lines[0] += " — skip (outputs exist)"
     else:
         lines[0] += f" — exit {rc} — {secs:.1f}s — {_now()}"
@@ -395,7 +425,15 @@ def runbook_append(
 
 
 def execute_step(step: Step) -> int:
-    """Run one step; returns the exit code. Streams into <step.id>.log."""
+    """Run one step; returns the exit code. Streams into <step.id>.log.
+
+    B3: a step whose declared cwd is missing is recorded as failed
+    (exit -1) and never raised — the runbook continues.
+    """
+    if not step.in_process and not step.cwd.exists():
+        log_path = step.outputs[0].parent / f"{step.id}.log"
+        log_path.write_text(f"FAILED: cwd does not exist: {step.cwd}\n", encoding="utf-8")
+        return -1
     log_path = step.outputs[0].parent / f"{step.id}.log"
     with log_path.open("w", encoding="utf-8") as log:
         if step.pre_argv and (step.pre_target is None or not step.pre_target.exists()):
@@ -411,10 +449,18 @@ def execute_step(step: Step) -> int:
             if pre.returncode != 0:
                 return pre.returncode
         if step.in_process:
+            # B3(b): if A/B setup failed, the summary shows 'A/B: not run'
+            # instead of an all-dashes A/B table.
+            ab_failed_marker = step.outputs[0].parent / "ab-failed.txt"
+            if ab_failed_marker.exists():
+                ab_block = None
+            else:
+                ab_block = collect_side(step.outputs[0].parent / "ab")
             text = build_summary_text(
                 collect_side(step.outputs[0].parent),
-                collect_side(step.outputs[0].parent / "ab"),
+                ab_block,
                 parity_models=_meta_parity_models(step.outputs[0].parent),
+                ab_failed=ab_failed_marker.exists(),
             )
             log.write(text)
             (step.outputs[0].parent / "SUMMARY.md").write_text(text, encoding="utf-8")
@@ -585,7 +631,9 @@ def _combo_agreement(row: dict) -> float | None:
     return row.get("accuracy")
 
 
-def build_summary_text(main: dict, ab: dict | None, *, parity_models: list[str]) -> str:
+def build_summary_text(
+    main: dict, ab: dict | None, *, parity_models: list[str], ab_failed: bool = False
+) -> str:
     """SUMMARY.md: main table, timing report, invariance rollup, A/B deltas.
 
     Pure: takes the collected blocks (see collect_side), never touches disk.
@@ -675,7 +723,12 @@ def build_summary_text(main: dict, ab: dict | None, *, parity_models: list[str])
                 f"| {label} | {_fmt(mv, pct=pct)} | {_fmt(av, pct=pct)} | {_fmt(delta, pct=pct)} |"
             )
     else:
-        lines += ["", "## A/B comparison", "", "A/B not run (no --ab-branch)."]
+        lines += [
+            "",
+            "## A/B comparison",
+            "",
+            "A/B: not run (setup failed)." if ab_failed else "A/B not run (no --ab-branch).",
+        ]
     lines.append("")
     return "\n".join(lines)
 
@@ -797,13 +850,28 @@ def main(argv: list[str] | None = None) -> int:
 
     failures: list[str] = []
     worktree = out / "ab-worktree"
+    # B3: when the A/B setup step fails, every later A/B step is SKIPPED
+    # with a RUNBOOK line. The summary step still runs for the main side
+    # with an 'A/B: not run' note.
+    ab_setup_failed = False
     try:
         for index, step in enumerate(steps, 1):
             if step_done(step, args.fresh):
                 runbook_append(out, index, step, rc=None, secs=None)
                 continue
+            # B3(b): skip later A/B steps when ab-setup failed.
+            if ab_setup_failed and step.id.startswith("ab-"):
+                runbook_append(out, index, step, rc=None, secs=None, skipped=True)
+                continue
             secs = time.perf_counter()
-            rc = execute_step(step)
+            # B3(c): catch any unexpected exception inside a step, record
+            # its type+message, and continue to the next non-dependent step.
+            try:
+                rc = execute_step(step)
+            except Exception as exc:  # noqa: BLE001
+                rc = -1
+                log_path = step.outputs[0].parent / f"{step.id}.log"
+                log_path.write_text(f"EXCEPTION ({type(exc).__name__}): {exc}\n", encoding="utf-8")
             secs = time.perf_counter() - secs
             runbook_append(out, index, step, rc=rc, secs=secs)
             if rc == 0:
@@ -812,6 +880,12 @@ def main(argv: list[str] | None = None) -> int:
                         marker.touch()
             else:
                 failures.append(step.id)
+                # B3(b): mark A/B setup as failed so later ab-* steps skip.
+                if step.id == "ab-setup":
+                    ab_setup_failed = True
+                    (out / "ab-failed.txt").write_text(
+                        f"A/B setup failed at {_now()}\n", encoding="utf-8"
+                    )
                 if step.gate:
                     with (out / "RUNBOOK.md").open("a", encoding="utf-8") as f:
                         f.write(
