@@ -106,6 +106,52 @@ def _rounded_json_payload(result: dict) -> dict:
     return parsed
 
 
+def _parse_kv_pairs(items: list[str], flag: str) -> dict[str, str]:
+    """Parse repeated ``name=description`` args into an ordered dict.
+
+    A bare ``name`` (no ``=``) maps to ``name -> name``. Used by the
+    choose/rate verbs' ``--option``/``--level``.
+    """
+    out: dict[str, str] = {}
+    for item in items:
+        if "=" in item:
+            name, desc = item.split("=", 1)
+        else:
+            name = desc = item
+        name = name.strip()
+        if not name:
+            raise SystemExit(f"{flag}: empty name in {item!r}")
+        out[name] = desc
+    return out
+
+
+def _field_result_json(field) -> dict:
+    """One :class:`FieldResult` as the JSON shape decide's --json prints for
+    a single field: the decided value + rounded confidence + alternatives +
+    ordinal record (rate only).
+    """
+    import dataclasses as _dc
+
+    payload = {
+        "value": field.value,
+        "prob": round(field.probability, 4) if field.probability is not None else None,
+        "probability_margin": (
+            round(field.probability_margin, 4) if field.probability_margin is not None else None
+        ),
+        "log_score_margin": (
+            round(field.log_score_margin, 4) if field.log_score_margin is not None else None
+        ),
+        "score": round(field.score, 4),
+        "model": field.model,
+        "calibrated": field.calibrated,
+        "alternatives": [{"choice": c, "probability": round(p, 4)} for c, p in field.alternatives],
+        "reason": field.reason,
+    }
+    if field.ordinal is not None:
+        payload["ordinal"] = _dc.asdict(field.ordinal)
+    return payload
+
+
 def _one_line(exc: BaseException) -> str:
     """The failure message: exception type + full message (multi-line
     validation errors keep their detail; the whole block is indented under
@@ -237,6 +283,60 @@ def _dispatch(argv) -> None:
         "excludes / requires_parent / exclusivity); wires through to the "
         "constrained MAP solver",
     )
+
+    # ---- one-field convenience verbs (W6-B5) -----------------------------
+    # choose / judge / rate: thin CLI wrappers over the api helpers.
+    def _add_common_onefield_args(p):
+        p.add_argument(
+            "--model",
+            default=DEFAULT_MODEL,
+            help="Hugging Face model id or alias (fast, quality, test)",
+        )
+        p.add_argument(
+            "--context", required=True, help="path to a context .txt file, or - for stdin"
+        )
+        p.add_argument(
+            "--json", action="store_true", dest="as_json", help="print the FieldResult as JSON only"
+        )
+        p.add_argument(
+            "--temperature", type=float, default=1.0, help="softmax temperature (1.0 = raw)"
+        )
+        p.add_argument(
+            "--scoring", choices=["slots", "labels"], default="slots", help="scoring mode"
+        )
+        p.add_argument(
+            "--prior-correction",
+            action="store_true",
+            help="subtract the neutral-context prior from the per-choice log scores",
+        )
+
+    choose_p = sub.add_parser(
+        "choose", help="one-field enum: pick one of --option name=description"
+    )
+    _add_common_onefield_args(choose_p)
+    choose_p.add_argument(
+        "--option",
+        action="append",
+        required=True,
+        metavar="name=description",
+        help="an option (name=description; repeatable; >= 2 required)",
+    )
+    choose_p.add_argument("--instructions", default="", help="field description / instructions")
+
+    judge_p = sub.add_parser("judge", help="one-field boolean: yes/no for --question")
+    _add_common_onefield_args(judge_p)
+    judge_p.add_argument("--question", required=True, help="the yes/no question")
+
+    rate_p = sub.add_parser("rate", help="one-field ordinal: rate on --level name=description")
+    _add_common_onefield_args(rate_p)
+    rate_p.add_argument(
+        "--level",
+        action="append",
+        required=True,
+        metavar="name=description",
+        help="a scale level (name=description; repeatable; >= 2 required; order = scale order)",
+    )
+    rate_p.add_argument("--instructions", default="", help="field description / instructions")
 
     calib = sub.add_parser(
         "calibrate", help="Fit a temperature on labeled JSONL cases and report ECE"
@@ -531,6 +631,50 @@ def _dispatch(argv) -> None:
             print(json.dumps(_rounded_json_payload(result), indent=2))
         else:
             print_result(title, model_label, result)
+
+    elif args.command in ("choose", "judge", "rate"):
+        from jevmlx import api
+
+        # Read context (string form; --messages is not supported here — use
+        # decide for the messages form).
+        if args.context == "-":
+            context = sys.stdin.read()
+        else:
+            with open(args.context, encoding="utf-8") as f:
+                context = f.read()
+
+        if args.command == "choose":
+            options = _parse_kv_pairs(args.option, "--option")
+            field = api.choose(
+                context,
+                options,
+                instructions=args.instructions,
+                model=args.model,
+                temperature=args.temperature,
+                scoring=args.scoring,
+                prior_correction=args.prior_correction,
+            )
+        elif args.command == "judge":
+            field = api.judge(
+                context,
+                args.question,
+                model=args.model,
+                temperature=args.temperature,
+                scoring=args.scoring,
+                prior_correction=args.prior_correction,
+            )
+        else:  # rate
+            levels = _parse_kv_pairs(args.level, "--level")
+            field = api.rate(
+                context,
+                levels,
+                instructions=args.instructions,
+                model=args.model,
+                temperature=args.temperature,
+                scoring=args.scoring,
+                prior_correction=args.prior_correction,
+            )
+        print(json.dumps(_field_result_json(field), indent=2, default=str))
 
     elif args.command == "calibrate":
         from jevmlx import calibrate
