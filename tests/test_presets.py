@@ -90,6 +90,10 @@ class TestContentModerationPreset:
         assert "requires_human_review" in schema.fields
         assert schema.fields["requires_human_review"].field_type == "boolean"
         assert "user_intent" in schema.fields
+        assert "action_priority" in schema.fields
+        assert schema.fields["action_priority"].ordered is True
+        assert "strike_count_tier" in schema.fields
+        assert schema.fields["strike_count_tier"].ordered is True
 
     def test_decide_via_cli(self, fake_engine, capsys):
         """`decide --preset content_moderation --json` runs end to end."""
@@ -107,7 +111,7 @@ class TestInboundEmailPreset:
         """Schema parses with correct field count and ordered priority."""
         preset = load_preset("inbound_email")
         schema = StructuredSchema(preset["schema"])
-        assert len(schema.fields) == 20
+        assert len(schema.fields) == 19
         assert "destination" in schema.fields
         assert "is_spam_or_phishing" in schema.fields
         assert schema.fields["is_spam_or_phishing"].field_type == "boolean"
@@ -116,6 +120,9 @@ class TestInboundEmailPreset:
         assert schema.fields["priority"].choices == ("low", "normal", "high", "urgent")
         assert "needs_reply" in schema.fields
         assert schema.fields["needs_reply"].field_type == "boolean"
+        assert "sla_deadline_hours" in schema.fields
+        assert schema.fields["sla_deadline_hours"].ordered is True
+        assert "confidence_tier" not in schema.fields
 
     def test_decide_via_cli(self, fake_engine, capsys):
         """`decide --preset inbound_email --json` runs end to end."""
@@ -179,3 +186,25 @@ class TestAllPresetsValid:
         assert "context" in preset
         schema = StructuredSchema(preset["schema"])
         assert len(schema.fields) > 0
+
+
+class TestReadmeFieldCounts:
+    """The README bundled-presets table field counts must match the actual
+    preset JSON field counts (guard against drift)."""
+
+    def test_readme_counts_match_presets(self):
+        import re
+        from pathlib import Path
+
+        readme = Path(__file__).resolve().parent.parent / "README.md"
+        text = readme.read_text(encoding="utf-8")
+        # Parse the bundled-presets table rows: | `name` | N | desc |
+        rows = re.findall(r"\| `(\w+)` \| (\d+) \|", text)
+        counts = {name: int(n) for name, n in rows}
+        for name, expected in counts.items():
+            preset = load_preset(name)
+            schema = StructuredSchema(preset["schema"])
+            actual = len(schema.fields)
+            assert actual == expected, (
+                f"README says {name} has {expected} fields but the preset has {actual}"
+            )

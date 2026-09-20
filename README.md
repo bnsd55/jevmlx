@@ -202,7 +202,7 @@ git clone https://github.com/bnsd55/jevmlx && cd jevmlx && ./setup.sh
 | `code_security` | 28 | SAST/DAST pull-request vulnerability triage |
 | `high_cardinality_255` | 4 | 255-choice customs tariff router (latency scaling demo) |
 | `content_moderation` | 20 | Trust-and-safety policy enforcement (violation category, ordered severity, human-review flag) |
-| `inbound_email` | 20 | Email routing, spam/phishing detection, ordered reply priority |
+| `inbound_email` | 19 | Email routing, spam/phishing detection, ordered reply priority |
 
 ## How it works
 
