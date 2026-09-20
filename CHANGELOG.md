@@ -193,6 +193,15 @@
   re-execing; `sleep_blocked` is recorded in `RUNBOOK.md`'s header. Opt out
   with `--allow-sleep`. No-op on non-darwin; a missing `caffeinate` prints a
   warning and continues.
+- W5c-17: run.json's `dataset_lock_sha256` is now always the sha256 of the
+  exact dataset lock that was evaluated (was null for every `bundled`
+  combo: `benchmarks.to_jsonl` wrote its lock as the generic
+  `dataset.lock.json` while the bench registered
+  `<name>.dataset.lock.json`, so the registered path never existed and
+  `_sha256_file` silently returned None). The bundled builder now passes
+  `--lock` to write the registered name; a non-None lock path that does
+  not exist raises OSError instead of hashing to null — a missing lock is
+  an error, never a silent null.
 
 ## Released
 

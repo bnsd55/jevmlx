@@ -162,8 +162,17 @@ def _next_timing_segment(out_dir: str) -> int:
 
 
 def _sha256_file(path: str | None) -> str | None:
-    if not path or not os.path.exists(path):
+    """sha256 hex of the file at ``path``; None only when path is None.
+
+    A non-None path that does not exist raises OSError — callers must not
+    write null into run.json for a lock they claimed exists (W5c-17: the
+    bench passed a lock path that was never written, and the silent None
+    hid the broken provenance chain).
+    """
+    if not path:
         return None
+    if not os.path.exists(path):
+        raise OSError(f"dataset lock file not found: {path}")
     digest = hashlib.sha256()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 16), b""):
@@ -554,6 +563,13 @@ def run_eval(
     resume: bool = False,
 ) -> dict:
     """Run the batch and write ``predictions.jsonl`` + ``run.json`` into out_dir.
+
+    ``dataset_lock_path`` is the dataset lock produced next to the cases
+    file; run.json's ``dataset_lock_sha256`` is the sha256 of THAT lock —
+    the provenance anchor for leaderboard rows. A non-None path that does
+    not exist is an ERROR (OSError), never a silent null: a missing lock
+    means the dataset was built by a stale builder and the sha would be
+    untraceable.
 
     ``decide_fn(schema_dict, context) -> per-field results`` is the seam: each
     per-field result carries ``prediction``, optionally ``valid``/``error``/

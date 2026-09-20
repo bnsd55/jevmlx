@@ -1119,3 +1119,96 @@ def test_w5c14_set_cache_limit_returns_none_on_failure(monkeypatch, capsys):
     assert _set_metal_cache_limit(8.0) is None
     captured = capsys.readouterr()
     assert "NOT set" in captured.out
+
+
+# --- W5c-17: dataset lock sha256 in run.json --------------------------------
+
+
+def test_build_bundled_writes_lock_at_registered_name(tmp_path, monkeypatch):
+    """_build_bundled must write the lock where build_datasets registers it
+    (<dataset>.dataset.lock.json). The converter's default name
+    (dataset.lock.json) left the registered path missing and run.json's
+    dataset_lock_sha256 came out null."""
+    import hashlib
+
+    from jevmlx import bench
+
+    cache = tmp_path / "cache"
+    monkeypatch.setattr(bench, "BENCH_CACHE", cache)
+    bench._build_bundled()
+
+    jsonl = cache / "bundled.jsonl"
+    lock = cache / "bundled.dataset.lock.json"
+    assert jsonl.is_file()
+    assert lock.is_file(), "lock must be written under the registered name"
+    lock_data = json.loads(lock.read_text(encoding="utf-8"))
+    assert lock_data["cases_sha256"] == hashlib.sha256(jsonl.read_bytes()).hexdigest()
+    # And build_datasets then finds everything without rebuilding:
+    paths, locks = bench.build_datasets(["bundled"])
+    assert locks["bundled"] == lock
+    assert locks["bundled"].exists()
+    assert paths["bundled"] == jsonl
+
+
+def test_run_one_threads_registered_lock_into_run_json(tmp_path, monkeypatch):
+    """_run_one passes the REGISTERED lock path to run_eval; run.json's
+    dataset_lock_sha256 is the sha256 of that exact file."""
+    import hashlib
+
+    from jevmlx import bench
+    from jevmlx import evalrun as evalrun_mod
+
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    jsonl = cache / "bundled.jsonl"
+    lock = cache / "bundled.dataset.lock.json"
+    jsonl.write_text(
+        json.dumps(
+            {
+                "id": "q/c1",
+                "group_id": "q/c1",
+                "source": "quality-eval",
+                "workflow": None,
+                "schema": {"f": {"type": "boolean", "description": "d"}},
+                "context": "x",
+                "labels": {"f": True},
+                "split": "train",
+                "meta": {},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    lock.write_text('{"cases_sha256": "abc"}', encoding="utf-8")
+
+    class _FakeEngine:
+        tokenizer = type("T", (), {})()
+
+    import jevmlx.engine as engine_mod
+
+    monkeypatch.setattr(engine_mod, "load_engine", lambda model: _FakeEngine())
+    captured: dict = {}
+
+    real_run_eval = evalrun_mod.run_eval
+
+    def spy_run_eval(*args, **kwargs):
+        captured["dataset_lock_path"] = kwargs.get("dataset_lock_path")
+        return real_run_eval(*args, **kwargs)
+
+    monkeypatch.setattr(bench, "run_eval", spy_run_eval)
+
+    combo_dir = tmp_path / "combo"
+    combo_dir.mkdir()
+    bench._run_one(
+        "m",
+        "parallel",
+        "slots",
+        jsonl,
+        combo_dir,
+        dataset_lock_path=lock,
+    )
+    assert captured["dataset_lock_path"] == str(lock)
+    run_json = json.load(open(combo_dir / "run.json"))
+    assert (
+        run_json["config"]["dataset_lock_sha256"] == hashlib.sha256(lock.read_bytes()).hexdigest()
+    )

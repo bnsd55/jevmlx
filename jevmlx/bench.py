@@ -283,7 +283,11 @@ def _build_bundled() -> None:
 
     out = str(BENCH_CACHE / "bundled.jsonl")
     print("building bundled dataset...")
-    to_jsonl_main(["--out", out])
+    # --lock: the registered lock name is <dataset>.dataset.lock.json (build_datasets
+    # reads it back from there); the converter's default 'dataset.lock.json'
+    # would collide with other datasets sharing the cache dir and leave the
+    # registered path missing — run.json's dataset_lock_sha256 came out null.
+    to_jsonl_main(["--out", out, "--lock", str(BENCH_CACHE / "bundled.dataset.lock.json")])
 
 
 def _build_typesafe() -> None:
