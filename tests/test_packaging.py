@@ -11,6 +11,7 @@ Builds the wheel (marked 'slow' because uv build is not instant) and asserts:
 from __future__ import annotations
 
 import subprocess
+import sys
 import zipfile
 from pathlib import Path
 
@@ -62,7 +63,7 @@ class TestPackaging:
             subprocess.run(["uv", "build"], cwd=REPO, check=True, capture_output=True)
         dist_files = [str(p) for p in (REPO / "dist").iterdir() if p.suffix in (".whl", ".tar.gz")]
         result = subprocess.run(
-            ["python", "-m", "twine", "check", *dist_files],
+            [sys.executable, "-m", "twine", "check", *dist_files],
             cwd=REPO,
             capture_output=True,
             text=True,
