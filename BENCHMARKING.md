@@ -151,6 +151,14 @@ above the cap instead of hoarding them — so inside a long combo (typesafe,
 and push the machine into swap. The cap is recorded in each combo's
 `run.json` `memory` block as `metal_cache_limit_bytes`.
 
+W5c-16 adds a **heartbeat** (`--heartbeat-every`, default 25, 0 disables):
+the per-case eval loop prints `[heartbeat] <combo> cases_done=N pred_lines=M
+elapsed_s=S peak=X active=Y cache=Z` every N completed cases (reusing the
+same GB formatting as the `[memory]` line) and appends the same fields as
+one JSON record per heartbeat to `<combo>/heartbeat.jsonl`. The Metal
+memory API moved to the top-level `mx` names (`mx.set_cache_limit` etc.)
+now that mlx 0.32 deprecates the `mx.metal.*` aliases.
+
 Anything outside `benchmarks/results/<machine>-<model-slug>/`: caches
 (`~/.cache/jevmlx/`), model weights, logs, editor files. Predictions larger
 than 5 MB total are gzipped automatically (the folder README says so).

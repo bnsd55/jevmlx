@@ -291,7 +291,17 @@ def _patch_bench_core(monkeypatch, tmp_path, failing_models=()):
 
     run_calls: list[str] = []
 
-    def fake_run_one(model, track, scorer, jsonl, combo_dir, dataset_lock_path=None, resume=False):
+    def fake_run_one(
+        model,
+        track,
+        scorer,
+        jsonl,
+        combo_dir,
+        dataset_lock_path=None,
+        resume=False,
+        heartbeat_every=0,
+        combo="",
+    ):
         if model in failing_models:
             raise RuntimeError(f"load failed for {model}")
         run_calls.append(model)
@@ -917,7 +927,7 @@ def test_w5c13_clear_metal_cache_called_once_per_combo_and_memory_block_written(
     """run_bench (single-model path) clears the Metal buffer cache AFTER every
     combo (not only in run_bench_models between models), resets the peak
     counter at combo start, and writes a 'memory' block (peak/active/cache)
-    into each combo's run.json. A fake mx.metal is monkeypatched so no real
+    into each combo's run.json. A fake mx (top-level) is monkeypatched so no real
     GPU is needed; _run_one is stubbed to write a minimal run.json."""
     import json
 
@@ -925,9 +935,9 @@ def test_w5c13_clear_metal_cache_called_once_per_combo_and_memory_block_written(
 
     import jevmlx.bench as bench
 
-    # Fake mx.metal: counters + call recording. Monkeypatch the functions on
+    # Fake mx (top-level): counters + call recording. Monkeypatch the functions on
     # the REAL mlx.core.metal module (bench does `import mlx.core as mx;
-    # mx.metal.clear_cache()` locally, so sys.modules faking is unreliable).
+    # mx (top-level).clear_cache()` locally, so sys.modules faking is unreliable).
     state = {"peak": 1000, "active": 500, "cache": 2000}
     calls = {"clear_cache": 0, "reset_peak": 0}
 
@@ -938,11 +948,11 @@ def test_w5c13_clear_metal_cache_called_once_per_combo_and_memory_block_written(
         calls["reset_peak"] += 1
         state["peak"] = 0
 
-    monkeypatch.setattr(mx.metal, "clear_cache", _fake_clear_cache)
-    monkeypatch.setattr(mx.metal, "reset_peak_memory", _fake_reset_peak)
-    monkeypatch.setattr(mx.metal, "get_peak_memory", lambda: state["peak"])
-    monkeypatch.setattr(mx.metal, "get_active_memory", lambda: state["active"])
-    monkeypatch.setattr(mx.metal, "get_cache_memory", lambda: state["cache"])
+    monkeypatch.setattr(mx, "clear_cache", _fake_clear_cache)
+    monkeypatch.setattr(mx, "reset_peak_memory", _fake_reset_peak)
+    monkeypatch.setattr(mx, "get_peak_memory", lambda: state["peak"])
+    monkeypatch.setattr(mx, "get_active_memory", lambda: state["active"])
+    monkeypatch.setattr(mx, "get_cache_memory", lambda: state["cache"])
 
     # Stub the heavy pieces run_bench calls.
     monkeypatch.setattr(bench, "preflight", lambda force, ov: "test-machine")
@@ -1011,15 +1021,9 @@ def test_w5c13_sample_metal_memory_returns_three_keys(monkeypatch):
 
     from jevmlx.bench import _sample_metal_memory
 
-    monkeypatch.setattr(
-        mx.metal, "get_peak_memory", lambda: (_ for _ in ()).throw(RuntimeError("x"))
-    )
-    monkeypatch.setattr(
-        mx.metal, "get_active_memory", lambda: (_ for _ in ()).throw(RuntimeError("x"))
-    )
-    monkeypatch.setattr(
-        mx.metal, "get_cache_memory", lambda: (_ for _ in ()).throw(RuntimeError("x"))
-    )
+    monkeypatch.setattr(mx, "get_peak_memory", lambda: (_ for _ in ()).throw(RuntimeError("x")))
+    monkeypatch.setattr(mx, "get_active_memory", lambda: (_ for _ in ()).throw(RuntimeError("x")))
+    monkeypatch.setattr(mx, "get_cache_memory", lambda: (_ for _ in ()).throw(RuntimeError("x")))
     mem = _sample_metal_memory()
     assert set(mem.keys()) == {"peak_memory", "active_memory", "cache_memory"}
     assert mem == {"peak_memory": -1, "active_memory": -1, "cache_memory": -1}
@@ -1039,7 +1043,7 @@ def test_w5c13_augment_run_json_missing_file_is_noop(tmp_path):
 
 
 def test_w5c14_set_cache_limit_called_once_with_configured_bytes(tmp_path, monkeypatch):
-    """run_bench calls mx.metal.set_cache_limit once at start with the
+    """run_bench calls mx (top-level).set_cache_limit once at start with the
     configured --metal-cache-gb (default 8 => 8 * 2**30 bytes), and the run.json
     memory block carries metal_cache_limit_bytes. Monkeypatches mlx.core.metal
     so no real GPU is needed."""
@@ -1051,12 +1055,12 @@ def test_w5c14_set_cache_limit_called_once_with_configured_bytes(tmp_path, monke
 
     calls = {"set_cache_limit": []}
 
-    monkeypatch.setattr(mx.metal, "set_cache_limit", lambda b: calls["set_cache_limit"].append(b))
-    monkeypatch.setattr(mx.metal, "clear_cache", lambda: None)
-    monkeypatch.setattr(mx.metal, "reset_peak_memory", lambda: None)
-    monkeypatch.setattr(mx.metal, "get_peak_memory", lambda: 0)
-    monkeypatch.setattr(mx.metal, "get_active_memory", lambda: 0)
-    monkeypatch.setattr(mx.metal, "get_cache_memory", lambda: 0)
+    monkeypatch.setattr(mx, "set_cache_limit", lambda b: calls["set_cache_limit"].append(b))
+    monkeypatch.setattr(mx, "clear_cache", lambda: None)
+    monkeypatch.setattr(mx, "reset_peak_memory", lambda: None)
+    monkeypatch.setattr(mx, "get_peak_memory", lambda: 0)
+    monkeypatch.setattr(mx, "get_active_memory", lambda: 0)
+    monkeypatch.setattr(mx, "get_cache_memory", lambda: 0)
 
     monkeypatch.setattr(bench, "preflight", lambda force, ov: "test-machine")
     monkeypatch.setattr(
@@ -1107,14 +1111,14 @@ def test_w5c14_set_cache_limit_called_once_with_configured_bytes(tmp_path, monke
 
 
 def test_w5c14_set_cache_limit_returns_none_on_failure(monkeypatch, capsys):
-    """_set_metal_cache_limit returns None when mx.metal raises (best-effort)
+    """_set_metal_cache_limit returns None when mx (top-level) raises (best-effort)
     and prints a 'NOT set' warning so the silent-failure path is visible."""
     import mlx.core as mx
 
     from jevmlx.bench import _set_metal_cache_limit
 
     monkeypatch.setattr(
-        mx.metal, "set_cache_limit", lambda b: (_ for _ in ()).throw(RuntimeError("no metal"))
+        mx, "set_cache_limit", lambda b: (_ for _ in ()).throw(RuntimeError("no metal"))
     )
     assert _set_metal_cache_limit(8.0) is None
     captured = capsys.readouterr()

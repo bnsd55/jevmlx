@@ -569,7 +569,7 @@ def _cache_nbytes(cache) -> int:
 
 def _max_recommended_working_set() -> int:
     """Metal's max recommended working set size in bytes."""
-    return int(mx.metal.device_info()["max_recommended_working_set_size"])
+    return int(mx.device_info()["max_recommended_working_set_size"])
 
 
 def run_naive_generation(
