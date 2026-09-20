@@ -644,7 +644,6 @@ def run_eval(
     plan_provider: Callable[..., dict] | None = None,
     dataset_lock_path: str | None = None,
     dataset_path: str | None = None,
-    carry_perturbation: bool = False,
     carry_consensus: bool = False,
     resume: bool = False,
     heartbeat_every: int = 0,
@@ -664,12 +663,6 @@ def run_eval(
     ``log_scores``/``probability``/``per_option``; a ``"_meta"`` entry carries
     run-level ``latency_ms``/``rows``/``passes``. Returns the run manifest.
 
-    With ``carry_perturbation=True`` each prediction line also carries
-    ``"perturbation"``: the case's ``meta.perturbation`` (a string such as
-    ``"ws"`` or ``"shuffle3"``) or null for original cases. Pairs of lines
-    sharing a ``group_id`` (original vs variant) feed
-    :func:`jevmlx.evalmetrics.perturbation_flip_rate`.
-
     With ``carry_consensus=True`` each prediction line whose case carries a
     ``meta.consensus[field]`` distribution (TypeSafe / typed-decisions
     fetchers) gets a ``"consensus"`` key with that field's ``{choice: p}``
@@ -677,6 +670,14 @@ def run_eval(
     """
     run_id = run_id or make_run_id()
     os.makedirs(out_dir, exist_ok=True)
+
+    # Auto-detect perturbation metadata: if any case carries a non-None
+    # meta.perturbation (original vs variant sharing a group_id), carry the
+    # ``perturbation`` key to every prediction line so
+    # perturbation_flip_rate can pair them. Non-perturbed datasets are
+    # unaffected (no key added, frozen contract unchanged). This is the
+    # OWNING layer — no caller needs to remember a flag.
+    carry_perturbation = any((c.get("meta") or {}).get("perturbation") is not None for c in cases)
 
     # W5c-7: crash-safe resumable eval infrastructure.
     from datetime import UTC, datetime

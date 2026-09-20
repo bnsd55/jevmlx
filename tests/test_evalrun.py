@@ -484,8 +484,14 @@ def test_engine_metadata_resolves_snapshot_sha(tmp_path):
     assert meta["mlx_lm_version"]
 
 
-def test_carry_perturbation_flag_passes_meta_through(tmp_path):
-    """carry_perturbation=True adds 'perturbation' (str|null) to every line."""
+def test_perturbation_auto_carried_when_meta_present(tmp_path):
+    """run_eval auto-detects meta.perturbation and carries it (no flag needed).
+
+    The owning layer (run_eval) detects perturbation metadata itself: when any
+    case has a non-None meta.perturbation, every prediction line gets the key
+    (None for originals, the kind string for variants). Non-perturbed datasets
+    are unaffected (no key added).
+    """
     cases = [
         {**_two_cases()[0], "group_id": "wf/case-1", "meta": {}},  # original: perturbation null
         {
@@ -502,25 +508,13 @@ def test_carry_perturbation_flag_passes_meta_through(tmp_path):
             "flag": {"prediction": True},
         }
 
-    # Default: no perturbation key at all (contract unchanged).
-    run_default = evalrun.run_eval(
+    # Auto-detected: original lines carry None, variant lines carry the kind.
+    # No carry_perturbation flag — run_eval detects it from the cases.
+    run = evalrun.run_eval(
         cases, decide, track="parallel", model="m", out_dir=str(tmp_path / "a"), run_id="r0"
     )
-    lines_default = _read_lines(tmp_path / "a" / "predictions.jsonl")
-    assert run_default["counts"]["prediction_lines"] == 4
-    assert all("perturbation" not in line for line in lines_default)
-
-    # With the flag: original lines carry None, variant lines carry the kind.
-    evalrun.run_eval(
-        cases,
-        decide,
-        track="parallel",
-        model="m",
-        out_dir=str(tmp_path / "b"),
-        run_id="r1",
-        carry_perturbation=True,
-    )
-    lines = _read_lines(tmp_path / "b" / "predictions.jsonl")
+    lines = _read_lines(tmp_path / "a" / "predictions.jsonl")
+    assert run["counts"]["prediction_lines"] == 4
     assert len(lines) == 4
     by_case = {line["case_id"]: line["perturbation"] for line in lines}
     assert by_case["wf/case-1"] is None

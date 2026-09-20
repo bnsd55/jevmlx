@@ -1,22 +1,29 @@
 """Fix: perturbation_flip_rate was None on perturbed combos.
 
-Root cause: run_eval carries the ``perturbation`` key to prediction lines
-only when ``carry_perturbation=True``, but the CLI never set it. So even on
-perturbed datasets (where cases carry ``meta.perturbation``), the prediction
-lines lacked the key, and perturbation_flip_rate returned None (no pairs).
+Root cause: run_eval carried the ``perturbation`` key to prediction lines
+only when ``carry_perturbation=True``, but no caller set it (the CLI and
+bench._run_one both called run_eval without it). So even on perturbed
+datasets (where cases carry ``meta.perturbation``), the prediction lines
+lacked the key, and perturbation_flip_rate returned None (no pairs).
 
-Fix: the CLI detects perturbation metadata in the cases and passes
-``carry_perturbation=True`` to run_eval.
+Fix at the OWNING layer: run_eval auto-detects perturbation metadata
+(any case with a non-None meta.perturbation) and carries the key itself.
+The carry_perturbation parameter is deleted — no caller needs to remember
+a flag. Non-perturbed datasets are unaffected (no key added).
 
-This test runs the FULL path: a small perturbed jsonl (original + #p1..#p3
-variants) through run_eval with a fake decide_fn, then compute_metrics, and
-asserts perturbation_flip_rate is a float (not None).
+Tests:
+- end-to-end fake-engine eval through run_eval + compute_metrics
+- all-flip / partial-flip / no-flip rates
+- non-perturbed dataset: no key added (contract unchanged)
+- bench._run_one: report.json has perturbation_flip_rate (the M5 path)
+- detection logic (perturbed / plain / empty-meta)
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -49,7 +56,7 @@ def _perturbed_cases(tmp_path: Path) -> str:
                 "schema": {
                     "risk": {"type": "enum", "choices": ["LOW", "HIGH"], "description": "d"}
                 },
-                "context": "The applicant pays late.",  # perturbed text doesn't matter for the fake
+                "context": "The applicant pays late.",
                 "labels": {"risk": "LOW"},
                 "split": "test",
                 "meta": {"perturbation": kind},
@@ -92,8 +99,8 @@ def _fake_decide_fn_partial_flip():
     return decide
 
 
-def test_perturbation_flip_rate_is_float_with_carry(tmp_path):
-    """End-to-end: perturbed jsonl -> run_eval (carry_perturbation=True) ->
+def test_perturbation_flip_rate_is_float(tmp_path):
+    """End-to-end: perturbed jsonl -> run_eval (auto-carry) ->
     compute_metrics -> perturbation_flip_rate is a float, not None."""
     cases_path = _perturbed_cases(tmp_path)
     cases = evalrun.load_cases(cases_path)
@@ -106,14 +113,13 @@ def test_perturbation_flip_rate_is_float_with_carry(tmp_path):
         track="parallel",
         model="fake",
         out_dir=str(tmp_path / "out"),
-        carry_perturbation=True,
     )
 
     # Load the predictions and compute metrics.
     preds_path = tmp_path / "out" / "predictions.jsonl"
     records = [json.loads(line) for line in preds_path.read_text().splitlines() if line.strip()]
 
-    # Every variant line carries the perturbation key.
+    # Every variant line carries the perturbation key (auto-detected).
     variant_lines = [r for r in records if r.get("perturbation") is not None]
     assert len(variant_lines) == 3
     # The original line has perturbation = None.
@@ -133,28 +139,25 @@ def test_perturbation_flip_rate_is_float_with_carry(tmp_path):
     assert metrics["perturbation_flip_rate"] == pytest.approx(1.0)
 
 
-def test_perturbation_flip_rate_none_without_carry(tmp_path):
-    """Without carry_perturbation, the key is absent and the metric returns None."""
+def test_perturbation_flip_rate_partial_flip(tmp_path):
+    """When only 2 of 3 variants flip, the rate is 2/3."""
     cases_path = _perturbed_cases(tmp_path)
     cases = evalrun.load_cases(cases_path)
 
-    decide_fn = _fake_decide_fn_all_flip()
+    decide_fn = _fake_decide_fn_partial_flip()
     evalrun.run_eval(
         cases,
         decide_fn,
         track="parallel",
         model="fake",
-        out_dir=str(tmp_path / "out_nocarry"),
-        carry_perturbation=False,  # the bug: key never carried
+        out_dir=str(tmp_path / "out_partial"),
     )
 
-    preds_path = tmp_path / "out_nocarry" / "predictions.jsonl"
+    preds_path = tmp_path / "out_partial" / "predictions.jsonl"
     records = [json.loads(line) for line in preds_path.read_text().splitlines() if line.strip()]
 
-    # No line carries the perturbation key.
-    assert all("perturbation" not in r for r in records)
-    # The metric returns None (no pairs).
-    assert perturbation_flip_rate(records) is None
+    rate = perturbation_flip_rate(records)
+    assert rate == pytest.approx(2 / 3)
 
 
 def test_perturbation_flip_rate_zero_when_no_flips(tmp_path):
@@ -173,7 +176,6 @@ def test_perturbation_flip_rate_zero_when_no_flips(tmp_path):
         track="parallel",
         model="fake",
         out_dir=str(tmp_path / "out_noflip"),
-        carry_perturbation=True,
     )
 
     preds_path = tmp_path / "out_noflip" / "predictions.jsonl"
@@ -183,35 +185,93 @@ def test_perturbation_flip_rate_zero_when_no_flips(tmp_path):
     assert rate == 0.0
 
 
-def test_perturbation_flip_rate_partial_flip(tmp_path):
-    """When only 2 of 3 variants flip, the rate is 2/3."""
-    cases_path = _perturbed_cases(tmp_path)
-    cases = evalrun.load_cases(cases_path)
+def test_non_perturbed_dataset_no_key_added(tmp_path):
+    """A non-perturbed dataset does NOT get the perturbation key (contract
+    unchanged). This is the byte-identical-to-main guarantee."""
+    cases = [
+        {
+            "id": "c1",
+            "group_id": "c1",
+            "schema": {"risk": {"type": "enum", "choices": ["LOW", "HIGH"], "description": "d"}},
+            "context": "ctx",
+            "labels": {"risk": "LOW"},
+            "split": "test",
+            "meta": {},
+        }
+    ]
+    cases_path = tmp_path / "plain.jsonl"
+    cases_path.write_text(json.dumps(cases[0]) + "\n", encoding="utf-8")
 
-    decide_fn = _fake_decide_fn_partial_flip()
+    def decide(schema_dict, context, constraints=None, oracle_overrides=None):
+        return {"risk": {"prediction": "LOW", "probability": 0.9, "valid": True}}
+
     evalrun.run_eval(
-        cases,
-        decide_fn,
+        evalrun.load_cases(str(cases_path)),
+        decide,
         track="parallel",
         model="fake",
-        out_dir=str(tmp_path / "out_partial"),
-        carry_perturbation=True,
+        out_dir=str(tmp_path / "out_plain"),
     )
 
-    preds_path = tmp_path / "out_partial" / "predictions.jsonl"
+    preds_path = tmp_path / "out_plain" / "predictions.jsonl"
     records = [json.loads(line) for line in preds_path.read_text().splitlines() if line.strip()]
 
-    rate = perturbation_flip_rate(records)
-    assert rate == pytest.approx(2 / 3)
+    # No line carries the perturbation key.
+    assert all("perturbation" not in r for r in records)
+    # The metric returns None (no pairs).
+    assert perturbation_flip_rate(records) is None
+
+
+def test_bench_run_one_report_has_perturbation_flip_rate(tmp_path):
+    """The M5 path: bench._run_one on a perturbed jsonl produces a report.json
+    with perturbation_flip_rate (not None / not missing).
+
+    This is the regression test for the original M5 finding: bench._run_one
+    calls run_eval directly, and before the fix it never carried the
+    perturbation key, so the report had a dash.
+    """
+    from jevmlx.bench import _run_one
+
+    cases_path = _perturbed_cases(tmp_path)
+    combo_dir = tmp_path / "combo"
+
+    # Mock the engine load + decide_fn so we don't need a real MLX model.
+    # _run_one calls load_engine(model) then parallel_decide_fn(engine, ...).
+    # We patch both so the fake decide_fn (all-flip) is used.
+    fake_engine = type(
+        "FakeEngine", (), {"tokenizer": type("FakeTok", (), {"chat_template": None})()}
+    )()
+    fake_decide = _fake_decide_fn_all_flip()
+
+    with (
+        patch("jevmlx.engine.load_engine", lambda model: fake_engine),
+        patch("jevmlx.bench.parallel_decide_fn", lambda engine, scoring="slots", **kw: fake_decide),
+    ):
+        _run_one(
+            model="fake",
+            track="parallel",
+            scorer="slots",
+            jsonl=Path(cases_path),
+            combo_dir=combo_dir,
+        )
+
+    # The report.json has perturbation_flip_rate as a float.
+    report_path = combo_dir / "report.json"
+    assert report_path.exists()
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert "perturbation_flip_rate" in report["metrics"]
+    assert isinstance(report["metrics"]["perturbation_flip_rate"], float)
+    # All 3 variants flipped -> rate = 1.0.
+    assert report["metrics"]["perturbation_flip_rate"] == pytest.approx(1.0)
 
 
 def _detect_perturbation(cases: list[dict]) -> bool:
-    """The detection expression the CLI uses (mirrors jevmlx/cli.py)."""
+    """The detection expression run_eval uses (mirrors jevmlx/evalrun.py)."""
     return any((c.get("meta") or {}).get("perturbation") is not None for c in cases)
 
 
 def test_detect_perturbation_flag_perturbed():
-    """The CLI's detection returns True when any case has meta.perturbation."""
+    """run_eval's detection returns True when any case has meta.perturbation."""
     cases = [
         {"id": "c1", "meta": {}},
         {"id": "c1#p1", "meta": {"perturbation": "ws"}},
@@ -220,7 +280,7 @@ def test_detect_perturbation_flag_perturbed():
 
 
 def test_detect_perturbation_flag_plain():
-    """The CLI's detection returns False for a non-perturbed dataset."""
+    """run_eval's detection returns False for a non-perturbed dataset."""
     cases = [{"id": "c1", "meta": {}}, {"id": "c2", "meta": {}}]
     assert _detect_perturbation(cases) is False
 
