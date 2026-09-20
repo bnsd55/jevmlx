@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- W6-B5: `choose` / `judge` / `rate` one-field convenience helpers + CLI
+  verbs. Thin wrappers over `decide`'s engine path (`run_parallel_generation`)
+  that synthesize a one-field schema and return the single `FieldResult`
+  (not a full `Decision`). `choose(context, options, instructions="")` —
+  one-field enum (dict name->description or list of names; >= 2 unique);
+  `judge(context, question)` — one-field boolean (probability of True is
+  `f.probability`, full `FieldResult` kept); `rate(context, levels,
+  instructions="")` — one-field ORDINAL (`ordered=True`, returns an
+  `OrdinalFieldRecord` with `argmax_level`/`expected_index`/
+  `expected_score_normalized`). All pass through `model`/`temperature`/
+  `scoring`/`prior_correction` like `decide`. CLI: `jevmlx choose --option
+  name=desc ...`, `jevmlx judge --question ...`, `jevmlx rate --level
+  name=desc ...` (prints the FieldResult as JSON). No engine change, no new
+  prompt version. 18 new tests (fake-engine: schema built, FieldResult
+  returned, validation, CLI parse + print, stdin context).
+
 - W6-B2: OpenJev `authored144` and `perturbations108` datasets + `optrev`/
   `criterion` perturbation kinds. `authored144` (144 rows, 36 groups × 4
   variants, 3-way evidence interpretation) and `perturbations108` (108 rows,

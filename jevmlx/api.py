@@ -43,8 +43,11 @@ __all__ = [
     "FieldSemantics",
     "OrdinalFieldRecord",
     "Ordered",
+    "choose",
     "decide",
     "decide_many",
+    "judge",
+    "rate",
     "schema_from_model",
 ]
 
@@ -818,3 +821,187 @@ def decide_many[T: BaseModel](
         )
         for raw in raws
     ]
+
+
+# ---- one-field convenience helpers (W6-B5) -----------------------------------
+#
+# choose / judge / rate: thin wrappers over run_parallel_generation that
+# synthesize a one-field schema and return the single FieldResult (not a
+# full Decision). No engine change, no new prompt version — they reuse the
+# exact same _prefill/_score_rows path decide() uses.
+
+
+def _normalize_options(
+    options: dict[str, str] | list[str], *, min_count: int = 2, what: str = "options"
+) -> tuple[list[str], dict[str, str]]:
+    """Normalize a dict (name->description) or list (names only) into
+    (ordered names, descriptions). Validates: >= min_count, unique names."""
+    if isinstance(options, dict):
+        names = list(options.keys())
+        descriptions = dict(options)
+    elif isinstance(options, list):
+        names = list(options)
+        descriptions = {name: name for name in names}
+    else:
+        raise TypeError(
+            f"{what} must be a dict (name -> description) or a list of names, "
+            f"not {type(options).__name__}"
+        )
+    if len(names) < min_count:
+        raise ValueError(f"{what} must have at least {min_count} entries, got {len(names)}")
+    if len(set(names)) != len(names):
+        seen: set[str] = set()
+        dup = next(n for n in names if n in seen or seen.add(n))  # type: ignore[func-returns-value]
+        raise ValueError(f"{what} has a duplicate name: {dup!r}")
+    if not all(isinstance(n, str) and n for n in names):
+        raise ValueError(f"every name in {what} must be a non-empty str")
+    return names, descriptions
+
+
+def _one_field_decision(
+    context: str | list[dict],
+    field_name: str,
+    schema_dict: dict,
+    *,
+    model: str = DEFAULT_MODEL,
+    temperature: float = 1.0,
+    scoring: str = "slots",
+    calibration: str | CalibrationBundle | None = None,
+    prior_correction: bool = False,
+    constraints: list[dict] | None = None,
+) -> FieldResult:
+    """Build a one-field StructuredSchema, run the engine, return the field's
+    FieldResult. Reuses run_parallel_generation — the same path decide()
+    takes, no second prompt renderer."""
+    schema = StructuredSchema({field_name: schema_dict})
+    engine = load_engine(model)
+    result = run_parallel_generation(
+        engine,
+        context,
+        schema,
+        temperature=temperature,
+        scoring=scoring,
+        calibration=_resolve_calibration(calibration),
+        prior_correction=prior_correction,
+        constraints=constraints,
+    )
+    fields = _build_field_results(result, result["confidence_model"])
+    return fields[field_name]
+
+
+def choose(
+    context: str | list[dict],
+    options: dict[str, str] | list[str],
+    instructions: str = "",
+    *,
+    model: str = DEFAULT_MODEL,
+    temperature: float = 1.0,
+    scoring: str = "slots",
+    calibration: str | CalibrationBundle | None = None,
+    prior_correction: bool = False,
+    constraints: list[dict] | None = None,
+) -> FieldResult:
+    """One-field enum decision — pick one of ``options`` for ``context``.
+
+    ``options`` is a dict (name -> description) or a list of names (the
+    description defaults to the name). ``instructions`` is the field's
+    description. Returns the :class:`FieldResult` for the single field
+    (winner, probabilities, probability_margin, log_score_margin).
+
+    Reuses :func:`decide`'s engine path — no second prompt renderer, no new
+    prompt version.
+    """
+    names, descriptions = _normalize_options(options, min_count=2, what="options")
+    description = instructions.strip() or "Choose the best option."
+    schema_dict = {
+        "type": "enum",
+        "description": description,
+        "choices": names,
+        "choice_descriptions": descriptions,
+    }
+    return _one_field_decision(
+        context,
+        "choice",
+        schema_dict,
+        model=model,
+        temperature=temperature,
+        scoring=scoring,
+        calibration=calibration,
+        prior_correction=prior_correction,
+        constraints=constraints,
+    )
+
+
+def judge(
+    context: str | list[dict],
+    question: str,
+    *,
+    model: str = DEFAULT_MODEL,
+    temperature: float = 1.0,
+    scoring: str = "slots",
+    calibration: str | CalibrationBundle | None = None,
+    prior_correction: bool = False,
+    constraints: list[dict] | None = None,
+) -> FieldResult:
+    """One-field boolean decision — yes/no for ``question`` on ``context``.
+
+    Returns the boolean :class:`FieldResult`; the probability of True is the
+    field's ``probability``. Keeps the full FieldResult (not a bare float)
+    so margins and provenance are available.
+    """
+    if not question.strip():
+        raise ValueError("question must be a non-empty str")
+    schema_dict = {"type": "boolean", "description": question.strip()}
+    return _one_field_decision(
+        context,
+        "judgment",
+        schema_dict,
+        model=model,
+        temperature=temperature,
+        scoring=scoring,
+        calibration=calibration,
+        prior_correction=prior_correction,
+        constraints=constraints,
+    )
+
+
+def rate(
+    context: str | list[dict],
+    levels: dict[str, str] | list[str],
+    instructions: str = "",
+    *,
+    model: str = DEFAULT_MODEL,
+    temperature: float = 1.0,
+    scoring: str = "slots",
+    calibration: str | CalibrationBundle | None = None,
+    prior_correction: bool = False,
+    constraints: list[dict] | None = None,
+) -> FieldResult:
+    """One-field ORDINAL decision — rate ``context`` on the ``levels`` scale.
+
+    ``levels`` is a dict (name -> description) or a list of names; the
+    DECLARATION order is the scale order (level 0 = first). The field is
+    marked ``ordered=True``, so the returned :class:`FieldResult` carries an
+    :class:`OrdinalFieldRecord` (argmax_level, expected_index,
+    expected_score_normalized).
+    """
+    names, descriptions = _normalize_options(levels, min_count=2, what="levels")
+    description = instructions.strip() or "Rate on the given scale."
+    schema_dict = {
+        "type": "enum",
+        "description": description,
+        "choices": names,
+        "choice_descriptions": descriptions,
+        "ordered": True,
+    }
+    return _one_field_decision(
+        context,
+        "rating",
+        schema_dict,
+        model=model,
+        temperature=temperature,
+        scoring=scoring,
+        calibration=calibration,
+        prior_correction=prior_correction,
+        constraints=constraints,
+    )

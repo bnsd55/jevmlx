@@ -113,6 +113,50 @@ Read the result. `decide(...)` returns a `Decision`: `.value` (a validated
   `failed_attempts` on the engine result, per-combo `timing.json` in bench
   output.
 
+### One-question helpers
+
+For a single-field decision you don't need a Pydantic model — `choose`,
+`judge`, and `rate` synthesize a one-field schema and return the field's
+`FieldResult` directly (no `Decision` wrapper). They reuse the exact
+`decide` engine path — no second prompt renderer, no new prompt version.
+
+```python
+from jevmlx import choose, judge, rate
+
+# one-field enum: pick one of N options (dict = name -> description)
+f = choose(
+    "The optician ordered replacement lenses. They have not been fitted.",
+    {
+        "supported": "evidence establishes the claim",
+        "insufficient": "evidence does not establish either",
+        "contradicted": "evidence establishes the opposite",
+    },
+    instructions="Assess the claim: the lenses have been fitted.",
+)
+print(f.value, f.probability, f.probability_margin)
+
+# one-field boolean: yes/no for a question (probability of True is f.probability)
+f = judge(passage, "Is the claim supported by the passage?")
+
+# one-field ORDINAL: rate on a scale (declaration order = scale order;
+# the FieldResult carries an OrdinalFieldRecord — argmax_level,
+# expected_index, expected_score_normalized)
+f = rate(review, {"low": "poor", "medium": "ok", "high": "great"})
+print(f.ordinal.argmax_level, f.ordinal.expected_score_normalized)
+```
+
+`options`/`levels` accept a dict (name -> description) or a list of names
+(the description defaults to the name). `choose` and `rate` require >= 2
+unique names; `rate` marks the field `ordered=True`. All three pass through
+the same `model` / `temperature` / `scoring` / `prior_correction` kwargs as
+`decide`.
+
+CLI verbs mirror them: `jevmlx choose --context ctx.txt --option
+name=description ...`, `jevmlx judge --context ctx.txt --question "..."`,
+`jevmlx rate --context ctx.txt --level name=description ...` — each prints
+the FieldResult as JSON (value, prob, margins, alternatives, ordinal for
+`rate`).
+
 ## Use it from any OpenAI-compatible server
 
 Instead of loading a model on this Mac, jevmlx can send the same prompts to a chat server that returns logprobs: Ollama, oMLX, MTPLX, vLLM.
