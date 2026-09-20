@@ -546,6 +546,13 @@ def collect_side(side_dir: Path) -> dict:
 def _fmt(value: float | int | None, pct: bool = False) -> str:
     if value is None:
         return "-"
+    # Dict-safe: a metrics field that is unexpectedly a dict (e.g. typesafe's
+    # agreement {overall, by_workflow, ...}) should never reach here, but if
+    # it does, extract 'overall' or show '-' rather than crash on __format__.
+    if isinstance(value, dict):
+        value = value.get("overall")
+        if value is None:
+            return "-"
     return f"{value:.1%}" if pct else f"{value:.4g}"
 
 
@@ -554,7 +561,20 @@ def _mean(values: list[float]) -> float | None:
 
 
 def _combo_agreement(row: dict) -> float | None:
-    return row["agreement"] if row["agreement"] is not None else row["accuracy"]
+    """Extract a float agreement/accuracy from a row's metrics.
+
+    Typesafe report.json stores ``agreement`` as a dict
+    (``{overall, by_workflow, ...}``); bundled/other report.json stores a
+    bare float. This always returns a float: the dict's ``overall`` key when
+    ``agreement`` is a dict, the float when it is a number, else falls back
+    to ``accuracy``. Never returns a dict (``_fmt`` would crash on it).
+    """
+    agreement = row.get("agreement")
+    if isinstance(agreement, dict):
+        agreement = agreement.get("overall")
+    if agreement is not None:
+        return agreement
+    return row.get("accuracy")
 
 
 def build_summary_text(main: dict, ab: dict | None, *, parity_models: list[str]) -> str:
