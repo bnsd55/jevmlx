@@ -997,6 +997,11 @@ def _run_eval_command(args) -> None:
         plan_provider = None
 
     logging.getLogger("jevmlx.evalrun").setLevel(logging.INFO)
+    # Detect whether the dataset carries perturbation metadata (original vs
+    # variant cases sharing a group_id). If so, carry the ``perturbation`` key
+    # to every prediction line so perturbation_flip_rate can pair them.
+    carry_perturbation = any((c.get("meta") or {}).get("perturbation") is not None for c in cases)
+
     run = evalrun.run_eval(
         cases,
         decide_fn,
@@ -1011,6 +1016,7 @@ def _run_eval_command(args) -> None:
         dataset_lock_path=lock if os.path.exists(lock) else None,
         dataset_path=os.path.abspath(args.data),
         resume=getattr(args, "resume", False),
+        carry_perturbation=carry_perturbation,
     )
     print(
         f"run {run['run_id']}: {run['counts']['cases']} cases, "

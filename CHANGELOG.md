@@ -25,6 +25,17 @@
   at `http://127.0.0.1:PORT/` with a `<meta http-equiv=refresh>` tag so
   Chrome auto-reloads; `/dashboard.json` returns the raw numbers for scripts.
   No new dependency, no JS framework. `--no-tty` runs web only.
+- Fix: `perturbation_flip_rate` was missing (None / dash) from `report.json`
+  on perturbed combos. Root cause: `run_eval` carries the `perturbation` key
+  to prediction lines only when `carry_perturbation=True`, but the CLI never
+  set it — so even on perturbed datasets (where cases carry
+  `meta.perturbation`), the prediction lines lacked the key and
+  `perturbation_flip_rate` found no (original, variant) pairs. Fix: the CLI
+  detects `meta.perturbation` in the cases and passes
+  `carry_perturbation=True` to `run_eval`. Non-perturbed datasets are
+  unaffected (the flag stays False, no key added). 7 tests (end-to-end
+  fake-engine eval through `run_eval` + `compute_metrics`, all-flip /
+  partial-flip / no-flip rates, no-carry returns None, CLI detection logic).
 
 - B11: two-stage vs one-stage measurement script for 255-option enums
   (`benchmarks/two_stage.py`). Measures whether coarse→fine two-stage choice
