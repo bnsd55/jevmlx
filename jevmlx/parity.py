@@ -59,7 +59,7 @@ PARITY_TEST_NAME = "test_w1a_scoring_parity_batch_vs_chunked_real_model"
 # jevmlx/presets/. The bench's quality-eval dataset is built from
 # benchmarks/cases.json (payment_risk + support_triage); the preset JSONs in
 # jevmlx/presets/ carry the same two families plus the stress shapes
-# (code_security, high_cardinality_255). Parity covers all four — a model
+# (code_security, high_cardinality_255). Parity covers all bundled presets — a model
 # that is only parity-clean on the small schemas has not earned the README
 # compat table.
 

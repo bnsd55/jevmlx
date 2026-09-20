@@ -195,6 +195,30 @@
         "P2_NORMAL",
         "P3_LOW"
       ]
+    },
+    "frustration_level": {
+      "type": "enum",
+      "description": "Customer emotional frustration on an ordered scale",
+      "ordered": true,
+      "choices": [
+        "calm",
+        "annoyed",
+        "frustrated",
+        "angry",
+        "enraged"
+      ]
+    },
+    "churn_risk": {
+      "type": "enum",
+      "description": "Probability of contract churn on an ordered scale",
+      "ordered": true,
+      "choices": [
+        "none",
+        "low",
+        "medium",
+        "high",
+        "critical"
+      ]
     }
   }
 }

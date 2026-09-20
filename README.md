@@ -191,6 +191,19 @@ git clone https://github.com/bnsd55/jevmlx && cd jevmlx && ./setup.sh
 
 `-v` for progress logs; `JEVMLX_LOG=json` for machine-readable logs.
 
+### Bundled presets
+
+`decide --preset <name>` loads a bundled schema + context:
+
+| Preset | Fields | Description |
+|---|---|---|
+| `fintech_fraud` | 28 | Real-time financial fraud detection, sanctions verification, and autonomous containment |
+| `support_triage` | 30 | Enterprise incident triage and routing (includes ordered `frustration_level` and `churn_risk`) |
+| `code_security` | 28 | SAST/DAST pull-request vulnerability triage |
+| `high_cardinality_255` | 4 | 255-choice customs tariff router (latency scaling demo) |
+| `content_moderation` | 20 | Trust-and-safety policy enforcement (violation category, ordered severity, human-review flag) |
+| `inbound_email` | 19 | Email routing, spam/phishing detection, ordered reply priority |
+
 ## How it works
 
 The schema compiles per tokenizer: a bounded codebook search picks the neutral alias codes whose candidate rows tokenize most cleanly, and the prompt renders FROM the compiled plan — the model is taught exactly the protocol the scorer judges. The context is fenced with a per-context nonce, so no interior line can impersonate the closing fence. The rendered prompt is a tested contract: [PROMPT_PROTOCOL.md](PROMPT_PROTOCOL.md) documents it, and committed golden vectors (`benchmarks/golden_prompts.py --check`, run in CI) fail on any renderer drift.
