@@ -414,6 +414,11 @@ def naive_local_decide_fn(engine) -> DecideFn:
             out[fname] = entry
         out["_meta"] = {
             "latency_ms": result.get("elapsed_ms"),
+            # B11-naive: per-call total_ms (generation wall) and
+            # per_item_end_to_end_ms (one call per case -> same as total_ms).
+            "total_ms": result.get("elapsed_ms"),
+            "per_item_end_to_end_ms": result.get("elapsed_ms"),
+            "generated_tokens": result.get("total_tokens"),
             "rows": None,
             "passes": result.get("total_tokens"),
         }
@@ -448,6 +453,9 @@ def api_baseline_decide_fn(
             out[fname] = entry
         out["_meta"] = {
             "latency_ms": result.get("latency_ms"),
+            # B11-naive: per-call total_ms and per_item_end_to_end_ms.
+            "total_ms": result.get("latency_ms"),
+            "per_item_end_to_end_ms": result.get("latency_ms"),
             "rows": None,
             "passes": None,
         }
@@ -881,8 +889,11 @@ def run_eval(
                 _breaker.record_success()
                 meta = results.pop("_meta", {})
                 # W3-R: parallel-track _meta carries the engine's timing split.
-                if track == "parallel" and tag is None and meta:
-                    timing_meta.append(meta)
+                # B11-naive: naive_local and api_baseline also carry per-call
+                # timing (total_ms, per_item_end_to_end_ms, generated_tokens).
+                if tag is None and meta:
+                    if track in ("parallel", "naive_local", "api_baseline"):
+                        timing_meta.append(meta)
                 if tag is None and first_field_telemetry is None and meta.get("field_telemetry"):
                     first_field_telemetry = meta["field_telemetry"]
                 if tag is None:

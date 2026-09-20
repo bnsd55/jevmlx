@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- naive_local track writes timing.json; SUMMARY latency is call-level for
+  every track. The naive track's `_meta` now carries `per_item_end_to_end_ms`
+  and `total_ms` (generation wall), so `run_eval` writes `timing.json` with
+  the call-level median (parallel-only keys absent, no zeros).
+  `summarize_results.py`'s 'p50 latency (ms)' column is now the
+  `per_item_end_to_end_ms` median from `timing.json` for every track (dash if
+  missing), and a new `calls` column shows the call count so rotations are
+  visible.
+
 - B11: two-stage vs one-stage measurement script for 255-option enums
   (`benchmarks/two_stage.py`). Measures whether coarse→fine two-stage choice
   (pick a category group of ~16 from a deterministic partition, then pick

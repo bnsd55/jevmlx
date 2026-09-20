@@ -1216,3 +1216,84 @@ def test_run_one_threads_registered_lock_into_run_json(tmp_path, monkeypatch):
     assert (
         run_json["config"]["dataset_lock_sha256"] == hashlib.sha256(lock.read_bytes()).hexdigest()
     )
+
+
+# --- B11-naive: SUMMARY latency is call-level, calls column visible --------
+
+
+def test_summarize_latency_from_timing_json_call_level(tmp_path, capsys):
+    """B11-naive: 'p50 latency (ms)' is the per_item_end_to_end_ms median
+    from timing.json, NOT the per-line latency_ms. 'calls' column shows the
+    call count so rotations are visible."""
+    from benchmarks.summarize_results import _run_extras
+
+    combo = tmp_path / "m5max-128gb--model-a" / "naive_local-slots-typesafe"
+    combo.mkdir(parents=True)
+    # run.json for n_cases.
+    (combo / "run.json").write_text(json.dumps({"counts": {"cases": 20}}), encoding="utf-8")
+    # timing.json with call-level per_item_end_to_end_ms median.
+    (combo / "timing.json").write_text(
+        json.dumps(
+            {
+                "calls": 20,
+                "median": {"per_item_end_to_end_ms": 8695.0, "generated_tokens": 150},
+            }
+        ),
+        encoding="utf-8",
+    )
+    # report.json (minimal metrics).
+    _write_report(
+        combo,
+        {"accuracy": 0.5, "case_exact_match": 0.3, "n_cases": 20},
+    )
+    # Model dir parity.json (passing).
+    model_dir = combo.parent
+    (model_dir / "parity.json").write_text(
+        json.dumps(
+            {"passed": True, "max_abs_drift_nats": 0.01, "atol": 0.05, "winners_identical": True}
+        ),
+        encoding="utf-8",
+    )
+
+    # _run_extras returns the call-level median.
+    latency, n_cases, n_calls = _run_extras(combo)
+    assert latency == 8695.0
+    assert n_cases == 20
+    assert n_calls == 20
+
+    summary = summarize(tmp_path)
+    text = summary.read_text()
+    # The SUMMARY table has the call-level latency, not per-line.
+    assert "8695" in text
+    # 'calls' column header present.
+    assert "calls" in text
+    # The calls count appears in the table.
+    assert "20" in text
+
+
+def test_summarize_latency_dash_when_no_timing_json(tmp_path, capsys):
+    """B11-naive: when timing.json is missing, latency is a dash (—) and
+    calls is a dash."""
+    combo = tmp_path / "m5max-128gb--model-a" / "parallel-trie-typesafe"
+    combo.mkdir(parents=True)
+    (combo / "run.json").write_text(json.dumps({"counts": {"cases": 10}}), encoding="utf-8")
+    _write_report(combo, {"accuracy": 0.5, "n_cases": 10})
+    model_dir = combo.parent
+    (model_dir / "parity.json").write_text(
+        json.dumps(
+            {"passed": True, "max_abs_drift_nats": 0.01, "atol": 0.05, "winners_identical": True}
+        ),
+        encoding="utf-8",
+    )
+
+    from benchmarks.summarize_results import _run_extras
+
+    latency, n_cases, n_calls = _run_extras(combo)
+    assert latency is None
+    assert n_cases == 10
+    assert n_calls is None
+
+    summary = summarize(tmp_path)
+    text = summary.read_text()
+    # The latency cell is a dash.
+    assert "—" in text
