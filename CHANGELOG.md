@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.1.0 - unreleased
+
+### Added
+
 - W6-B5: `choose` / `judge` / `rate` one-field convenience helpers + CLI
   verbs. Thin wrappers over `decide`'s engine path (`run_parallel_generation`)
   that synthesize a one-field schema and return the single `FieldResult`
@@ -135,36 +139,6 @@
   `ag_news`, `boolq`, `sst5` (each producing `.balanced` / `.natural`; a
   bare name runs both views; `--per-class` / `--natural-rows` override the
   sample sizes).
-- W5c-6 / B4: token-accounting telemetry. Every engine result (single and
-  batched) and timing.json now carry: `naive_branch_prompt_tokens` (sum of
-  full prompt length for every actual scoring row, shared prefix repeated),
-  `shared_prefix_tokens` (the prompt every row starts from),
-  `logical_suffix_token_positions` (unpadded suffix content per row),
-  `computed_suffix_token_positions` (padded/chunked, including retries),
-  `computed_prompt_token_positions` (= shared + computed), and
-  `retry_wasted_ms` (wall time of failed Metal attempts — the ledger drops
-  the failed span; total wall survives; the waste is now visible). Actual
-  rows/branches are counted (multi option rows, count rows, trie branches),
-  not fields. `decide_many` reports per-context logical values + group-level
-  computed values (`group_computed_suffix_token_positions`,
-  `group_retry_wasted_ms`). The ratio of naive to computed is NOT presented
-  as a speedup anywhere — a suffix query still attends over the cached
-  prefix, and token-position savings do not map linearly to latency.
-  `check_results` contract v2 enforces the new keys in timing.json's
-  median block.
-- **W5c-5 (golden prompts, pre-M5)** — the rendered prompt is now a
-  tested contract: PROMPT_PROTOCOL.md (versioned, its example blocks
-  GENERATED between markers by `benchmarks/golden_prompts.py --write`),
-  committed golden vectors under `tests/golden/prompts/` (unit =
-  prompt version x profile x PINNED tokenizer revision x representative
-  request; 3 profiles — qwen2.5, qwen3 thinking-off, gemma merged-system
-  — x 3 cases: slots, labels, multi; real-tokenizer vectors pinned via
-  `from_pretrained(revision=...)`), and `--check` (CI) that re-renders
-  everything through the live renderer and fails on any drift. Not
-  circular: the committed file is the only "expected". The fast CI suite
-  stays HF-free (`network` marker), one cache-backed CI step owns the
-  tokenizer files.
-
 - **W5-C** — set constraints, joint count + set optimization, typed
   calibration, internal telemetry, abstention contract (PROMPT_VERSION
   `jevmlx-parallel-v9`). The set-constraint solver is exact: connected
@@ -198,17 +172,6 @@
   per-option distance from its threshold side, floored at 0, recomputed
   after every reconciler.
 
-- W5c-11 test hygiene: the fast suite (`-m 'not slow and not network'`) is
-  offline-clean — it passes with `HF_HUB_OFFLINE=1` and an empty `HF_HOME`.
-  `tests/test_api.py::test_decide_end_to_end` loads a real model and is now
-  `@pytest.mark.slow` (it previously carried no marker and broke offline
-  runs with `LocalEntryNotFoundError`); `TestAliasHubIdsExist` is also
-  `@pytest.mark.network` (HEADs huggingface.co). doctor's editable-install
-  check compares the tree the python interpreter IMPORTS (`jevmlx.__file__`)
-  with the tree the venv INSTALLED (`direct_url.json`): OK when equal, FAIL
-  naming both when different. The FAIL on a shared venv across worktrees is
-  BY DESIGN (each worktree gets its own venv — BENCHMARKING.md).
-
 - **W5c-9 (persisted drift envelope, measured rescore band)** — the near-tie
   rescore band is no longer a constant: it is INSTABILITY_BAND widened by a
   PERSISTED, MEASURED drift bound E_bound(M) for the pass's shape bucket.
@@ -230,16 +193,6 @@
   re-execing; `sleep_blocked` is recorded in `RUNBOOK.md`'s header. Opt out
   with `--allow-sleep`. No-op on non-darwin; a missing `caffeinate` prints a
   warning and continues.
-- W5c-17: run.json's `dataset_lock_sha256` is now always the sha256 of the
-  exact dataset lock that was evaluated (was null for every `bundled`
-  combo: `benchmarks.to_jsonl` wrote its lock as the generic
-  `dataset.lock.json` while the bench registered
-  `<name>.dataset.lock.json`, so the registered path never existed and
-  `_sha256_file` silently returned None). The bundled builder now passes
-  `--lock` to write the registered name; a non-None lock path that does
-  not exist raises OSError instead of hashing to null — a missing lock is
-  an error, never a silent null.
-
 - **W5c-16 (bench heartbeat + non-deprecated Metal API)** — the per-case
   eval loop prints `[heartbeat] <combo> cases_done=N pred_lines=M elapsed_s=S
   peak=X active=Y cache=Z` every N completed cases (`--heartbeat-every`,
@@ -277,6 +230,62 @@
   even for single-pass runs (passes==1), so a batched eval is visible in
   the log (the M5 machine misread the parity probe's lines as the eval).
   No engine logic change.
+### Changed
+
+- W5c-6 / B4: token-accounting telemetry. Every engine result (single and
+  batched) and timing.json now carry: `naive_branch_prompt_tokens` (sum of
+  full prompt length for every actual scoring row, shared prefix repeated),
+  `shared_prefix_tokens` (the prompt every row starts from),
+  `logical_suffix_token_positions` (unpadded suffix content per row),
+  `computed_suffix_token_positions` (padded/chunked, including retries),
+  `computed_prompt_token_positions` (= shared + computed), and
+  `retry_wasted_ms` (wall time of failed Metal attempts — the ledger drops
+  the failed span; total wall survives; the waste is now visible). Actual
+  rows/branches are counted (multi option rows, count rows, trie branches),
+  not fields. `decide_many` reports per-context logical values + group-level
+  computed values (`group_computed_suffix_token_positions`,
+  `group_retry_wasted_ms`). The ratio of naive to computed is NOT presented
+  as a speedup anywhere — a suffix query still attends over the cached
+  prefix, and token-position savings do not map linearly to latency.
+  `check_results` contract v2 enforces the new keys in timing.json's
+  median block.
+- **W5c-5 (golden prompts, pre-M5)** — the rendered prompt is now a
+  tested contract: PROMPT_PROTOCOL.md (versioned, its example blocks
+  GENERATED between markers by `benchmarks/golden_prompts.py --write`),
+  committed golden vectors under `tests/golden/prompts/` (unit =
+  prompt version x profile x PINNED tokenizer revision x representative
+  request; 3 profiles — qwen2.5, qwen3 thinking-off, gemma merged-system
+  — x 3 cases: slots, labels, multi; real-tokenizer vectors pinned via
+  `from_pretrained(revision=...)`), and `--check` (CI) that re-renders
+  everything through the live renderer and fails on any drift. Not
+  circular: the committed file is the only "expected". The fast CI suite
+  stays HF-free (`network` marker), one cache-backed CI step owns the
+  tokenizer files.
+
+- W5c-17: run.json's `dataset_lock_sha256` is now always the sha256 of the
+  exact dataset lock that was evaluated (was null for every `bundled`
+  combo: `benchmarks.to_jsonl` wrote its lock as the generic
+  `dataset.lock.json` while the bench registered
+  `<name>.dataset.lock.json`, so the registered path never existed and
+  `_sha256_file` silently returned None). The bundled builder now passes
+  `--lock` to write the registered name; a non-None lock path that does
+  not exist raises OSError instead of hashing to null — a missing lock is
+  an error, never a silent null.
+
+
+### Fixed
+
+- W5c-11 test hygiene: the fast suite (`-m 'not slow and not network'`) is
+  offline-clean — it passes with `HF_HUB_OFFLINE=1` and an empty `HF_HOME`.
+  `tests/test_api.py::test_decide_end_to_end` loads a real model and is now
+  `@pytest.mark.slow` (it previously carried no marker and broke offline
+  runs with `LocalEntryNotFoundError`); `TestAliasHubIdsExist` is also
+  `@pytest.mark.network` (HEADs huggingface.co). doctor's editable-install
+  check compares the tree the python interpreter IMPORTS (`jevmlx.__file__`)
+  with the tree the venv INSTALLED (`direct_url.json`): OK when equal, FAIL
+  naming both when different. The FAIL on a shared venv across worktrees is
+  BY DESIGN (each worktree gets its own venv — BENCHMARKING.md).
+
 
 ## Released
 

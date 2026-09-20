@@ -191,7 +191,6 @@ class TestMetal:
         import mlx
 
         fake_mx = types.ModuleType("mlx.core")
-        fake_mx.is_available = lambda: available
         fake_mx.metal = types.SimpleNamespace(is_available=lambda: available)
         fake_mx.array = array if array is not None else (lambda v: v)
         fake_mx.add = add if add is not None else (lambda a, b: [2.0])
