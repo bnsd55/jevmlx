@@ -36,6 +36,7 @@ from typing import Any
 
 from jevmlx.baseline import baseline_decide, parse_baseline_output
 from jevmlx.evalreport import environment
+from jevmlx.models import DEFAULT_SCORING
 from jevmlx.schema import StructuredSchema, _thaw_plan
 
 __all__ = [
@@ -249,7 +250,9 @@ def _compute_tokenizer_metrics(
     }
 
 
-def parallel_decide_fn(engine, scoring: str = "slots", prior_correction: bool = False) -> DecideFn:
+def parallel_decide_fn(
+    engine, scoring: str = DEFAULT_SCORING, prior_correction: bool = False
+) -> DecideFn:
     """Track ``parallel``: the jevmlx engine at T=1.
 
     Takes the loaded :class:`Engine`.

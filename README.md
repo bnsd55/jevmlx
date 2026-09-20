@@ -43,6 +43,7 @@ Structured output asks the model to write the JSON, token by token, then parses 
 - **Add an escape option when the list may not be exhaustive.** A restricted softmax cannot say "none of these" unless you give it one. Add an `other` or `escalate` choice, or use `allow_none_of_above=True` (adds an explicit NONE_OF_ABOVE that maps to `None`; the field must be `Optional`).
 - **Use `ordered=True` for scales.** An enum declared `ordered` (schema `"ordered": True`, or Pydantic `Field(json_schema_extra={"ordered": True})`) adds ordinal telemetry — `argmax_level`, `expected_index` (Σ pᵢ·i), `expected_score_normalized` — with no extra model call. Use it for severity, priority, or any monotonic scale.
 - **Set review thresholds from labeled data.** `abstain_below_margin=X` withholds a field whose `probability_margin` (top1 − top2) falls below the cut. Fit the threshold on labeled examples — not by feel — so the abstention rate matches your review capacity. `probability_margin` and `threshold_distance` (multi) are on every `FieldResult`.
+- **`labels` is the default scorer** (measured better on the 7B); `slots` scores single-token letter codes and is cheaper for very long option lists. Pass `scoring="slots"` to `decide`/`decide_many` or `--scoring slots` on the CLI to switch.
 
 ## Use it from Python
 

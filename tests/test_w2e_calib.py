@@ -166,6 +166,7 @@ def test_engine_calibration_from_file(tmp_path):
         make_engine(model, FakeTokenizer()),
         "ctx",
         _multi_schema(),
+        scoring="slots",
         calibration=CalibrationBundle.load(str(path)),
     )
     # calibrated = 2*2 - 5 = -1 < 0 -> nothing selected

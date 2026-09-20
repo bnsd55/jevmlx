@@ -40,6 +40,17 @@
   partial-flip / no-flip rates, non-perturbed no-key, `bench._run_one`
   report.json has the metric, detection logic).
 
+### Changed
+
+- Default scorer is now `labels` (was `slots`). Measured on the 7B (M5):
+  labels field accuracy 0.82 vs slots 0.63 on typesafe, 0.72 vs 0.61 on
+  bundled, order any-flip 0.03 vs 0.16. `slots` remains available via
+  `scoring="slots"` on `decide`/`decide_many`/`choose`/`judge`/`rate`, or
+  `--scoring slots` on the CLI. A single `DEFAULT_SCORING = "labels"`
+  constant in `jevmlx.models` is referenced by every default declaration;
+  no literal duplicates. Golden prompt vectors regenerated for both
+  scorers (new `tags_multi_labels` case).
+
 - B11: two-stage vs one-stage measurement script for 255-option enums
   (`benchmarks/two_stage.py`). Measures whether coarse→fine two-stage choice
   (pick a category group of ~16 from a deterministic partition, then pick

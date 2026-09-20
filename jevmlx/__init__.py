@@ -15,6 +15,7 @@ from jevmlx.schema import FieldDefinition, StructuredSchema  # noqa: E402
 
 __all__ = [
     "DEFAULT_MODEL",
+    "DEFAULT_SCORING",
     "Decision",
     "FieldDefinition",
     "FieldResult",
@@ -40,6 +41,7 @@ def __getattr__(name: str):
     # engine functions. Only imported when actually accessed.
     if name in {
         "DEFAULT_MODEL",
+        "DEFAULT_SCORING",
         "Decision",
         "FieldResult",
         "FieldSemantics",

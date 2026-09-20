@@ -11,7 +11,48 @@ import urllib.request
 
 import pytest
 
-from jevmlx.models import DEFAULT_MODEL, MODEL_ALIASES, resolve_model
+from jevmlx.models import DEFAULT_MODEL, DEFAULT_SCORING, MODEL_ALIASES, resolve_model
+
+
+class TestDefaultScoring:
+    """The default scorer is 'labels' (measured better on the 7B; slots
+    stays available via scoring='slots')."""
+
+    def test_default_scoring_is_labels(self):
+        assert DEFAULT_SCORING == "labels"
+
+    def test_decide_signature_uses_default_scoring(self):
+        import inspect
+
+        from jevmlx.api import decide, decide_many
+
+        for fn in (decide, decide_many):
+            sig = inspect.signature(fn)
+            assert sig.parameters["scoring"].default is DEFAULT_SCORING
+
+    def test_cli_default_is_labels(self):
+        # The decide subcommand's --scoring default must be DEFAULT_SCORING.
+        # We parse ``jevmlx decide --help`` and inspect the help text.
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+
+        from jevmlx.cli import main
+
+        buf = io.StringIO()
+        try:
+            with redirect_stdout(buf), redirect_stderr(buf):
+                main(["decide", "--help"])
+        except SystemExit:
+            pass
+        help_text = buf.getvalue()
+        assert "labels" in help_text
+        assert "default" in help_text
+
+    def test_default_scoring_exported_from_package(self):
+        import jevmlx
+
+        assert hasattr(jevmlx, "DEFAULT_SCORING")
+        assert jevmlx.DEFAULT_SCORING == "labels"
 
 
 class TestAliasResolution:

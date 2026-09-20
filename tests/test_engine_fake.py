@@ -37,7 +37,7 @@ def test_engine_runs_mixed_schema_with_fake_model():
             "flags": {"type": "multi", "description": "d", "choices": ["x", "y"]},
         }
     )
-    result = run_parallel_generation(make_engine(model, tokenizer), "ctx", schema)
+    result = run_parallel_generation(make_engine(model, tokenizer), "ctx", schema, scoring="slots")
 
     assert set(result["parsed_json"]) == {"flag", "action", "flags"}
     assert result["confidence_model"] == "slots"
@@ -820,9 +820,13 @@ def test_metal_allocation_failure_halves_chunk_and_scores_all_rows():
     )
     # Baseline without failure: same model class, no failure injected.
     clean = StatefulCacheModel(vocab_size=64)
-    expected = run_parallel_generation(make_engine(clean, tokenizer), "ctx", schema)
+    expected = run_parallel_generation(
+        make_engine(clean, tokenizer), "ctx", schema, scoring="slots"
+    )
 
-    result = run_parallel_generation(make_engine(model, tokenizer), "ctx", schema, max_rows=4)
+    result = run_parallel_generation(
+        make_engine(model, tokenizer), "ctx", schema, scoring="slots", max_rows=4
+    )
     assert model.failed_once, "the injected allocation failure never fired"
     assert result["parsed_json"] == expected["parsed_json"]
     for fname in expected["field_telemetry"]:
