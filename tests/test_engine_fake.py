@@ -979,3 +979,76 @@ def test_chunking_heuristic_logged_at_info_even_for_single_pass(caplog):
     assert all(r.levelno == logging.INFO for r in chunk_lines)
     # The line reports 1 pass for a single-field schema.
     assert "over 1 passes" in chunk_lines[0].getMessage()
+
+
+def test_p5_rotations_produce_identical_log_scores_cold_vs_warm():
+    """P5 HARD RULE: decisions must be bit-identical with and without the
+    option-plan cache. Run the fake engine over a rotation twice — once cold
+    (cache cleared) and once warm (cache populated) — and assert identical
+    log_scores and winners."""
+    from jevmlx.schema import _OPTION_PLAN_CACHE
+
+    # A 4-choice enum: rotations cycle the choices.
+    choices = ["A", "B", "C", "D"]
+    rotated = ["B", "C", "D", "A"]
+
+    schema_cold = StructuredSchema(
+        {"action": {"type": "enum", "description": "d", "choices": rotated}}
+    )
+    _OPTION_PLAN_CACHE.clear()  # cold: no cached option plan
+    result_cold = run_parallel_generation(
+        make_engine(FakeModel(), FakeTokenizer()), "ctx", schema_cold
+    )
+
+    # Warm: populate the cache by compiling the canonical order first.
+    schema_canonical = StructuredSchema(
+        {"action": {"type": "enum", "description": "d", "choices": choices}}
+    )
+    schema_canonical.compile_slot_plan(FakeTokenizer())  # populates the cache
+
+    schema_warm = StructuredSchema(
+        {"action": {"type": "enum", "description": "d", "choices": rotated}}
+    )
+    result_warm = run_parallel_generation(
+        make_engine(FakeModel(), FakeTokenizer()), "ctx", schema_warm
+    )
+
+    # Bit-identical log_scores and winners.
+    cold_ls = result_cold["field_telemetry"]["action"]["log_scores"]
+    warm_ls = result_warm["field_telemetry"]["action"]["log_scores"]
+    assert cold_ls == warm_ls
+    assert (
+        result_cold["parsed_json"]["action"]["value"]
+        == result_warm["parsed_json"]["action"]["value"]
+    )
+
+
+def test_p5_second_call_plan_compile_below_20_percent():
+    """P5 HARD RULE: the second call's plan_compile_ms must be below 20% of
+    the first. The option-plan cache makes a rotation reuse the token work;
+    only the cheap alias_map is rebuilt."""
+    import time
+
+    from jevmlx.schema import _OPTION_PLAN_CACHE
+
+    tok = FakeTokenizer()
+    _OPTION_PLAN_CACHE.clear()
+
+    # First (cold) compile: full _search_codebook + tokenize.
+    schema1 = StructuredSchema(
+        {"action": {"type": "enum", "description": "d", "choices": ["A", "B", "C", "D"]}}
+    )
+    t0 = time.perf_counter()
+    schema1.compile_slot_plan(tok)
+    cold_ms = (time.perf_counter() - t0) * 1000
+
+    # Second (warm) compile: same field name + choice count, rotated order.
+    schema2 = StructuredSchema(
+        {"action": {"type": "enum", "description": "d", "choices": ["B", "C", "D", "A"]}}
+    )
+    t0 = time.perf_counter()
+    schema2.compile_slot_plan(tok)
+    warm_ms = (time.perf_counter() - t0) * 1000
+
+    assert cold_ms > 0
+    assert warm_ms < cold_ms * 0.20, f"warm {warm_ms:.1f} ms is not < 20% of cold {cold_ms:.1f} ms"
