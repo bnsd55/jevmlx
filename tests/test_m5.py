@@ -262,6 +262,87 @@ class TestBuildSummaryText:
         assert "- |" in text or "|" in text  # table renders, never crashes
         assert "M5 runbook summary" in text
 
+    def test_typesafe_agreement_dict_does_not_crash(self):
+        """M5 crash fix: typesafe report.json stores agreement as a dict
+        ({overall, by_workflow, ...}); _combo_agreement extracts 'overall'
+        and _fmt formats it as a percentage, never crashing on dict.__format__."""
+        main = {
+            "combos": [
+                combo_row(
+                    "parallel-slots-typesafe",
+                    {"metrics": {"agreement": {"overall": 0.87, "by_workflow": {"x": 0.9}}}},
+                    {"median": {"total_ms": 1000.0, "peak_active_bytes": 6 * 2**30}},
+                )
+            ],
+            "invariance": {"mean_flip_rate": 0.05, "mean_drift": 0.3},
+            "timing_report": {},
+        }
+        text = build_summary_text(main, None, parity_models=[])
+        assert "87.0%" in text  # overall extracted from the dict
+        assert "dict" not in text.lower()
+
+    def test_bundled_agreement_float_still_works(self):
+        """Bundled/other report.json stores agreement as a bare float; the
+        fix must not break the existing path."""
+        main = {
+            "combos": [
+                combo_row(
+                    "parallel-slots-bundled",
+                    {"metrics": {"agreement": 0.92}},
+                    {"median": {"total_ms": 800.0, "peak_active_bytes": 5 * 2**30}},
+                )
+            ],
+            "invariance": {"mean_flip_rate": 0.03, "mean_drift": 0.2},
+            "timing_report": {},
+        }
+        text = build_summary_text(main, None, parity_models=[])
+        assert "92.0%" in text
+
+    def test_agreement_dict_in_ab_section_does_not_crash(self):
+        """The A/B comparison section also calls _combo_agreement via _agg;
+        a typesafe-shaped agreement dict must not crash there either."""
+        main = {
+            "combos": [
+                combo_row(
+                    "parallel-slots-typesafe",
+                    {"metrics": {"agreement": {"overall": 0.90, "by_workflow": {}}}},
+                    {"median": {"total_ms": 1000.0, "peak_active_bytes": 6 * 2**30}},
+                )
+            ],
+            "invariance": {"mean_flip_rate": 0.05, "mean_drift": 0.3},
+            "timing_report": {},
+        }
+        ab = {
+            "combos": [
+                combo_row(
+                    "parallel-slots-typesafe",
+                    {"metrics": {"agreement": {"overall": 0.92, "by_workflow": {}}}},
+                    {"median": {"total_ms": 900.0, "peak_active_bytes": 5.5 * 2**30}},
+                )
+            ],
+            "invariance": {"mean_flip_rate": 0.04, "mean_drift": 0.25},
+            "timing_report": {},
+        }
+        text = build_summary_text(main, ab, parity_models=[])
+        assert "| agreement/accuracy (mean) | 90.0% | 92.0% | 2.0% |" in text
+
+    def test_agreement_dict_without_overall_falls_back_to_accuracy(self):
+        """When agreement is a dict without 'overall' (malformed), fall back
+        to accuracy rather than crash."""
+        main = {
+            "combos": [
+                combo_row(
+                    "parallel-slots-typesafe",
+                    {"metrics": {"agreement": {"by_workflow": {}}, "accuracy": 0.75}},
+                    {"median": {"total_ms": 1000.0, "peak_active_bytes": 6 * 2**30}},
+                )
+            ],
+            "invariance": {},
+            "timing_report": {},
+        }
+        text = build_summary_text(main, None, parity_models=[])
+        assert "75.0%" in text
+
 
 # --- W5c-15: macOS idle-sleep blocking (caffeinate re-exec) ----------------
 
