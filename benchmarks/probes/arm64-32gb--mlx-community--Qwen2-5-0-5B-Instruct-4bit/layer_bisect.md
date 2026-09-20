@@ -10,10 +10,10 @@ enters before the LM head. This probe isolates WHERE in the transformer body.
 ## Reproduce
 
 ```bash
-# From the repo root, through the shared GPU slot lock:
-~/git/jev-on-a-laptop/.agent-mail/slowtest.sh .venv/bin/python benchmarks/layer_bisect.py
+# From the repo root:
+.venv/bin/python benchmarks/layer_bisect.py
 # Override model:
-~/git/jev-on-a-laptop/.agent-mail/slowtest.sh .venv/bin/python benchmarks/layer_bisect.py --model <mlx-model-id>
+.venv/bin/python benchmarks/layer_bisect.py --model <mlx-model-id>
 ```
 
 Writes `benchmarks/probes/<arch>--<model>/layer_bisect.json` and prints seven

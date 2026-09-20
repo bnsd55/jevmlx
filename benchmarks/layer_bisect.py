@@ -31,7 +31,7 @@ drift grows smoothly or jumps (per-layer delta).
 
 Run (model-loading — MUST go through the shared slot lock):
 
-    ~/git/jev-on-a-laptop/.agent-mail/slowtest.sh .venv/bin/python benchmarks/layer_bisect.py
+    .venv/bin/python benchmarks/layer_bisect.py
 
 Writes layer_bisect.json + prints two markdown tables. No conclusions.
 """
