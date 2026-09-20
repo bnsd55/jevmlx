@@ -31,11 +31,12 @@ from jevmlx.engine import (
     run_parallel_generation,
     run_parallel_generation_batched,
 )
-from jevmlx.models import DEFAULT_MODEL
+from jevmlx.models import DEFAULT_MODEL, DEFAULT_SCORING
 from jevmlx.schema import StructuredSchema
 
 __all__ = [
     "DEFAULT_MODEL",
+    "DEFAULT_SCORING",
     "NONE_OF_ABOVE",
     "NONE_OF_ABOVE_DESCRIPTION",
     "Decision",
@@ -533,7 +534,7 @@ def _decide_once[T: BaseModel](
     engine,
     schema: StructuredSchema,
     temperature: float,
-    scoring: str = "slots",
+    scoring: str = DEFAULT_SCORING,
     allow_none_of_above: bool = False,
     abstain_below_margin: float | None = None,
     calibration: str | CalibrationBundle | None = None,
@@ -695,7 +696,7 @@ def decide[T: BaseModel](
     *,
     model: str = DEFAULT_MODEL,
     temperature: float = 1.0,
-    scoring: str = "slots",
+    scoring: str = DEFAULT_SCORING,
     allow_none_of_above: bool = False,
     abstain_below_margin: float | None = None,
     calibration: str | CalibrationBundle | None = None,
@@ -704,9 +705,10 @@ def decide[T: BaseModel](
 ) -> Decision[T]:
     """Run parallel constrained decisions and return a validated model instance.
 
-    ``scoring`` selects the engine mode: ``"slots"`` (default) decides
-    through neutral aliases listed in the prompt; ``"labels"`` scores the
-    real choice text via the token trie.
+    ``scoring`` selects the engine mode: ``"labels"`` (default) scores the
+    real choice text via the token trie; ``"slots"`` decides through
+    neutral aliases listed in the prompt (cheaper for very long option
+    lists).
 
     ``allow_none_of_above`` adds an explicit ``NONE_OF_ABOVE`` choice (gloss:
     "none of the options apply") to every enum field and maps it to None in
@@ -760,7 +762,7 @@ def decide_many[T: BaseModel](
     *,
     model: str = DEFAULT_MODEL,
     temperature: float = 1.0,
-    scoring: str = "slots",
+    scoring: str = DEFAULT_SCORING,
     allow_none_of_above: bool = False,
     abstain_below_margin: float | None = None,
     calibration: str | CalibrationBundle | None = None,
@@ -865,7 +867,7 @@ def _one_field_decision(
     *,
     model: str = DEFAULT_MODEL,
     temperature: float = 1.0,
-    scoring: str = "slots",
+    scoring: str = DEFAULT_SCORING,
     calibration: str | CalibrationBundle | None = None,
     prior_correction: bool = False,
     constraints: list[dict] | None = None,
@@ -896,7 +898,7 @@ def choose(
     *,
     model: str = DEFAULT_MODEL,
     temperature: float = 1.0,
-    scoring: str = "slots",
+    scoring: str = DEFAULT_SCORING,
     calibration: str | CalibrationBundle | None = None,
     prior_correction: bool = False,
     constraints: list[dict] | None = None,
@@ -938,7 +940,7 @@ def judge(
     *,
     model: str = DEFAULT_MODEL,
     temperature: float = 1.0,
-    scoring: str = "slots",
+    scoring: str = DEFAULT_SCORING,
     calibration: str | CalibrationBundle | None = None,
     prior_correction: bool = False,
     constraints: list[dict] | None = None,
@@ -972,7 +974,7 @@ def rate(
     *,
     model: str = DEFAULT_MODEL,
     temperature: float = 1.0,
-    scoring: str = "slots",
+    scoring: str = DEFAULT_SCORING,
     calibration: str | CalibrationBundle | None = None,
     prior_correction: bool = False,
     constraints: list[dict] | None = None,

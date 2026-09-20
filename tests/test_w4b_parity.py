@@ -103,7 +103,11 @@ def test_parity_report_fails_when_winners_flip(tmp_path):
     from jevmlx.parity import write_parity_json
 
     payload = write_parity_json(
-        make_engine(_DriftingModel(), _CountTokenizer()), "fake/drift", tmp_path, _cases()
+        make_engine(_DriftingModel(), _CountTokenizer()),
+        "fake/drift",
+        tmp_path,
+        _cases(),
+        scoring="slots",
     )
     assert payload["passed"] is False
     assert payload["status"] == "FAIL"  # P4/I7: winners changed

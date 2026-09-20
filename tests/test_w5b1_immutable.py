@@ -184,4 +184,10 @@ def test_api_has_no_compat_reexports():
     assert "resolve_model" not in exported
     assert "MODEL_ALIASES" not in exported
     # The API's own surface is intact:
-    assert {"decide", "decide_many", "schema_from_model", "DEFAULT_MODEL"} <= exported
+    assert {
+        "decide",
+        "decide_many",
+        "schema_from_model",
+        "DEFAULT_MODEL",
+        "DEFAULT_SCORING",
+    } <= exported

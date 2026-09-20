@@ -222,7 +222,7 @@ def run_generation(schema, model, tokenizer, calibration=None):
     elif isinstance(calibration, str):
         calibration = CalibrationBundle.load(calibration)
     return run_parallel_generation(
-        make_engine(model, tokenizer), "ctx", schema, calibration=calibration
+        make_engine(model, tokenizer), "ctx", schema, scoring="slots", calibration=calibration
     )
 
 
