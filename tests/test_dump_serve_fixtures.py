@@ -280,10 +280,12 @@ def test_serve_fixtures_match_committed(tmp_path):
         # Compare parsed JSON (ignores key order, whitespace).
         committed_json = json.loads(committed_text)
         fresh_json = json.loads(fresh_text)
-        # The Date and X-Request-Id headers differ per-run; strip them.
+        # The Date, X-Request-Id, and Server headers differ per-run/platform;
+        # strip them (the Server header carries the Python patch version).
         for d in (committed_json, fresh_json):
             d["headers"].pop("Date", None)
             d["headers"].pop("X-Request-Id", None)
+            d["headers"].pop("Server", None)
             d["body"].pop("request_id", None)
             d["body"].pop("queue_wait_ms", None)
             d["body"].pop("queue_depth", None)
