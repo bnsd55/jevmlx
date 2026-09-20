@@ -81,8 +81,17 @@ Paste `SUMMARY.md` into the PR description and link the machine specs
   holds significant Metal memory (`--force` overrides with a printed warning).
 - Datasets: bundled cases, TypeSafe's public set (skipped offline), the
   typed-decisions Hugging Face mirror, the three PUBLIC gold datasets
-  (below), and deterministic perturbations of the bundled cases — built
-  once into `~/.cache/jevmlx/bench/` and reused while the lock files match.
+  (below), the two OpenJev datasets (below), and deterministic
+  perturbations of the bundled cases — built once into
+  `~/.cache/jevmlx/bench/` and reused while the lock files match.
+  Perturbation kinds (W6-B2): four context-side (`ws` whitespace
+  normalisation, `preamble` neutral preamble, `numfmt` number reformatting,
+  `shuffle` block-order shuffle) plus two label-preserving SCHEMA kinds —
+  `optrev` (reverse every enum field's option order; labels are option
+  descriptions so they stay valid) and `criterion` (prefix each field
+  description with an evidence-grounding instruction). All are deterministic;
+  `perturbation_flip_rate` picks up every kind via `group_id` +
+  `meta.perturbation` with no metric change.
 - Public gold datasets (W6-B5, pass `--datasets` `ag_news`, `boolq`,
   `sst5`, or view-suffixed names like `ag_news.balanced`; a bare name
   runs both views): AG News (4-class topic enum), BoolQ (yes/no reading
@@ -98,6 +107,18 @@ Paste `SUMMARY.md` into the PR description and link the machine specs
   `<name>.natural.jsonl` (the dataset's own class prevalence, 500 rows
   drawn from rows the balanced view did NOT take, so calibration rows
   are never the reported diagnostic rows — the view NLL/Brier/ECE
+  describe). Pass `--datasets authored144,perturbations108` for the two
+  OpenJev datasets (W6-B2): `authored144` (144 rows, 36 groups × 4 variants,
+  3-way evidence interpretation — `supported`/`insufficient`/`contradicted`)
+  and `perturbations108` (108 rows, split `rebase_stability`, 36 base rows
+  × 3 label-preserving perturbation variants — `option_reversal`,
+  `criterion_wrapper`, `irrelevant_context`; each row's
+  `provenance.base_id` clusters it with its authored144 base under
+  `group_id`). Source: github.com/TheoLeeCJ/openjev, pinned by commit sha +
+  per-file EXPECTED sha256 (fail-closed, same guard as the public gold).
+  Both are **model-reviewed, not human-adjudicated**
+  (`meta.annotation_status` copied verbatim from provenance); the
+  leaderboard row says so. No sampling views — every row is an eval row.
   describe). Selection is deterministic: `hash(seed, source_row_id)`.
   License/terms are recorded per dataset in the lock and redistribution
   is NOT cleared for any of them: the cached cases files (under
