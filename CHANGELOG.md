@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- W6-B2: OpenJev `authored144` and `perturbations108` datasets + `optrev`/
+  `criterion` perturbation kinds. `authored144` (144 rows, 36 groups × 4
+  variants, 3-way evidence interpretation) and `perturbations108` (108 rows,
+  split `rebase_stability`, 36 base rows × 3 label-preserving perturbation
+  variants) are fetched from github.com/TheoLeeCJ/openjev at a pinned commit
+  sha + per-file EXPECTED sha256 (fail-closed, same guard as the public gold).
+  Converter: one enum field (`decision`) with the row's three option
+  descriptions, `context` = `state`, `labels` = the option description at the
+  label index (a STRING — option-order perturbations keep the label valid),
+  `group_id` = `provenance.base_id` for perturbation rows (clusters with the
+  authored144 base), `meta.annotation_status` copied verbatim (model-reviewed,
+  not human-adjudicated — the leaderboard row says so). Registered in
+  `DATASETS_ALL`/`normalize_dataset_names` (`jevmlx/bench.py`) and
+  `_LOCAL_GROUPS` (`benchmarks/leaderboard.py`). Two new label-preserving
+  perturbation kinds in `benchmarks/perturb.py`: `optrev` (reverse every enum
+  field's option order) and `criterion` (prefix each field description with an
+  evidence-grounding instruction) — both schema-side, deterministic, same id
+  conventions (`<orig>#p<k>`, `group_id` = original id, `meta.perturbation`).
+  `perturbation_flip_rate` picks them up with no metric change (keys on
+  `group_id` + `meta.perturbation`). 15 new tests + 2 updated.
+
 - W6-B7: serve.py backpressure + admission limits. The HTTP server is now
   a `ThreadingHTTPServer` (HTTP/1.0, one thread per connection) with a
   bounded admission queue (default 16, via `--queue-size`) feeding a single

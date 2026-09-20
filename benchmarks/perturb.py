@@ -72,6 +72,10 @@ def _shuffle(context: str, rng: random.Random) -> str:
 
 
 # kind -> (transform, needs_rng). Order is the variant-emission order.
+# Context transforms take/return a context string; schema transforms take
+# the whole case dict and return a new case (they change the SCHEMA, not
+# the context — optrev reverses option order, criterion prefixes the
+# field description).
 TRANSFORMS: dict[str, tuple[Callable[..., str], bool]] = {
     "ws": (_norm_whitespace, False),
     "preamble": (lambda context: f"{PREAMBLE}\n\n{context}", False),
@@ -79,15 +83,68 @@ TRANSFORMS: dict[str, tuple[Callable[..., str], bool]] = {
     "shuffle": (_shuffle, True),
 }
 
+# Schema perturbation kinds (W6-B2): label-preserving schema changes. These
+# transform the CASE (schema), not the context. optrev reverses every enum
+# field's option order (labels are strings — the option description — so a
+# reversed order keeps the label valid). criterion prefixes each field's
+# description with an evidence-grounding instruction.
+_CRITERION_PREFIX = "Using only the supplied evidence, decide the following criterion: "
+
+
+def _optrev(case: dict) -> dict:
+    """Reverse the option order of every enum field in the schema.
+
+    Label-preserving: labels are stored as the option DESCRIPTION (a
+    string), not an index — reversing ``choices`` does not change which
+    description is the gold answer.
+    """
+    import copy
+
+    new = copy.deepcopy(case)
+    schema = new.get("schema") or {}
+    changed = False
+    for field in schema.values():
+        if field.get("type") == "enum" and len(field.get("choices", [])) >= 2:
+            field["choices"] = list(reversed(field["choices"]))
+            changed = True
+    return new if changed else case
+
+
+def _criterion(case: dict) -> dict:
+    """Prefix each field description with an evidence-grounding instruction.
+
+    Label-preserving: the instruction changes the phrasing, not the
+    decision space (choices and labels are untouched).
+    """
+    import copy
+
+    new = copy.deepcopy(case)
+    schema = new.get("schema") or {}
+    changed = False
+    for field in schema.values():
+        desc = field.get("description", "")
+        if not desc.startswith(_CRITERION_PREFIX):
+            field["description"] = _CRITERION_PREFIX + desc
+            changed = True
+    return new if changed else case
+
+
+# Schema transforms: (transform, needs_rng=False). They take the whole case.
+SCHEMA_TRANSFORMS: dict[str, tuple[Callable[[dict], dict], bool]] = {
+    "optrev": (_optrev, False),
+    "criterion": (_criterion, False),
+}
+
 
 def _candidate_kinds(variants: int) -> list[str]:
     """Kinds to try, in order, for ``--variants N``.
 
-    The three deterministic kinds first, then as many shuffle attempts as the
-    requested variant count (single-block cases skip shuffles, so a few spare
-    attempts cost nothing).
+    The three deterministic context kinds first, then the two schema kinds
+    (optrev, criterion), then as many shuffle attempts as the requested
+    variant count (single-block cases skip shuffles, so a few spare attempts
+    cost nothing).
     """
-    base = ["ws", "preamble", "numfmt"]
+    base = ["ws", "preamble", "numfmt", "optrev", "criterion"]
     return base + ["shuffle"] * max(0, variants - len(base) + 1)
 
 
@@ -105,6 +162,23 @@ def perturb_case(case: dict, variants: int, seed: int) -> list[dict]:
     for kind in _candidate_kinds(variants):
         if len(out) >= variants:
             break
+        if kind in SCHEMA_TRANSFORMS:
+            # Schema perturbation (optrev/criterion): transforms the case
+            # dict (schema), not the context. A no-op (returns the original)
+            # is skipped.
+            transform, _needs_rng = SCHEMA_TRANSFORMS[kind]
+            candidate_case = transform(case)
+            if candidate_case is case:
+                continue
+            k += 1
+            variant = dict(candidate_case)
+            variant["id"] = f"{case.get('id')}#p{k}"
+            variant["group_id"] = case.get("id")
+            meta = dict(case.get("meta") or {})
+            meta["perturbation"] = kind
+            variant["meta"] = meta
+            out.append(variant)
+            continue
         transform, needs_rng = TRANSFORMS[kind]
         if needs_rng:
             rng = random.Random(f"{seed}:{case.get('id')}:{k}")

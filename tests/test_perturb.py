@@ -63,22 +63,29 @@ def test_preamble_and_ws_change_context_as_documented():
 
 
 def test_noop_kinds_are_skipped():
-    """A single-block, already-normalised context yields only the preamble.
+    """A single-block, already-normalised context skips ws/numfmt/shuffle.
 
     ws and numfmt are no-ops there and shuffle is structurally impossible
-    (one block), so ids stay contiguous from p1 despite the skipped kinds.
+    (one block); preamble fires, plus the schema kinds (optrev/criterion)
+    which are context-independent. Ids stay contiguous from p1 despite the
+    skipped kinds.
     """
     case = _case(context="Block one.")
     variants = perturb_case(case, variants=3, seed=0)
-    assert [v["meta"]["perturbation"] for v in variants] == ["preamble"]
-    assert [v["id"] for v in variants] == ["q/case-1#p1"]
-    assert variants[0]["context"] == "Record follows.\n\nBlock one."
+    kinds = [v["meta"]["perturbation"] for v in variants]
+    assert "preamble" in kinds
+    assert "ws" not in kinds and "numfmt" not in kinds and "shuffle" not in kinds
+    assert [v["id"] for v in variants] == [f"q/case-1#p{k}" for k in range(1, len(variants) + 1)]
+    pre = next(v for v in variants if v["meta"]["perturbation"] == "preamble")
+    assert pre["context"] == "Record follows.\n\nBlock one."
 
 
 def test_shuffle_is_deterministic_and_preserves_blocks():
     case = _case(context="Block one.\n\nBlock two.\n\nBlock three.\n\nBlock four.")
-    run_1 = perturb_case(case, variants=3, seed=7)
-    run_2 = perturb_case(case, variants=3, seed=7)
+    # variants=6 so the shuffle kind (after ws/preamble/numfmt/optrev/criterion)
+    # is reached; the schema kinds are context-independent and always fire.
+    run_1 = perturb_case(case, variants=6, seed=7)
+    run_2 = perturb_case(case, variants=6, seed=7)
     assert run_1 == run_2  # same seed -> byte-identical plan
 
     shuffles = [v for v in run_1 if v["meta"]["perturbation"] == "shuffle"]

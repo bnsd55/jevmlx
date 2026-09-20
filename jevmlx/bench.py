@@ -45,7 +45,12 @@ DATASETS = (
 PUBLIC_DATASETS = ("ag_news", "boolq", "sst5")
 PUBLIC_VIEWS = ("balanced", "natural")
 PUBLIC_DATASET_NAMES = tuple(f"{name}.{view}" for name in PUBLIC_DATASETS for view in PUBLIC_VIEWS)
-DATASETS_ALL = DATASETS + PUBLIC_DATASETS + PUBLIC_DATASET_NAMES
+
+# W6-B2 OpenJev datasets: authored144 (3-way evidence interpretation) and
+# perturbations108 (label-preserving perturbations). No views — each is one
+# cases file. Model-reviewed, not human-adjudicated (meta.annotation_status).
+OPENJEV_DATASETS = ("authored144", "perturbations108")
+DATASETS_ALL = DATASETS + PUBLIC_DATASETS + PUBLIC_DATASET_NAMES + OPENJEV_DATASETS
 
 
 def normalize_dataset_names(names: list[str]) -> list[str]:
@@ -226,6 +231,29 @@ def build_datasets(
             paths[f"{name}.{view}"] = jsonl
             paths_locks[f"{name}.{view}"] = lock
 
+    # W6-B2 OpenJev datasets: authored144 + perturbations108 (one cases file
+    # each, no views). Fetch + convert from the pinned GitHub revision.
+    for name in OPENJEV_DATASETS:
+        if name not in datasets:
+            continue
+        jsonl = BENCH_CACHE / f"{name}.jsonl"
+        lock = BENCH_CACHE / f"{name}.dataset.lock.json"
+        try:
+            _rebuild_if_needed(
+                jsonl,
+                lock,
+                lambda n=name: _build_openjev_dataset(n),
+            )
+        except OSError as exc:
+            if offline_ok and not (jsonl.exists() and lock.exists()):
+                print(f"{name} dataset skipped (offline): {exc}")
+            elif jsonl.exists() and lock.exists():
+                print(f"{name}: reusing cached copy (fetch failed: {exc})")
+            else:
+                raise
+        paths[name] = jsonl
+        paths_locks[name] = lock
+
     if "perturbed" in datasets:
         jsonl = BENCH_CACHE / "perturbed.jsonl"
         lock = BENCH_CACHE / "perturbed.dataset.lock.json"
@@ -350,6 +378,22 @@ def _build_public_view(name: str, view: str) -> None:
         lock = BENCH_CACHE / f"{name}.{v}.dataset.lock.json"
         write_view(records, out, lock, files_sha256=sha_by_file)
         print(f"  wrote {out.name} ({len(records)} cases)")
+
+
+def _build_openjev_dataset(name: str) -> None:
+    """One OpenJev dataset: fetch the pinned GitHub revision, convert, write.
+
+    authored144 (3-way evidence interpretation) and perturbations108
+    (label-preserving perturbations). No sampling views — every row is an
+    eval row. Model-reviewed, not human-adjudicated (meta.annotation_status).
+    """
+    from benchmarks.openjev.fetch import convert_dataset
+
+    jsonl = BENCH_CACHE / f"{name}.jsonl"
+    lock = BENCH_CACHE / f"{name}.dataset.lock.json"
+    print(f"building {name} dataset (downloads from GitHub)...")
+    n, sha = convert_dataset(name, jsonl, lock)
+    print(f"  wrote {jsonl.name} ({n} cases, sha256 {sha[:16]}...)")
 
 
 def _build_typed_decisions() -> None:

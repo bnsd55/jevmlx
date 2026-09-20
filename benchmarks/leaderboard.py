@@ -57,6 +57,10 @@ _WORKFLOW_COLS = [
 _LOCAL_GROUPS = {
     "typesafe": "jevmlx, local (measured)",
     "typed-decisions": "jevmlx, local on LocalLLaMA/typed-decisions test split (measured)",
+    "authored144": ("jevmlx, local on OpenJev authored144 (model-reviewed, not human-adjudicated)"),
+    "perturbations108": (
+        "jevmlx, local on OpenJev perturbations108 (model-reviewed, not human-adjudicated)"
+    ),
 }
 
 _HEADER = (
