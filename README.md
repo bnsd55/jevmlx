@@ -178,6 +178,7 @@ No local results yet — contribute one with `jevmlx bench`.
 | `report` | Build a JSON + markdown eval report from predictions (offline) |
 | `bench` | Full benchmark: all combos, parity gate, `SUMMARY.md` |
 | `doctor` | Environment checks before filing an issue or a bench run |
+| `watch` | Live read-only dashboard for a bench/m5 output dir (`--ui` on bench starts it in the same terminal; `--web` serves it as HTML) |
 
 `-v` for progress logs; `JEVMLX_LOG=json` for machine-readable logs.
 

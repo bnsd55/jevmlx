@@ -198,6 +198,49 @@ def _last_verbose(argv) -> bool:
     return any(t in ("-v", "--verbose") for t in tokens)
 
 
+def _run_bench_ui(
+    out_dir, bench_argv, *, web=False, port=8765, tty=True, refresh=2.0, watch_fn=None
+):
+    """W6-UI: run the bench (stdout -> <out>/bench.log) + the watcher.
+
+    ``watch_fn`` is injectable so tests never enter the live loop or bind a
+    port (the real ``run_watch`` loops forever and may take over the TTY).
+    """
+    import subprocess as _sp
+    import threading as _th
+    from pathlib import Path as _Path
+
+    out_dir = _Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    bench_log = out_dir / "bench.log"
+
+    # Spawn the bench process synchronously so Popen has been called before
+    # the watcher starts (and before tests assert on it). The wait() runs in
+    # a daemon thread so the watcher can render while bench runs.
+    bench_log_handle = open(bench_log, "w", encoding="utf-8")
+    p = _sp.Popen(
+        [sys.executable, "-m", "jevmlx", "bench", *bench_argv],
+        stdout=bench_log_handle,
+        stderr=_sp.STDOUT,
+    )
+
+    def _wait_bench():
+        p.wait()
+        bench_log_handle.close()
+
+    t = _th.Thread(target=_wait_bench, daemon=True)
+    t.start()
+    if watch_fn is None:
+        from jevmlx.watch import run_watch as watch_fn
+    try:
+        watch_fn(out_dir, refresh=refresh, web=web, port=port, tty=tty)
+    finally:
+        print(f"\nbench log: {bench_log}")
+        summary = out_dir / "SUMMARY.md"
+        if summary.exists():
+            print(f"summary: {summary}")
+
+
 def _dispatch(argv) -> None:
     ap = argparse.ArgumentParser(prog="jevmlx", description=__doc__)
     ap.add_argument("--version", action="version", version=f"jevmlx {__version__}")
@@ -518,6 +561,28 @@ def _dispatch(argv) -> None:
         help="print the machine tag, dataset build plan, combo list with output "
         "folders, and a memory estimate per model, then exit without loading anything",
     )
+    bench_p.add_argument(
+        "--ui",
+        action="store_true",
+        help="start the live watcher (jevmlx watch) in the same terminal; "
+        "bench stdout goes to <out>/bench.log so the screen stays clean",
+    )
+    bench_p.add_argument(
+        "--web",
+        action="store_true",
+        help="with --ui: serve the dashboard as HTML at http://127.0.0.1:PORT/",
+    )
+    bench_p.add_argument(
+        "--port",
+        type=int,
+        default=8765,
+        help="port for --ui --web (default 8765)",
+    )
+    bench_p.add_argument(
+        "--no-tty",
+        action="store_true",
+        help="with --ui --web: web only, skip the terminal render",
+    )
 
     report_p = sub.add_parser(
         "report",
@@ -540,6 +605,33 @@ def _dispatch(argv) -> None:
         dest="as_json",
         action="store_true",
         help="print the checks as JSON instead of a table",
+    )
+    watch_p = sub.add_parser(
+        "watch",
+        help="Live dashboard for a bench/m5 output directory (read-only)",
+    )
+    watch_p.add_argument("out_dir", help="the bench/m5 output directory to watch")
+    watch_p.add_argument(
+        "--refresh",
+        type=float,
+        default=2.0,
+        help="refresh interval in seconds (default 2)",
+    )
+    watch_p.add_argument(
+        "--web",
+        action="store_true",
+        help="serve the dashboard as HTML at http://127.0.0.1:PORT/ (auto-reloads)",
+    )
+    watch_p.add_argument(
+        "--port",
+        type=int,
+        default=8765,
+        help="port for --web mode (default 8765)",
+    )
+    watch_p.add_argument(
+        "--no-tty",
+        action="store_true",
+        help="web only — skip the terminal render (implies --web)",
     )
     args = ap.parse_args(argv)
 
@@ -779,7 +871,20 @@ def _dispatch(argv) -> None:
             argv += ["--load-timeout", str(args.load_timeout)]
         if args.dry_run:
             argv.append("--dry-run")
-        raise SystemExit(bench_main(argv))
+        if args.ui:
+            # W6-UI: run the bench (stdout -> <out>/bench.log) + the watcher.
+            from pathlib import Path as _Path
+
+            out_dir = _Path(args.out) if args.out else _Path("bench-results")
+            _run_bench_ui(
+                out_dir,
+                argv,
+                web=args.web,
+                port=args.port,
+                tty=not args.no_tty,
+            )
+        else:
+            raise SystemExit(bench_main(argv))
 
     elif args.command == "report":
         # Offline: pure-python metrics over predictions.jsonl -> evalreport.
@@ -794,6 +899,17 @@ def _dispatch(argv) -> None:
         from jevmlx.doctor import run_doctor
 
         raise SystemExit(run_doctor(model=args.model, as_json=args.as_json))
+
+    elif args.command == "watch":
+        from jevmlx.watch import run_watch
+
+        run_watch(
+            args.out_dir,
+            refresh=args.refresh,
+            web=args.web or args.no_tty,
+            port=args.port,
+            tty=not args.no_tty,
+        )
 
     elif args.command == "validate":
         from dataclasses import asdict

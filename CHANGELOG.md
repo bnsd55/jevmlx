@@ -10,6 +10,21 @@
   `per_item_end_to_end_ms` median from `timing.json` for every track (dash if
   missing), and a new `calls` column shows the call count so rotations are
   visible.
+- W6-UI: `jevmlx watch` live read-only dashboard for a bench/m5 output dir
+  (`jevmlx/watch.py`). Renders the RUNBOOK step states, current combo progress
+  (cases done/total, cases/h, ETA, heartbeat memory — cache red above 10 GB),
+  a live results table with the same columns as the README leaderboard
+  (accuracy with Wilson CI, four workflow accuracies, time/cost per case),
+  and the last 8 prediction lines. `jevmlx bench --ui` starts the watcher in
+  the same terminal (bench stdout -> `<out>/bench.log`). Half-written lines
+  are truncated (same rule as `--resume`); missing files show `—`; no parse
+  error ever raises. New base dep: `rich`.
+- W6-UI: `--web` mode for `jevmlx watch` (and `jevmlx bench --ui --web`).
+  Renders the SAME dashboard to HTML via rich `Console(record=True)` +
+  `export_html(inline_styles=True)` and serves it with stdlib `http.server`
+  at `http://127.0.0.1:PORT/` with a `<meta http-equiv=refresh>` tag so
+  Chrome auto-reloads; `/dashboard.json` returns the raw numbers for scripts.
+  No new dependency, no JS framework. `--no-tty` runs web only.
 
 - B11: two-stage vs one-stage measurement script for 255-option enums
   (`benchmarks/two_stage.py`). Measures whether coarse→fine two-stage choice
