@@ -627,3 +627,11 @@ First release.
   trust-and-safety triage with ordered severity) and `inbound_email`
   (20-field routing with ordered priority). `support_triage` extended
   with ordered `frustration_level` and `churn_risk` fields.
+- B3: `/v1/systemone` and `/v1/models` routes on `jevmlx serve`.
+  `/v1/systemone` maps a questions block (choice/noul/score) to one
+  schema, runs it through the same serial worker + admission queue as
+  `/decide` (identical 429/503/413/400 backpressure), and returns
+  typed answers (ChoiceAnswer/NoulAnswer/ScoreAnswer) with confidence,
+  probabilities, and usage telemetry. `/v1/models` advertises only our
+  resolved model id. The shared queue path is factored into one function
+  both routes call.

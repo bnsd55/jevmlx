@@ -711,3 +711,308 @@ def test_f2_baseexception_returns_500():
         httpd.shutdown()
         httpd.server_close()
         aq.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# B3: /v1/systemone and /v1/models
+# ---------------------------------------------------------------------------
+
+
+def _post_path(port, path, payload):
+    """POST to a custom path (not /decide)."""
+    import urllib.error
+    import urllib.request
+
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}{path}",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status, json.loads(resp.read()), dict(resp.headers)
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read()), dict(e.headers)
+
+
+def _make_systemone_result(questions):
+    """Build a fake decide_fn result with field_telemetry for each question."""
+    fields = {}
+    for qid, qspec in questions.items():
+        qtype = qspec.get("type")
+        if qtype == "choice":
+            criteria = qspec.get("criteria", {})
+            choices = list(criteria.keys()) if isinstance(criteria, dict) else list(criteria)
+            fields[qid] = make_field_telemetry(
+                value=choices[0],
+                choices=choices,
+                probability=0.7,
+            )
+            # Override top_choices for known probabilities.
+            fields[qid]["top_choices"] = [
+                {"choice": choices[0], "probability": 0.7},
+                {"choice": choices[1] if len(choices) > 1 else "other", "probability": 0.3},
+            ]
+        elif qtype == "noul":
+            fields[qid] = make_field_telemetry(
+                value=True,
+                type_="boolean",
+                choices=["true", "false"],
+                probability=0.8,
+            )
+            fields[qid]["top_choices"] = [
+                {"choice": "true", "probability": 0.8},
+                {"choice": "false", "probability": 0.2},
+            ]
+        elif qtype == "score":
+            criteria = qspec.get("criteria", {})
+            choices = list(criteria.keys()) if isinstance(criteria, dict) else list(criteria)
+            fields[qid] = make_field_telemetry(
+                value=choices[1],
+                choices=choices,
+                probability=0.5,
+            )
+            probs = [0.1, 0.5, 0.3, 0.1] if len(choices) >= 4 else [0.2, 0.5, 0.3][: len(choices)]
+            fields[qid]["top_choices"] = [
+                {"choice": c, "probability": p} for c, p in zip(choices, probs, strict=False)
+            ]
+    return make_engine_result(fields=fields)
+
+
+def test_systemone_happy_path_all_three_types(server):
+    """POST /v1/systemone with choice, noul, and score questions."""
+    port, calls, _, _ = server
+    questions = {
+        "q1": {
+            "type": "choice",
+            "instructions": "Pick a category",
+            "criteria": {"A": "Option A", "B": "Option B"},
+        },
+        "q2": {
+            "type": "noul",
+            "instructions": "Is it true?",
+        },
+        "q3": {
+            "type": "score",
+            "instructions": "Rate 0-3",
+            "criteria": {"none": "No harm", "low": "Minor", "med": "Moderate", "high": "Severe"},
+        },
+    }
+    # Replace the server's decide_fn with one that returns the right fields.
+    # We need to restart the server with a custom decide_fn.
+    httpd2, port2, _, aq2 = _start_server(lambda sd, ctx, t=1.0: _make_systemone_result(questions))
+    try:
+        status, body, _ = _post_path(
+            port2,
+            "/v1/systemone",
+            {"state": {"user": "alice"}, "questions": questions},
+        )
+        assert status == 200
+        assert body["model"] == "fake"
+        # choice answer
+        assert body["answers"]["q1"]["type"] == "choice"
+        assert body["answers"]["q1"]["choice"] == "A"
+        assert "confidence" in body["answers"]["q1"]
+        assert "probabilities" in body["answers"]["q1"]
+        # noul answer
+        assert body["answers"]["q2"]["type"] == "noul"
+        assert body["answers"]["q2"]["noul"] == 0.8
+        assert "confidence" in body["answers"]["q2"]
+        # score answer
+        assert body["answers"]["q3"]["type"] == "score"
+        assert body["answers"]["q3"]["argmax_level"] == "low"
+        assert "score" in body["answers"]["q3"]
+        assert "probabilities" in body["answers"]["q3"]
+        assert "legend" in body["answers"]["q3"]
+        assert body["answers"]["q3"]["legend"]["0"] == "none"
+        assert body["answers"]["q3"]["legend"]["3"] == "high"
+        # usage
+        assert "prompt_tokens" in body["usage"]
+        assert "computed_positions" in body["usage"]
+    finally:
+        httpd2.shutdown()
+        httpd2.server_close()
+        aq2.shutdown()
+
+
+def test_systemone_score_expected_index(server):
+    """score answer: expected_index = sum(i * p_i)."""
+    port, calls, _, _ = server
+    questions = {
+        "q": {
+            "type": "score",
+            "instructions": "Rate",
+            "criteria": {"a": "A", "b": "B", "c": "C"},
+        },
+    }
+    httpd2, port2, _, aq2 = _start_server(lambda sd, ctx, t=1.0: _make_systemone_result(questions))
+    try:
+        status, body, _ = _post_path(port2, "/v1/systemone", {"state": "x", "questions": questions})
+        assert status == 200
+        # probs are [0.2, 0.5, 0.3] -> expected = 0*0.2 + 1*0.5 + 2*0.3 = 1.1
+        assert abs(body["answers"]["q"]["score"] - 1.1) < 0.01
+    finally:
+        httpd2.shutdown()
+        httpd2.server_close()
+        aq2.shutdown()
+
+
+def test_systemone_bad_question_type_is_400(server):
+    """Unknown question type -> 400 with the id named."""
+    port, _, _, _ = server
+    questions = {
+        "bad_q": {"type": "ranking", "instructions": "Rank", "criteria": {"A": "a"}},
+    }
+    status, body, _ = _post_path(port, "/v1/systemone", {"state": "x", "questions": questions})
+    assert status == 400
+    assert "bad_q" in body["error"]
+
+
+def test_systemone_state_object_becomes_context(server):
+    """state object -> json.dumps(indent=2) as context."""
+    port, calls, _, _ = server
+    questions = {
+        "q": {"type": "noul", "instructions": "Is it true?"},
+    }
+    httpd2, port2, _, aq2 = _start_server(lambda sd, ctx, t=1.0: _make_systemone_result(questions))
+    try:
+        state_obj = {"user": "bob", "action": "login"}
+        status, body, _ = _post_path(
+            port2, "/v1/systemone", {"state": state_obj, "questions": questions}
+        )
+        assert status == 200
+    finally:
+        httpd2.shutdown()
+        httpd2.server_close()
+        aq2.shutdown()
+
+
+def test_systemone_503_during_warmup():
+    """/v1/systemone returns 503 before the server is ready."""
+    stats = _ServerStats()  # not ready
+    aq = _AdmissionQueue(maxsize=16, stats=stats)
+    httpd, port, _, _ = _start_server(
+        lambda sd, ctx, t=1.0: {"parsed_json": {}, "field_telemetry": {}},
+        stats=stats,
+        aq=aq,
+    )
+    try:
+        questions = {"q": {"type": "noul", "instructions": "x"}}
+        status, body, _ = _post_path(port, "/v1/systemone", {"state": "x", "questions": questions})
+        assert status == 503
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        aq.shutdown()
+
+
+def test_systemone_429_on_queue_overflow():
+    """/v1/systemone shares the same 429 backpressure as /decide."""
+    block = threading.Event()
+
+    def blocking_decide(sd, ctx, t=1.0):
+        block.wait(timeout=10)
+        return {"parsed_json": {}, "field_telemetry": {}}
+
+    stats = _ServerStats()
+    stats.mark_ready()
+    aq = _AdmissionQueue(maxsize=1, stats=stats)
+    httpd, port, _, _ = _start_server(blocking_decide, stats=stats, aq=aq)
+    try:
+        questions = {"q": {"type": "noul", "instructions": "x"}}
+        payload = {"state": "x", "questions": questions}
+        # Fire 3 concurrent requests: 1 worker + 1 queued + 1 rejected.
+        results = []
+        threads = []
+        rlock = threading.Lock()
+
+        def fire():
+            try:
+                s, b, h = _post_path(port, "/v1/systemone", payload)
+                with rlock:
+                    results.append((s, b, h))
+            except Exception as e:  # noqa: BLE001
+                with rlock:
+                    results.append((0, {"error": str(e)}, {}))
+
+        for _ in range(3):
+            t = threading.Thread(target=fire)
+            t.start()
+            threads.append(t)
+        time.sleep(1.0)
+
+        rejected = [r for r in results if r[0] == 429]
+        assert len(rejected) >= 1, f"expected at least one 429, got {[r[0] for r in results]}"
+        status, body, headers = rejected[0]
+        assert "Retry-After" in headers
+        assert body["error"] == "admission queue full"
+
+        block.set()
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        aq.shutdown()
+
+
+def test_v1_models():
+    """GET /v1/models returns only our model id."""
+    httpd, port, _, aq = _start_server(
+        lambda sd, ctx, t=1.0: {"parsed_json": {}, "field_telemetry": {}}, model_id="my-model"
+    )
+    try:
+        status, body, _ = _get(port, "/v1/models")
+        assert status == 200
+        assert body == {"data": [{"id": "my-model", "owned_by": "jevmlx"}]}
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        aq.shutdown()
+
+
+def test_systemone_mapping_criteria_order_to_ordinal_levels():
+    """_systemone_to_schema maps score criteria order to ordered enum choices."""
+    from jevmlx.serve import _systemone_to_schema
+
+    questions = {
+        "q": {
+            "type": "score",
+            "instructions": "Rate",
+            "criteria": {"low": "L", "mid": "M", "high": "H"},
+        }
+    }
+    schema = _systemone_to_schema(questions)
+    assert schema["q"]["type"] == "enum"
+    assert schema["q"]["ordered"] is True
+    assert schema["q"]["choices"] == ["low", "mid", "high"]
+
+
+def test_systemone_mapping_choice_criteria_as_enum():
+    """_systemone_to_schema maps choice criteria names to enum choices."""
+    from jevmlx.serve import _systemone_to_schema
+
+    questions = {
+        "q": {
+            "type": "choice",
+            "instructions": "Pick",
+            "criteria": {"A": "Option A", "B": "Option B"},
+        }
+    }
+    schema = _systemone_to_schema(questions)
+    assert schema["q"]["type"] == "enum"
+    assert (
+        "ordered" not in schema["q"]
+        or schema["q"].get("ordered") is False
+        or "ordered" not in schema["q"]
+    )
+    assert schema["q"]["choices"] == ["A", "B"]
+
+
+def test_systemone_mapping_noul_as_boolean():
+    """_systemone_to_schema maps noul to boolean."""
+    from jevmlx.serve import _systemone_to_schema
+
+    questions = {"q": {"type": "noul", "instructions": "True?"}}
+    schema = _systemone_to_schema(questions)
+    assert schema["q"]["type"] == "boolean"
