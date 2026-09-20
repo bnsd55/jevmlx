@@ -1276,6 +1276,14 @@ def compute_metrics(records: list[dict], schema=None) -> dict:
     agreement = typesafe_agreement(records)
     if agreement:
         metrics["agreement"] = agreement
+    # W6-B1: per-workflow accuracy for datasets that carry a ``workflow`` key
+    # (jabr's task_id, or any future dataset with per-group breakdown). This
+    # is the GENERAL metric (macro-by-workflow field accuracy); the TypeSafe-
+    # specific ``agreement.by_workflow`` is a separate, narrower metric.
+    labelled = _labelled(records)
+    wf_acc = macro_by(labelled, "workflow")
+    if wf_acc:
+        metrics["per_workflow_accuracy"] = wf_acc
     tvd = tvd_vs_consensus(records)
     if tvd:
         metrics["tvd_vs_consensus"] = tvd

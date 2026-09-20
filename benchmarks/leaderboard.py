@@ -53,6 +53,19 @@ _WORKFLOW_COLS = [
     ("invoice_processing", "Invoices"),
 ]
 
+# W6-B1: jabr per-task accuracy columns (8 tasks). These are SEPARATE from
+# the TypeSafe workflow columns above — the two never share a row group.
+_JABR_TASK_COLS = [
+    ("support_department", "Support dept"),
+    ("email_intent", "Email intent"),
+    ("secret_leak", "Secret leak"),
+    ("urgency", "Urgency"),
+    ("refund_eligible", "Refund"),
+    ("frustration_level", "Frustration"),
+    ("incident_severity", "Severity"),
+    ("review_sentiment", "Sentiment"),
+]
+
 # Local datasets with TypeSafe-style consensus labels -> row-group title.
 _LOCAL_GROUPS = {
     "typesafe": "jevmlx, local (measured)",
@@ -61,6 +74,7 @@ _LOCAL_GROUPS = {
     "perturbations108": (
         "jevmlx, local on OpenJev perturbations108 (model-reviewed, not human-adjudicated)"
     ),
+    "jabr": "jevmlx, local on jabr/classifier-benchmark (measured)",
 }
 
 _HEADER = (
@@ -68,6 +82,16 @@ _HEADER = (
     "Agent trace | Security | Invoices | Time per case | Cost per case | Cases |"
 )
 _SEP = "|---|---|---|---|---|---|---|---|---|---|---|---|"
+
+# W6-B1: jabr has its OWN table (different columns: 8 task accuracies).
+# The TypeSafe table and the jabr table are separate markdown blocks so
+# their columns never collide.
+_JABR_HEADER = (
+    "| Model | Source | Scorer | Machine | Accuracy | "
+    + " | ".join(label for _, label in _JABR_TASK_COLS)
+    + " | Time per case | Cost per case | Cases |"
+)
+_JABR_SEP = "|" + "|".join("---" for _ in range(13 + len(_JABR_TASK_COLS))) + "|"
 
 
 def _fmt_pct(value) -> str:
@@ -259,6 +283,21 @@ def _local_rows(results_root: Path) -> list[dict]:
             )
             n_cases = ta.get("n_cases")
             n_fields = ta.get("n_fields")
+            # W6-B1: for non-TypeSafe datasets (jabr), the per-workflow
+            # breakdown comes from per_workflow_accuracy (general metric),
+            # and the overall accuracy from metrics["accuracy"].
+            if dataset_name == "jabr":
+                agreement = metrics.get("accuracy")
+                pwa = metrics.get("per_workflow_accuracy", {})
+                by_workflow = pwa if isinstance(pwa, dict) else {}
+                # n_cases from the per-field accuracy entries (one field per
+                # case in jabr).
+                pfa = metrics.get("per_field_accuracy", [])
+                if isinstance(pfa, list) and pfa:
+                    n_fields = sum(e.get("n", 0) for e in pfa if isinstance(e, dict))
+                else:
+                    n_fields = None
+                n_cases = n_fields
             model = config.get("model", "")
             _, scorer, _ = _combo_parts(combo)
             machine, _ = _machine_model(combo)
@@ -294,7 +333,9 @@ def _local_rows(results_root: Path) -> list[dict]:
                         "agent_trace_observability": by_workflow.get("agent_trace_observability"),
                         "security_incidents": by_workflow.get("security_incidents"),
                         "invoice_processing": by_workflow.get("invoice_processing"),
-                    },
+                    }
+                    if dataset_name != "jabr"
+                    else {key: by_workflow.get(key) for key, _ in _JABR_TASK_COLS},
                     "time_per_case_s": time_per_case_s,
                     "cost_per_case_usd": "$0 (local)",
                     "cases": n_cases if n_cases is not None else n_fields,
@@ -340,7 +381,7 @@ def _refuse_mixed_revisions(rows: list[dict]) -> None:
 
 
 def _row_line(r: dict) -> str:
-    """One markdown table row from a row dict."""
+    """One markdown table row from a row dict (TypeSafe workflow columns)."""
     wf = r.get("by_workflow", {}) or {}
     wf_cells = [_fmt_pct(wf.get(key)) for key, _ in _WORKFLOW_COLS]
     cost = r.get("cost_per_case_usd")
@@ -349,6 +390,22 @@ def _row_line(r: dict) -> str:
         f"| {r['model']} | {r['source']} | {r.get('scorer', '—')} | "
         f"{r.get('machine', '—')} | {_fmt_pct_with_ci(r.get('accuracy'), r.get('accuracy_ci'))} | "
         f"{' | '.join(wf_cells)} | "
+        f"{_fmt_seconds(r.get('time_per_case_s'))} | "
+        f"{cost_cell} | "
+        f"{r.get('cases', '—')} |"
+    )
+
+
+def _jabr_row_line(r: dict) -> str:
+    """One markdown table row for the jabr table (8 task accuracy columns)."""
+    wf = r.get("by_workflow", {}) or {}
+    task_cells = [_fmt_pct(wf.get(key)) for key, _ in _JABR_TASK_COLS]
+    cost = r.get("cost_per_case_usd")
+    cost_cell = cost if isinstance(cost, str) else _fmt_cost(cost)
+    return (
+        f"| {r['model']} | {r['source']} | {r.get('scorer', '—')} | "
+        f"{r.get('machine', '—')} | {_fmt_pct_with_ci(r.get('accuracy'), r.get('accuracy_ci'))} | "
+        f"{' | '.join(task_cells)} | "
         f"{_fmt_seconds(r.get('time_per_case_s'))} | "
         f"{cost_cell} | "
         f"{r.get('cases', '—')} |"
@@ -433,10 +490,38 @@ def build_table(
     # Groups C/D: jevmlx, local (measured), one group per dataset — they are
     # different test sets and must never share a column.
     for dataset_name, title in _LOCAL_GROUPS.items():
+        if dataset_name == "jabr":
+            continue  # jabr gets its own table below (different columns)
         group = [r for r in local_rows if r.get("dataset") == dataset_name]
         if group:
             lines.append(f"| **{title}** | | | | | | | | | | | |")
             lines.extend(_row_line(r) for r in group)
+
+    # W6-B1: jabr table — separate block with 8 per-task accuracy columns.
+    jabr_rows = [r for r in local_rows if r.get("dataset") == "jabr"]
+    if jabr_rows:
+        if local_rows or official_models or published_models:
+            lines.append("")
+            lines.append("")
+        lines.append("### jabr/classifier-benchmark")
+        lines.append("")
+        lines.append(_JABR_HEADER)
+        lines.append(_JABR_SEP)
+        for r in jabr_rows:
+            lines.append(_jabr_row_line(r))
+        lines.append("")
+        lines.append(
+            "_jabr rows are on the jabr/classifier-benchmark suite "
+            "(https://github.com/jabr/classifier-benchmark) — 8 tasks, "
+            "78 cases, pinned at commit "
+            f"{jabr_rows[0].get('revision') or 'unpinned'}._"
+        )
+        lines.append(
+            "_Per-task columns: support_department (5-way), email_intent "
+            "(5-way), secret_leak (bool), urgency (bool), refund_eligible "
+            "(bool), frustration_level (3-level ordinal), incident_severity "
+            "(5-level ordinal), review_sentiment (5-level ordinal)._"
+        )
 
     # Caption lines.
     lines.append("")

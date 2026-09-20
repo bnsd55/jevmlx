@@ -130,6 +130,24 @@ Paste `SUMMARY.md` into the PR description and link the machine specs
   dataset lock file for the combo's dataset (provenance: leaderboard rows
   trace to a pinned dataset revision; a missing lock aborts the run with
   an error, it never records null).
+- **jabr classifier-benchmark** (W6-B1, pass `--datasets jabr`): a
+  public-domain (CC0) benchmark from
+  https://github.com/jabr/classifier-benchmark — 8 classification tasks /
+  78 cases covering the three System One primitives: `choice`
+  (support_department 5-way, email_intent 5-way) -> enum, `noul`
+  (secret_leak, urgency, refund_eligible) -> boolean, `score`
+  (frustration_level 3-level, incident_severity 5-level,
+  review_sentiment 5-level) -> ordered enum (OrdinalTelemetry applies).
+  Single-view (all 78 cases are the benchmark; no balanced/natural
+  sampling — the set is hand-curated). The case definitions live in
+  upstream's `bench/cases.py` as Python source that imports a
+  package we do not depend on; we parse the source with `ast`
+  the fetcher downloads the PINNED commit sha from raw.githubusercontent.com,
+  verifies its sha256 against a hardcoded expectation (fail-closed on
+  mismatch, same F5 rule as the HF datasets), and parses it with the `ast`
+  module — never `exec`. Each case carries `workflow = task_id` so the
+  report's `per_workflow_accuracy` carries per-task accuracy, and the
+  leaderboard renders a separate jabr table with 8 per-task columns.
 - Runs: for every (track, scorer, dataset) — `eval` in-process `--runs` times
   (default 2), last run kept, order-rotation permutations on for the parallel
   track. Writes `predictions.jsonl`, `run.json`, `report.json`, `report.md`
