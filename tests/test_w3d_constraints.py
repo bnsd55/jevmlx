@@ -93,6 +93,7 @@ def test_decide_passes_constraints_to_engine(monkeypatch):
         calibration=None,
         prior_correction=False,
         constraints=None,
+        **kwargs,
     ):
         captured["constraints"] = constraints
         return make_engine_result(
@@ -209,6 +210,7 @@ def test_evalrun_constraint_violation_rate_zero_with_map(monkeypatch):
         prior_correction=False,
         constraints=None,
         oracle_overrides=None,
+        **kwargs,
     ):
         # Simulate the constrained MAP: with constraints, subtype flips to refund.
         reconciled_subtype = "refund" if constraints else "bug"
@@ -291,6 +293,7 @@ def test_evalrun_constraint_violation_without_map(monkeypatch):
         prior_correction=False,
         constraints=None,
         oracle_overrides=None,
+        **kwargs,
     ):
         # No MAP: subtype stays at argmax 'bug'.
         return make_engine_result(

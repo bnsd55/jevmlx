@@ -86,6 +86,7 @@ def test_decide_many_uses_one_engine_and_one_schema(monkeypatch):
         calibration=None,
         prior_correction=False,
         constraints=None,
+        **kwargs,
     ):
         run_calls.append((engine, context, schema, temperature))
         return make_engine_result(

@@ -297,3 +297,41 @@ against the fake tokenizer, so the template-kwargs contract is checked
 without that model's tokenizer in CI. A tokenizer/template update bumps
 the `tokenizer_revision` in the vector filenames — `--check` fails until
 `--write` re-pins them, making the change reviewable byte-for-byte.
+
+## HOLD (M5 A/B): dual-framing scoring for boolean fields (`--dual-framing`)
+
+When `dual_framing=True` (engine option, CLI `--dual-framing`, default OFF),
+each boolean field is scored **twice**: once with the field's declared
+description (the positive framing), and once with a **deterministic
+negation prefix** (`"Negated framing — answer the opposite: <original
+description>"` — no LLM rewriting). The two probabilities are combined:
+
+```
+p = 0.5 * (p_true_pos + (1 - p_true_neg))
+```
+
+where `p_true_pos` is P(true) from the positive pass and `p_true_neg` is
+P(true) from the negated pass. If the model is negation-biased,
+`p_true_pos` and `(1 - p_true_neg)` disagree; the combination averages
+them out. The decided value flips to False when `p < 0.5`.
+
+**Prompt version**: when the option is ON, the result's `prompt_version`
+bumps to `jevmlx-parallel-v11-dualframe`. When OFF (the default), the
+prompt version is unchanged (`jevmlx-parallel-v9`) and the prompt bytes are
+**byte-identical to main** — golden prompt vectors pass unchanged. A second
+golden set is generated for the on-mode (the negated schema block produces
+different prompt bytes, pinned separately).
+
+**Telemetry**: each boolean field's `field_telemetry` gains `p_pos`,
+`p_neg_complement`, `p_combined`, `score_source='dual_framing'`, and a
+`dual_framing` dict with `p_neg`, `disagreement` (|p_pos − p_neg_complement|),
+and `combined: true/false`. Non-boolean fields are untouched. The result's
+`probability_status` becomes `"dual_framing"`.
+
+**Implementation**: the negated pass runs a full `run_parallel_generation`
+with a schema whose boolean descriptions carry the negation prefix; both
+passes share the same engine, temperature, scoring, calibration, and
+constraints. Non-boolean fields' negated-pass results are discarded.
+
+This branch is **HOLD**: it will NOT merge before an M5 A/B.
+`benchmarks.m5 --ab-branch w6-dualframe` runs it against main.

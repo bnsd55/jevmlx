@@ -444,6 +444,14 @@ def _dispatch(argv) -> None:
         "per-choice log scores; the neutral pass runs once per schema",
     )
     eval_p.add_argument(
+        "--dual-framing",
+        action="store_true",
+        help="parallel track (HOLD, M5 A/B): score boolean fields twice "
+        "(positive + negated wording) and combine p = 0.5*(p_pos + "
+        "(1-p_neg)); prompt version bumps to "
+        "jevmlx-parallel-v11-dualframe only when this is set",
+    )
+    eval_p.add_argument(
         "--permutations",
         default="none",
         choices=["none", "rotations", "fieldperm", "all"],
@@ -839,6 +847,9 @@ def _run_eval_command(args) -> None:
         "dataset_path": os.path.abspath(args.data),
         "scoring": args.scoring if args.track == "parallel" else "slots",
         "prior_correction": bool(args.prior_correction) if args.track == "parallel" else False,
+        "dual_framing": bool(getattr(args, "dual_framing", False))
+        if args.track == "parallel"
+        else False,
     }
     lock = os.path.join(os.path.dirname(os.path.abspath(args.data)), "dataset.lock.json")
 
@@ -847,7 +858,10 @@ def _run_eval_command(args) -> None:
         print(f"Loading {args.model} ...", flush=True)
         engine = load_engine(args.model)
         decide_fn = evalrun.parallel_decide_fn(
-            engine, scoring=args.scoring, prior_correction=args.prior_correction
+            engine,
+            scoring=args.scoring,
+            prior_correction=args.prior_correction,
+            dual_framing=bool(getattr(args, "dual_framing", False)),
         )
         chat_template = getattr(engine.tokenizer, "chat_template", None)
         plan_provider = lambda schema: schema.compile_labels_plan(engine.tokenizer)  # noqa: E731

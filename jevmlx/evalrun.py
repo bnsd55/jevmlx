@@ -249,7 +249,9 @@ def _compute_tokenizer_metrics(
     }
 
 
-def parallel_decide_fn(engine, scoring: str = "slots", prior_correction: bool = False) -> DecideFn:
+def parallel_decide_fn(
+    engine, scoring: str = "slots", prior_correction: bool = False, dual_framing: bool = False
+) -> DecideFn:
     """Track ``parallel``: the jevmlx engine at T=1.
 
     Takes the loaded :class:`Engine`.
@@ -275,6 +277,7 @@ def parallel_decide_fn(engine, scoring: str = "slots", prior_correction: bool = 
             prior_correction=prior_correction,
             constraints=constraints,
             oracle_overrides=oracle_overrides,
+            dual_framing=dual_framing,
         )
         out: dict[str, dict[str, Any]] = {}
         for fname, telemetry in result["field_telemetry"].items():

@@ -677,3 +677,21 @@ conversion: same shape with empty `sources` plus `fetched_at`.
    PROBABILITIES. Per-field telemetry carries `rescore_band_nats` (the
    band the decision used) and `drift_envelope_nats` (E_bound) so every
    decision's trigger is auditable; `FieldSemantics` is unchanged.
+
+## Dual-framing scoring for boolean fields (HOLD, `--dual-framing`)
+
+Boolean fields are scored from one framing today: the field's declared
+description is the question, and the model's P(true) is the answer. Negation
+bias — the model's yes/no shifting with the wording of the question — is a
+known failure mode. The `dual_framing` engine option (default OFF) scores
+each boolean field a second time with a **deterministic negation prefix**
+(`"Negated framing — answer the opposite: <description>"`), then combines:
+`p = 0.5 * (p_true_pos + (1 - p_true_neg))`. Both passes share the same
+engine, temperature, scoring, calibration, and constraints; the negated
+pass runs a full `run_parallel_generation` with the negated schema and its
+non-boolean results are discarded. Per-boolean-field telemetry records
+`p_pos`, `p_neg_complement`, `p_combined`, `score_source='dual_framing'`,
+and the disagreement (`|p_pos − p_neg_complement|`). The prompt version
+bumps to `jevmlx-parallel-v11-dualframe` only when the option is on;
+default-off is byte-identical to main. This is a HOLD branch for an M5 A/B
+(`benchmarks.m5 --ab-branch w6-dualframe`).

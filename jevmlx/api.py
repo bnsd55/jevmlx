@@ -539,6 +539,7 @@ def _decide_once[T: BaseModel](
     calibration: str | CalibrationBundle | None = None,
     prior_correction: bool = False,
     constraints: list[dict] | None = None,
+    dual_framing: bool = False,
 ) -> Decision[T]:
     """Decide one context with a loaded :class:`Engine` and a compiled schema
     The Engine is the single handle; no (model, tokenizer) pairs."""
@@ -551,6 +552,7 @@ def _decide_once[T: BaseModel](
         calibration=_resolve_calibration(calibration),
         prior_correction=prior_correction,
         constraints=constraints,
+        dual_framing=dual_framing,
     )
     return _assemble_decision(
         model_cls,
@@ -701,6 +703,7 @@ def decide[T: BaseModel](
     calibration: str | CalibrationBundle | None = None,
     prior_correction: bool = False,
     constraints: list[dict] | None = None,
+    dual_framing: bool = False,
 ) -> Decision[T]:
     """Run parallel constrained decisions and return a validated model instance.
 
@@ -751,6 +754,7 @@ def decide[T: BaseModel](
         calibration=_resolve_calibration(calibration),
         prior_correction=prior_correction,
         constraints=constraints,
+        dual_framing=dual_framing,
     )
 
 
@@ -869,6 +873,7 @@ def _one_field_decision(
     calibration: str | CalibrationBundle | None = None,
     prior_correction: bool = False,
     constraints: list[dict] | None = None,
+    dual_framing: bool = False,
 ) -> FieldResult:
     """Build a one-field StructuredSchema, run the engine, return the field's
     FieldResult. Reuses run_parallel_generation — the same path decide()
@@ -884,6 +889,7 @@ def _one_field_decision(
         calibration=_resolve_calibration(calibration),
         prior_correction=prior_correction,
         constraints=constraints,
+        dual_framing=dual_framing,
     )
     fields = _build_field_results(result, result["confidence_model"])
     return fields[field_name]
@@ -900,6 +906,7 @@ def choose(
     calibration: str | CalibrationBundle | None = None,
     prior_correction: bool = False,
     constraints: list[dict] | None = None,
+    dual_framing: bool = False,
 ) -> FieldResult:
     """One-field enum decision — pick one of ``options`` for ``context``.
 
@@ -929,6 +936,7 @@ def choose(
         calibration=calibration,
         prior_correction=prior_correction,
         constraints=constraints,
+        dual_framing=dual_framing,
     )
 
 
@@ -942,6 +950,7 @@ def judge(
     calibration: str | CalibrationBundle | None = None,
     prior_correction: bool = False,
     constraints: list[dict] | None = None,
+    dual_framing: bool = False,
 ) -> FieldResult:
     """One-field boolean decision — yes/no for ``question`` on ``context``.
 
@@ -962,6 +971,7 @@ def judge(
         calibration=calibration,
         prior_correction=prior_correction,
         constraints=constraints,
+        dual_framing=dual_framing,
     )
 
 
@@ -976,6 +986,7 @@ def rate(
     calibration: str | CalibrationBundle | None = None,
     prior_correction: bool = False,
     constraints: list[dict] | None = None,
+    dual_framing: bool = False,
 ) -> FieldResult:
     """One-field ORDINAL decision — rate ``context`` on the ``levels`` scale.
 
@@ -1004,4 +1015,5 @@ def rate(
         calibration=calibration,
         prior_correction=prior_correction,
         constraints=constraints,
+        dual_framing=dual_framing,
     )

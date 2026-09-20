@@ -9,6 +9,26 @@
   pass. Reports top-1 accuracy, wall ms median/p95, prompt tokens, computed
   positions, and stage-1 error rate. Output: `two_stage.{json,md}` under the
   probes folder. No engine or API change — benchmark script only.
+- **HOLD (M5 A/B)**: dual-framing scoring for boolean fields
+  (`--dual-framing`). When `dual_framing=True` (engine option, CLI flag,
+  default OFF), each boolean field is scored twice — once with the declared
+  description (positive framing) and once with a **deterministic complement
+  template** (`"<description> Answer true only if this is NOT the case.",`
+  no LLM rewriting) — then combined: `p = 0.5 * (p_true_pos + (1 - p_true_neg))`.
+  The negated row rides in the **same batched pass** as the positive row
+  (one prefill, one suffix pass); the row builder adds the negated boolean
+  row to the shared row set. Non-boolean fields are untouched.
+  Per-boolean-field telemetry gains `p_pos`, `p_neg_complement`,
+  `p_combined`, `score_source='dual_framing'`, and a `dual_framing` dict
+  with `disagreement`. Prompt version bumps to
+  `jevmlx-parallel-v11-dualframe` ONLY when on; default-off is
+  byte-identical to main (golden prompt vectors pass unchanged). Threaded
+  through `decide`/`choose`/`judge`/`rate` and the eval CLI
+  (`--dual-framing`, recorded in run.json config). Tests (combination math,
+  flip on disagreement, telemetry keys, non-boolean untouched, no-bool
+  version bump, determinism, default-off byte-identical, API kwarg).
+  PROMPT_PROTOCOL.md + ARCHITECTURE.md sections. This branch will NOT merge
+  before an M5 A/B.
 
 - B12: TypeScript client for `jevmlx serve` (`@jevmlx/client` in `js/`).
   Zero runtime deps (uses global `fetch`), ESM + CJS via `tsc`, Node 20+.

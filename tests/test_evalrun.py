@@ -393,6 +393,7 @@ def test_parallel_log_scores_reads_finalized_dict(tmp_path, monkeypatch):
         prior_correction=False,
         constraints=None,
         oracle_overrides=None,
+        **kwargs,
     ):
         calls["temperature"] = temperature
         return make_engine_result(
