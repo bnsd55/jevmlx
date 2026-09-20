@@ -266,3 +266,48 @@ def test_prompt_version_bumped():
     from jevmlx.engine import PROMPT_VERSION
 
     assert PROMPT_VERSION == "jevmlx-parallel-v9"
+
+
+def test_p5_option_plan_cache_reuses_across_rotations():
+    """P5: the option-plan cache reuses the tokenizer-invariant part
+    (aliases, shared_ids, remainders) across rotations. A rotation creates
+    a new StructuredSchema, but the per-field token work is the same —
+    only the alias_map (alias -> real value) changes."""
+    from jevmlx.schema import (
+        _OPTION_PLAN_CACHE,
+        StructuredSchema,
+        _get_option_plan,
+    )
+
+    tok = CharTokenizer()
+    # Clear the cache to start fresh.
+    _OPTION_PLAN_CACHE.clear()
+
+    schema_canonical = StructuredSchema(
+        {"action": {"type": "enum", "description": "d", "choices": ["A", "B", "C", "D"]}}
+    )
+    plan1 = schema_canonical.compile_slot_plan(tok)
+
+    # The cache should now have an entry for (tok, "action", 4, "slots").
+    cached = _get_option_plan(tok, "action", 4, "slots")
+    assert cached is not None
+    # The cached aliases and remainders are the tokenizer-invariant part.
+    assert list(cached["aliases"]) == list(plan1["fields"]["action"]["aliases"])
+    assert [list(r) for r in cached["remainders"]] == [
+        list(r) for r in plan1["fields"]["action"]["remainders"]
+    ]
+
+    # A rotation: same choices, different order, NEW schema object.
+    schema_rotated = StructuredSchema(
+        {"action": {"type": "enum", "description": "d", "choices": ["B", "C", "D", "A"]}}
+    )
+    plan2 = schema_rotated.compile_slot_plan(tok)
+
+    # The token ids (shared_ids, remainders) are IDENTICAL — only the
+    # alias_map differs (alias A -> B instead of A -> A).
+    assert plan1["fields"]["action"]["shared_ids"] == plan2["fields"]["action"]["shared_ids"]
+    assert plan1["fields"]["action"]["remainders"] == plan2["fields"]["action"]["remainders"]
+    assert plan1["fields"]["action"]["aliases"] == plan2["fields"]["action"]["aliases"]
+    # The alias_map reflects the rotation.
+    assert plan1["fields"]["action"]["alias_map"] == {"A": "A", "B": "B", "C": "C", "D": "D"}
+    assert plan2["fields"]["action"]["alias_map"] == {"A": "B", "B": "C", "C": "D", "D": "A"}

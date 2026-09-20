@@ -73,6 +73,56 @@ def _freeze_choice_descriptions(
 
 _LOGGER = logging.getLogger(__name__)
 
+# P5: option-plan cache — the tokenizer-invariant part of a scalar field's
+# slot plan (aliases, shared_ids, remainders, codebook, single_branch) is
+# the same for any schema whose field has the same name and choice count,
+# regardless of choice ORDER. Rotations reorder choices, creating a new
+# StructuredSchema object that misses _cached_plan (keyed on id(schema));
+# this cache keys on (id(tokenizer), field_name, n_choices, mode) so a
+# rotation reuses the expensive _search_codebook + tokenizer.encode work
+# and only the cheap alias_map (alias -> real value) is rebuilt.
+# Identity: the stored weakref must resolve to THIS tokenizer (same rule
+# as _cached_plan / _prior_cache_key — id() reuse is caught at hit time).
+_OPTION_PLAN_CACHE: dict[tuple, tuple] = {}  # key -> (weakref, plan_part)
+
+
+def _option_plan_key(tokenizer, field_name: str, n_choices: int, mode: str) -> tuple | None:
+    """Cache key for the tokenizer-invariant option plan. None = disabled."""
+    try:
+        weakref.ref(tokenizer)
+    except TypeError:
+        return None
+    return (id(tokenizer), field_name, n_choices, mode)
+
+
+def _get_option_plan(tokenizer, field_name: str, n_choices: int, mode: str) -> dict | None:
+    """Return the cached tokenizer-invariant plan part, or None."""
+    key = _option_plan_key(tokenizer, field_name, n_choices, mode)
+    if not key:
+        return None
+    entry = _OPTION_PLAN_CACHE.get(key)
+    if entry is not None and entry[0]() is tokenizer:
+        return entry[1]
+    if entry is not None:
+        _OPTION_PLAN_CACHE.pop(key, None)
+    return None
+
+
+def _store_option_plan(
+    tokenizer, field_name: str, n_choices: int, mode: str, plan_part: dict
+) -> None:
+    """Store the tokenizer-invariant plan part for reuse by rotations."""
+    key = _option_plan_key(tokenizer, field_name, n_choices, mode)
+    if not key:
+        return
+    try:
+        ref = weakref.ref(tokenizer)
+    except TypeError:
+        return
+    if key not in _OPTION_PLAN_CACHE:
+        weakref.finalize(tokenizer, _OPTION_PLAN_CACHE.pop, key, None)
+    _OPTION_PLAN_CACHE[key] = (ref, plan_part)
+
 
 def _alias_code(index: int) -> str:
     """Neutral choice alias for slot scoring: A..Z, then AA..ZZ (base 26).
@@ -1019,6 +1069,29 @@ class StructuredSchema:
                 values = list(fdef.choices)
             from functools import partial
 
+            # P5: check the option-plan cache first. The tokenizer-invariant
+            # part (aliases, shared_ids, remainders, codebook, single_branch)
+            # is the same for any field with the same name and choice count,
+            # regardless of choice ORDER — a rotation reuses it and only the
+            # cheap alias_map (alias -> real value) is rebuilt.
+            cached_option = _get_option_plan(tokenizer, fname, len(values), "slots")
+            if cached_option is not None:
+                aliases = cached_option["aliases"]
+                single_branch = cached_option["single_branch"]
+                shared = cached_option["shared_ids"]
+                remainders = cached_option["remainders"]
+                alias_map = dict(zip(aliases, values, strict=True))
+                fields_plan[fname] = {
+                    "shared_ids": shared,
+                    "remainders": remainders,
+                    "alias_map": alias_map,
+                    "aliases": aliases,
+                    "choices": values,
+                    "codebook": list(aliases),
+                    "single_branch": single_branch,
+                }
+                continue
+
             aliases, single_branch = _search_codebook(
                 tokenizer,
                 partial(slot_candidate_text, fname),
@@ -1056,6 +1129,19 @@ class StructuredSchema:
                     f"(tokenizer {type(tokenizer).__name__}); cannot place the "
                     "decision row",
                 )
+            # P5: store the tokenizer-invariant part for rotation reuse.
+            _store_option_plan(
+                tokenizer,
+                fname,
+                len(values),
+                "slots",
+                {
+                    "aliases": aliases,
+                    "single_branch": single_branch,
+                    "shared_ids": shared,
+                    "remainders": remainders,
+                },
+            )
             fields_plan[fname] = {
                 "shared_ids": shared,
                 "remainders": remainders,

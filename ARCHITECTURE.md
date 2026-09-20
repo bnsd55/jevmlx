@@ -652,7 +652,15 @@ conversion: same shape with empty `sources` plus `fetched_at`.
 7. **Identity-keyed plan cache.** Compiled plans are cached per tokenizer
    object identity (weakref, evicted on death) so repeated decisions skip
    recompilation without leaking tokenizers — and two equal-but-distinct
-   tokenizers never share a plan.
+   tokenizers never share a plan. **P5: an option-plan cache**
+   (`_OPTION_PLAN_CACHE`) sits below the plan cache: the tokenizer-invariant
+   part of a scalar field's slot plan (aliases, shared_ids, remainders — the
+   output of `_search_codebook` + `tokenizer.encode`) is keyed on
+   `(id(tokenizer), field_name, n_choices, mode)` so a choice rotation
+   (which creates a new `StructuredSchema` and misses the plan cache) reuses
+   it and only the cheap `alias_map` (alias → real value) is rebuilt. Plan
+   compile was 83% of a bundled call (815 of 987 ms) on the M5 7B; rotations
+   defeated the plan cache because every rotation is a new schema object.
 8. **Failure is a result.** A bench model that cannot load writes
    `load_failed` rows and keeps going; a parity failure is recorded and
    gates the model's rows instead of crashing the run or producing unvetted

@@ -244,7 +244,27 @@
   ('Chunking heuristic: N rows over P passes') is now logged at INFO
   even for single-pass runs (passes==1), so a batched eval is visible in
   the log (the M5 machine misread the parity probe's lines as the eval).
-  No engine logic change.- The engine is an object: `load_engine` returns a frozen `Engine`
+  No engine logic change.
+- P5: reuse compiled option plans across rotations (plan compile was 83%
+  of a bundled call — 815 of 987 ms on the M5 7B). The eval runs each case
+  with option-order rotations; each rotation creates a new StructuredSchema
+  object that misses the plan cache (keyed on id(schema)), so the expensive
+  _search_codebook (tokenizer-heavy codebook search) and tokenizer.encode
+  calls ran again for every rotation even though the option strings and
+  their token ids are identical — only the ORDER changes. A new
+  option-plan cache (_OPTION_PLAN_CACHE in schema.py) keys the
+  tokenizer-invariant part of a scalar field's slot plan (aliases,
+  shared_ids, remainders) on (id(tokenizer), field_name, n_choices, mode)
+  so a rotation reuses it and only the cheap alias_map (alias -> real
+  value) is rebuilt. Same weakref/identity discipline as the plan cache and
+  the prior cache (no id()-keyed dicts without liveness check). Decisions
+  are bit-identical with and without the cache (tested: cold vs warm
+  log_scores and winners are equal; second call's plan compile is < 20% of
+  the first). No behaviour change to prompts or scoring.
+
+## Released
+
+- The engine is an object: `load_engine` returns a frozen `Engine`
   dataclass carrying `model`, `tokenizer`, `model_id` (resolved),
   `revision`, `profile`, `vocab_size`, `weight_bytes`,
   `cache_capabilities`, and the measured `width_slope` — every per-model
