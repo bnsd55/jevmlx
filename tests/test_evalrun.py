@@ -736,3 +736,93 @@ class TestHeartbeat:
         out = capsys.readouterr().out
         assert "[heartbeat]" not in out
         assert not (tmp_path / "heartbeat.jsonl").exists()
+
+
+# --- B11-naive: naive_local track writes timing.json -----------------------
+
+
+def test_naive_track_writes_timing_json_with_call_level_ms(tmp_path):
+    """B11-naive: when naive_local _meta carries per_item_end_to_end_ms,
+    run_eval writes timing.json with the call-level median (not per-line
+    latency_ms)."""
+    cases = [
+        {
+            "id": f"naive/case-{i}",
+            "schema": {"verdict": {"type": "enum", "choices": ["yes", "no"]}},
+            "context": f"Evidence {i}.",
+            "labels": {"verdict": "yes"},
+            "split": "train",
+        }
+        for i in range(3)
+    ]
+
+    def naive_decide(schema_dict, context, constraints=None, oracle_overrides=None):
+        return {
+            "verdict": {"prediction": "yes", "valid": True},
+            "_meta": {
+                "latency_ms": 8695.0,
+                "total_ms": 8695.0,
+                "per_item_end_to_end_ms": 8695.0,
+                "generated_tokens": 150,
+                "rows": None,
+                "passes": 150,
+            },
+        }
+
+    out = tmp_path / "naive_timing"
+    evalrun.run_eval(
+        cases,
+        naive_decide,
+        track="naive_local",
+        model="fake/model",
+        out_dir=str(out),
+        run_id="r-naive-timing",
+    )
+    # timing.json exists with call-level median.
+    timing_path = out / "timing.json"
+    assert timing_path.exists(), "naive track should write timing.json"
+    timing = json.loads(timing_path.read_text())
+    assert timing["calls"] == 3
+    assert timing["median"]["per_item_end_to_end_ms"] == 8695.0
+    # No parallel-only keys present as zeros (only what _meta carried).
+    assert "prior_ms" not in timing["median"]
+    assert "plan_compile_ms" not in timing["median"]
+
+
+def test_naive_track_prediction_lines_carry_per_item_end_to_end_ms(tmp_path):
+    """B11-naive: naive prediction lines carry per_item_end_to_end_ms from
+    _meta, so the call-level latency is on every line."""
+    cases = [
+        {
+            "id": "naive/case-0",
+            "schema": {"verdict": {"type": "enum", "choices": ["yes", "no"]}},
+            "context": "Evidence.",
+            "labels": {"verdict": "yes"},
+            "split": "train",
+        }
+    ]
+
+    def naive_decide(schema_dict, context, constraints=None, oracle_overrides=None):
+        return {
+            "verdict": {"prediction": "yes", "valid": True},
+            "_meta": {
+                "latency_ms": 570.0,
+                "total_ms": 570.0,
+                "per_item_end_to_end_ms": 570.0,
+                "generated_tokens": 42,
+                "rows": None,
+                "passes": 42,
+            },
+        }
+
+    out = tmp_path / "naive_lines"
+    evalrun.run_eval(
+        cases,
+        naive_decide,
+        track="naive_local",
+        model="fake/model",
+        out_dir=str(out),
+        run_id="r-naive-lines",
+    )
+    line = _read_lines(out / "predictions.jsonl")[0]
+    assert line["per_item_end_to_end_ms"] == 570.0

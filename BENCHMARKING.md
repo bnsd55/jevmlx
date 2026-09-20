@@ -77,6 +77,10 @@ Paste `SUMMARY.md` into the PR description and link the machine specs
 
 ## What the command does
 
+- The SUMMARY `p50 latency (ms)` column is the call-level
+  `per_item_end_to_end_ms` median from `timing.json` (one value per decide
+  call, not per prediction line) so parallel and naive tracks are compared
+  fairly; the `calls` column shows the call count so rotations are visible.
 - Preflight: Apple Silicon check; refuses on battery or when another process
   holds significant Metal memory (`--force` overrides with a printed warning).
 - Datasets: bundled cases, TypeSafe's public set (skipped offline), the

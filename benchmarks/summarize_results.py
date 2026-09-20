@@ -55,12 +55,13 @@ def _row_from_folder(folder: Path) -> dict | None:
                     "any_flip_rate": None,
                     "perturbation_flip_rate": None,
                     "latency_ms_p50": None,
+                    "n_calls": None,
                     "n_cases": None,
                 }
         return None
     run = json.loads(report_path.read_text(encoding="utf-8"))
     metrics = run.get("metrics") or {}
-    latency, n_cases = _run_extras(folder)
+    latency, n_cases, n_calls = _run_extras(folder)
 
     # Combo folder names are <machine>-<model>/<track>-<scorer>-<dataset>;
     # the machine/model live one level up.
@@ -84,6 +85,7 @@ def _row_from_folder(folder: Path) -> dict | None:
         "any_flip_rate": _mean_or_none(metrics.get("any_flip_rate")),
         "perturbation_flip_rate": _mean_or_none(metrics.get("perturbation_flip_rate")),
         "latency_ms_p50": metrics.get("latency_ms_p50") or latency,
+        "n_calls": n_calls,
         "n_cases": metrics.get("n_cases") or n_cases,
     }
 
@@ -131,34 +133,30 @@ def _mean_or_none(value) -> float | None:
     return None
 
 
-def _run_extras(folder: Path) -> tuple[float | None, int | None]:
-    """(median latency ms, n_cases) from the combo's run.json + predictions."""
+def _run_extras(folder: Path) -> tuple[float | None, int | None, int | None]:
+    """(median call-level latency ms, n_cases, n_calls) from the combo's
+    timing.json + run.json.
+
+    B11-naive: the 'p50 latency' column must be the CALL-level
+    per_item_end_to_end_ms median from timing.json for every track —
+    not the per-line latency_ms (which is shared across a call's fields
+    on the parallel track and inflated by rotations). Falls back to
+    nothing (returns None) if timing.json is absent.
+    """
     run_path = folder / "run.json"
     n_cases = None
     if run_path.is_file():
         run = json.loads(run_path.read_text(encoding="utf-8"))
         n_cases = (run.get("counts") or {}).get("cases")
     latency = None
-    latencies: list[float] = []
-    pred_path = folder / "predictions.jsonl"
-    if pred_path.is_file():
-        with open(pred_path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                record = json.loads(line)
-                ms = record.get("latency_ms")
-                if isinstance(ms, int | float):
-                    latencies.append(float(ms))
-    if latencies:
-        latencies.sort()
-        mid = len(latencies) // 2
-        if len(latencies) % 2:
-            latency = latencies[mid]
-        else:
-            latency = (latencies[mid - 1] + latencies[mid]) / 2
-    return latency, n_cases
+    n_calls = None
+    timing_path = folder / "timing.json"
+    if timing_path.is_file():
+        timing = json.loads(timing_path.read_text(encoding="utf-8"))
+        n_calls = timing.get("calls")
+        median = timing.get("median") or {}
+        latency = median.get("per_item_end_to_end_ms")
+    return latency, n_cases, n_calls
 
 
 def _model_parity_note(model_dir: Path) -> str | None:
@@ -235,13 +233,13 @@ def summarize(out: Path, parity_note: str | None = None) -> Path:
 
     header = (
         "| machine | model | track | scorer | dataset | field acc | case exact "
-        "| bal acc mean | ECE | any-flip | perturb-flip | p50 latency (ms) | n_cases |"
+        "| bal acc mean | ECE | any-flip | perturb-flip | p50 latency (ms) | calls | n_cases |"
     )
     lines = [
         "# Bench summary",
         "",
         header,
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     columns = [
         "machine",
@@ -258,6 +256,7 @@ def summarize(out: Path, parity_note: str | None = None) -> Path:
         "any_flip_rate",
         "perturbation_flip_rate",
         "latency_ms_p50",
+        "n_calls",
         "n_cases",
     ]
     for row in rows:
