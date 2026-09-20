@@ -795,7 +795,10 @@ def _set_metal_cache_limit(cache_gb: float) -> int | None:
 # combo start so each combo's peak is its own (not cumulative across the
 # matrix). All best-effort: a non-Metal build / import failure yields -1
 # and never breaks the run.
-_MEMORY_KEYS = ("peak_memory", "active_memory", "cache_memory")
+from jevmlx.evalrun import (  # noqa: E402 (bench reuses evalrun's Metal helpers)
+    _memory_block_gb,
+    _sample_metal_memory,
+)
 
 
 def _reset_metal_peak_memory() -> None:
@@ -806,41 +809,6 @@ def _reset_metal_peak_memory() -> None:
         mx.reset_peak_memory()
     except Exception:  # noqa: BLE001 - telemetry must never break the run
         pass
-
-
-def _sample_metal_memory() -> dict[str, int]:
-    """Sample the three Metal memory counters (bytes), -1 when unreadable.
-
-    - peak_memory:   mx.get_peak_memory() — the high-water mark since
-                      the last reset_peak_memory() (reset at combo start).
-    - active_memory: mx.get_active_memory() — buffers currently held.
-    - cache_memory:  mx.get_cache_memory() — the buffer cache Metal
-                      keeps after frees (the #79 root cause: not returned to
-                      macOS until clear_cache()).
-    """
-    out: dict[str, int] = {k: -1 for k in _MEMORY_KEYS}
-    try:
-        import mlx.core as mx
-
-        out["peak_memory"] = int(mx.get_peak_memory())
-        out["active_memory"] = int(mx.get_active_memory())
-        out["cache_memory"] = int(mx.get_cache_memory())
-    except Exception:  # noqa: BLE001 - telemetry must never break the run
-        pass
-    return out
-
-
-def _memory_block_gb(mem: dict[str, int]) -> str:
-    """A one-line bench-log string of the memory block in GB."""
-
-    def _gb(v: int) -> str:
-        return f"{v / 2**30:.2f} GB" if v >= 0 else "n/a"
-
-    return (
-        f"peak={_gb(mem['peak_memory'])} "
-        f"active={_gb(mem['active_memory'])} "
-        f"cache={_gb(mem['cache_memory'])}"
-    )
 
 
 def _augment_run_json_memory(

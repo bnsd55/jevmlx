@@ -561,7 +561,9 @@ def test_bench_combos_run_end_to_end_with_fake_engine(hubless, monkeypatch, tmp_
         lambda model: (_ for _ in ()).throw(AssertionError("real load")),
     )
 
-    def fake_run_one(model, track, scorer, jsonl, combo_dir, dataset_lock_path=None, resume=False):
+    def fake_run_one(
+        model, track, scorer, jsonl, combo_dir, dataset_lock_path=None, resume=False, **kwargs
+    ):
         combo_dir = pathlib.Path(combo_dir)
         combo_dir.mkdir(parents=True, exist_ok=True)
         rows = [json.loads(line) for line in jsonl.read_text().splitlines() if line.strip()]

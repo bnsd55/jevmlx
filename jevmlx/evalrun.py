@@ -529,12 +529,10 @@ def _heartbeat(
     """W5c-16: print + append one heartbeat record for every N completed cases.
 
     One line to stdout (the same GB formatting as the bench [memory] line,
-    reusing jevmlx.bench._sample_metal_memory + _memory_block_gb) and one
+    reusing the local _sample_metal_memory + _memory_block_gb) and one
     JSON object appended to ``<out_dir>/heartbeat.jsonl`` (machine-readable).
     Best-effort: a Metal read failure yields -1 and never breaks the run.
     """
-    from jevmlx.bench import _memory_block_gb, _sample_metal_memory
-
     elapsed = int(time.perf_counter() - start)
     mem = _sample_metal_memory()
     print(
@@ -554,8 +552,48 @@ def _heartbeat(
     try:
         with open(os.path.join(out_dir, "heartbeat.jsonl"), "a", encoding="utf-8") as f:
             f.write(json.dumps(rec, sort_keys=True) + "\n")
-    except OSError:
+    except OSError as exc:
+        print(f"[heartbeat] could not append heartbeat.jsonl: {exc}", flush=True)
+
+
+# W5c-13/16: Metal memory helpers. Defined here (not in jevmlx.bench) so the
+# eval infra never imports from the bench CLI; bench imports these from here.
+_MEMORY_KEYS = ("peak_memory", "active_memory", "cache_memory")
+
+
+def _sample_metal_memory() -> dict[str, int]:
+    """Sample the three Metal memory counters (bytes), -1 when unreadable.
+
+    - peak_memory:   mx.get_peak_memory() — the high-water mark since
+                      the last reset_peak_memory() (reset at combo start).
+    - active_memory: mx.get_active_memory() — buffers currently held.
+    - cache_memory:  mx.get_cache_memory() — the buffer cache Metal
+                      keeps after frees (the #79 root cause: not returned to
+                      macOS until clear_cache()).
+    """
+    out: dict[str, int] = {k: -1 for k in _MEMORY_KEYS}
+    try:
+        import mlx.core as mx
+
+        out["peak_memory"] = int(mx.get_peak_memory())
+        out["active_memory"] = int(mx.get_active_memory())
+        out["cache_memory"] = int(mx.get_cache_memory())
+    except Exception:  # noqa: BLE001 - telemetry must never break the run
         pass
+    return out
+
+
+def _memory_block_gb(mem: dict[str, int]) -> str:
+    """A one-line bench-log string of the memory block in GB."""
+
+    def _gb(v: int) -> str:
+        return f"{v / 2**30:.2f} GB" if v >= 0 else "n/a"
+
+    return (
+        f"peak={_gb(mem['peak_memory'])} "
+        f"active={_gb(mem['active_memory'])} "
+        f"cache={_gb(mem['cache_memory'])}"
+    )
 
 
 def _schema_variants(
