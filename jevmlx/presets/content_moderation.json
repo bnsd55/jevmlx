@@ -1,0 +1,136 @@
+{
+  "id": "content_moderation",
+  "title": "Autonomous Content Moderation & Policy Enforcement (20 Fields)",
+  "description": "Real-time multi-axis classification of a user-submitted content item against platform trust-and-safety policies, determining violation category, severity, and enforcement action.",
+  "context": "MODERATION QUEUE ITEM #MOD-77312\nPlatform: SocialMedia (450M MAU)\nContent Type: Public Post (text + linked image)\nAuthor: user_88214 (Account age 14 months, 2 prior minor violations: spam warnings)\nReported By: 3 distinct users (automated ML flag + 2 manual reports)\n\nPost Text: \"Everyone who disagrees with our movement should be erased. They are parasites destroying our society. We know where some of them live. It is time to act. DM me to join the operation.\"\nLinked Image Alt Text: Crowd with torches outside a residential address.\nAttached Link: shorturl.at/xK9pP (redirects to a forum thread organizing a physical confrontation)\n\nAuthor History: Recent posts show escalating dehumanizing language toward an identified political group over the past 3 weeks. No prior account suspensions.\nCurrent Account Standing: ACTIVE (not restricted)\nRegion: North America (policy jurisdiction: US Community Guidelines)",
+  "schema": {
+    "violation_category": {
+      "type": "enum",
+      "description": "Primary policy violation classification",
+      "choices": [
+        "none",
+        "harassment",
+        "hate",
+        "sexual",
+        "violence",
+        "self_harm",
+        "spam",
+        "illegal"
+      ]
+    },
+    "severity": {
+      "type": "enum",
+      "description": "Harm severity on an ordered scale from no-harm to imminent-danger",
+      "ordered": true,
+      "choices": [
+        "none",
+        "low",
+        "medium",
+        "high",
+        "critical"
+      ]
+    },
+    "requires_human_review": {
+      "type": "boolean",
+      "description": "Whether a human moderator must review before action is finalized"
+    },
+    "user_intent": {
+      "type": "enum",
+      "description": "Inferred intent behind the content",
+      "choices": [
+        "benign_expression",
+        "discussion_debate",
+        "coordination_harm",
+        "intimidation",
+        "commerce_promotion",
+        "information_sharing"
+      ]
+    },
+    "secondary_violation": {
+      "type": "enum",
+      "description": "Secondary policy domain if multiple apply",
+      "choices": [
+        "none",
+        "harassment",
+        "hate",
+        "sexual",
+        "violence",
+        "self_harm",
+        "spam",
+        "illegal"
+      ]
+    },
+    "remove_content": {
+      "type": "boolean",
+      "description": "Whether the content item should be immediately removed from the platform"
+    },
+    "restrict_account": {
+      "type": "boolean",
+      "description": "Whether the author account should be temporarily restricted from posting"
+    },
+    "suspend_account": {
+      "type": "boolean",
+      "description": "Whether the author account should be suspended for a fixed period"
+    },
+    "ban_account": {
+      "type": "boolean",
+      "description": "Whether the author account should be permanently banned"
+    },
+    "escalate_to_law_enforcement": {
+      "type": "boolean",
+      "description": "Whether the case must be referred to law enforcement under legal process"
+    },
+    "imminent_danger_flag": {
+      "type": "boolean",
+      "description": "Whether content indicates a credible imminent physical threat requiring emergency response"
+    },
+    "targeted_individual": {
+      "type": "boolean",
+      "description": "Whether the content targets a specific identifiable private individual"
+    },
+    "coordinated_activity": {
+      "type": "boolean",
+      "description": "Whether the content is part of an organized coordinated campaign rather than a lone actor"
+    },
+    "dehumanizing_language": {
+      "type": "boolean",
+      "description": "Whether content uses language that denies the humanity of a protected group"
+    },
+    "action_priority": {
+      "type": "enum",
+      "description": "Queue priority for the enforcement action",
+      "choices": [
+        "P0_IMMEDIATE",
+        "P1_URGENT",
+        "P2_STANDARD",
+        "P3_BATCH"
+      ]
+    },
+    "appeal_eligible": {
+      "type": "boolean",
+      "description": "Whether the author is eligible to appeal the enforcement decision"
+    },
+    "notify_author": {
+      "type": "boolean",
+      "description": "Whether the platform must send a notification to the author explaining the action"
+    },
+    "warn_author": {
+      "type": "boolean",
+      "description": "Whether a formal warning strike should be recorded on the author profile"
+    },
+    "strike_count_tier": {
+      "type": "enum",
+      "description": "Cumulative violation strike tier the author is now in",
+      "choices": [
+        "TIER_0_CLEAN",
+        "TIER_1_FIRST",
+        "TIER_2_REPEATING",
+        "TIER_3_HABITUAL"
+      ]
+    },
+    "repeat_offender": {
+      "type": "boolean",
+      "description": "Whether the author has a prior history of similar violations within the lookback window"
+    }
+  }
+}

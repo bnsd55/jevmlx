@@ -582,3 +582,7 @@ First release.
   and chat-template hashes, dataset locks, run manifests, and parity verdicts
   so any number in a report traces back to the exact prompt, data, and code
   that produced it.
+- B10: two new bundled presets — `content_moderation` (20-field
+  trust-and-safety triage with ordered severity) and `inbound_email`
+  (20-field routing with ordered priority). `support_triage` extended
+  with ordered `frustration_level` and `churn_risk` fields.

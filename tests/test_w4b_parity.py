@@ -78,12 +78,14 @@ def test_parity_report_passes_on_stable_fake(tmp_path):
     assert payload["cases"] == ["mini", "mini2"]
     assert payload["run_at"].endswith("Z")
 
-    # Default cases = every bundled preset (4 shipped schemas).
+    # Default cases = every bundled preset (6 shipped schemas).
     default_cases = bundled_preset_specs()
     assert [cid for cid, _ in default_cases] == [
         "code_security",
+        "content_moderation",
         "fintech_fraud",
         "high_cardinality_255",
+        "inbound_email",
         "support_triage",
     ]
 
@@ -203,8 +205,10 @@ def test_parity_real_model_twin(engine):
     assert payload["passed"] is False
     assert payload["cases"] == [
         "code_security",
+        "content_moderation",
         "fintech_fraud",
         "high_cardinality_255",
+        "inbound_email",
         "support_triage",
     ]
 

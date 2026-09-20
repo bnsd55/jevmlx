@@ -1,0 +1,154 @@
+{
+  "id": "inbound_email",
+  "title": "Autonomous Inbound Email Triage & Routing (20 Fields)",
+  "description": "Real-time classification of an inbound email to determine destination team, spam or phishing risk, reply priority, and response workflow.",
+  "context": "INBOUND EMAIL #EMAIL-48207\nFrom: jennifer.morrison@acme-corp.com (Recognized customer, Account ID: ACME-3391, ARR: 0k)\nTo: contact@yourcompany.com (general inbox, no team alias)\nReceived: 2026-09-20 08:47 UTC (Monday, business hours EMEA)\nSubject: URGENT: contract renewal question + invoice discrepancy\n\nBody: Hi team,\n\nOur renewal is coming up next month and I had two quick items:\n\n1. The renewal quote (Q-9921) shows 12% uplift but our CSM promised a price-lock through 2026. Can someone from sales confirm the correct pricing before we sign?\n\n2. Invoice INV-202609-0044 for ,200 does not match our PO (,400). The line item for 'Premium Support Add-on' was not authorized. We need this corrected before we can process payment.\n\nWe need this resolved by end of week or we will need to escalate to our procurement team. Please route to the right person.\n\nThanks,\nJennifer Morrison\nVP Operations, Acme Corp",
+  "schema": {
+    "destination": {
+      "type": "enum",
+      "description": "Primary internal team the email should be routed to",
+      "choices": [
+        "sales",
+        "support",
+        "billing",
+        "hr",
+        "legal",
+        "engineering",
+        "spam"
+      ]
+    },
+    "is_spam_or_phishing": {
+      "type": "boolean",
+      "description": "Whether the email is unsolicited spam or a phishing attempt"
+    },
+    "priority": {
+      "type": "enum",
+      "description": "Reply and handling urgency on an ordered scale",
+      "ordered": true,
+      "choices": [
+        "low",
+        "normal",
+        "high",
+        "urgent"
+      ]
+    },
+    "needs_reply": {
+      "type": "boolean",
+      "description": "Whether a human or automated reply must be sent to the sender"
+    },
+    "secondary_destination": {
+      "type": "enum",
+      "description": "Secondary team to CC or coordinate with",
+      "choices": [
+        "none",
+        "sales",
+        "support",
+        "billing",
+        "hr",
+        "legal",
+        "engineering",
+        "spam"
+      ]
+    },
+    "customer_tier": {
+      "type": "enum",
+      "description": "Sender account value classification",
+      "choices": [
+        "strategic",
+        "enterprise",
+        "mid_market",
+        "smb",
+        "unknown_individual"
+      ]
+    },
+    "contains_billing_dispute": {
+      "type": "boolean",
+      "description": "Whether the email raises an invoice or billing discrepancy requiring finance action"
+    },
+    "contains_renewal_question": {
+      "type": "boolean",
+      "description": "Whether the email asks about contract renewal terms or pricing"
+    },
+    "requires_csm_involvement": {
+      "type": "boolean",
+      "description": "Whether the Customer Success Manager must be looped in"
+    },
+    "auto_reply_eligible": {
+      "type": "boolean",
+      "description": "Whether an automated acknowledgment reply can be sent without human review"
+    },
+    "escalate_to_manager": {
+      "type": "boolean",
+      "description": "Whether the case must be escalated to a team manager"
+    },
+    "sla_deadline_hours": {
+      "type": "enum",
+      "description": "Target response window from receipt",
+      "choices": [
+        "1_HOUR",
+        "4_HOURS",
+        "8_BUSINESS_HOURS",
+        "24_HOURS",
+        "72_HOURS"
+      ]
+    },
+    "sentiment": {
+      "type": "enum",
+      "description": "Sender emotional tone",
+      "choices": [
+        "positive",
+        "neutral",
+        "frustrated",
+        "angry",
+        "urgent_panicked"
+      ]
+    },
+    "contains_pii": {
+      "type": "boolean",
+      "description": "Whether the email body contains personally identifiable information requiring redaction"
+    },
+    "contains_attachment": {
+      "type": "boolean",
+      "description": "Whether the email has an attachment requiring malware scanning"
+    },
+    "thread_type": {
+      "type": "enum",
+      "description": "Conversation classification",
+      "choices": [
+        "new_inquiry",
+        "follow_up",
+        "complaint",
+        "renewal",
+        "billing_dispute",
+        "outbound_reply",
+        "spam"
+      ]
+    },
+    "assign_to_queue": {
+      "type": "boolean",
+      "description": "Whether the email should be assigned to a named agent queue rather than auto-resolved"
+    },
+    "confidence_tier": {
+      "type": "enum",
+      "description": "Model routing confidence bucket",
+      "choices": [
+        "HIGH_CONFIDENCE",
+        "MODERATE",
+        "LOW_REQUIRES_HUMAN"
+      ]
+    },
+    "contains_legal_language": {
+      "type": "boolean",
+      "description": "Whether the email contains legal threats or contract-citation language requiring legal review"
+    },
+    "account_health_impact": {
+      "type": "enum",
+      "description": "Whether the email signals an account-health risk",
+      "choices": [
+        "no_risk",
+        "at_risk",
+        "churn_imminent"
+      ]
+    }
+  }
+}
