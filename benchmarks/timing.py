@@ -158,7 +158,9 @@ def run_timing(
     return report
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
+    """The timing CLI parser (exposed for parse-only tests; see
+    tests/test_m5_e2e.py TestPlannedArgvParses)."""
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -170,7 +172,12 @@ def main() -> None:
     )
     ap.add_argument("--out", default=os.path.join(ROOT, "results"), help="output directory")
     ap.add_argument("--tag", default=None, help="output name (default: timing-<model slug>)")
-    args = ap.parse_args()
+    return ap
+
+
+def main(argv: list[str] | None = None) -> None:
+    ap = build_parser()
+    args = ap.parse_args(argv)
 
     report = run_timing(args.model, args.presets, args.reps, args.prior_correction)
 

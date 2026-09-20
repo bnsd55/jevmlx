@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Fix: `jevmlx bench --models-file <f>` no longer requires `--model`.
+  `--model` and `--models-file` are now a mutually exclusive group with
+  exactly one required (the field failure: the M5 `bench the remaining
+  models` step exited 2 because the bench parser had `--model required=True`).
+  The top-level `jevmlx` cli and the inner `jevmlx.bench` parser both enforce
+  this. `build_parser()` is now exposed on `jevmlx.cli`, `jevmlx.bench`, and
+  every `benchmarks.*` module m5 shells out to (invariance, timing, probe,
+  typesafe.fetch), and `tests/test_m5_e2e.py` parses every planned step argv
+  against the REAL parser — so a CLI contract break fails the e2e test in
+  seconds instead of after an 8-hour model run.
+
 - naive_local track writes timing.json; SUMMARY latency is call-level for
   every track. The naive track's `_meta` now carries `per_item_end_to_end_ms`
   and `total_ms` (generation wall), so `run_eval` writes `timing.json` with

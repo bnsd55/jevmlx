@@ -241,7 +241,14 @@ def _run_bench_ui(
             print(f"summary: {summary}")
 
 
-def _dispatch(argv) -> None:
+def build_parser() -> argparse.ArgumentParser:
+    """Build the top-level jevmlx ArgumentParser.
+
+    Exposed so tests can parse (not dispatch) the real argv that
+    benchmarks/m5.py plan_steps builds — catching CLI contract breaks
+    (e.g. a required arg that should be optional) at test time, not after an
+    8-hour run. See tests/test_m5_e2e.py TestPlannedArgvParses.
+    """
     ap = argparse.ArgumentParser(prog="jevmlx", description=__doc__)
     ap.add_argument("--version", action="version", version=f"jevmlx {__version__}")
     sub = ap.add_subparsers(dest="command", required=True)
@@ -514,13 +521,19 @@ def _dispatch(argv) -> None:
         "bench",
         help="One command: complete PR-ready benchmark results folder.",
     )
-    bench_p.add_argument(
+    # B1: --model and --models-file are mutually exclusive; exactly one is
+    # required. --model alone (comma-separated list) or --models-file alone
+    # (one id per line). The old code had --model required=True, so
+    # --models-file alone exited 2 — the M5 step 'bench the remaining
+    # models' failed.
+    bench_model_group = bench_p.add_mutually_exclusive_group(required=True)
+    bench_model_group.add_argument(
         "--model",
-        required=True,
+        default=None,
         help="Hugging Face model id(s) or alias (fast, quality, test) for mlx-lm; "
         "comma-separated list runs them sequentially with one SUMMARY.md across all",
     )
-    bench_p.add_argument(
+    bench_model_group.add_argument(
         "--models-file",
         default=None,
         help="file with one model id per line ('#' comments allowed); overrides --model",
@@ -633,6 +646,11 @@ def _dispatch(argv) -> None:
         action="store_true",
         help="web only — skip the terminal render (implies --web)",
     )
+    return ap
+
+
+def _dispatch(argv) -> None:
+    ap = build_parser()
     args = ap.parse_args(argv)
 
     # serve defaults to INFO: the user must see the listen address. -v is a no-op there.
@@ -644,14 +662,14 @@ def _dispatch(argv) -> None:
 
     if args.command == "decide":
         if args.preset and (args.schema or args.context):
-            decide.error("--preset cannot be combined with --schema/--context")
+            ap.error("--preset cannot be combined with --schema/--context")
         if not args.preset and not (args.schema and args.context):
             missing = [
                 flag
                 for flag, given in (("--schema", args.schema), ("--context", args.context))
                 if not given
             ]
-            decide.error(
+            ap.error(
                 "exactly one of --preset or --schema AND --context is required; "
                 f"missing: {', '.join(missing)}"
             )
@@ -675,9 +693,9 @@ def _dispatch(argv) -> None:
             from jevmlx.openai_slots import decide_openai
 
             if not (args.base_url and args.api_model):
-                decide.error("--backend openai requires --base-url and --api-model")
+                ap.error("--backend openai requires --base-url and --api-model")
             if args.prior_correction:
-                decide.error("--prior-correction is native-backend only")
+                ap.error("--prior-correction is native-backend only")
             schema = StructuredSchema(schema_dict)
             # W5-A finding 1: the schema block renders from the compiled
             # slot plan, which needs a tokenizer. Use the API model's own
@@ -846,8 +864,6 @@ def _dispatch(argv) -> None:
         from jevmlx.bench import main as bench_main
 
         argv = [
-            "--model",
-            args.model,
             "--datasets",
             args.datasets,
             "--scorers",
@@ -857,12 +873,16 @@ def _dispatch(argv) -> None:
             "--runs",
             str(args.runs),
         ]
+        # B1: exactly one of --model / --models-file is set (mutually exclusive
+        # group, required=True). Pass whichever one the user gave.
+        if args.models_file:
+            argv += ["--models-file", args.models_file]
+        else:
+            argv += ["--model", args.model]
         if args.out:
             argv += ["--out", args.out]
         if args.machine:
             argv += ["--machine", args.machine]
-        if args.models_file:
-            argv += ["--models-file", args.models_file]
         if args.force:
             argv.append("--force")
         if args.fresh:
