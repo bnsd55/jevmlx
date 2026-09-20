@@ -1,0 +1,50 @@
+{
+  "status": 200,
+  "headers": {
+    "Server": "BaseHTTP/0.6 Python/3.12.9",
+    "Date": "Sun, 20 Sep 2026 10:57:47 GMT",
+    "Content-Type": "application/json",
+    "Content-Length": "482",
+    "X-Request-Id": "jev-5c6d7e518a78"
+  },
+  "body": {
+    "model": "fake",
+    "answers": {
+      "q1": {
+        "type": "choice",
+        "choice": "A",
+        "confidence": 0.39999999999999997,
+        "probabilities": {
+          "A": 0.7,
+          "B": 0.3
+        }
+      },
+      "q2": {
+        "type": "noul",
+        "noul": 0.8,
+        "confidence": 0.6000000000000001
+      },
+      "q3": {
+        "type": "score",
+        "score": 1.4000000000000001,
+        "argmax_level": "low",
+        "probabilities": {
+          "none": 0.1,
+          "low": 0.5,
+          "med": 0.3,
+          "high": 0.1
+        },
+        "legend": {
+          "0": "none",
+          "1": "low",
+          "2": "med",
+          "3": "high"
+        }
+      }
+    },
+    "usage": {
+      "prompt_tokens": 62,
+      "computed_positions": 12
+    }
+  }
+}

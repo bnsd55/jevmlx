@@ -13,3 +13,7 @@ dist/
 # Lockfile stays local; consumers resolve their own dependencies
 uv.lock
 .venv/
+
+# JavaScript client (B12)
+js/node_modules/
+js/dist/

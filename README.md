@@ -136,6 +136,8 @@ Backpressure: **429 + `Retry-After`** when the queue is full (`--queue-size`, de
 
 [BENCHMARKING.md](BENCHMARKING.md) documents the eval methodology: accuracy against the TypeSafe public consensus, the majority baseline, and exact-record agreement; parity (batched vs. single-call within `PARITY_ATOL`); and the drift band (log-score and probability-margin drift between runs). The leaderboard below cites official TypeSafe accuracies; local rows are measured by contributors on the 20 public examples.
 
+A **TypeScript client** (`@jevmlx/client`) lives in [`js/`](js/) — zero runtime deps, mirrors the server's JSON shapes exactly (types derived from fixture responses dumped by the server). Install from the GitHub path (no npm publish yet): `npm install github:bnsd55/jevmlx#main`. See [`js/README.md`](js/README.md) for the full API.
+
 ## Leaderboard
 
 Agreement with the TypeSafe public eval consensus. Official rows are cited from TypeSafe's page; local rows are measured by contributors on the 20 public examples.

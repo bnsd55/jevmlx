@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- B12: TypeScript client for `jevmlx serve` (`@jevmlx/client` in `js/`).
+  Zero runtime deps (uses global `fetch`), ESM + CJS via `tsc`, Node 20+.
+  `JevmlxClient` with `decide`, `systemOne`, `models`, `health`, `ready`;
+  `AbortController` timeout; typed `JevmlxError` (`status`, `body`,
+  `retryAfterMs` for 429 from the `Retry-After` header); no built-in retries.
+  Types mirror the server's JSON shapes exactly — fixtures in
+  `js/tests/fixtures/*.json` are dumped by a Python test that starts the real
+  server with a fake `decide_fn` and captures the bytes, so the TS tests parse
+  the same shapes the server produces (one source of truth). A pytest wrapper
+  re-dumps and diffs the committed fixtures, failing if the server's response
+  shape drifts. 16 TS tests (node:test, no network: fetch capture, fixture
+  parse, 429/413/503/400/500 errors, timeout, env-var base URL, external
+  AbortSignal). CI: `js-client` job pins Node 20 (`npm ci` + `npm run build`
+  + `npm test`). No npm publish. Top-level README HTTP section + `js/README.md`.
+
 ## 0.1.0 - unreleased
 
 ### Added

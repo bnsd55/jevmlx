@@ -1,0 +1,18 @@
+{
+  "status": 200,
+  "headers": {
+    "Server": "BaseHTTP/0.6 Python/3.12.9",
+    "Date": "Sun, 20 Sep 2026 10:57:46 GMT",
+    "Content-Type": "application/json",
+    "Content-Length": "113",
+    "X-Request-Id": "jev-5899af3f078e"
+  },
+  "body": {
+    "ok": true,
+    "model": "fake",
+    "worker_alive": true,
+    "requests_served": 1,
+    "queue_depth": 0,
+    "queue_capacity": 16
+  }
+}
