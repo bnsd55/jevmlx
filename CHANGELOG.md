@@ -186,6 +186,13 @@
   M above the largest recorded bucket uses the largest recorded bound. A
   failed canary / uncovered batched pass RAISES (no constant fallback). The
   PARITY contract is unchanged (0.05 on d_gap).
+- **W5c-15 (block macOS idle sleep in M5)** — on darwin `benchmarks.m5`
+  re-execs under `caffeinate -dimsu` so macOS does not idle-sleep mid-run
+  (during the M5 7B smoke it did, and Metal parks while wall time runs). A
+  guard env var (`JEVMLX_M5_CAFFEINATED`) prevents the re-execed child from
+  re-execing; `sleep_blocked` is recorded in `RUNBOOK.md`'s header. Opt out
+  with `--allow-sleep`. No-op on non-darwin; a missing `caffeinate` prints a
+  warning and continues.
 
 ## Released
 

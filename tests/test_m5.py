@@ -261,3 +261,94 @@ class TestBuildSummaryText:
         text = build_summary_text({"combos": [], "invariance": {}}, None, parity_models=[])
         assert "- |" in text or "|" in text  # table renders, never crashes
         assert "M5 runbook summary" in text
+
+
+# --- W5c-15: macOS idle-sleep blocking (caffeinate re-exec) ----------------
+
+
+class TestMaybeCaffeinate:
+    """The four guardrail paths for _maybe_caffeinate (monkeypatches
+    os.execvp and sys.platform so no real re-exec happens)."""
+
+    def test_default_darwin_execvp_called_once(self, monkeypatch, capsys):
+        """(a) default darwin, no env var, no --allow-sleep: execvp called once
+        with argv starting ['caffeinate','-dimsu', sys.executable,
+        '-m','benchmarks.m5'] and the env var set."""
+        import benchmarks.m5 as m5
+
+        monkeypatch.setattr(m5.sys, "platform", "darwin")
+        monkeypatch.delenv("JEVMLX_M5_CAFFEINATED", raising=False)
+        calls = []
+
+        def _fake_execvp(prog, argv):
+            calls.append((prog, argv))
+
+        monkeypatch.setattr(m5.os, "execvp", _fake_execvp)
+        m5._maybe_caffeinate(allow_sleep=False, argv_tail=["--out", "x"])
+        assert len(calls) == 1
+        prog, argv = calls[0]
+        assert prog == "caffeinate"
+        assert argv[:5] == ["caffeinate", "-dimsu", m5.sys.executable, "-m", "benchmarks.m5"]
+        assert argv[5:] == ["--out", "x"]
+        assert m5.os.environ.get("JEVMLX_M5_CAFFEINATED") == "1"
+        out = capsys.readouterr().out
+        assert "blocking macOS idle sleep" in out
+
+    def test_allow_sleep_not_called(self, monkeypatch, capsys):
+        """(b) --allow-sleep: execvp not called."""
+        import benchmarks.m5 as m5
+
+        monkeypatch.setattr(m5.sys, "platform", "darwin")
+        monkeypatch.delenv("JEVMLX_M5_CAFFEINATED", raising=False)
+        called = []
+
+        monkeypatch.setattr(m5.os, "execvp", lambda *a: called.append(1))
+        m5._maybe_caffeinate(allow_sleep=True, argv_tail=["--out", "x"])
+        assert not called
+        assert "NOT blocked (--allow-sleep)" in capsys.readouterr().out
+
+    def test_env_var_already_set_not_called(self, monkeypatch, capsys):
+        """(c) env var already '1': not called (the re-execed child)."""
+        import benchmarks.m5 as m5
+
+        monkeypatch.setattr(m5.sys, "platform", "darwin")
+        monkeypatch.setenv("JEVMLX_M5_CAFFEINATED", "1")
+        called = []
+
+        monkeypatch.setattr(m5.os, "execvp", lambda *a: called.append(1))
+        m5._maybe_caffeinate(allow_sleep=False, argv_tail=["--out", "x"])
+        assert not called
+
+    def test_execvp_file_not_found_prints_warning_and_continues(self, monkeypatch, capsys):
+        """(d) execvp raises FileNotFoundError: prints 'NOT blocked', pops the
+        guard env var (so the RUNBOOK header reports sleep_blocked: False),
+        and continues."""
+        import benchmarks.m5 as m5
+
+        monkeypatch.setattr(m5.sys, "platform", "darwin")
+        monkeypatch.delenv("JEVMLX_M5_CAFFEINATED", raising=False)
+
+        def _raise(*a):
+            raise FileNotFoundError("no caffeinate")
+
+        monkeypatch.setattr(m5.os, "execvp", _raise)
+        # Must not raise.
+        m5._maybe_caffeinate(allow_sleep=False, argv_tail=["--out", "x"])
+        out = capsys.readouterr().out
+        assert "caffeinate not found" in out
+        assert "NOT blocked" in out
+        # The guard env var was popped — the re-exec never happened.
+        assert m5.os.environ.get("JEVMLX_M5_CAFFEINATED") is None
+
+    def test_non_darwin_noop(self, monkeypatch, capsys):
+        """Non-darwin: no-op (no print, no execvp)."""
+        import benchmarks.m5 as m5
+
+        monkeypatch.setattr(m5.sys, "platform", "linux")
+        monkeypatch.delenv("JEVMLX_M5_CAFFEINATED", raising=False)
+        called = []
+
+        monkeypatch.setattr(m5.os, "execvp", lambda *a: called.append(1))
+        m5._maybe_caffeinate(allow_sleep=False, argv_tail=["--out", "x"])
+        assert not called
+        assert capsys.readouterr().out == ""
