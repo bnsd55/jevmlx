@@ -320,7 +320,9 @@ class TestMaybeCaffeinate:
         assert not called
 
     def test_execvp_file_not_found_prints_warning_and_continues(self, monkeypatch, capsys):
-        """(d) execvp raises FileNotFoundError: prints 'NOT blocked' and continues."""
+        """(d) execvp raises FileNotFoundError: prints 'NOT blocked', pops the
+        guard env var (so the RUNBOOK header reports sleep_blocked: False),
+        and continues."""
         import benchmarks.m5 as m5
 
         monkeypatch.setattr(m5.sys, "platform", "darwin")
@@ -335,6 +337,8 @@ class TestMaybeCaffeinate:
         out = capsys.readouterr().out
         assert "caffeinate not found" in out
         assert "NOT blocked" in out
+        # The guard env var was popped — the re-exec never happened.
+        assert m5.os.environ.get("JEVMLX_M5_CAFFEINATED") is None
 
     def test_non_darwin_noop(self, monkeypatch, capsys):
         """Non-darwin: no-op (no print, no execvp)."""

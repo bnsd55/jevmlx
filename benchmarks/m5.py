@@ -654,7 +654,7 @@ def build_summary_text(main: dict, ab: dict | None, *, parity_models: list[str])
 # --------------------------------------------------------------------- main
 
 
-def _maybe_caffeinate(allow_sleep: bool, argv_tail: list[str]) -> bool:
+def _maybe_caffeinate(allow_sleep: bool, argv_tail: list[str]) -> None:
     """Block macOS idle sleep for the M5 run (W5c-15).
 
     During the M5 7B smoke macOS idle-slept mid-run; Metal parks, the process
@@ -662,17 +662,17 @@ def _maybe_caffeinate(allow_sleep: bool, argv_tail: list[str]) -> bool:
     (display idle / system idle / disk idle / user assertion) exactly once,
     then set a guard env var so the re-execed child does not re-exec. Opt out
     with ``--allow-sleep``. No-op on non-darwin. Best-effort: a missing
-    caffeinate prints a warning and continues. Returns True if the re-exec
-    was attempted (the caller never sees the return on success — execvp
-    replaces the process; only the FileNotFoundError path returns True).
+    caffeinate prints a warning, POPS the guard env var (so the RUNBOOK
+    header truthfully reports ``sleep_blocked: False``), and continues.
+    Returns None.
     """
     if sys.platform != "darwin":
-        return False
+        return
     if allow_sleep:
         print("[sleep] idle sleep NOT blocked (--allow-sleep)", flush=True)
-        return False
+        return
     if os.environ.get("JEVMLX_M5_CAFFEINATED") == "1":
-        return False
+        return
     os.environ["JEVMLX_M5_CAFFEINATED"] = "1"
     print(
         "[sleep] blocking macOS idle sleep via caffeinate -dimsu (opt out: --allow-sleep)",
@@ -684,8 +684,10 @@ def _maybe_caffeinate(allow_sleep: bool, argv_tail: list[str]) -> bool:
             ["caffeinate", "-dimsu", sys.executable, "-m", "benchmarks.m5", *argv_tail],
         )
     except FileNotFoundError:
+        # Pop the guard so the RUNBOOK header reports sleep_blocked: False —
+        # the re-exec never happened, so sleep is NOT blocked.
+        os.environ.pop("JEVMLX_M5_CAFFEINATED", None)
         print("[sleep] caffeinate not found; idle sleep NOT blocked", flush=True)
-    return True
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -759,7 +761,7 @@ def main(argv: list[str] | None = None) -> int:
             f"cmd: python -m benchmarks.m5 --out {args.out}"
             + (f" --ab-branch {args.ab_branch}" if args.ab_branch else ""),
             f"parity models: {', '.join(parity_models)}",
-            f"sleep_blocked: {not args.allow_sleep and sys.platform == 'darwin'}",
+            f"sleep_blocked: {os.environ.get('JEVMLX_M5_CAFFEINATED') == '1'}",
             "",
         ]
         (out / "RUNBOOK.md").write_text("\n".join(header), encoding="utf-8")
