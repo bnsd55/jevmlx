@@ -1,14 +1,21 @@
 """W6-dualframe (HOLD): dual-framing scoring for boolean fields.
 
+Single-pass approach: when dual_framing=True, the schema is expanded with a
+synthetic __dual_neg__<field> boolean twin (complement-condition description)
+BEFORE the prefill. Both render in ONE schema block (one prefill) and both
+get row(s) in ONE batched suffix pass. After assembly, the twin is extracted
+and combined: p = 0.5*(p_pos + (1-p_neg)).
+
 Tests:
-- default off: prompt_version unchanged, byte-identical to main
-- on: boolean fields get a second pass, p_combined = 0.5*(p_pos + (1-p_neg))
-- on: telemetry carries p_pos, p_neg_complement, score_source='dual_framing'
+- default off: byte-identical to main
+- on: combination math (p_combined, flip on disagreement)
+- on: telemetry keys (p_pos, p_neg_complement, score_source, dual_framing dict)
 - on: non-boolean fields untouched
-- on: no boolean fields -> prompt version bumps but no second pass
-- negation is deterministic (no LLM)
-- golden prompt vectors: default-off unchanged
-- public API: dual_framing kwarg exists on decide/choose/judge/rate
+- on: no boolean fields -> version bump only
+- on: twin fields stripped from the public result
+- complement template is deterministic (no LLM)
+- default-off prompt byte-identical
+- public API: dual_framing kwarg exists
 """
 
 from __future__ import annotations
@@ -20,10 +27,11 @@ import jevmlx
 from jevmlx import api
 from jevmlx.engine import (
     PROMPT_VERSION_DUAL_FRAME,
-    _apply_dual_framing,
     _boolean_field_names,
+    _combine_dual_framing,
+    _dual_neg_field_name,
+    _expand_schema_for_dual_framing,
     _negate_boolean_description,
-    _negated_schema,
 )
 from jevmlx.schema import StructuredSchema
 
@@ -50,32 +58,17 @@ def _bool_telemetry(value: bool, p_true: float):
     )
 
 
-def _apply_with_neg(monkeypatch, schema, pos_result, neg_result):
-    """Call _apply_dual_framing with the negated pass patched.
-
-    _apply_dual_framing calls run_parallel_generation (module global) for the
-    negated pass; we patch that to return ``neg_result`` and assert the
-    negated schema carries the negation prefix.
-    """
-    import jevmlx.engine as eng_mod
-
-    def fake_neg(engine, context, neg_schema, **kwargs):
-        for fname in _boolean_field_names(schema):
-            assert neg_schema.fields[fname].description.startswith("Negated framing")
-        return neg_result
-
-    monkeypatch.setattr(eng_mod, "run_parallel_generation", fake_neg)
-    return _apply_dual_framing(
-        ("engine", "tokenizer"),
-        "ctx",
-        schema,
-        1.0,
-        None,
-        "slots",
-        None,
-        False,
-        None,
-        pos_result,
+def _make_result_with_twin(field: str, p_pos: float, p_neg: float):
+    """A single-pass result with both the positive field and its __dual_neg__ twin."""
+    return make_engine_result(
+        fields={
+            field: _bool_telemetry(p_pos >= 0.5, p_pos),
+            _dual_neg_field_name(field): _bool_telemetry(p_neg >= 0.5, p_neg),
+        },
+        parsed={
+            field: {"value": p_pos >= 0.5, "prob": p_pos},
+            _dual_neg_field_name(field): {"value": p_neg >= 0.5, "prob": p_neg},
+        },
     )
 
 
@@ -99,11 +92,7 @@ def test_default_off_prompt_version_unchanged(monkeypatch):
 
 
 def test_default_off_prompt_sha_unchanged():
-    """The default-off prompt is byte-identical to main (golden vectors pass).
-
-    The prompt is rendered by _user_content + _chat_ids; dual_framing=False
-    never touches the prompt path.
-    """
+    """The default-off prompt is byte-identical to main (golden vectors pass)."""
     from conftest import FakeTokenizer
 
     from jevmlx.engine import _user_content
@@ -118,37 +107,22 @@ def test_default_off_prompt_sha_unchanged():
 # ---- on: combination math --------------------------------------------------
 
 
-def test_dual_framing_combines_probabilities(monkeypatch):
+def test_dual_framing_combines_probabilities():
     """p = 0.5 * (p_pos + (1 - p_neg))."""
-    schema = StructuredSchema({"flag": {"type": "boolean", "description": "Is it true?"}})
-    pos = make_engine_result(
-        fields={"flag": _bool_telemetry(True, 0.8)},
-        parsed={"flag": {"value": True, "prob": 0.8}},
-    )
-    neg = make_engine_result(
-        fields={"flag": _bool_telemetry(False, 0.3)},
-        parsed={"flag": {"value": False, "prob": 0.3}},
-    )
-    result = _apply_with_neg(monkeypatch, schema, pos, neg)
-    ft = result["field_telemetry"]["flag"]
+    result = _make_result_with_twin("flag", p_pos=0.8, p_neg=0.3)
+    combined = _combine_dual_framing(result, ["flag"])
+    ft = combined["field_telemetry"]["flag"]
     # p = 0.5 * (0.8 + (1 - 0.3)) = 0.5 * 1.5 = 0.75
     assert ft["p_combined"] == pytest.approx(0.75)
     assert ft["value"] is True  # 0.75 >= 0.5
 
 
-def test_dual_framing_flips_when_negated_disagrees(monkeypatch):
+def test_dual_framing_flips_when_negated_disagrees():
     """If the negated framing strongly disagrees, the combined value can flip."""
-    schema = StructuredSchema({"flag": {"type": "boolean", "description": "Is it true?"}})
-    pos = make_engine_result(  # positive: P(true) = 0.6
-        fields={"flag": _bool_telemetry(True, 0.6)},
-        parsed={"flag": {"value": True, "prob": 0.6}},
-    )
-    neg = make_engine_result(  # negated: P(true) = 0.9 -> complement 0.1
-        fields={"flag": _bool_telemetry(True, 0.9)},
-        parsed={"flag": {"value": True, "prob": 0.9}},
-    )
-    result = _apply_with_neg(monkeypatch, schema, pos, neg)
-    ft = result["field_telemetry"]["flag"]
+    # positive: P(true) = 0.6, negated: P(true) = 0.9 -> complement 0.1
+    result = _make_result_with_twin("flag", p_pos=0.6, p_neg=0.9)
+    combined = _combine_dual_framing(result, ["flag"])
+    ft = combined["field_telemetry"]["flag"]
     # p = 0.5 * (0.6 + 0.1) = 0.35 -> flips to False
     assert ft["p_combined"] == pytest.approx(0.35)
     assert ft["value"] is False
@@ -157,112 +131,109 @@ def test_dual_framing_flips_when_negated_disagrees(monkeypatch):
 # ---- on: telemetry ---------------------------------------------------------
 
 
-def test_dual_framing_telemetry_keys(monkeypatch):
+def test_dual_framing_telemetry_keys():
     """field_telemetry carries p_pos, p_neg_complement, score_source."""
-    schema = StructuredSchema({"flag": {"type": "boolean", "description": "Is it true?"}})
-    pos = make_engine_result(
-        fields={"flag": _bool_telemetry(True, 0.7)},
-        parsed={"flag": {"value": True, "prob": 0.7}},
-    )
-    neg = make_engine_result(
-        fields={"flag": _bool_telemetry(False, 0.4)},
-        parsed={"flag": {"value": False, "prob": 0.4}},
-    )
-    result = _apply_with_neg(monkeypatch, schema, pos, neg)
-    ft = result["field_telemetry"]["flag"]
+    result = _make_result_with_twin("flag", p_pos=0.7, p_neg=0.4)
+    combined = _combine_dual_framing(result, ["flag"])
+    ft = combined["field_telemetry"]["flag"]
     assert ft["score_source"] == "dual_framing"
     assert ft["p_pos"] == pytest.approx(0.7)
     assert ft["p_neg_complement"] == pytest.approx(0.6)  # 1 - 0.4
     assert ft["p_combined"] == pytest.approx(0.65)  # 0.5*(0.7+0.6)
     assert ft["dual_framing"]["combined"] is True
+    assert ft["dual_framing"]["p_neg"] == pytest.approx(0.4)
     assert ft["dual_framing"]["disagreement"] == pytest.approx(0.1)  # |0.7-0.6|
-    assert result["prompt_version"] == PROMPT_VERSION_DUAL_FRAME
+    assert combined["prompt_version"] == PROMPT_VERSION_DUAL_FRAME
+    assert combined["probability_status"] == "dual_framing"
 
 
-def test_dual_framing_non_boolean_untouched(monkeypatch):
+def test_dual_framing_twin_stripped_from_result():
+    """The __dual_neg__ twin is removed from the public result."""
+    result = _make_result_with_twin("flag", p_pos=0.7, p_neg=0.4)
+    combined = _combine_dual_framing(result, ["flag"])
+    assert _dual_neg_field_name("flag") not in combined["field_telemetry"]
+    assert _dual_neg_field_name("flag") not in combined["parsed_json"]
+    assert "flag" in combined["field_telemetry"]
+
+
+def test_dual_framing_non_boolean_untouched():
     """Non-boolean fields keep their original result."""
-    schema = StructuredSchema(
-        {
-            "risk": {"type": "enum", "choices": ["LOW", "HIGH"], "description": "risk"},
-            "flag": {"type": "boolean", "description": "flagged"},
-        }
-    )
-    pos = make_engine_result(
+    result = make_engine_result(
         fields={
             "risk": make_field_telemetry(value="LOW", choices=["LOW", "HIGH"], probability=0.9),
             "flag": _bool_telemetry(True, 0.7),
+            _dual_neg_field_name("flag"): _bool_telemetry(False, 0.3),
         },
         parsed={
             "risk": {"value": "LOW", "prob": 0.9},
             "flag": {"value": True, "prob": 0.7},
+            _dual_neg_field_name("flag"): {"value": False, "prob": 0.3},
         },
     )
-    neg = make_engine_result(
-        fields={"flag": _bool_telemetry(False, 0.3)},
-        parsed={"flag": {"value": False, "prob": 0.3}},
-    )
-    result = _apply_with_neg(monkeypatch, schema, pos, neg)
-    # risk is untouched (no dual_framing keys)
-    risk_ft = result["field_telemetry"]["risk"]
+    combined = _combine_dual_framing(result, ["flag"])
+    risk_ft = combined["field_telemetry"]["risk"]
     assert "p_pos" not in risk_ft
     assert "score_source" not in risk_ft
     assert risk_ft["value"] == "LOW"
-    # flag is combined
-    flag_ft = result["field_telemetry"]["flag"]
+    flag_ft = combined["field_telemetry"]["flag"]
     assert flag_ft["score_source"] == "dual_framing"
 
 
 def test_dual_framing_no_boolean_fields_bumps_version_only():
-    """With no boolean fields, the second pass is skipped but the version bumps."""
-    schema = StructuredSchema(
-        {"risk": {"type": "enum", "choices": ["LOW", "HIGH"], "description": "risk"}}
-    )
-    pos = make_engine_result(
+    """With no boolean fields, no expansion; the version still bumps."""
+    result = make_engine_result(
         fields={
             "risk": make_field_telemetry(value="LOW", choices=["LOW", "HIGH"], probability=0.9)
         },
         parsed={"risk": {"value": "LOW", "prob": 0.9}},
     )
-    # No monkeypatch needed: _apply_dual_framing short-circuits (no bool fields).
-    result = _apply_dual_framing(
-        ("engine", "tokenizer"),
-        "ctx",
-        schema,
-        1.0,
-        None,
-        "slots",
-        None,
-        False,
-        None,
-        pos,
-    )
-    assert result["prompt_version"] == PROMPT_VERSION_DUAL_FRAME
-    assert "p_pos" not in result["field_telemetry"]["risk"]
+    # _combine_dual_framing with empty bool_fields just bumps the version.
+    combined = _combine_dual_framing(result, [])
+    assert combined["prompt_version"] == PROMPT_VERSION_DUAL_FRAME
+    assert "p_pos" not in combined["field_telemetry"]["risk"]
 
 
-# ---- negation determinism --------------------------------------------------
-
-
-def test_negate_description_is_deterministic():
-    """The negation prefix is a fixed template, no LLM."""
-    assert (
-        _negate_boolean_description("Is it true?")
-        == "Negated framing — answer the opposite: Is it true?"
-    )
-    assert _negate_boolean_description("Is it true?") == _negate_boolean_description("Is it true?")
-
-
-def test_negated_schema_only_touches_booleans():
+def test_expand_schema_adds_twins():
+    """_expand_schema_for_dual_framing adds a __dual_neg__ twin per boolean."""
     schema = StructuredSchema(
         {
-            "risk": {"type": "enum", "choices": ["LOW", "HIGH"], "description": "risk tier"},
+            "risk": {"type": "enum", "choices": ["LOW", "HIGH"], "description": "risk"},
             "flag": {"type": "boolean", "description": "Is it flagged?"},
         }
     )
-    negated = _negated_schema(schema, ["flag"])
-    assert negated.fields["risk"].description == "risk tier"  # untouched
-    assert negated.fields["flag"].description.startswith("Negated framing")
-    assert negated.fields["flag"].description.endswith("Is it flagged?")
+    expanded, bool_fields = _expand_schema_for_dual_framing(schema)
+    assert bool_fields == ["flag"]
+    assert _dual_neg_field_name("flag") in expanded.fields
+    # The twin has the complement-condition description.
+    twin_desc = expanded.fields[_dual_neg_field_name("flag")].description
+    assert twin_desc.endswith(" Answer true only if this is NOT the case.")
+    assert twin_desc.startswith("Is it flagged?")
+    # The original field is unchanged.
+    assert expanded.fields["flag"].description == "Is it flagged?"
+    # Non-boolean field is untouched.
+    assert "risk" in expanded.fields
+    assert _dual_neg_field_name("risk") not in expanded.fields
+
+
+def test_expand_schema_no_booleans_returns_original():
+    """No boolean fields -> the original schema is returned unchanged."""
+    schema = StructuredSchema(
+        {"risk": {"type": "enum", "choices": ["LOW", "HIGH"], "description": "d"}}
+    )
+    expanded, bool_fields = _expand_schema_for_dual_framing(schema)
+    assert bool_fields == []
+    assert expanded is schema  # same object, no copy
+
+
+# ---- complement template determinism ---------------------------------------
+
+
+def test_negate_description_is_deterministic():
+    """The complement template is a fixed suffix, no LLM."""
+    assert _negate_boolean_description("Is it true?") == (
+        "Is it true? Answer true only if this is NOT the case."
+    )
+    assert _negate_boolean_description("Is it true?") == _negate_boolean_description("Is it true?")
 
 
 def test_boolean_field_names():
@@ -274,6 +245,10 @@ def test_boolean_field_names():
         }
     )
     assert _boolean_field_names(schema) == ["a", "b"]
+
+
+def test_dual_neg_field_name():
+    assert _dual_neg_field_name("flag") == "__dual_neg__flag"
 
 
 # ---- public API: dual_framing kwarg exists ---------------------------------

@@ -301,17 +301,26 @@ the `tokenizer_revision` in the vector filenames — `--check` fails until
 ## HOLD (M5 A/B): dual-framing scoring for boolean fields (`--dual-framing`)
 
 When `dual_framing=True` (engine option, CLI `--dual-framing`, default OFF),
-each boolean field is scored **twice**: once with the field's declared
-description (the positive framing), and once with a **deterministic
-negation prefix** (`"Negated framing — answer the opposite: <original
-description>"` — no LLM rewriting). The two probabilities are combined:
+each boolean field is scored **twice in ONE batched pass**: the schema is
+expanded with a synthetic `__dual_neg__<field>` boolean twin whose description
+is the **deterministic complement template**:
+
+```
+<original description> Answer true only if this is NOT the case.
+```
+
+(no LLM rewriting — one fixed suffix template, documented verbatim here).
+Both the original field and its twin render in ONE schema block (one
+prefill) and both get row(s) in ONE batched suffix pass — no second prefill,
+no second scoring pass. After assembly, the twin's P(true) is extracted and
+combined:
 
 ```
 p = 0.5 * (p_true_pos + (1 - p_true_neg))
 ```
 
-where `p_true_pos` is P(true) from the positive pass and `p_true_neg` is
-P(true) from the negated pass. If the model is negation-biased,
+where `p_true_pos` is P(true) from the positive field and `p_true_neg` is
+P(true) from the `__dual_neg__` twin. If the model is negation-biased,
 `p_true_pos` and `(1 - p_true_neg)` disagree; the combination averages
 them out. The decided value flips to False when `p < 0.5`.
 
@@ -319,19 +328,15 @@ them out. The decided value flips to False when `p < 0.5`.
 bumps to `jevmlx-parallel-v11-dualframe`. When OFF (the default), the
 prompt version is unchanged (`jevmlx-parallel-v9`) and the prompt bytes are
 **byte-identical to main** — golden prompt vectors pass unchanged. A second
-golden set is generated for the on-mode (the negated schema block produces
+golden set is generated for the on-mode (the expanded schema block produces
 different prompt bytes, pinned separately).
 
 **Telemetry**: each boolean field's `field_telemetry` gains `p_pos`,
 `p_neg_complement`, `p_combined`, `score_source='dual_framing'`, and a
 `dual_framing` dict with `p_neg`, `disagreement` (|p_pos − p_neg_complement|),
-and `combined: true/false`. Non-boolean fields are untouched. The result's
+and `combined: true/false`. The `__dual_neg__` twins are stripped from the
+public result. Non-boolean fields are untouched. The result's
 `probability_status` becomes `"dual_framing"`.
-
-**Implementation**: the negated pass runs a full `run_parallel_generation`
-with a schema whose boolean descriptions carry the negation prefix; both
-passes share the same engine, temperature, scoring, calibration, and
-constraints. Non-boolean fields' negated-pass results are discarded.
 
 This branch is **HOLD**: it will NOT merge before an M5 A/B.
 `benchmarks.m5 --ab-branch w6-dualframe` runs it against main.

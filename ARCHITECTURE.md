@@ -683,15 +683,16 @@ conversion: same shape with empty `sources` plus `fetched_at`.
 Boolean fields are scored from one framing today: the field's declared
 description is the question, and the model's P(true) is the answer. Negation
 bias — the model's yes/no shifting with the wording of the question — is a
-known failure mode. The `dual_framing` engine option (default OFF) scores
-each boolean field a second time with a **deterministic negation prefix**
-(`"Negated framing — answer the opposite: <description>"`), then combines:
-`p = 0.5 * (p_true_pos + (1 - p_true_neg))`. Both passes share the same
-engine, temperature, scoring, calibration, and constraints; the negated
-pass runs a full `run_parallel_generation` with the negated schema and its
-non-boolean results are discarded. Per-boolean-field telemetry records
-`p_pos`, `p_neg_complement`, `p_combined`, `score_source='dual_framing'`,
-and the disagreement (`|p_pos − p_neg_complement|`). The prompt version
-bumps to `jevmlx-parallel-v11-dualframe` only when the option is on;
-default-off is byte-identical to main. This is a HOLD branch for an M5 A/B
-(`benchmarks.m5 --ab-branch w6-dualframe`).
+known failure mode. The `dual_framing` engine option (default OFF) expands
+the schema with a synthetic `__dual_neg__<field>` boolean twin whose
+description is a **deterministic complement template** (`"<description>
+Answer true only if this is NOT the case."`). Both fields render in ONE
+schema block (one prefill) and both get row(s) in ONE batched suffix pass —
+no second prefill, no second scoring pass. After assembly, the twin's
+P(true) is extracted and combined: `p = 0.5 * (p_true_pos + (1 - p_true_neg))`.
+The `__dual_neg__` twins are stripped from the public result.
+Per-boolean-field telemetry records `p_pos`, `p_neg_complement`, `p_combined`,
+`score_source='dual_framing'`, and the disagreement (`|p_pos − p_neg_complement|`).
+The prompt version bumps to `jevmlx-parallel-v11-dualframe` only when the
+option is on; default-off is byte-identical to main. This is a HOLD branch
+for an M5 A/B (`benchmarks.m5 --ab-branch w6-dualframe`).

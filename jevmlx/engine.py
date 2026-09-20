@@ -58,9 +58,10 @@ PROMPT_VERSION = "jevmlx-parallel-v9"
 # byte-identical to main (golden prompt vectors pass unchanged).
 PROMPT_VERSION_DUAL_FRAME = "jevmlx-parallel-v11-dualframe"
 
-# The deterministic negation prefix (no LLM rewriting). Applied to a boolean
-# field's description to produce the negated framing row.
-_DUAL_FRAME_NEGATION_PREFIX = "Negated framing — answer the opposite: "
+# The deterministic complement-condition template (no LLM rewriting). Applied
+# to a boolean field's description to produce the negated framing. Reads as
+# the complement condition (not a meta-instruction) so small models follow it.
+_DUAL_FRAME_COMPLEMENT_SUFFIX = " Answer true only if this is NOT the case."
 
 
 # W2-E step 3: the count row's answer is trusted over the per-option rule
@@ -2559,9 +2560,20 @@ def run_parallel_generation(
     # wall time (plan/prefill/scoring/assembly are its children). The
     # memory guard below stays INSIDE it (it is part of the wall).
     with ledger.span("request"):
+        # W6-dualframe (HOLD): when dual_framing is on, expand the schema to
+        # add a synthetic __dual_neg__<field> boolean twin per boolean field
+        # (complement-condition description). Both render in ONE schema block
+        # (one prefill) and both get row(s) in ONE batched suffix pass — no
+        # second prefill, no second scoring pass. The twins are stripped and
+        # combined AFTER assembly.
+        dual_bool_fields: list[str] = []
+        effective_schema = schema
+        if dual_framing and not _prior_mode:
+            effective_schema, dual_bool_fields = _expand_schema_for_dual_framing(schema)
+
         # 1. Batch plan + rows per field (context-independent — W3-F stage split).
         with ledger.span("plan"):
-            built = _build_schema_rows(schema, tokenizer, scoring)
+            built = _build_schema_rows(effective_schema, tokenizer, scoring)
         rows = built["rows"]
 
         # W5-D finding 32: the peak counter is process-lifetime state — without
@@ -2574,7 +2586,7 @@ def run_parallel_generation(
 
         # 2. Prefill once (prompt v2: system paragraph + user schema block and
         #    delimited context) — W3-F stage split.
-        pf = _prefill(model, tokenizer, context, schema, ledger, scoring, engine.profile)
+        pf = _prefill(model, tokenizer, context, effective_schema, ledger, scoring, engine.profile)
         base_ids = pf.base_ids
         cache = pf.cache
 
@@ -2617,7 +2629,7 @@ def run_parallel_generation(
         return _assemble(
             model,
             tokenizer,
-            schema,
+            effective_schema,
             built,
             scored,
             cache,
@@ -2676,7 +2688,7 @@ def run_parallel_generation(
     result = _assemble(
         model,
         tokenizer,
-        schema,
+        effective_schema,
         built,
         scored,
         cache,
@@ -2697,30 +2709,24 @@ def run_parallel_generation(
         drift_envelope=engine.drift_envelope,
         pass_m_rows=_pass_m_rows(scored),
     )
+    if dual_bool_fields:
+        return _combine_dual_framing(result, dual_bool_fields)
     if dual_framing and not _prior_mode:
-        return _apply_dual_framing(
-            engine,
-            context,
-            schema,
-            temperature,
-            max_rows,
-            scoring,
-            calibration,
-            prior_correction,
-            constraints,
-            result,
-        )
+        # No boolean fields: still bump the prompt version so the A/B can
+        # detect the option was on.
+        result["prompt_version"] = PROMPT_VERSION_DUAL_FRAME
     return result
 
 
 def _negate_boolean_description(desc: str) -> str:
-    """Deterministic negation of a boolean field's description (no LLM).
+    """Deterministic complement of a boolean field's description (no LLM).
 
     The positive framing asks the model to assess the claim as stated; the
-    negated framing asks it to assess the OPPOSITE — if the model is
-    negation-biased, p_true_pos and p_true_neg_complement will disagree.
+    complement framing asks it to answer true only if the claim is NOT the
+    case — if the model is negation-biased, p_true_pos and
+    p_true_neg_complement will disagree.
     """
-    return f"{_DUAL_FRAME_NEGATION_PREFIX}{desc}"
+    return f"{desc}{_DUAL_FRAME_COMPLEMENT_SUFFIX}"
 
 
 def _boolean_field_names(schema: StructuredSchema) -> list[str]:
@@ -2728,21 +2734,33 @@ def _boolean_field_names(schema: StructuredSchema) -> list[str]:
     return [name for name, fd in schema.fields.items() if fd.field_type == "boolean"]
 
 
-def _negated_schema(schema: StructuredSchema, bool_fields: list[str]) -> StructuredSchema:
-    """A copy of ``schema`` where every boolean field's description is negated.
+def _dual_neg_field_name(fname: str) -> str:
+    """The synthetic field name for a boolean field's negated framing.
 
-    Non-boolean fields are untouched. The negated schema is compiled fresh
-    (no plan cache sharing) so its prompt renders the negated descriptions.
+    Uses ``__`` prefix (never a user field name — schema.py bans dots/slashes/
+    hashes but not double-underscore) so it renders as a distinct field in the
+    ONE schema block and gets its own row(s) in the ONE batched pass.
     """
+    return f"__dual_neg__{fname}"
+
+
+def _expand_schema_for_dual_framing(schema: StructuredSchema) -> tuple[StructuredSchema, list[str]]:
+    """Expand a schema so every boolean field gets a synthetic negated twin.
+
+    Returns (expanded_schema, bool_field_names). The expanded schema has the
+    original fields PLUS one ``__dual_neg__<field>`` boolean field per boolean,
+    with the complement-condition description. Both render in ONE schema block
+    (one prefill) and both get row(s) in ONE batched suffix pass — no second
+    prefill, no second scoring pass.
+    """
+    bool_fields = _boolean_field_names(schema)
+    if not bool_fields:
+        return schema, []
     schema_dict: dict[str, Any] = {}
     for name, fd in schema.fields.items():
         spec: dict[str, Any] = {
             "type": fd.field_type,
-            "description": (
-                _negate_boolean_description(fd.description)
-                if name in bool_fields
-                else fd.description
-            ),
+            "description": fd.description,
         }
         if fd.choices is not None:
             spec["choices"] = list(fd.choices)
@@ -2753,7 +2771,68 @@ def _negated_schema(schema: StructuredSchema, bool_fields: list[str]) -> Structu
         if fd.ordered:
             spec["ordered"] = True
         schema_dict[name] = spec
-    return StructuredSchema(schema_dict)
+        if name in bool_fields:
+            schema_dict[_dual_neg_field_name(name)] = {
+                "type": "boolean",
+                "description": _negate_boolean_description(fd.description),
+            }
+    return StructuredSchema(schema_dict), bool_fields
+
+
+def _combine_dual_framing(result: dict[str, Any], bool_fields: list[str]) -> dict[str, Any]:
+    """Extract the negated twins from a single-pass result and combine.
+
+    p = 0.5 * (p_true_pos + (1 - p_true_neg))
+
+    The negated twin fields (``__dual_neg__<field>``) are REMOVED from the
+    result's field_telemetry and parsed_json after extraction. Each boolean
+    field's telemetry gains ``p_pos``, ``p_neg_complement``, ``p_combined``,
+    ``score_source='dual_framing'``, and a ``dual_framing`` dict with
+    ``disagreement``.
+    """
+    ft = result.get("field_telemetry") or {}
+    parsed = result.get("parsed_json") or {}
+    for fname in bool_fields:
+        neg_name = _dual_neg_field_name(fname)
+        pos_ft = ft.get(fname, {})
+        neg_ft = ft.get(neg_name, {})
+        p_pos = _p_true_from_telemetry(pos_ft)
+        p_neg = _p_true_from_telemetry(neg_ft)
+        # Remove the synthetic twin from the public result.
+        ft.pop(neg_name, None)
+        parsed.pop(neg_name, None)
+        if p_pos is None or p_neg is None:
+            pos_ft["dual_framing"] = {"combined": False, "reason": "missing probability"}
+            continue
+        p_neg_complement = 1.0 - p_neg
+        p_combined = 0.5 * (p_pos + p_neg_complement)
+        combined_value = p_combined >= 0.5
+        pos_ft["p_pos"] = p_pos
+        pos_ft["p_neg_complement"] = p_neg_complement
+        pos_ft["p_combined"] = p_combined
+        pos_ft["score_source"] = "dual_framing"
+        pos_ft["value"] = combined_value
+        pos_ft["probability"] = p_combined
+        for tc in pos_ft.get("top_choices") or []:
+            if tc.get("choice") == "true":
+                tc["probability"] = p_combined
+            elif tc.get("choice") == "false":
+                tc["probability"] = 1.0 - p_combined
+        pos_ft["dual_framing"] = {
+            "combined": True,
+            "p_pos": p_pos,
+            "p_neg": p_neg,
+            "p_neg_complement": p_neg_complement,
+            "p_combined": p_combined,
+            "disagreement": abs(p_pos - p_neg_complement),
+        }
+        if fname in parsed:
+            parsed[fname] = {"value": combined_value, "prob": p_combined}
+    result["prompt_version"] = PROMPT_VERSION_DUAL_FRAME
+    result["probability_status"] = "dual_framing"
+    # Fix num_fields (the twins are gone).
+    result["num_fields"] = len(ft)
+    return result
 
 
 def _p_true_from_telemetry(ft: dict) -> float | None:
@@ -2769,102 +2848,6 @@ def _p_true_from_telemetry(ft: dict) -> float | None:
     if ft.get("value") is True:
         return float(ft.get("probability", 0.0))
     return None
-
-
-def _apply_dual_framing(
-    engine: "Engine",
-    context: str,
-    schema: StructuredSchema,
-    temperature: float,
-    max_rows: int | None,
-    scoring: str,
-    calibration: CalibrationBundle | None,
-    prior_correction: bool,
-    constraints: list[dict] | None,
-    result: dict[str, Any],
-) -> dict[str, Any]:
-    """Score boolean fields a second time with negated descriptions, combine.
-
-    p = 0.5 * (p_true_pos + (1 - p_true_neg))
-
-    The negated pass runs the FULL run_parallel_generation with a schema
-    whose boolean descriptions carry a deterministic negation prefix. Both
-    passes share the same engine, temperature, scoring, calibration, and
-    constraints. Non-boolean fields keep their original result (the negated
-    pass's non-boolean fields are discarded).
-
-    Telemetry: each boolean field's field_telemetry gains ``p_pos``,
-    ``p_neg_complement``, and ``score_source='dual_framing'``. The result's
-    ``prompt_version`` bumps to PROMPT_VERSION_DUAL_FRAME.
-    """
-    bool_fields = _boolean_field_names(schema)
-    if not bool_fields:
-        # No boolean fields: dual framing is a no-op, but still bump the
-        # prompt version so the A/B can detect the option was on.
-        result["prompt_version"] = PROMPT_VERSION_DUAL_FRAME
-        return result
-
-    negated = _negated_schema(schema, bool_fields)
-    neg_result = run_parallel_generation(
-        engine,
-        context,
-        negated,
-        temperature=temperature,
-        max_rows=max_rows,
-        scoring=scoring,
-        calibration=calibration,
-        prior_correction=prior_correction,
-        constraints=constraints,
-        # No oracle_overrides, no _prior_mode, no dual_framing recursion.
-    )
-
-    ft = result.get("field_telemetry") or {}
-    neg_ft = neg_result.get("field_telemetry") or {}
-    for fname in bool_fields:
-        pos_ft = ft.get(fname, {})
-        neg_ft_field = neg_ft.get(fname, {})
-        p_pos = _p_true_from_telemetry(pos_ft)
-        p_neg = _p_true_from_telemetry(neg_ft_field)
-        if p_pos is None or p_neg is None:
-            # Cannot combine: keep the positive result, flag it.
-            pos_ft["dual_framing"] = {"combined": False, "reason": "missing probability"}
-            continue
-        p_neg_complement = 1.0 - p_neg
-        p_combined = 0.5 * (p_pos + p_neg_complement)
-        # Update the field's value/probability to the combined result.
-        pos_ft["p_pos"] = p_pos
-        pos_ft["p_neg_complement"] = p_neg_complement
-        pos_ft["p_combined"] = p_combined
-        pos_ft["score_source"] = "dual_framing"
-        # The decided value flips if the combined P(true) < 0.5 and the
-        # positive pass said True (or vice versa).
-        combined_value = p_combined >= 0.5
-        pos_ft["value"] = combined_value
-        pos_ft["probability"] = p_combined
-        # Update top_choices to reflect the combined distribution.
-        top_choices = pos_ft.get("top_choices") or []
-        for tc in top_choices:
-            if tc.get("choice") == "true":
-                tc["probability"] = p_combined
-            elif tc.get("choice") == "false":
-                tc["probability"] = 1.0 - p_combined
-        pos_ft["dual_framing"] = {
-            "combined": True,
-            "p_pos": p_pos,
-            "p_neg": p_neg,
-            "p_neg_complement": p_neg_complement,
-            "p_combined": p_combined,
-            "disagreement": abs(p_pos - p_neg_complement),
-        }
-        # Sync parsed_json to the combined value.
-        parsed = result.get("parsed_json") or {}
-        if fname in parsed:
-            parsed[fname] = {"value": combined_value, "prob": p_combined}
-
-    result["prompt_version"] = PROMPT_VERSION_DUAL_FRAME
-    # Update the probability_status to reflect dual framing.
-    result["probability_status"] = "dual_framing"
-    return result
 
 
 def dispatch_rows(built: dict, scored: ScoreRowsResult) -> DispatchResult:
