@@ -503,6 +503,28 @@ def _copy_template_piece(piece: str, dest: Path) -> None:
     raise ValueError(f"unknown template piece: {piece}")
 
 
+@pytest.fixture(autouse=True)
+def _reset_logging_handlers():
+    """The real run_eval/evalreport code calls jevmlx.log.configure(), which
+    adds a StreamHandler bound to the CURRENT sys.stderr. pytest swaps
+    sys.stderr per-test for capture; after teardown that stream closes, and a
+    later log emit (from another test) raises 'I/O operation on closed file'.
+    Snapshot the root logger's handlers before each test and restore them
+    after, so no stale captured-stream handler leaks across tests."""
+    import logging
+
+    root = logging.getLogger()
+    saved = list(root.handlers)
+    yield
+    for h in list(root.handlers):
+        if h not in saved:
+            root.removeHandler(h)
+            try:
+                h.close()
+            except Exception:  # noqa: BLE001 - best-effort cleanup
+                pass
+
+
 @pytest.fixture
 def artifacts(tmp_path_factory):
     """A fresh, writable copy of the real-writer artifact tree (see
@@ -757,6 +779,10 @@ class TestM5MainEndToEnd:
         def fake_run(argv, **_kwargs):
             argv = tuple(argv)
             joined = " ".join(argv)
+            # Match by (basename(argv[0]), subcommand) — never by absolute path,
+            # which differs per runner (local /Users/ben vs CI /Users/runner).
+            bin0 = argv[0].split("/")[-1]
+            submod = argv[2] if len(argv) > 2 and argv[1] == "-m" else ""
             is_doctor = "doctor" in joined and "--json" in argv
             if is_doctor:
                 # doctor --json: real exit-0 stdout JSON (the shape the gate
@@ -764,27 +790,40 @@ class TestM5MainEndToEnd:
                 calls.append(("doctor", 0))
                 stdout = '{"exit_code": 0, "checks": []}'
                 return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
-            is_pytest = "pytest" in argv[0].split("/")[-1]
+            # The parity step is `pytest -m slow`; the invariance/timing/probe/
+            # fetch steps are `python -m benchmarks.<x>` (submod set). A plain
+            # `python -m <not benchmarks.*>` is treated as pytest too.
+            is_pytest = "pytest" in bin0
             is_plain_dash_m = (
-                len(argv) > 1
-                and argv[1] == "-m"
-                and not (len(argv) > 2 and argv[2].startswith("benchmarks."))
+                len(argv) > 1 and argv[1] == "-m" and not submod.startswith("benchmarks.")
             )
             if is_pytest or is_plain_dash_m:
                 calls.append(("parity", 0))
                 return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
-            if "benchmarks.invariance" in joined:
+            if submod == "benchmarks.typesafe.fetch":
+                # The invariance step's pre-step: fetch typesafe cases. On a
+                # fresh checkout (CI) the cached typesafe.jsonl is absent, so
+                # this pre-step runs. Write a minimal dataset at --out so
+                # pre_target is satisfied and the real invariance step gets
+                # its data; return exit 0 (the fake run never hits the network).
+                fetch_out = Path(argv[argv.index("--out") + 1])
+                fetch_out.parent.mkdir(parents=True, exist_ok=True)
+                if not fetch_out.exists():
+                    _write_jsonl(fetch_out, _typesafe_cases(2))
+                calls.append(("typesafe-fetch", 0))
+                return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+            if submod == "benchmarks.invariance" or "benchmarks.invariance" in joined:
                 inv_out = Path(argv[argv.index("--out") + 1])
                 target = inv_out.parent if inv_out.name == "invariance" else inv_out
                 _copy_template_piece("invariance", target)
                 calls.append(("invariance", 0))
                 return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
-            if "benchmarks.timing" in joined:
+            if submod == "benchmarks.timing" or "benchmarks.timing" in joined:
                 timing_out = Path(argv[argv.index("--out") + 1])
                 _copy_template_piece("timing", timing_out)
                 calls.append(("timing", 0))
                 return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
-            if "benchmarks.probe" in joined:
+            if submod == "benchmarks.probe" or "benchmarks.probe" in joined:
                 probe_out = Path(argv[argv.index("--out") + 1])
                 if "--command" in argv and argv[argv.index("--command") + 1] == "slope":
                     command = "slope"
@@ -793,14 +832,26 @@ class TestM5MainEndToEnd:
                 _build_probe_json(probe_out.parent, command)
                 calls.append((f"probe-{command}", 0))
                 return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
-            if argv[0].endswith("/jevmlx") and "bench" in argv[1:3] and "--models-file" in argv:
-                # bench-rest: bench the remaining parity models into --out.
+            # bench-rest: jevmlx bench --models-file (basename jevmlx + bench subcommand).
+            is_bench_rest = (
+                bin0 == "jevmlx"
+                and "--models-file" in argv
+                and any(a == "bench" for a in argv[1:3])
+            )
+            if is_bench_rest:
                 rest_out = Path(argv[argv.index("--out") + 1])
                 rest_file = Path(argv[argv.index("--models-file") + 1])
                 _build_rest_model_results(rest_out=rest_out, models_file=rest_file)
                 calls.append(("bench-rest", 0))
                 return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
-            if "bench" in joined and "--model" in argv and "--out" in argv:
+            # bench-quality: jevmlx bench --model ... --out ...
+            is_bench_quality = (
+                bin0 == "jevmlx"
+                and any(a == "bench" for a in argv[1:3])
+                and "--model" in argv
+                and "--out" in argv
+            )
+            if is_bench_quality:
                 combo_out = Path(argv[argv.index("--out") + 1])
                 combo_out.parent.mkdir(parents=True, exist_ok=True)
                 # The builders write the shared dataset jsonls next to the
