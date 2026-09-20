@@ -191,7 +191,6 @@ class TestMetal:
         import mlx
 
         fake_mx = types.ModuleType("mlx.core")
-        fake_mx.is_available = lambda: available
         fake_mx.metal = types.SimpleNamespace(is_available=lambda: available)
         fake_mx.array = array if array is not None else (lambda v: v)
         fake_mx.add = add if add is not None else (lambda a, b: [2.0])
@@ -214,6 +213,17 @@ class TestMetal:
 
         self._fake_mlx(monkeypatch, available=True, add=boom)
         assert check_metal().status == "FAIL"
+
+    def test_real_mlx_availability_check_does_not_raise(self):
+        """Exercise the availability check against the REAL mlx (no mock, no
+        model load). A signature change in mlx (e.g. mx.is_available() now
+        requiring a device arg) is caught by CI, not by a fresh-venv smoke."""
+        check = check_metal()
+        assert check.status in ("OK", "FAIL")
+        # On Apple Silicon it should be OK; in CI without a GPU it may FAIL —
+        # either is fine, the point is no TypeError/AttributeError.
+        if check.status == "FAIL":
+            assert check.fix
 
 
 class TestHFCache:

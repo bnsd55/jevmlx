@@ -311,10 +311,10 @@ def check_metal() -> Check:
     try:
         import mlx.core as mx
 
-        if not mx.is_available():
+        if not mx.metal.is_available():
             return _fail(
                 "metal",
-                "mx.is_available() is False",
+                "mx.metal.is_available() is False",
                 "run on Apple Silicon; check macOS GPU restrictions",
             )
         result = mx.add(mx.array([1.0]), mx.array([1.0]))
