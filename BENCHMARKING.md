@@ -216,6 +216,11 @@ reruns everything). Per-step logs land in `<out>/<step-id>.log`. Interrupted
 runs resume; the gate step keeps a half-finished evening from wasting GPU time
 on a broken environment.
 
+**macOS idle sleep** (W5c-15): on darwin the runbook re-execs under
+`caffeinate -dimsu` so macOS does not idle-sleep mid-run (during the M5 7B
+smoke it did, and Metal parks while wall time runs). The `sleep_blocked`
+flag is recorded in `RUNBOOK.md`'s header. Opt out with `--allow-sleep`.
+
 ### MODEL_ID env: the slow suite's model selector
 
 `tests/conftest.py` reads `MODEL_ID` from the environment in ONE place

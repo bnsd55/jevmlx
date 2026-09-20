@@ -654,6 +654,40 @@ def build_summary_text(main: dict, ab: dict | None, *, parity_models: list[str])
 # --------------------------------------------------------------------- main
 
 
+def _maybe_caffeinate(allow_sleep: bool, argv_tail: list[str]) -> bool:
+    """Block macOS idle sleep for the M5 run (W5c-15).
+
+    During the M5 7B smoke macOS idle-slept mid-run; Metal parks, the process
+    stays alive, wall time becomes a lie. Re-exec under ``caffeinate -dimsu``
+    (display idle / system idle / disk idle / user assertion) exactly once,
+    then set a guard env var so the re-execed child does not re-exec. Opt out
+    with ``--allow-sleep``. No-op on non-darwin. Best-effort: a missing
+    caffeinate prints a warning and continues. Returns True if the re-exec
+    was attempted (the caller never sees the return on success — execvp
+    replaces the process; only the FileNotFoundError path returns True).
+    """
+    if sys.platform != "darwin":
+        return False
+    if allow_sleep:
+        print("[sleep] idle sleep NOT blocked (--allow-sleep)", flush=True)
+        return False
+    if os.environ.get("JEVMLX_M5_CAFFEINATED") == "1":
+        return False
+    os.environ["JEVMLX_M5_CAFFEINATED"] = "1"
+    print(
+        "[sleep] blocking macOS idle sleep via caffeinate -dimsu (opt out: --allow-sleep)",
+        flush=True,
+    )
+    try:
+        os.execvp(
+            "caffeinate",
+            ["caffeinate", "-dimsu", sys.executable, "-m", "benchmarks.m5", *argv_tail],
+        )
+    except FileNotFoundError:
+        print("[sleep] caffeinate not found; idle sleep NOT blocked", flush=True)
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m benchmarks.m5",
@@ -690,7 +724,16 @@ def main(argv: list[str] | None = None) -> int:
         help="append the W6-2 prep probes (memory slope + adapter parity) "
         "as optional steps (python -m benchmarks.probe)",
     )
+    parser.add_argument(
+        "--allow-sleep",
+        action="store_true",
+        help="do NOT block macOS idle sleep via caffeinate (default: block it)",
+    )
     args = parser.parse_args(argv)
+
+    # W5c-15: block macOS idle sleep (caffeinate re-exec). See
+    # _maybe_caffeinate for the rationale and the env-var guard.
+    _maybe_caffeinate(args.allow_sleep, list(sys.argv[1:]))
 
     if args.parity_models:
         parity_models = [m.strip() for m in args.parity_models.split(",") if m.strip()]
@@ -716,6 +759,7 @@ def main(argv: list[str] | None = None) -> int:
             f"cmd: python -m benchmarks.m5 --out {args.out}"
             + (f" --ab-branch {args.ab_branch}" if args.ab_branch else ""),
             f"parity models: {', '.join(parity_models)}",
+            f"sleep_blocked: {not args.allow_sleep and sys.platform == 'darwin'}",
             "",
         ]
         (out / "RUNBOOK.md").write_text("\n".join(header), encoding="utf-8")
