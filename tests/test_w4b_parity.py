@@ -63,6 +63,7 @@ def test_parity_report_passes_on_stable_fake(tmp_path):
 
     payload = parity_report(make_engine(_StableModel(), _CountTokenizer()), "fake/stable", _cases())
     assert payload["passed"] is True
+    assert payload["status"] == "PASS"  # P4/I7
     assert payload["winners_identical"] is True
     assert payload["max_abs_drift_nats"] == 0.0
     assert payload["atol"] == PARITY_ATOL
@@ -105,6 +106,7 @@ def test_parity_report_fails_when_winners_flip(tmp_path):
         make_engine(_DriftingModel(), _CountTokenizer()), "fake/drift", tmp_path, _cases()
     )
     assert payload["passed"] is False
+    assert payload["status"] == "FAIL"  # P4/I7: winners changed
     assert payload["winners_identical"] is False
     on_disk = json.loads((tmp_path / "parity.json").read_text(encoding="utf-8"))
     assert on_disk["passed"] is False

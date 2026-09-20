@@ -272,6 +272,18 @@
   are bit-identical with and without the cache (tested: cold vs warm
   log_scores and winners are equal; second call's plan compile is < 20% of
   the first). No behaviour change to prompts or scoring.
+- P4/I7: parity report distinguishes DRIFT (batch-shape noise) from FAIL
+  (a real divergence). parity.json gets a `status` field in {PASS, DRIFT,
+  FAIL}: PASS = all drifts < atol; DRIFT = some drift >= atol but winners
+  identical on all cases AND max drift inside the persisted envelope band
+  for the run's shape bucket; FAIL = a winner changed or drift beyond the
+  band. The GATE (`passed`) is unchanged — DRIFT and FAIL both set
+  `passed: false` — so nothing downstream loosens. `check_results
+  --check-parity` prints the status word and one sentence ('DRIFT: batched
+  drift 0.051 >= atol 0.05, winners identical on all N cases, inside
+  envelope band 0.141; near-tie rescore applies' vs 'FAIL: ...'). The
+  bench SUMMARY and the leaderboard show the status word in the parity
+  column.
 
 ## Released
 

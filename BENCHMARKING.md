@@ -234,7 +234,16 @@ faster than a single trie-constrained pass on 255-option enums. Output:
       "max_gap_drift_nats": 0.070, "max_margin_drift_nats": 0.063,
       "max_batched_drift_nats": 0.05, "winners_identical": true,
       "atol": 0.05, "rescore_gate": {...}, "environment": {...},
-      "run_at": "..."}`
+      "status": "PASS", "run_at": "..."}`
+
+      P4/I7: ``status`` is the REPORTING word — PASS, DRIFT, or FAIL. The
+      GATE (``passed``) is unchanged (DRIFT and FAIL both set ``passed:
+      false``). PASS = all drifts < atol. DRIFT = some drift >= atol but
+      winners identical on all cases AND max drift inside the persisted
+      envelope band for the run's shape bucket (batch-shape noise, not a
+      real divergence). FAIL = a winner changed, or drift beyond the band.
+      ``check_results --check-parity`` prints the status word and one
+      sentence; the leaderboard shows the status word in the Parity column.`
 - [ ] `SUMMARY.md` pasted into the PR description
 - [ ] Machine specs (chip, RAM, macOS) mentioned in the PR body
 - [ ] No hand-edited numbers — recompute instead of fixing up

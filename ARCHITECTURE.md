@@ -375,6 +375,7 @@ Written by the bench into each model folder right after the engine load
   "winners_identical": true,
   "atol": 0.05,
   "passed": true,
+  "status": "PASS",
   "cases": ["code_security", "fintech_fraud", "high_cardinality_255", "support_triage"],
   "test": "test_w1a_scoring_parity_batch_vs_chunked_real_model",
   "run_at": "2026-09-18T12:00:00Z"
@@ -383,8 +384,12 @@ Written by the bench into each model folder right after the engine load
 
 (Four bundled presets on disk; the docstring example shows two. Field names
 match `parity.py` verbatim: `model`, `prompt_version`, `max_abs_drift_nats`,
-`winners_identical`, `atol`, `passed`, `cases`, `test` = `PARITY_TEST_NAME`,
-`run_at`.)
+`winners_identical`, `atol`, `passed`, `status`, `cases`, `test` = `PARITY_TEST_NAME`,
+`run_at`.) P4/I7: `status` is the REPORTING word (PASS / DRIFT / FAIL).
+The GATE (`passed`) is unchanged — DRIFT and FAIL both set `passed: false`.
+PASS = all drifts < atol. DRIFT = some drift >= atol but winners identical
+on all cases AND max drift inside the persisted envelope band for the run's
+shape bucket. FAIL = a winner changed, or drift beyond the band.
 
 One check, two consumers: the slow parity test and the bench share
 `check_scoring_parity`. A model without a passing `parity.json` gets

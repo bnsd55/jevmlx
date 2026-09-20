@@ -18,6 +18,7 @@ This module is that implementation:
       "winners_identical": true,
       "atol": 0.05,
       "passed": true,
+      "status": "PASS",
       "cases": ["fintech_fraud", "support_triage"],
       "test": "test_w1a_scoring_parity_batch_vs_chunked_real_model",
       "run_at": "2026-09-18T12:00:00Z"
@@ -35,6 +36,13 @@ passed, max_drift_nats, atol, run_at): the extra keys (prompt_version,
 winners_identical, max_abs_drift_nats alias, cases) identify WHAT ran;
 PR #29's ``check_parity`` only reads ``passed``, so the superset stays
 compatible both ways.
+
+P4/I7: ``status`` is the REPORTING word (PASS / DRIFT / FAIL). The GATE
+(``passed``) is unchanged — DRIFT and FAIL both set ``passed: false``.
+PASS = all drifts < atol. DRIFT = some drift >= atol but winners identical
+on all cases AND max drift inside the persisted envelope band for the run's
+shape bucket (batch-shape noise, not a real divergence). FAIL = a winner
+changed, or drift beyond the band.
 """
 
 from __future__ import annotations
@@ -326,6 +334,25 @@ def parity_report(
         and max_margin_drift < INSTABILITY_BAND
         and not escaped
     )
+    # P4/I7: the REPORTING status (PASS / DRIFT / FAIL). The GATE (passed)
+    # is unchanged — DRIFT and FAIL both set passed=False. DRIFT = some
+    # drift >= atol but winners identical on all cases AND max drift inside
+    # the persisted envelope band for the run's shape bucket (batch-shape
+    # noise, not a real divergence). FAIL = a winner changed, or drift
+    # beyond the band.
+    envelope_band = recorded.get("band") if isinstance(recorded, dict) else None
+    max_drift = max(max_abs_drift, max_gap_drift, max_margin_drift)
+    if passed:
+        status = "PASS"
+    elif (
+        winners_identical
+        and not escaped
+        and isinstance(envelope_band, (int, float))
+        and max_drift <= envelope_band
+    ):
+        status = "DRIFT"
+    else:
+        status = "FAIL"
     return {
         "model": model_id,
         "prompt_version": PROMPT_VERSION,
@@ -346,6 +373,11 @@ def parity_report(
         # Environment metadata (review item 3).
         "environment": _environment_metadata(engine),
         "passed": passed,
+        # P4/I7: the REPORTING status (PASS / DRIFT / FAIL). passed is
+        # unchanged (False for DRIFT and FAIL); status tells the operator
+        # whether the drift is batch-shape noise (DRIFT) or a real divergence
+        # (FAIL).
+        "status": status,
         "cases": [case_id for case_id, _preset in (cases or bundled_preset_specs())],
         "test": PARITY_TEST_NAME,
         "run_at": datetime.datetime.now(datetime.UTC)

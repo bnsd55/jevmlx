@@ -241,9 +241,9 @@ def test_official_block_exact_text(tmp_path):
     table = build_table(None, published, official)
     # Official header + group separator line + two cited rows.
     assert "TypeSafe official (cited, retrieved 2026-09-17)" in table
-    assert "| Jev | official (cited) | — | — | 67.8% | 76.0% |" in table
+    assert "| Jev | official (cited) | — | — | 67.8% | — | 76.0% |" in table
     assert "71.6% | 61.7% | 61.8% | 0.4s | $0.0004 | — |" in table
-    assert "| GPT-5.6 Terra | official (cited) | — | — | 67.9% |" in table
+    assert "| GPT-5.6 Terra | official (cited) | — | — | 67.9% | — |" in table
     # Published group — driven by the REAL published_agreement() output.
     assert "Published models on the public examples (computed)" in table
     assert "| opus | computed from published answers |" in table
