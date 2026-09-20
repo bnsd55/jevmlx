@@ -231,6 +231,25 @@
   `<combo>/heartbeat.jsonl`. The Metal memory API moved to the top-level
   `mx` names (`mx.set_cache_limit`, `mx.device_info`, etc.) now that mlx
   0.32 deprecates the `mx.metal.*` aliases.
+- W6-B1: jabr classifier-benchmark as a pinned public dataset and
+  leaderboard row. A new `--datasets jabr` fetches the public-domain (CC0)
+  benchmark from https://github.com/jabr/classifier-benchmark (8 tasks / 78
+  cases: support_department 5-way, email_intent 5-way, secret_leak bool,
+  urgency bool, refund_eligible bool, frustration_level 3-level ordinal,
+  incident_severity 5-level ordinal, review_sentiment 5-level ordinal).
+  The case definitions live in upstream's `bench/cases.py` as Python source
+  importing `von.types`, so the fetcher (`benchmarks/public/jabr.py`)
+  downloads the PINNED commit sha from raw.githubusercontent.com, verifies
+  its sha256 against a hardcoded expectation (fail-closed on mismatch, same
+  F5 rule as the HF datasets), and parses it with the `ast` module — never
+  `exec`. Single-view (all 78 cases are the benchmark; no balanced/natural
+  sampling). Task -> schema mapping via the SHARED `field_schema`:
+  `choice` -> enum, `noul` -> boolean, `score` -> ordered enum
+  (OrdinalTelemetry). Each case carries `workflow = task_id` so the new
+  `per_workflow_accuracy` metric in `compute_metrics` carries per-task
+  accuracy, and the leaderboard renders a separate jabr table with 8
+  per-task accuracy columns. CC0 clears redistribution (unlike the HF
+  datasets whose text stays in the uncommitted cache).
 
 ## Released
 

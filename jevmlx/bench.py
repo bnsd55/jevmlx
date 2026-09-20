@@ -50,7 +50,10 @@ PUBLIC_DATASET_NAMES = tuple(f"{name}.{view}" for name in PUBLIC_DATASETS for vi
 # perturbations108 (label-preserving perturbations). No views — each is one
 # cases file. Model-reviewed, not human-adjudicated (meta.annotation_status).
 OPENJEV_DATASETS = ("authored144", "perturbations108")
-DATASETS_ALL = DATASETS + PUBLIC_DATASETS + PUBLIC_DATASET_NAMES + OPENJEV_DATASETS
+# W6-B1: jabr classifier-benchmark — single-view (all 78 cases are the
+# benchmark; no balanced/natural sampling). Not in PUBLIC_VIEWS expansion.
+JABR_DATASETS = ("jabr",)
+DATASETS_ALL = DATASETS + PUBLIC_DATASETS + PUBLIC_DATASET_NAMES + OPENJEV_DATASETS + JABR_DATASETS
 
 
 def normalize_dataset_names(names: list[str]) -> list[str]:
@@ -254,6 +257,29 @@ def build_datasets(
         paths[name] = jsonl
         paths_locks[name] = lock
 
+    # W6-B1: jabr classifier-benchmark — single-view (all 78 cases are the
+    # benchmark; no balanced/natural sampling). The verifier re-checks the
+    # pinned file sha256 on cache reuse (same F5 rule).
+    if "jabr" in datasets:
+        jsonl = BENCH_CACHE / "jabr.jsonl"
+        lock = BENCH_CACHE / "jabr.dataset.lock.json"
+        try:
+            _rebuild_if_needed(
+                jsonl,
+                lock,
+                lambda: _build_jabr(),
+                verify=_jabr_pin_problem,
+            )
+        except OSError as exc:
+            if offline_ok and not (jsonl.exists() and lock.exists()):
+                print(f"jabr dataset skipped (offline): {exc}")
+            elif jsonl.exists() and lock.exists():
+                print(f"jabr: reusing cached copy (fetch failed: {exc})")
+            else:
+                raise
+        paths["jabr"] = jsonl
+        paths_locks["jabr"] = lock
+
     if "perturbed" in datasets:
         jsonl = BENCH_CACHE / "perturbed.jsonl"
         lock = BENCH_CACHE / "perturbed.dataset.lock.json"
@@ -394,6 +420,47 @@ def _build_openjev_dataset(name: str) -> None:
     print(f"building {name} dataset (downloads from GitHub)...")
     n, sha = convert_dataset(name, jsonl, lock)
     print(f"  wrote {jsonl.name} ({n} cases, sha256 {sha[:16]}...)")
+
+
+def _build_jabr() -> None:
+    """jabr classifier-benchmark: fetch the pinned revision, parse, write.
+
+    Single-view (all 78 cases are the benchmark). The fetcher downloads
+    bench/cases.py from the pinned GitHub commit, verifies its sha256, and
+    parses it with AST (no exec, no third-party import).
+    """
+    from benchmarks.public.jabr import build_records, write_dataset
+
+    print("building jabr dataset (downloads from raw.githubusercontent.com)...")
+    records, _sha = build_records()
+    out = BENCH_CACHE / "jabr.jsonl"
+    lock = BENCH_CACHE / "jabr.dataset.lock.json"
+    write_dataset(records, out, lock)
+    print(f"  wrote {out.name} ({len(records)} cases)")
+
+
+def _jabr_pin_problem(lock: Path) -> str | None:
+    """F5 on cache reuse: re-check the lock's recorded file sha256 against
+    the hardcoded pin expectation. None = still the pinned bytes."""
+    from benchmarks.public.jabr import EXPECTED_SHA256, REVISION, SOURCE_FILE
+
+    try:
+        data = json.loads(lock.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "lock unreadable"
+    sources = data.get("sources") or []
+    if not sources:
+        return "lock has no sources"
+    source = sources[0]
+    if source.get("revision") != REVISION:
+        return f"revision drift: {source.get('revision')} != pin {REVISION}"
+    files = source.get("files") or {}
+    recorded = files.get(SOURCE_FILE)
+    if recorded is None:
+        return f"no pin expectation for {SOURCE_FILE}"
+    if recorded != EXPECTED_SHA256:
+        return f"file sha256 drift for {SOURCE_FILE}"
+    return None
 
 
 def _build_typed_decisions() -> None:
