@@ -306,6 +306,7 @@ def test_report_renders_dependent_metrics():
     }
     rows = _metric_rows(run)
     names = [r[0] for r in rows]
-    assert "exact_record_accuracy" in names
+    # P7: exact_record_accuracy is now rendered as 'exact record' (first-class).
+    assert "exact record" in names
     assert "constraint_violation_rate[overall]" in names
     assert "child_accuracy_given_parent_correct[intent→subtype]" in names

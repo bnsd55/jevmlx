@@ -2578,13 +2578,16 @@ def run_parallel_generation(
             rows, cache, engine.vocab_size, engine.weight_bytes, engine.width_slope, max_rows
         )
         num_passes = max(1, math.ceil(len(rows) / auto_max_rows))
-        if num_passes > 1:
-            logger.warning(
-                "Chunking heuristic: %d rows over %d passes (rows_per_chunk=%d)",
-                len(rows),
-                num_passes,
-                auto_max_rows,
-            )
+        # P7/I3: always log the chunk line at INFO so a single-pass batched
+        # run is visible (the M5 machine misread the parity probe's lines as
+        # the eval). No logic change — the heuristic is the same whether
+        # passes==1 or >1.
+        logger.info(
+            "Chunking heuristic: %d rows over %d passes (rows_per_chunk=%d)",
+            len(rows),
+            num_passes,
+            auto_max_rows,
+        )
 
         # 4. Batched suffix forward passes + per-row dispatch into
         #    node_logits / option_pair / count_node_logits (W3-F stage split:
@@ -2636,13 +2639,14 @@ def run_parallel_generation(
         rows, cache, engine.vocab_size, engine.weight_bytes, engine.width_slope, max_rows
     )
     num_passes = max(1, math.ceil(len(rows) / auto_max_rows))
-    if num_passes > 1:
-        logger.warning(
-            "Chunking heuristic: %d rows over %d passes (rows_per_chunk=%d)",
-            len(rows),
-            num_passes,
-            auto_max_rows,
-        )
+    # P7/I3: always log the chunk line at INFO so a single-pass batched run
+    # is visible. No logic change.
+    logger.info(
+        "Chunking heuristic: %d rows over %d passes (rows_per_chunk=%d)",
+        len(rows),
+        num_passes,
+        auto_max_rows,
+    )
 
     # 4. Batched suffix forward passes + per-row dispatch into
     #    node_logits / option_pair / count_node_logits (W3-F stage split:

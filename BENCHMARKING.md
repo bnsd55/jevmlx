@@ -342,4 +342,7 @@ point estimates. `per_field_accuracy` carries a `ci` (Wilson) per field.
 `valid_accuracy` is the valid-only companion to `field_accuracy`.
 `check_results` enforces `REQUIRED_CI_KEYS` (accuracy_ci, valid_accuracy,
 per_field_accuracy). The leaderboard prints the interval next to every
-point or 'n too small'.
+point or 'n too small'. `report.md` and `SUMMARY.md` show the majority
+baseline (mean over fields) and exact-record accuracy as first-class
+columns right after field accuracy; the per-field table marks a field
+below its majority baseline with †.

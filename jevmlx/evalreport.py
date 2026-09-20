@@ -121,6 +121,17 @@ def _metric_rows(run: dict) -> list[tuple]:
     # W6-B6b: accuracy row carries its CI when present.
     if "accuracy" in metrics:
         rows.append(("accuracy", _with_ci("accuracy", metrics)))
+    # P7: majority baseline (mean over fields) and exact-record accuracy
+    # are first-class, right after accuracy — a reader sees them before any
+    # other metric. The 7B bundled smoke read 61% accuracy while exact-record
+    # was 0 and one field was below majority; these must be visible up top.
+    if "majority_class_baseline" in metrics:
+        mcb = metrics["majority_class_baseline"]
+        if isinstance(mcb, dict) and mcb:
+            mean_mcb = sum(v for v in mcb.values() if isinstance(v, (int, float))) / len(mcb)
+            rows.append(("majority baseline (mean over fields)", mean_mcb))
+    if "exact_record_accuracy" in metrics:
+        rows.append(("exact record", metrics["exact_record_accuracy"]))
     for type_name in sorted(run.get("per_type") or {}):
         entry = run["per_type"][type_name]
         accuracy = entry.get("accuracy") if isinstance(entry, dict) else entry
@@ -142,6 +153,9 @@ def _metric_rows(run: dict) -> list[tuple]:
     # not as standalone rows; per_field_accuracy has its own table.
     handled |= {k for k in metrics if k.endswith("_ci")}
     handled |= {"valid_accuracy", "per_field_accuracy"}
+    # P7: majority_class_baseline and exact_record_accuracy are rendered as
+    # first-class rows above; don't also dump them as generic rows.
+    handled |= {"majority_class_baseline", "exact_record_accuracy"}
     for key in sorted(set(metrics) - handled):
         value = metrics[key]
         if isinstance(value, dict):
@@ -231,6 +245,10 @@ def _to_markdown(run: dict) -> str:
         (run.get("per_field") or (run.get("metrics") or {}).get("per_field_accuracy") or []),
         key=lambda row: (_accuracy(row.get("accuracy")), str(row.get("field", ""))),
     )
+    # P7: per-field majority baseline (from metrics.majority_class_baseline).
+    per_field_mcb = (run.get("metrics") or {}).get("majority_class_baseline") or {}
+    if not isinstance(per_field_mcb, dict):
+        per_field_mcb = {}
     parts = [
         "# jevmlx eval report",
         "",
@@ -258,12 +276,29 @@ def _to_markdown(run: dict) -> str:
         "## Per-field accuracy",
         "",
         _table(
-            ["field", "n", "accuracy"],
-            [(row.get("field"), row.get("n"), _per_field_accuracy_cell(row)) for row in per_field],
+            ["field", "n", "acc", "majority"],
+            [_per_field_row(row, per_field_mcb) for row in per_field],
         ),
         "",
     ]
     return "\n".join(parts)
+
+
+def _per_field_row(row: dict, mcb: dict) -> tuple:
+    """One per-field table row: field, n, accuracy (+CI), majority.
+
+    P7: when accuracy < majority, a † marker appears next to acc — the field
+    is below the always-predict-modal baseline (the case the 7B smoke hit).
+    """
+    field = row.get("field", "")
+    acc = _per_field_accuracy_cell(row)
+    maj = mcb.get(field)
+    # Extract the numeric accuracy for the below-majority comparison.
+    acc_num = row.get("accuracy")
+    marker = ""
+    if isinstance(acc_num, (int, float)) and isinstance(maj, (int, float)) and acc_num < maj:
+        marker = " †"
+    return (field, row.get("n"), f"{acc}{marker}" if marker else acc, maj)
 
 
 def _per_field_accuracy_cell(row: dict) -> object:
