@@ -3,7 +3,7 @@
 Source: https://github.com/jabr/classifier-benchmark — a public-domain
 (CC0) benchmark of 8 classification tasks / 78 cases for "System One"-style
 decision models. The case definitions live in ``bench/cases.py`` as Python
-source that imports ``von.types`` (which we do not depend on), so the
+source that imports a package we do not depend on, so the
 fetcher downloads the PINNED file, verifies its sha256 against a hardcoded
 expectation, and parses it with the ``ast`` module — never ``exec``.
 

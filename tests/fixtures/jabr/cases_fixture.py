@@ -1,19 +1,20 @@
-"""Minimal fixture mimicking jabr's bench/cases.py structure (3 primitives).
+"""Minimal fixture mimicking the upstream bench/cases.py structure (3 primitives).
 
 One choice task, one noul task, one score task — enough to test the AST
-parser's mapping for all three question types. NOT the real case text.
+parser's mapping for all three question types. Every sentence below is
+invented by the test author; no case text is copied from upstream (our rule:
+case text is fetched at build time, never stored in the repo).
 """
 
 from dataclasses import dataclass
-from typing import Union
 
-from von.types import Choice, Question, Noul, Score
+from bench_types import Choice, Noul, Question, Score
 
 
 @dataclass
 class Case:
     state: str
-    expected: Union[str, bool, int]
+    expected: str | bool | int
 
 
 @dataclass

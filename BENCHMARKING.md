@@ -140,7 +140,8 @@ Paste `SUMMARY.md` into the PR description and link the machine specs
   review_sentiment 5-level) -> ordered enum (OrdinalTelemetry applies).
   Single-view (all 78 cases are the benchmark; no balanced/natural
   sampling — the set is hand-curated). The case definitions live in
-  upstream's `bench/cases.py` as Python source importing `von.types`, so
+  upstream's `bench/cases.py` as Python source that imports a
+  package we do not depend on; we parse the source with `ast`
   the fetcher downloads the PINNED commit sha from raw.githubusercontent.com,
   verifies its sha256 against a hardcoded expectation (fail-closed on
   mismatch, same F5 rule as the HF datasets), and parses it with the `ast`

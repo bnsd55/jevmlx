@@ -238,7 +238,8 @@
   urgency bool, refund_eligible bool, frustration_level 3-level ordinal,
   incident_severity 5-level ordinal, review_sentiment 5-level ordinal).
   The case definitions live in upstream's `bench/cases.py` as Python source
-  importing `von.types`, so the fetcher (`benchmarks/public/jabr.py`)
+  imports a package we do not depend on; we parse the source with
+  `ast`, so the fetcher (`benchmarks/public/jabr.py`)
   downloads the PINNED commit sha from raw.githubusercontent.com, verifies
   its sha256 against a hardcoded expectation (fail-closed on mismatch, same
   F5 rule as the HF datasets), and parses it with the `ast` module — never

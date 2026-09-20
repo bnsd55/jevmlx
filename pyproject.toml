@@ -52,11 +52,6 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 
-[tool.ruff.lint.per-file-ignores]
-# The jabr fixture mimics the upstream bench/cases.py style (Union, import
-# order) — it's test data, not our code.
-"tests/fixtures/jabr/cases_fixture.py" = ["I", "UP007"]
-
 [tool.pytest.ini_options]
 markers = [
     "slow: loads a real model via mlx-lm (deselect with -m 'not slow')",
