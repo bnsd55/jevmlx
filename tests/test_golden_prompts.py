@@ -38,10 +38,10 @@ def test_vectors_exist():
     assert any(n.startswith("qwen2.5__a5339a41") for n in names), names
     assert any(n.startswith("gemma__") for n in names), names
     assert any(n.startswith("qwen3__fake__") for n in names), names
-    cases = ("risk_enum_bool", "risk_enum_bool_labels", "tags_multi")
+    cases = ("risk_enum_bool", "risk_enum_bool_labels", "tags_multi", "tags_multi_labels")
     for case in cases:
         assert sum(1 for n in names if n.endswith(f"__{case}")) == 3, (case, names)
-    assert len(names) == len(VECTORS) == 9
+    assert len(names) == len(VECTORS) == 12
 
 
 def test_every_vector_pins_version_profile_revision():

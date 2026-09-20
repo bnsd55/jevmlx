@@ -98,6 +98,17 @@ CASES: dict[str, dict] = {
         "context": "The applicant disputes one charge.",
         "scoring": "slots",
     },
+    "tags_multi_labels": {
+        "schema": {
+            "tags": {
+                "type": "multi",
+                "description": "observed tags",
+                "choices": ["late_payment", "dispute"],
+            },
+        },
+        "context": "The applicant disputes one charge.",
+        "scoring": "labels",
+    },
 }
 
 # The profiles: engine-resolved from a representative model id. qwen2.5 =

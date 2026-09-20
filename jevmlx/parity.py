@@ -94,6 +94,7 @@ def check_scoring_parity(
     engine: Any,
     cases: list[tuple[str, dict]] | None = None,
     max_rows_options: tuple[int, ...] = (1, 2),
+    scoring: str | None = None,
 ) -> dict[str, Any]:
     """Run batch=1 vs batched vs chunked scoring parity on a loaded engine.
 
@@ -129,10 +130,18 @@ def check_scoring_parity(
     for case_id, preset in cases:
         schema = _make_schema(case_id, preset["schema"])
         context = _case_context(case_id, preset)
-        full = run_parallel_generation(engine, context, schema)
+        full = (
+            run_parallel_generation(engine, context, schema, scoring=scoring)
+            if scoring
+            else run_parallel_generation(engine, context, schema)
+        )
         case_drift = 0.0
         for max_rows in max_rows_options:
-            again = run_parallel_generation(engine, context, schema, max_rows=max_rows)
+            again = (
+                run_parallel_generation(engine, context, schema, max_rows=max_rows, scoring=scoring)
+                if scoring
+                else run_parallel_generation(engine, context, schema, max_rows=max_rows)
+            )
             # Winners must be identical — a different decision is a real bug.
             for fname, entry in full["parsed_json"].items():
                 if again["parsed_json"].get(fname, {}).get("value") != entry["value"]:
@@ -277,6 +286,7 @@ def parity_report(
     model_id: str,
     cases: list[tuple[str, dict]] | None = None,
     max_rows_options: tuple[int, ...] = (1, 2),
+    scoring: str | None = None,
 ) -> dict[str, Any]:
     """The ``parity.json`` payload for a model folder (schema above).
 
@@ -302,7 +312,7 @@ def parity_report(
 
     from jevmlx.engine import INSTABILITY_BAND, PROMPT_VERSION
 
-    result = check_scoring_parity(engine, cases, max_rows_options)
+    result = check_scoring_parity(engine, cases, max_rows_options, scoring=scoring)
     batched = check_batched_parity(engine, cases)
     winners_identical = bool(result["winners_identical"] and batched["winners_identical"])
     # Single-context W1-A drift (the invariant that predates the matrix).
@@ -391,13 +401,14 @@ def write_parity_json(
     model_id: str,
     out_dir: Any,
     cases: list[tuple[str, dict]] | None = None,
+    scoring: str | None = None,
 ) -> dict[str, Any]:
     """Run the parity check and write ``<out_dir>/parity.json``. Returns
     the payload written. The bench calls this right after the engine load;
     ``check_parity`` (PR #29) reads the file back."""
     from pathlib import Path
 
-    payload = parity_report(engine, model_id, cases)
+    payload = parity_report(engine, model_id, cases, scoring=scoring)
     out = Path(out_dir) / "parity.json"
     out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return payload

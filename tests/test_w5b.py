@@ -192,7 +192,7 @@ def test_conditioned_rows_use_header_not_schema_lead_in(row_capture):
             },
         }
     )
-    result = run_parallel_generation(make_engine(model, tok), "ctx", schema)
+    result = run_parallel_generation(make_engine(model, tok), "ctx", schema, scoring="slots")
     assert result["rerun_fields"] == ["cb"]
     # Dependency rows are identifiable by content (the header token 'G').
     dep_rows = [r for call in row_capture for r in call if G in r]
@@ -280,7 +280,7 @@ def test_second_pass_binds_each_field_own_definition():
             "e1": {"type": "enum", "description": "d", "choices": ["X1", "X2"], "depends_on": "pa"},
         }
     )
-    result = run_parallel_generation(make_engine(model, tok), "ctx", schema)
+    result = run_parallel_generation(make_engine(model, tok), "ctx", schema, scoring="slots")
     assert set(result["rerun_fields"]) == {"b1", "e1"}
     b1 = result["parsed_json"]["b1"]["value"]
     assert isinstance(b1, bool), f"boolean child value leaked as {type(b1)}: {b1!r}"
@@ -307,10 +307,20 @@ def test_second_pass_prior_correction_and_temperature():
         }
     )
     r1 = run_parallel_generation(
-        make_engine(model, tok), "ctx", schema, prior_correction=True, temperature=1.0
+        make_engine(model, tok),
+        "ctx",
+        schema,
+        scoring="slots",
+        prior_correction=True,
+        temperature=1.0,
     )
     r2 = run_parallel_generation(
-        make_engine(model, tok), "ctx", schema, prior_correction=True, temperature=2.0
+        make_engine(model, tok),
+        "ctx",
+        schema,
+        scoring="slots",
+        prior_correction=True,
+        temperature=2.0,
     )
     assert r1["rerun_fields"] == ["cb"] and r2["rerun_fields"] == ["cb"]
     # The conditioned winner is the second choice, confidently, at T=1.
@@ -320,7 +330,9 @@ def test_second_pass_prior_correction_and_temperature():
     assert r2["parsed_json"]["cb"]["value"] == "NEWVALUE"
     assert r2["field_telemetry"]["cb"]["probability"] < r1["field_telemetry"]["cb"]["probability"]
     # The prior was actually subtracted: the uncorrected run differs.
-    r0 = run_parallel_generation(make_engine(model, tok), "ctx", schema, prior_correction=False)
+    r0 = run_parallel_generation(
+        make_engine(model, tok), "ctx", schema, scoring="slots", prior_correction=False
+    )
     assert r0["field_telemetry"]["cb"]["log_scores"] != r1["field_telemetry"]["cb"]["log_scores"]
 
 
@@ -396,7 +408,7 @@ def test_dependency_waves_condition_on_updated_parents(row_capture):
     model = RoutingBiasModel()
     tok = BijectiveTokenizer()
     schema = StructuredSchema(_chain_schema())
-    result = run_parallel_generation(make_engine(model, tok), "ctx", schema)
+    result = run_parallel_generation(make_engine(model, tok), "ctx", schema, scoring="slots")
     # cb reruns (evidence tie), flips to NEWVALUE under conditioning; gc must
     # then rerun conditioned on the UPDATED cb — two waves.
     assert set(result["rerun_fields"]) == {"cb", "gc"}

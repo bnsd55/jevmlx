@@ -23,6 +23,13 @@ MODEL_ALIASES: dict[str, str] = {
 #: lighter alternative for latency-sensitive use.
 DEFAULT_MODEL = "quality"
 
+#: The default scoring mode. ``labels`` decides each field by rendering
+#: its options as labeled multi-token phrases and scoring them; ``slots``
+#: scores single-token letter codes (cheaper for very long option lists).
+#: Measured on the 7B (M5): labels field accuracy 0.82 vs slots 0.63 on
+#: typesafe, 0.72 vs 0.61 on bundled, order any-flip 0.03 vs 0.16.
+DEFAULT_SCORING = "labels"
+
 
 def resolve_model(model: str) -> str:
     """Resolve a model alias to a Hugging Face Hub id.

@@ -154,7 +154,7 @@ def test_decide_native_json_shape(fake_engine, preset_files, capsys, tmp_path):
             {
                 "model_revision": "test",
                 "prompt_version": "jevmlx-parallel-v9",
-                "scoring": "slots",
+                "scoring": "labels",
                 "prior_mode": "off",
                 "scalar": {"temperature": 1.0},
                 "multi": {"a": 1.0, "b": 0.0},

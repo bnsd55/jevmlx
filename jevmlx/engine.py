@@ -29,7 +29,7 @@ from jinja2.exceptions import TemplateError
 
 from jevmlx.calibrate import CalibrationBundle
 from jevmlx.constraints import CompiledConstraints
-from jevmlx.models import resolve_model
+from jevmlx.models import DEFAULT_SCORING, resolve_model
 from jevmlx.schema import (
     COUNT_CODES,
     StructuredSchema,
@@ -662,7 +662,7 @@ def _load_calibration(
     calibration: CalibrationBundle | None,
     *,
     temperature: float = 1.0,
-    scoring: str = "slots",
+    scoring: str = DEFAULT_SCORING,
     prior_correction: bool = False,
 ) -> tuple[CalibrationBundle | None, float]:
     """Validate the ``calibration`` bundle against this request (W5-C F22/F3).
@@ -2448,7 +2448,7 @@ def run_parallel_generation(
     schema: StructuredSchema,
     temperature: float = 1.0,
     max_rows: int | None = None,
-    scoring: str = "slots",
+    scoring: str = DEFAULT_SCORING,
     calibration: CalibrationBundle | None = None,
     prior_correction: bool = False,
     constraints: list[dict] | None = None,
@@ -2464,14 +2464,15 @@ def run_parallel_generation(
 
     Scoring modes:
 
-    - ``"slots"`` (default): the prompt lists each field's choices as neutral
+    - ``"labels"`` (default): the trie scores the real choice text.
+    - ``"slots"``: the prompt lists each field's choices as neutral
       aliases (``A) <choice> — <gloss>``); the decision row stays JSON
       (``'  "<field>": '``) and the scored candidates are the QUOTED aliases
       (``"A"``, ``"B"``, ...), read through the same token trie as labels
       mode and mapped back to the real choice strings on assembly. Aliases
       decouple the model's output vocabulary from the choice text: every
-      field scores through short, non-colliding tokens.
-    - ``"labels"``: the trie scores the real choice text (previous default).
+      field scores through short, non-colliding tokens. Cheaper for very
+      long option lists.
 
     Rows are the trie's branch points (one row per node where candidates
     diverge); each node's children are softmaxed over their logits at the
@@ -4152,7 +4153,7 @@ def run_parallel_generation_batched(
     schema: StructuredSchema,
     temperature: float = 1.0,
     max_rows: int | None = None,
-    scoring: str = "slots",
+    scoring: str = DEFAULT_SCORING,
     calibration: CalibrationBundle | None = None,
     prior_correction: bool = False,
     constraints: list[dict] | None = None,

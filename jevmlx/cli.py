@@ -19,7 +19,7 @@ from jevmlx import __version__
 from jevmlx.calibrate import CalibrationBundle
 from jevmlx.lint import lint_schema
 from jevmlx.log import configure
-from jevmlx.models import DEFAULT_MODEL
+from jevmlx.models import DEFAULT_MODEL, DEFAULT_SCORING
 from jevmlx.schema import StructuredSchema
 from jevmlx.serve import (
     DEFAULT_MAX_PROMPT_TOKENS,
@@ -272,10 +272,10 @@ def _dispatch(argv) -> None:
     decide.add_argument(
         "--scoring",
         choices=["slots", "labels"],
-        default="slots",
-        help="scoring mode: slots (neutral aliases in the prompt, quoted "
-        "alias candidates; default) or labels (real choice text through the "
-        "token trie)",
+        default=DEFAULT_SCORING,
+        help="scoring mode: labels (real choice text through the "
+        "token trie; default) or slots (neutral aliases in the prompt, "
+        "quoted alias candidates; cheaper for very long option lists)",
     )
     decide.add_argument(
         "--calibration",
@@ -345,7 +345,7 @@ def _dispatch(argv) -> None:
             "--temperature", type=float, default=1.0, help="softmax temperature (1.0 = raw)"
         )
         p.add_argument(
-            "--scoring", choices=["slots", "labels"], default="slots", help="scoring mode"
+            "--scoring", choices=["slots", "labels"], default=DEFAULT_SCORING, help="scoring mode"
         )
         p.add_argument(
             "--prior-correction",
@@ -476,7 +476,7 @@ def _dispatch(argv) -> None:
     eval_p.add_argument(
         "--scoring",
         choices=["slots", "labels"],
-        default="slots",
+        default=DEFAULT_SCORING,
         help="parallel-track scoring mode (slots = neutral aliases, the "
         "default; labels = real choice text through the token trie)",
     )
