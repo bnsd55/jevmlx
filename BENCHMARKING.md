@@ -61,6 +61,45 @@ each subsequent run starts from a clean combo dir (the prior run's output
 is removed) so only the last run's predictions are kept — 'last one kept'
 semantics, no cross-run contamination.
 
+### Watching a run (W6-UI)
+
+A many-hour bench/m5 run is blind without a watcher. `jevmlx watch` is a
+read-only live dashboard that renders from the files the run already writes —
+the run process is never touched.
+
+```bash
+# Attach to any running or finished output dir:
+jevmlx watch benchmarks/results/<machine>-<model-slug> [--refresh 2]
+
+# Or start the watcher in the same terminal as the bench:
+jevmlx bench --ui --model <model> --out <out-dir> ...
+
+# Web mode: serve the same dashboard as HTML (Chrome auto-reloads):
+jevmlx watch <out-dir> --web [--port 8765] [--no-tty]
+jevmlx bench --ui --web --no-tty --model <model> --out <out-dir> ...
+```
+
+The dashboard shows (top to bottom): the output dir and freeze hash, the
+RUNBOOK step states (✓ done / ▶ running / ○ pending, with wall time), the
+current combo's progress bar (cases done/total, cases/h, ETA, heartbeat
+memory — cache turns red above 10 GB), a live results table with the same
+columns as the README leaderboard (accuracy with Wilson CI, the four
+workflow accuracies, time and cost per case), and the last 8 prediction
+lines. Keys: `q` quit, `p` pause.
+
+Terminal mode is the default. `--web` renders the SAME dashboard to HTML
+via rich's `Console(record=True)` + `export_html(inline_styles=True)` and
+serves it with stdlib `http.server` at `http://127.0.0.1:PORT/` with a
+`<meta http-equiv=refresh>` tag so Chrome reloads by itself; `/dashboard.json`
+returns the raw numbers (progress, memory, table rows) for scripts. No new
+dependency, no JS framework. `--no-tty` runs web only; `--web` without
+`--no-tty` runs both the terminal render and the server.
+
+When run via `bench --ui`, bench stdout goes to `<out>/bench.log` so the
+screen stays clean; on exit the `SUMMARY.md` path is printed. The watcher
+truncates half-written trailing lines (same rule as `--resume`) and shows
+`—` for missing files — it never raises on a parse error.
+
 ## 3. Commit the results folder
 
 ```bash
