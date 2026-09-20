@@ -484,6 +484,7 @@ def run_bench(
     fresh: bool = False,
     load_timeout: float = 900.0,
     metal_cache_gb: float = 8.0,
+    heartbeat_every: int = 25,
 ) -> Path:
     """Run the full bench matrix for one model; returns the results folder.
 
@@ -619,6 +620,8 @@ def run_bench(
                         # --resume applies to the first run only (manifest
                         # present -> resume). Repeat runs are always fresh.
                         resume=_has_manifest and run_index == 0,
+                        heartbeat_every=heartbeat_every,
+                        combo=combo,
                     )
                     print(f"  run {run_index + 1}/{runs} done")
                 assert result is not None
@@ -675,6 +678,7 @@ def run_bench_models(
     fresh: bool = False,
     load_timeout: float = 900.0,
     metal_cache_gb: float = 8.0,
+    heartbeat_every: int = 25,
 ) -> Path:
     """Run the bench matrix for several models, sequentially.
 
@@ -712,6 +716,7 @@ def run_bench_models(
                 fresh=fresh,
                 load_timeout=load_timeout,
                 metal_cache_gb=metal_cache_gb,
+                heartbeat_every=heartbeat_every,
             )
         except SystemExit as exc:
             # run_bench exits 1 only when EVERY of its combos failed.
@@ -747,7 +752,7 @@ def _metal_cache_memory_gb() -> float:
     try:
         import mlx.core as mx
 
-        return round(mx.metal.get_cache_memory() / 2**30, 2)
+        return round(mx.get_cache_memory() / 2**30, 2)
     except Exception:  # noqa: BLE001 - memory logging must never break the run
         return -1.0
 
@@ -757,7 +762,7 @@ def _clear_metal_cache() -> None:
     try:
         import mlx.core as mx
 
-        mx.metal.clear_cache()
+        mx.clear_cache()
     except Exception:  # noqa: BLE001 - cleanup must never break the run
         pass
 
@@ -767,7 +772,7 @@ def _set_metal_cache_limit(cache_gb: float) -> int | None:
 
     The per-combo clear (W5c-13) releases the cache between combos, but
     inside a long combo the Metal allocator hoards freed buffers and pushes
-    the machine into swap. ``mx.metal.set_cache_limit`` makes the allocator
+    the machine into swap. ``mx.set_cache_limit`` makes the allocator
     evict buffers above the cap instead of hoarding — no per-case clear
     needed. Best-effort: a non-Metal build returns None and never raises.
     """
@@ -775,7 +780,7 @@ def _set_metal_cache_limit(cache_gb: float) -> int | None:
         import mlx.core as mx
 
         limit_bytes = int(float(cache_gb) * 2**30)
-        mx.metal.set_cache_limit(limit_bytes)
+        mx.set_cache_limit(limit_bytes)
         return limit_bytes
     except Exception as exc:  # noqa: BLE001 - telemetry must never break the run
         print(
@@ -798,7 +803,7 @@ def _reset_metal_peak_memory() -> None:
     try:
         import mlx.core as mx
 
-        mx.metal.reset_peak_memory()
+        mx.reset_peak_memory()
     except Exception:  # noqa: BLE001 - telemetry must never break the run
         pass
 
@@ -806,10 +811,10 @@ def _reset_metal_peak_memory() -> None:
 def _sample_metal_memory() -> dict[str, int]:
     """Sample the three Metal memory counters (bytes), -1 when unreadable.
 
-    - peak_memory:   mx.metal.get_peak_memory() — the high-water mark since
+    - peak_memory:   mx.get_peak_memory() — the high-water mark since
                       the last reset_peak_memory() (reset at combo start).
-    - active_memory: mx.metal.get_active_memory() — buffers currently held.
-    - cache_memory:  mx.metal.get_cache_memory() — the buffer cache Metal
+    - active_memory: mx.get_active_memory() — buffers currently held.
+    - cache_memory:  mx.get_cache_memory() — the buffer cache Metal
                       keeps after frees (the #79 root cause: not returned to
                       macOS until clear_cache()).
     """
@@ -817,9 +822,9 @@ def _sample_metal_memory() -> dict[str, int]:
     try:
         import mlx.core as mx
 
-        out["peak_memory"] = int(mx.metal.get_peak_memory())
-        out["active_memory"] = int(mx.metal.get_active_memory())
-        out["cache_memory"] = int(mx.metal.get_cache_memory())
+        out["peak_memory"] = int(mx.get_peak_memory())
+        out["active_memory"] = int(mx.get_active_memory())
+        out["cache_memory"] = int(mx.get_cache_memory())
     except Exception:  # noqa: BLE001 - telemetry must never break the run
         pass
     return out
@@ -901,6 +906,8 @@ def _run_one(
     combo_dir: Path,
     dataset_lock_path: Path | None = None,
     resume: bool = False,
+    heartbeat_every: int = 0,
+    combo: str = "",
 ) -> dict:
     """One eval run (in-process) + metrics + report, into combo_dir."""
     cases = _load_cases(jsonl)
@@ -936,6 +943,8 @@ def _run_one(
         # datasets have no meta.consensus and are unaffected.
         carry_consensus=True,
         resume=resume,
+        heartbeat_every=heartbeat_every,
+        combo=combo,
     )
 
     records = load_predictions(combo_dir / "predictions.jsonl")
@@ -1116,6 +1125,16 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--heartbeat-every",
+        type=int,
+        default=25,
+        help=(
+            "print a heartbeat every N completed cases (default 25; 0 disables). "
+            "One line to stdout + one JSON record per heartbeat to "
+            "<combo>/heartbeat.jsonl"
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="print the machine tag, dataset build plan, combo list with output "
@@ -1167,6 +1186,7 @@ def main(argv: list[str] | None = None) -> int:
             fresh=args.fresh,
             load_timeout=args.load_timeout,
             metal_cache_gb=args.metal_cache_gb,
+            heartbeat_every=args.heartbeat_every,
         )
     else:
         run_bench_models(
@@ -1181,6 +1201,7 @@ def main(argv: list[str] | None = None) -> int:
             fresh=args.fresh,
             load_timeout=args.load_timeout,
             metal_cache_gb=args.metal_cache_gb,
+            heartbeat_every=args.heartbeat_every,
         )
     return 0
 

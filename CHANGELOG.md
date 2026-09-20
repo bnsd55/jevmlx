@@ -203,6 +203,14 @@
   not exist raises OSError instead of hashing to null — a missing lock is
   an error, never a silent null.
 
+- **W5c-16 (bench heartbeat + non-deprecated Metal API)** — the per-case
+  eval loop prints `[heartbeat] <combo> cases_done=N pred_lines=M elapsed_s=S
+  peak=X active=Y cache=Z` every N completed cases (`--heartbeat-every`,
+  default 25, 0 disables) and appends the same fields as JSON to
+  `<combo>/heartbeat.jsonl`. The Metal memory API moved to the top-level
+  `mx` names (`mx.set_cache_limit`, `mx.device_info`, etc.) now that mlx
+  0.32 deprecates the `mx.metal.*` aliases.
+
 ## Released
 
 - The engine is an object: `load_engine` returns a frozen `Engine`

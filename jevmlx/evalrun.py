@@ -30,6 +30,7 @@ import logging
 import os
 import random
 import statistics
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -518,6 +519,45 @@ def _field_permutations(field_names: list[str], count: int = 3) -> list[list[str
     return perms
 
 
+def _heartbeat(
+    combo: str,
+    done: int,
+    pred_lines: int,
+    start: float,
+    out_dir: str,
+) -> None:
+    """W5c-16: print + append one heartbeat record for every N completed cases.
+
+    One line to stdout (the same GB formatting as the bench [memory] line,
+    reusing jevmlx.bench._sample_metal_memory + _memory_block_gb) and one
+    JSON object appended to ``<out_dir>/heartbeat.jsonl`` (machine-readable).
+    Best-effort: a Metal read failure yields -1 and never breaks the run.
+    """
+    from jevmlx.bench import _memory_block_gb, _sample_metal_memory
+
+    elapsed = int(time.perf_counter() - start)
+    mem = _sample_metal_memory()
+    print(
+        f"[heartbeat] {combo} cases_done={done} pred_lines={pred_lines} "
+        f"elapsed_s={elapsed} {_memory_block_gb(mem)}",
+        flush=True,
+    )
+    rec = {
+        "combo": combo,
+        "cases_done": done,
+        "pred_lines": pred_lines,
+        "elapsed_s": elapsed,
+        "peak_memory_bytes": mem["peak_memory"],
+        "active_memory_bytes": mem["active_memory"],
+        "cache_memory_bytes": mem["cache_memory"],
+    }
+    try:
+        with open(os.path.join(out_dir, "heartbeat.jsonl"), "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, sort_keys=True) + "\n")
+    except OSError:
+        pass
+
+
 def _schema_variants(
     case: dict, schema: StructuredSchema, mode: str
 ) -> list[tuple[str | None, dict]]:
@@ -561,6 +601,8 @@ def run_eval(
     carry_perturbation: bool = False,
     carry_consensus: bool = False,
     resume: bool = False,
+    heartbeat_every: int = 0,
+    combo: str = "",
 ) -> dict:
     """Run the batch and write ``predictions.jsonl`` + ``run.json`` into out_dir.
 
@@ -703,6 +745,9 @@ def run_eval(
     first_field_telemetry: dict[str, Any] | None = None
     _breaker = CircuitBreaker()
     _circuit_tripped: str | None = None
+    # W5c-16: heartbeat counters (cases committed + run start time).
+    _hb_done = 0
+    _hb_start = time.perf_counter()
     with ResultsLock(out_dir):
         for case in selected:
             schema = StructuredSchema(case["schema"])
@@ -772,6 +817,10 @@ def run_eval(
                             _ckey,
                             variant_lines,
                         )
+                        # W5c-16: heartbeat every N committed cases.
+                        _hb_done += 1
+                        if heartbeat_every and _hb_done % heartbeat_every == 0:
+                            _heartbeat(combo, _hb_done, len(lines), _hb_start, out_dir)
                     else:
                         _errors_path = os.path.join(out_dir, "errors.jsonl")
                         _blob = "".join(
@@ -902,6 +951,10 @@ def run_eval(
                         variant_lines,
                     )
                     lines.extend(variant_lines)
+                    # W5c-16: heartbeat every N committed cases.
+                    _hb_done += 1
+                    if heartbeat_every and _hb_done % heartbeat_every == 0:
+                        _heartbeat(combo, _hb_done, len(lines), _hb_start, out_dir)
 
     config: dict[str, Any] = {
         "model": model,

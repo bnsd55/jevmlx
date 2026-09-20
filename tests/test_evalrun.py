@@ -633,3 +633,106 @@ def test_run_eval_writes_timing_json_for_parallel_track(tmp_path):
         run_id="r-naive",
     )
     assert not (out2 / "timing.json").exists()
+
+
+# --- W5c-16: heartbeat every N completed cases ------------------------------
+
+
+def _n_cases(n: int) -> list[dict]:
+    """N minimal cases for the heartbeat loop (one enum field each)."""
+    return [
+        {
+            "id": f"hb/case-{i}",
+            "group_id": "g1",
+            "source": "quality-eval",
+            "workflow": None,
+            "schema": {
+                "action": {
+                    "type": "enum",
+                    "description": "d",
+                    "choices": ["A", "B"],
+                }
+            },
+            "context": "ctx",
+            "labels": {"action": "A"},
+            "split": "train",
+            "meta": {},
+        }
+        for i in range(n)
+    ]
+
+
+def _hb_decide(s, c):
+    return {
+        "action": {"prediction": "A", "probability": 0.9},
+        "_meta": {"latency_ms": 1.0, "rows": 1, "passes": 1},
+    }
+
+
+class TestHeartbeat:
+    def test_heartbeat_every_2_over_5_cases(self, tmp_path, capsys, monkeypatch):
+        """N=2 over 5 cases: 2 heartbeat lines printed (at case 2 and 4),
+        heartbeat.jsonl has 2 records with the keys."""
+        import mlx.core as mx
+
+        # Stub Metal memory so _heartbeat does not touch the real GPU.
+        monkeypatch.setattr(mx, "get_peak_memory", lambda: 0)
+        monkeypatch.setattr(mx, "get_active_memory", lambda: 0)
+        monkeypatch.setattr(mx, "get_cache_memory", lambda: 0)
+
+        evalrun.run_eval(
+            _n_cases(5),
+            _hb_decide,
+            track="parallel",
+            model="fake/model",
+            out_dir=str(tmp_path),
+            run_id="hb1",
+            heartbeat_every=2,
+            combo="parallel-trie-bundled",
+        )
+        out = capsys.readouterr().out
+        hb_lines = [line for line in out.splitlines() if line.startswith("[heartbeat]")]
+        assert len(hb_lines) == 2, f"expected 2 heartbeats, got {len(hb_lines)}: {hb_lines}"
+        assert "cases_done=2" in hb_lines[0]
+        assert "cases_done=4" in hb_lines[1]
+        assert "parallel-trie-bundled" in hb_lines[0]
+        assert "peak=" in hb_lines[0] and "active=" in hb_lines[0] and "cache=" in hb_lines[0]
+
+        hb_records = [
+            json.loads(line) for line in (tmp_path / "heartbeat.jsonl").read_text().splitlines()
+        ]
+        assert len(hb_records) == 2
+        for rec in hb_records:
+            assert set(rec) == {
+                "combo",
+                "cases_done",
+                "pred_lines",
+                "elapsed_s",
+                "peak_memory_bytes",
+                "active_memory_bytes",
+                "cache_memory_bytes",
+            }
+        assert hb_records[0]["cases_done"] == 2
+        assert hb_records[1]["cases_done"] == 4
+
+    def test_heartbeat_disabled_when_zero(self, tmp_path, capsys, monkeypatch):
+        """N=0: no heartbeat lines, no heartbeat.jsonl."""
+        import mlx.core as mx
+
+        monkeypatch.setattr(mx, "get_peak_memory", lambda: 0)
+        monkeypatch.setattr(mx, "get_active_memory", lambda: 0)
+        monkeypatch.setattr(mx, "get_cache_memory", lambda: 0)
+
+        evalrun.run_eval(
+            _n_cases(5),
+            _hb_decide,
+            track="parallel",
+            model="fake/model",
+            out_dir=str(tmp_path),
+            run_id="hb2",
+            heartbeat_every=0,
+            combo="parallel-trie-bundled",
+        )
+        out = capsys.readouterr().out
+        assert "[heartbeat]" not in out
+        assert not (tmp_path / "heartbeat.jsonl").exists()
