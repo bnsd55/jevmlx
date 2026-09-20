@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- B11: two-stage vs one-stage measurement script for 255-option enums
+  (`benchmarks/two_stage.py`). Measures whether coarse→fine two-stage choice
+  (pick a category group of ~16 from a deterministic partition, then pick
+  within that group) is more accurate or faster than a single trie-constrained
+  pass. Reports top-1 accuracy, wall ms median/p95, prompt tokens, computed
+  positions, and stage-1 error rate. Output: `two_stage.{json,md}` under the
+  probes folder. No engine or API change — benchmark script only.
+
 - B12: TypeScript client for `jevmlx serve` (`@jevmlx/client` in `js/`).
   Zero runtime deps (uses global `fetch`), ESM + CJS via `tsc`, Node 20+.
   `JevmlxClient` with `decide`, `systemOne`, `models`, `health`, `ready`;

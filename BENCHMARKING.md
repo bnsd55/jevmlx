@@ -209,6 +209,11 @@ not validated by the results-check CI job; they document one-off
 diagnostic measurements (batched drift matrix, kernel-shape probes) that
 accompany a PR but are not part of the results ledger.
 
+`benchmarks/two_stage.py` (B11) measures whether coarse→fine two-stage
+choice (pick a category group, then pick within it) is more accurate or
+faster than a single trie-constrained pass on 255-option enums. Output:
+`two_stage.{json,md}` in the same probes folder.
+
 ## PR checklist
 
 - [ ] Folder contains only the bench output (predictions, run.json,
