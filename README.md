@@ -136,6 +136,8 @@ jevmlx serve --model mlx-community/Qwen2.5-1.5B-Instruct-4bit --port 8000
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/decide` | `{"schema": {...}, "context": "...", "temperature": 1.0}` -> the per-field result dict |
+| `POST` | `/v1/systemone` | `{"state": str|object, "questions": {id: {type, instructions, criteria}}}` -> `{model, answers: {id: ChoiceAnswer\|NoulAnswer\|ScoreAnswer}, usage}` (maps questions to one schema, same queue/backpressure as /decide) |
+| `GET` | `/v1/models` | `{"data": [{"id": <resolved model id>, "owned_by": "jevmlx"}]}` (advertises only our model) |
 | `GET` | `/health` | Process liveness (always 200). Carries `queue_depth`, `queue_capacity`, `worker_alive`, `requests_served` |
 | `GET` | `/ready` | `503` until model load + warm-up complete AND the worker is alive, then `200` |
 

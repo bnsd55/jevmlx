@@ -265,6 +265,143 @@ def _request_id(headers) -> str:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# B3: /v1/systemone request adapter
+# ---------------------------------------------------------------------------
+
+
+def _systemone_to_schema(questions: dict) -> dict:
+    """Map a systemone questions block to a jevmlx schema dict.
+
+    choice -> enum with criteria as name->description.
+    noul   -> boolean.
+    score  -> enum ordered=True with criteria order as the level order.
+
+    Raises ValueError with the question id named on an unknown type.
+    """
+    schema: dict[str, dict] = {}
+    for qid, qspec in questions.items():
+        if not isinstance(qspec, dict):
+            raise ValueError(f"question '{qid}' spec must be an object")
+        qtype = qspec.get("type")
+        instructions = qspec.get("instructions", "")
+        criteria = qspec.get("criteria", {})
+        if qtype == "choice":
+            if isinstance(criteria, dict):
+                choices = list(criteria.keys())
+            elif isinstance(criteria, list):
+                choices = list(criteria)
+            else:
+                raise ValueError(f"question '{qid}' criteria must be object or array")
+            schema[qid] = {
+                "type": "enum",
+                "description": instructions,
+                "choices": choices,
+            }
+        elif qtype == "noul":
+            schema[qid] = {
+                "type": "boolean",
+                "description": instructions,
+            }
+        elif qtype == "score":
+            if isinstance(criteria, dict):
+                choices = list(criteria.keys())
+            elif isinstance(criteria, list):
+                choices = list(criteria)
+            else:
+                raise ValueError(f"question '{qid}' criteria must be object or array")
+            schema[qid] = {
+                "type": "enum",
+                "description": instructions,
+                "choices": choices,
+                "ordered": True,
+            }
+        else:
+            raise ValueError(f"question '{qid}' has unknown type: {qtype!r}")
+    return schema
+
+
+def _probability_margin(ft: dict) -> float | None:
+    """top1 - top2 probability from field_telemetry (None if unavailable)."""
+    top = ft.get("top_choices") or []
+    if len(top) >= 2:
+        return top[0].get("probability", 0.0) - top[1].get("probability", 0.0)
+    if len(top) == 1:
+        return top[0].get("probability", 0.0)
+    return ft.get("probability")
+
+
+def _format_systemone_response(
+    result: dict,
+    questions: dict,
+    model_id: str,
+) -> dict:
+    """Build the /v1/systemone response from a decide result.
+
+    choice -> {type:'choice', choice, confidence, probabilities}
+    noul   -> {type:'noul', noul: p_true, confidence}
+    score  -> {type:'score', score: expected_index, argmax_level, probabilities, legend}
+    """
+    field_telemetry = result.get("field_telemetry") or {}
+    parsed_json = result.get("parsed_json") or {}
+    answers: dict[str, dict] = {}
+    for qid, qspec in questions.items():
+        qtype = qspec.get("type")
+        ft = field_telemetry.get(qid, {})
+        parsed = parsed_json.get(qid, {})
+        probs = {tc["choice"]: tc.get("probability", 0.0) for tc in (ft.get("top_choices") or [])}
+        confidence = _probability_margin(ft)
+        if qtype == "choice":
+            answers[qid] = {
+                "type": "choice",
+                "choice": parsed.get("value"),
+                "confidence": confidence,
+                "probabilities": probs,
+            }
+        elif qtype == "noul":
+            # p_true: probability that the boolean is True.
+            p_true = 0.0
+            if "true" in probs:
+                p_true = probs["true"]
+            elif ft.get("value") is True:
+                p_true = ft.get("probability", 0.0)
+            else:
+                p_true = probs.get("true", 0.0)
+            answers[qid] = {
+                "type": "noul",
+                "noul": p_true,
+                "confidence": confidence,
+            }
+        elif qtype == "score":
+            criteria = qspec.get("criteria", {})
+            if isinstance(criteria, dict):
+                levels = list(criteria.keys())
+            else:
+                levels = list(criteria)
+            legend = {str(i): levels[i] for i in range(len(levels))}
+            argmax_level = parsed.get("value")
+            # expected_index = sum(i * p_i) over the ordered levels.
+            expected_index = 0.0
+            for i, level in enumerate(levels):
+                expected_index += i * probs.get(level, 0.0)
+            answers[qid] = {
+                "type": "score",
+                "score": expected_index,
+                "argmax_level": argmax_level,
+                "probabilities": probs,
+                "legend": legend,
+            }
+    usage = {
+        "prompt_tokens": result.get("computed_prompt_token_positions"),
+        "computed_positions": result.get("computed_suffix_token_positions"),
+    }
+    return {
+        "model": model_id,
+        "answers": answers,
+        "usage": usage,
+    }
+
+
 def make_handler(
     decide_fn: Callable[[dict, str, float | None], dict],
     model_id: str,
@@ -382,6 +519,12 @@ def make_handler(
                         "queue_capacity": admission_queue.capacity,
                     },
                 )
+            elif self.path == "/v1/models":
+                # B3: advertise only our resolved model id.
+                self._send(
+                    200,
+                    {"data": [{"id": model_id, "owned_by": "jevmlx"}]},
+                )
             elif self.path == "/ready":
                 # /ready = 503 until model load + warm-up complete AND the
                 # worker is alive, then 200.
@@ -392,14 +535,129 @@ def make_handler(
             else:
                 self._send(404, {"error": "not found"})
 
+        def _run_through_queue(
+            self, schema_dict: dict, context: str, temperature: float | None = 1.0
+        ) -> tuple[int, dict]:
+            """Shared path: admit, queue, wait for the serial worker, handle
+            errors. Returns (status_code, response_body). Both /decide and
+            /v1/systemone call this so backpressure is identical."""
+            # N2: 503 before touching the queue during warm-up.
+            if not stats.ready:
+                return 503, {"error": "server is warming up", "ready": False}
+            # Hard admission limits (413).
+            try:
+                _admit(schema_dict, context)
+            except AdmissionError as e:
+                return 413, {
+                    "error": str(e),
+                    "limit": e.limit,
+                    "value": e.value,
+                    "ceiling": e.ceiling,
+                }
+            cancel_event = threading.Event()
+            result_event = threading.Event()
+            request = {
+                "schema_dict": schema_dict,
+                "context": context,
+                "temperature": temperature,
+                "decide_fn": decide_fn,
+                "cancel_event": cancel_event,
+                "result_event": result_event,
+                "result": None,
+                "error": None,
+            }
+            if not admission_queue.submit(request):
+                return 429, {
+                    "error": "admission queue full",
+                    "queue_depth": admission_queue.depth,
+                    "queue_capacity": admission_queue.capacity,
+                    "retry_after_s": RETRY_AFTER_SECONDS,
+                }
+            # Wait for the worker, watching for client disconnect.
+            while not result_event.wait(timeout=0.5):
+                if self._client_gone():
+                    cancel_event.set()
+                    admission_queue.mark_cancelled(request)
+                    return 444, {"error": "client disconnected"}
+            err = request["error"]
+            if err is not None:
+                if isinstance(err, _NotReadyError):
+                    return 503, {"error": "server is warming up", "ready": False}
+                if isinstance(err, ValueError):
+                    return 400, {"error": str(err)}
+                if isinstance(err, AdmissionError):
+                    return 413, {
+                        "error": str(err),
+                        "limit": err.limit,
+                        "value": err.value,
+                        "ceiling": err.ceiling,
+                    }
+                logger.exception("decide failed", exc_info=err)
+                first_line = str(err).splitlines() or [type(err).__name__]
+                return 500, {"error": first_line[0]}
+            result = dict(request["result"] or {})
+            result["queue_depth"] = admission_queue.depth
+            result["queue_wait_ms"] = request["queue_wait_ms"]
+            result["request_id"] = self._rid
+            stats.record_served()
+            return 200, result
+
+        def _handle_systemone(self) -> None:
+            """POST /v1/systemone: map to ONE schema, run through the same
+            queue as /decide, format the systemone response."""
+            if not stats.ready:
+                self._send(503, {"error": "server is warming up", "ready": False})
+                return
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                questions = payload["questions"]
+                state = payload.get("state", "")
+                temperature = payload.get("temperature", 1.0)
+            except (json.JSONDecodeError, KeyError) as e:
+                self._send(400, {"error": f"bad request: {e}"})
+                return
+            if not isinstance(questions, dict):
+                self._send(400, {"error": "questions must be a JSON object"})
+                return
+            # Map questions -> schema. ValueError names the bad question id.
+            try:
+                schema_dict = _systemone_to_schema(questions)
+            except ValueError as e:
+                self._send(400, {"error": str(e)})
+                return
+            # state object -> json.dumps(indent=2) as context.
+            if isinstance(state, (dict, list)):
+                context = json.dumps(state, indent=2)
+            elif isinstance(state, str):
+                context = state
+            else:
+                self._send(400, {"error": "state must be a string or object"})
+                return
+            code, result = self._run_through_queue(schema_dict, context, temperature)
+            if code != 200:
+                # 429 carries Retry-After.
+                if code == 429:
+                    self._send(
+                        code, result, extra_headers={"Retry-After": str(RETRY_AFTER_SECONDS)}
+                    )
+                else:
+                    self._send(code, result)
+                return
+            response = _format_systemone_response(result, questions, model_id)
+            logger.info("POST /v1/systemone 200", extra={"elapsed_ms": result.get("elapsed_ms")})
+            self._send(200, response)
+
         def do_POST(self) -> None:
             self._rid = _request_id(self.headers)
+            if self.path == "/v1/systemone":
+                self._handle_systemone()
+                return
             if self.path != "/decide":
                 self._send(404, {"error": "not found"})
                 return
             # N2: during warm-up, return 503 BEFORE touching the admission
-            # queue (the placeholder decide_fn raises _NotReadyError, but we
-            # short-circuit here so no queue slot is consumed).
+            # queue.
             if not stats.ready:
                 self._send(503, {"error": "server is warming up", "ready": False})
                 return
@@ -414,8 +672,7 @@ def make_handler(
                 return
 
             # N7: validate types — schema must be a dict, context must be a
-            # str. A non-string context (e.g. 5) would crash the tokenizer;
-            # a non-dict schema (e.g. []) would crash _count_rows.
+            # str.
             if not isinstance(schema_dict, dict):
                 self._send(400, {"error": "schema must be a JSON object"})
                 return
@@ -423,86 +680,20 @@ def make_handler(
                 self._send(400, {"error": "context must be a string"})
                 return
 
-            # Hard admission limits (413) — before queueing. _count_rows is
-            # O(schema) arithmetic and never raises; schema validation happens
-            # inside the worker (StructuredSchema) and maps to 400 there.
-            try:
-                _admit(schema_dict, context)
-            except AdmissionError as e:
-                self._send_413(e)
-                return
-
-            # Bounded admission queue (429 on full).
-            cancel_event = threading.Event()
-            result_event = threading.Event()
-            request = {
-                "schema_dict": schema_dict,
-                "context": context,
-                "temperature": temperature,
-                "decide_fn": decide_fn,
-                "cancel_event": cancel_event,
-                "result_event": result_event,
-                "result": None,
-                "error": None,
-            }
-            if not admission_queue.submit(request):
-                self._send_429()
-                return
-            # N3: queue_wait_ms is stamped by the WORKER when it picks the
-            # request up (request["queue_wait_ms"]), not measured here at
-            # submit time (a request that waited 1 s reported 0.0 before).
-            # Fall back to the submit-time delta if the worker hasn't stamped
-            # it yet (e.g. immediate pickup race).
-
-            # Wait for the worker, but watch for client disconnect (B7 item 6).
-            # HTTP/1.0: the client connection is the request's lifetime; if
-            # urlopen raises (client gone), this thread sets the cancel event
-            # and exits — the worker skips the forward (B1: the slot is freed
-            # when the worker pops the cancelled entry).
-            # B1 strict: mark_cancelled removes the entry from depth so a live
-            # client behind it is admitted immediately.
-            while not result_event.wait(timeout=0.5):
-                if self._client_gone():
-                    cancel_event.set()
-                    admission_queue.mark_cancelled(request)
-                    return
-
-            # Result is ready (or the worker ran despite a late disconnect).
-            err = request["error"]
-            if err is not None:
-                if isinstance(err, _NotReadyError):
-                    # N2: during warm-up, /decide returns 503, not 200.
-                    self._send(503, {"error": "server is warming up", "ready": False})
-                    return
-                if isinstance(err, ValueError):
-                    self._send(400, {"error": str(err)})
-                    return
-                if isinstance(err, AdmissionError):
-                    self._send_413(err)
-                    return
-                # M5: any other exception from decide_fn is a 500 to THIS
-                # request; the worker caught it and continued.
-                logger.exception("decide failed", exc_info=err)
-                first_line = str(err).splitlines() or [type(err).__name__]
-                self._send(500, {"error": first_line[0]})
-                return
-
-            result = request["result"] or {}
-            result = dict(result)
-            result["queue_depth"] = admission_queue.depth
-            # N3: the worker stamps queue_wait_ms at pickup. No fallback — if
-            # the worker didn't stamp it, the request never ran.
-            result["queue_wait_ms"] = request["queue_wait_ms"]
-            result["request_id"] = self._rid
-            stats.record_served()
-            logger.info(
-                "POST /decide 200",
-                extra={
-                    "elapsed_ms": result.get("elapsed_ms"),
-                    "queue_wait_ms": result.get("queue_wait_ms"),
-                },
-            )
-            self._send(200, result)
+            code, result = self._run_through_queue(schema_dict, context, temperature)
+            if code == 429:
+                self._send(code, result, extra_headers={"Retry-After": str(RETRY_AFTER_SECONDS)})
+            elif code != 200:
+                self._send(code, result)
+            else:
+                logger.info(
+                    "POST /decide 200",
+                    extra={
+                        "elapsed_ms": result.get("elapsed_ms"),
+                        "queue_wait_ms": result.get("queue_wait_ms"),
+                    },
+                )
+                self._send(200, result)
 
         def _client_gone(self) -> bool:
             """Detect a disconnected client via select (no byte stealing).
