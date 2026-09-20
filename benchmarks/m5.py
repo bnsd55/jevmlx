@@ -525,6 +525,14 @@ def collect_side(side_dir: Path) -> dict:
         "combos": combos,
         "invariance": invariance_rollup(_load_json(side_dir / "invariance" / "invariance.json")),
     }
+    # P4/I7: parity status word (PASS / DRIFT / FAIL) from parity.json.
+    parity_path = side_dir / "parity.json"
+    if parity_path.exists():
+        parity = _load_json(parity_path) or {}
+        block["parity_status"] = parity.get(
+            "status", "FAIL" if not parity.get("passed") else "PASS"
+        )
+        block["parity_passed"] = parity.get("passed", False)
     timing_reports = sorted(side_dir.glob("timing-*.json"))
     if timing_reports:
         report = _load_json(timing_reports[0]) or {}
@@ -586,6 +594,7 @@ def build_summary_text(main: dict, ab: dict | None, *, parity_models: list[str])
         "# M5 runbook summary",
         "",
         f"- parity models: {', '.join(parity_models) or '-'}",
+        f"- parity status: {main.get('parity_status', '-')}",
         "",
         "## Main — bench combos",
         "",

@@ -406,6 +406,89 @@ class TestParityGate:
         assert not ok
         assert any("unreadable" in p for p in problems)
 
+    def test_drift_status_prints_drift_word(self, tmp_path):
+        """P4/I7: a parity.json with status=DRIFT (drift >= atol, winners
+        identical, inside envelope band) prints 'DRIFT: ...' and passed
+        stays False."""
+        from benchmarks.check_results import check_parity
+
+        (tmp_path / "parity.json").write_text(
+            json.dumps(
+                {
+                    "model": "m",
+                    "test": "w1a",
+                    "passed": False,
+                    "status": "DRIFT",
+                    "max_abs_drift_nats": 0.051,
+                    "max_raw_row_drift_nats": 0.03,
+                    "max_gap_drift_nats": 0.051,
+                    "max_margin_drift_nats": 0.051,
+                    "winners_identical": True,
+                    "atol": 0.05,
+                    "drift_envelope": {"band": 0.141, "shape_bucket": "M>16"},
+                    "run_at": "2026-09-20T12:00:00Z",
+                }
+            )
+        )
+        ok, problems = check_parity(tmp_path)
+        assert not ok  # passed is False for DRIFT
+        msg = problems[0]
+        assert "DRIFT:" in msg
+        assert "winners identical" in msg
+        assert "envelope band 0.141" in msg
+
+    def test_fail_status_prints_fail_word(self, tmp_path):
+        """P4/I7: a parity.json with a winner changed (status=FAIL) prints
+        'FAIL: ...' not 'DRIFT: ...'."""
+        from benchmarks.check_results import check_parity
+
+        (tmp_path / "parity.json").write_text(
+            json.dumps(
+                {
+                    "model": "m",
+                    "test": "w1a",
+                    "passed": False,
+                    "status": "FAIL",
+                    "max_abs_drift_nats": 0.15,
+                    "max_raw_row_drift_nats": 0.02,
+                    "max_gap_drift_nats": 0.15,
+                    "max_margin_drift_nats": 0.15,
+                    "winners_identical": False,
+                    "atol": 0.05,
+                    "run_at": "2026-09-20T12:00:00Z",
+                }
+            )
+        )
+        ok, problems = check_parity(tmp_path)
+        assert not ok
+        msg = problems[0]
+        assert "FAIL:" in msg
+        assert "DRIFT:" not in msg
+
+    def test_pass_status_passes(self, tmp_path):
+        """P4/I7: a parity.json with status=PASS passes check_parity."""
+        from benchmarks.check_results import check_parity
+
+        (tmp_path / "parity.json").write_text(
+            json.dumps(
+                {
+                    "model": "m",
+                    "test": "w1a",
+                    "passed": True,
+                    "status": "PASS",
+                    "max_abs_drift_nats": 0.02,
+                    "max_raw_row_drift_nats": 0.03,
+                    "max_gap_drift_nats": 0.01,
+                    "max_margin_drift_nats": 0.01,
+                    "winners_identical": True,
+                    "atol": 0.05,
+                    "run_at": "2026-09-20T12:00:00Z",
+                }
+            )
+        )
+        ok, problems = check_parity(tmp_path)
+        assert ok
+
     def test_leaderboard_excludes_model_without_parity(self, tmp_path):
         """_local_rows skips a model folder that has no parity.json."""
         from benchmarks.leaderboard import _local_rows

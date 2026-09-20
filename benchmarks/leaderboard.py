@@ -78,10 +78,11 @@ _LOCAL_GROUPS = {
 }
 
 _HEADER = (
-    "| Model | Source | Scorer | Machine | Accuracy | Customer service | "
+    "| Model | Source | Scorer | Machine | Accuracy | Parity | "
+    "Customer service | "
     "Agent trace | Security | Invoices | Time per case | Cost per case | Cases |"
 )
-_SEP = "|---|---|---|---|---|---|---|---|---|---|---|---|"
+_SEP = "|---|---|---|---|---|---|---|---|---|---|---|---|---|"
 
 # W6-B1: jabr has its OWN table (different columns: 8 task accuracies).
 # The TypeSafe table and the jabr table are separate markdown blocks so
@@ -261,6 +262,9 @@ def _local_rows(results_root: Path) -> list[dict]:
             continue
         if not parity.get("passed"):
             continue
+        # P4/I7: the status word (PASS for leaderboard rows — DRIFT/FAIL
+        # models are excluded by the passed gate above).
+        parity_status = parity.get("status", "PASS")
         for combo in sorted(p for p in machine_dir.iterdir() if p.is_dir()):
             report_path = combo / "report.json"
             if not report_path.exists():
@@ -323,6 +327,7 @@ def _local_rows(results_root: Path) -> list[dict]:
                     "source": "local",
                     "scorer": scorer,
                     "machine": machine,
+                    "parity_status": parity_status,
                     "accuracy": agreement,
                     # W6-B6b/F1: Wilson CI on the agreement accuracy.
                     "accuracy_ci": _agreement_ci(
@@ -389,6 +394,7 @@ def _row_line(r: dict) -> str:
     return (
         f"| {r['model']} | {r['source']} | {r.get('scorer', '—')} | "
         f"{r.get('machine', '—')} | {_fmt_pct_with_ci(r.get('accuracy'), r.get('accuracy_ci'))} | "
+        f"{r.get('parity_status', '—')} | "
         f"{' | '.join(wf_cells)} | "
         f"{_fmt_seconds(r.get('time_per_case_s'))} | "
         f"{cost_cell} | "
@@ -432,7 +438,7 @@ def build_table(
     # Group A: TypeSafe official (cited).
     if official_models:
         lines.append(
-            f"| **TypeSafe official (cited, retrieved {retrieved})** | | | | | | | | | | | |"
+            f"| **TypeSafe official (cited, retrieved {retrieved})** | | | | | | | | | | | | |"
         )
         for m in official_models:
             bw = m.get("by_workflow", {}) or {}
@@ -494,7 +500,7 @@ def build_table(
             continue  # jabr gets its own table below (different columns)
         group = [r for r in local_rows if r.get("dataset") == dataset_name]
         if group:
-            lines.append(f"| **{title}** | | | | | | | | | | | |")
+            lines.append(f"| **{title}** | | | | | | | | | | | | |")
             lines.extend(_row_line(r) for r in group)
 
     # W6-B1: jabr table — separate block with 8 per-task accuracy columns.
