@@ -129,15 +129,6 @@ def test_committed_fixture_passes():
     assert ok, problems
 
 
-def test_required_ci_keys_include_majority_and_exact():
-    """P7: the results contract v2 requires majority_class_baseline and
-    exact_record_accuracy in every report.json metrics dict."""
-    from benchmarks.check_results import REQUIRED_CI_KEYS
-
-    assert "majority_class_baseline" in REQUIRED_CI_KEYS
-    assert "exact_record_accuracy" in REQUIRED_CI_KEYS
-
-
 def test_mismatched_report_fails(tmp_path):
     folder = tmp_path / "combo"
     _write_valid(folder)

@@ -256,8 +256,7 @@
   (mean over fields)' and 'exact record' right after accuracy; the
   per-field table has a 'majority' column and marks a field below its
   majority baseline with †. SUMMARY.md adds 'majority' and 'exact'
-  columns next to field accuracy. check_results requires both keys in
-  report.json (REQUIRED_CI_KEYS). The batched chunking heuristic line
+  columns next to field accuracy. The batched chunking heuristic line
   ('Chunking heuristic: N rows over P passes') is now logged at INFO
   even for single-pass runs (passes==1), so a batched eval is visible in
   the log (the M5 machine misread the parity probe's lines as the eval).

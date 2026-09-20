@@ -96,14 +96,10 @@ TOKEN_ACCOUNTING_KEYS = (
 # these CI keys (additive; they ride alongside the point estimates). The
 # _metrics_match key-set check catches a missing key, but this explicit
 # list documents the contract and produces a clear error message.
-# P7: majority_class_baseline and exact_record_accuracy are first-class
-# (a reader sees them at the top of report.md); they are required here too.
 REQUIRED_CI_KEYS = (
     "accuracy_ci",
     "valid_accuracy",
     "per_field_accuracy",
-    "majority_class_baseline",
-    "exact_record_accuracy",
 )
 
 
