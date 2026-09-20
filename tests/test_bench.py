@@ -448,7 +448,12 @@ def test_parse_models_file_empty_raises(tmp_path):
 
 
 def test_bench_main_models_file_wiring(tmp_path, monkeypatch):
-    """--models-file overrides --model and reaches run_bench_models."""
+    """--models-file (alone, mutually exclusive with --model) reaches
+    run_bench_models with the file's model list.
+
+    B1: --model and --models-file are now mutually exclusive (exactly one
+    required). The old behavior (both allowed, --models-file overrode
+    --model) is gone; this test passes --models-file alone."""
     from jevmlx import bench
 
     _patch_bench_core(monkeypatch, tmp_path)
@@ -463,8 +468,6 @@ def test_bench_main_models_file_wiring(tmp_path, monkeypatch):
     models_file.write_text("m/a\nm/b\n", encoding="utf-8")
     rc = bench.main(
         [
-            "--model",
-            "ignored",
             "--models-file",
             str(models_file),
             "--datasets",

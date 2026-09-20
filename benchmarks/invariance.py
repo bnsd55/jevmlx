@@ -574,7 +574,9 @@ def _load_cases(path: str) -> list[dict]:
     return cases
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The invariance CLI parser (exposed for parse-only tests; see
+    tests/test_m5_e2e.py TestPlannedArgvParses)."""
     parser = argparse.ArgumentParser(
         prog="python -m benchmarks.invariance",
         description="Irrelevant-field invariance benchmark (W2-A gate).",
@@ -585,6 +587,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--extra", default="1,5,20,40", help="comma list of extra-field counts")
     parser.add_argument("--scoring", default="slots", choices=["slots", "labels"])
     parser.add_argument("--limit", type=int, default=None, help="cap cases (smoke runs)")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
     args = parser.parse_args(argv)
 
     extra_counts = [int(x) for x in args.extra.split(",") if x.strip()]

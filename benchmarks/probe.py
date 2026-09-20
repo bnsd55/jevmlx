@@ -189,7 +189,9 @@ def adapters_table_lines(result: dict) -> list[str]:
     return lines
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The probe CLI parser (exposed for parse-only tests; see
+    tests/test_m5_e2e.py TestPlannedArgvParses)."""
     parser = argparse.ArgumentParser(
         prog="python -m benchmarks.probe",
         description="W6-2 prep: memory slope probe + adapter parity probe.",
@@ -204,6 +206,11 @@ def main(argv: list[str] | None = None) -> int:
         default="both",
         help="which probe to run",
     )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
     args = parser.parse_args(argv)
 
     from jevmlx.engine import load_engine

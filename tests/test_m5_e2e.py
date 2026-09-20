@@ -763,6 +763,107 @@ class TestFmtCoverageOnRealArtifacts:
             )
 
 
+class TestPlannedArgvParses:
+    """B1 ROOT-CAUSE guard: every argv that benchmarks/m5.py plan_steps builds
+    for OUR OWN CLI/module must parse against the REAL argparse — parse-only,
+    no execution.
+
+    The old e2e test faked subprocess.run and never validated argv, so a CLI
+    contract break (``bench --models-file`` requiring ``--model``) passed the
+    e2e test and only failed in the field (M5 full list, 9d4ddbc). This class
+    catches that class of bug in seconds, offline.
+    """
+
+    @staticmethod
+    def _parse_planned_argv(argv: tuple[str, ...]) -> None:
+        """Parse one planned step's argv against the real parser for its
+        target CLI/module. Raises (SystemExit from argparse) if the argv
+        does not parse — the failure mode that escaped the old e2e.
+
+        argv[0] is the interpreter/binary path; we key on basename + the
+        subcommand (``jevmlx <cmd>`` or ``python -m benchmarks.<mod>``).
+        """
+        bin0 = argv[0].split("/")[-1]
+        submod = argv[2] if len(argv) > 2 and argv[1] == "-m" else ""
+        rest = list(argv[1:])
+
+        # jevmlx <subcommand> ... -> jevmlx.cli.build_parser()
+        if bin0 == "jevmlx":
+            from jevmlx.cli import build_parser
+
+            build_parser().parse_args(rest)
+            return
+        # python -m benchmarks.<module> ... -> that module's build_parser().
+        # Every benchmarks.<x> module m5 shells out to exposes build_parser()
+        # so the parse-only guard validates the REAL parser, not a duplicate.
+        if submod.startswith("benchmarks."):
+            import importlib
+
+            mod = importlib.import_module(submod)
+            assert hasattr(mod, "build_parser"), (
+                f"{submod} has no build_parser() — expose it so the planned "
+                "argv is validated against the real parser, not a duplicate"
+            )
+            mod.build_parser().parse_args(rest[2:])  # drop '-m benchmarks.<mod>'
+            return
+        # Not our CLI (git, pytest, uv): skip.
+
+    def test_every_planned_step_argv_parses(self, tmp_path):
+        """Every Step.argv (and pre_argv / extra_argv) that targets our CLI
+        or a benchmarks.* module parses against the real argparse."""
+        out = tmp_path / "run"
+        out.mkdir()  # plan_steps writes models-rest.txt into <out>
+        steps = plan_steps(
+            out,
+            parity_models=[QUALITY_TARGET, REST_MODEL],
+            ab_branch=None,
+            probe=True,
+        )
+        assert steps, "plan_steps returned no steps"
+        parsed_any = False
+        for step in steps:
+            for argv in (step.argv, step.pre_argv, *(step.extra_argv or ())):
+                if not argv:
+                    continue
+                bin0 = argv[0].split("/")[-1]
+                submod = argv[2] if len(argv) > 2 and argv[1] == "-m" else ""
+                is_ours = bin0 == "jevmlx" or submod.startswith("benchmarks.")
+                if not is_ours:
+                    continue
+                parsed_any = True
+                self._parse_planned_argv(argv)  # raises if it doesn't parse
+        assert parsed_any, "no jevmlx/benchmarks.* argv was checked"
+
+    def test_bench_models_file_alone_parses(self):
+        """B1 fix: ``jevmlx bench --models-file <f>`` no longer requires --model."""
+        from jevmlx.cli import build_parser
+
+        ns = build_parser().parse_args(["bench", "--models-file", "/tmp/m.txt", "--out", "/tmp/o"])
+        assert ns.models_file == "/tmp/m.txt"
+        assert ns.model is None
+
+    def test_bench_model_alone_parses(self):
+        from jevmlx.cli import build_parser
+
+        ns = build_parser().parse_args(["bench", "--model", "quality", "--out", "/tmp/o"])
+        assert ns.model == "quality"
+        assert ns.models_file is None
+
+    def test_bench_model_and_models_file_mutually_exclusive(self):
+        from jevmlx.cli import build_parser
+
+        with pytest.raises(SystemExit):
+            build_parser().parse_args(
+                ["bench", "--model", "quality", "--models-file", "/tmp/m.txt", "--out", "/tmp/o"]
+            )
+
+    def test_bench_requires_one_of_model_or_models_file(self):
+        from jevmlx.cli import build_parser
+
+        with pytest.raises(SystemExit):
+            build_parser().parse_args(["bench", "--out", "/tmp/o"])
+
+
 class TestM5MainEndToEnd:
     """benchmarks.m5.main() end to end: subprocess.run monkeypatched to a
     fake runner that produces each step's REAL outputs (via the builders

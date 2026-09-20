@@ -1145,19 +1145,26 @@ def dry_run(
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The ``jevmlx bench`` standalone parser (the inner parser the top-level
+    ``jevmlx`` cli delegates to). Exposed for parse-only tests; see
+    tests/test_m5_e2e.py TestPlannedArgvParses."""
     parser = argparse.ArgumentParser(
         prog="jevmlx bench",
         description="One command: complete PR-ready benchmark results folder.",
     )
-    parser.add_argument(
+    # B1: --model and --models-file are mutually exclusive; exactly one is
+    # required (the old code had --model required=True, so --models-file
+    # alone exited 2).
+    _bench_model_group = parser.add_mutually_exclusive_group(required=True)
+    _bench_model_group.add_argument(
         "--model",
-        required=True,
+        default=None,
         help="Hugging Face model id(s) for mlx-lm; comma-separated list runs "
         "them sequentially, each into its own <machine>-<slug>/ folder, one "
         "SUMMARY.md across all",
     )
-    parser.add_argument(
+    _bench_model_group.add_argument(
         "--models-file",
         default=None,
         help="path to a file with one model id per line ('#' comments allowed); overrides --model",
@@ -1219,6 +1226,11 @@ def main(argv: list[str] | None = None) -> int:
         help="print the machine tag, dataset build plan, combo list with output "
         "folders, and a memory estimate per model, then exit without loading anything",
     )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
     args = parser.parse_args(argv)
 
     if args.models_file:
