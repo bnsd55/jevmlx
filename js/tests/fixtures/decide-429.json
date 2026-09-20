@@ -1,0 +1,17 @@
+{
+  "status": 429,
+  "headers": {
+    "Server": "BaseHTTP/0.6 Python/3.12.9",
+    "Date": "Sun, 20 Sep 2026 10:57:48 GMT",
+    "Content-Type": "application/json",
+    "Content-Length": "92",
+    "X-Request-Id": "jev-b63c46c4afbf",
+    "Retry-After": "2"
+  },
+  "body": {
+    "error": "admission queue full",
+    "queue_depth": 1,
+    "queue_capacity": 1,
+    "retry_after_s": 2
+  }
+}

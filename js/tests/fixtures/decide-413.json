@@ -1,0 +1,16 @@
+{
+  "status": 413,
+  "headers": {
+    "Server": "BaseHTTP/0.6 Python/3.12.9",
+    "Date": "Sun, 20 Sep 2026 10:57:48 GMT",
+    "Content-Type": "application/json",
+    "Content-Length": "94",
+    "X-Request-Id": "jev-9a13045e10d6"
+  },
+  "body": {
+    "error": "too many scoring rows: 1 > limit 0",
+    "limit": "max_rows",
+    "value": 1,
+    "ceiling": 0
+  }
+}

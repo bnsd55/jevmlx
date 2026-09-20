@@ -1,0 +1,18 @@
+{
+  "status": 200,
+  "headers": {
+    "Server": "BaseHTTP/0.6 Python/3.12.9",
+    "Date": "Sun, 20 Sep 2026 10:57:46 GMT",
+    "Content-Type": "application/json",
+    "Content-Length": "48",
+    "X-Request-Id": "jev-6f9d6f94a0fb"
+  },
+  "body": {
+    "data": [
+      {
+        "id": "fake",
+        "owned_by": "jevmlx"
+      }
+    ]
+  }
+}
