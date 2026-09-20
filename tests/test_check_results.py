@@ -129,6 +129,15 @@ def test_committed_fixture_passes():
     assert ok, problems
 
 
+def test_required_ci_keys_include_majority_and_exact():
+    """P7: the results contract v2 requires majority_class_baseline and
+    exact_record_accuracy in every report.json metrics dict."""
+    from benchmarks.check_results import REQUIRED_CI_KEYS
+
+    assert "majority_class_baseline" in REQUIRED_CI_KEYS
+    assert "exact_record_accuracy" in REQUIRED_CI_KEYS
+
+
 def test_mismatched_report_fails(tmp_path):
     folder = tmp_path / "combo"
     _write_valid(folder)
@@ -200,6 +209,23 @@ def test_main_exits_0_on_success(tmp_path, capsys):
     captured = capsys.readouterr()
     assert rc == 0
     assert "OK" in captured.out
+
+
+def test_summary_row_has_majority_and_exact_columns(tmp_path):
+    """P7: SUMMARY.md rows carry 'majority' (mean over fields) and 'exact'
+    columns next to field accuracy."""
+    from benchmarks.summarize_results import _row_from_folder
+
+    folder = tmp_path / "combo"
+    _write_valid(folder)
+    row = _row_from_folder(folder)
+    assert row is not None
+    assert "majority_baseline" in row
+    assert "exact_record" in row
+    # Both are numeric (compute_metrics always produces them for labelled
+    # records).
+    assert row["majority_baseline"] is not None
+    assert row["exact_record"] is not None
 
 
 def test_imports_without_mlx(monkeypatch):

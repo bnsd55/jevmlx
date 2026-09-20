@@ -251,6 +251,17 @@
   accuracy, and the leaderboard renders a separate jabr table with 8
   per-task accuracy columns. CC0 clears redistribution (unlike the HF
   datasets whose text stays in the uncommitted cache).
+- P7: majority baseline and exact-record accuracy are first-class in
+  report.md and SUMMARY.md. The metrics table shows 'majority baseline
+  (mean over fields)' and 'exact record' right after accuracy; the
+  per-field table has a 'majority' column and marks a field below its
+  majority baseline with †. SUMMARY.md adds 'majority' and 'exact'
+  columns next to field accuracy. check_results requires both keys in
+  report.json (REQUIRED_CI_KEYS). The batched chunking heuristic line
+  ('Chunking heuristic: N rows over P passes') is now logged at INFO
+  even for single-pass runs (passes==1), so a batched eval is visible in
+  the log (the M5 machine misread the parity probe's lines as the eval).
+  No engine logic change.
 
 ## Released
 

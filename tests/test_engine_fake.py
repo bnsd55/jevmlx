@@ -958,3 +958,24 @@ def test_near_tie_multi_option_rescored_at_batch1():
     }
     assert result["parsed_json"]["tags"]["value"] == []
     assert all(p < 0.5 for p in result["field_telemetry"]["tags"]["per_option"].values())
+
+
+def test_chunking_heuristic_logged_at_info_even_for_single_pass(caplog):
+    """P7/I3: the 'Chunking heuristic' line is logged at INFO even when
+    passes==1 (single-pass batched run). The M5 machine misread the parity
+    probe's lines as the eval; a single-pass run must be visible too."""
+    import logging
+
+    model = FakeModel()
+    tokenizer = FakeTokenizer()
+    schema = StructuredSchema(
+        {"action": {"type": "enum", "description": "d", "choices": ["A", "B"]}}
+    )
+    with caplog.at_level(logging.INFO, logger="jevmlx.engine"):
+        run_parallel_generation(make_engine(model, tokenizer), "ctx", schema)
+    chunk_lines = [r for r in caplog.records if "Chunking heuristic" in r.getMessage()]
+    assert chunk_lines, "expected at least one 'Chunking heuristic' log line"
+    # All at INFO level (not WARNING — the old path only logged when passes>1).
+    assert all(r.levelno == logging.INFO for r in chunk_lines)
+    # The line reports 1 pass for a single-field schema.
+    assert "over 1 passes" in chunk_lines[0].getMessage()

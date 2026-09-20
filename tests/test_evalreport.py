@@ -125,3 +125,58 @@ class TestWriteReport:
         evalreport.write_report(json_path, {})
         md = json_path.with_suffix(".md").read_text()
         assert "## Metrics" in md
+
+    def test_majority_baseline_and_exact_record_are_first_class(self, tmp_path):
+        """P7: majority baseline (mean over fields) and exact-record accuracy
+        appear right after accuracy in the metrics table — a reader sees them
+        before any other metric."""
+        json_path = tmp_path / "run.json"
+        evalreport.write_report(
+            json_path,
+            {
+                "metrics": {
+                    "accuracy": 0.61,
+                    "majority_class_baseline": {"f1": 0.5, "f2": 0.7},
+                    "exact_record_accuracy": 0.0,
+                },
+                "per_field": [
+                    {"field": "f1", "n": 10, "accuracy": 0.4},
+                    {"field": "f2", "n": 10, "accuracy": 0.8},
+                ],
+            },
+        )
+        md = json_path.with_suffix(".md").read_text()
+        # Both appear right after accuracy.
+        assert "| accuracy | 0.6100 |" in md
+        assert "| majority baseline (mean over fields) | 0.6000 |" in md
+        assert "| exact record | 0.0000 |" in md
+        # They are between accuracy and the per-field table.
+        assert md.index("| accuracy |") < md.index("majority baseline") < md.index("exact record")
+
+    def test_per_field_table_has_majority_column_and_below_marker(self, tmp_path):
+        """P7: the per-field table has a 'majority' column, and a † marker
+        appears when acc < majority (the 7B smoke case: one field below the
+        always-predict-modal baseline)."""
+        json_path = tmp_path / "run.json"
+        evalreport.write_report(
+            json_path,
+            {
+                "metrics": {
+                    "accuracy": 0.5,
+                    "majority_class_baseline": {"good": 0.3, "bad": 0.8},
+                },
+                "per_field": [
+                    {"field": "good", "n": 10, "accuracy": 0.4},  # 0.4 > 0.3 — no marker
+                    {"field": "bad", "n": 10, "accuracy": 0.2},  # 0.2 < 0.8 — † marker
+                ],
+            },
+        )
+        md = json_path.with_suffix(".md").read_text()
+        # The per-field table header has a 'majority' column.
+        assert "| field | n | acc | majority |" in md
+        # The bad field (acc 0.2 < majority 0.8) has the † marker.
+        bad_line = [line for line in md.splitlines() if "| bad |" in line][0]
+        assert "†" in bad_line
+        # The good field (acc 0.4 > majority 0.3) has no marker.
+        good_line = [line for line in md.splitlines() if "| good |" in line][0]
+        assert "†" not in good_line
