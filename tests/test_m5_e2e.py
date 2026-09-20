@@ -301,8 +301,13 @@ def _build_bench_results(out: Path) -> Path:
             )
     # The naive track (scorer-independent; dataset bundled + perturbed).
     model_dir = _run_combo(
-        bench_out, "naive_local-slots-bundled", _bundled_cases(2), engine,
-        scorer="slots", track="naive_local", dataset_name="bundled",
+        bench_out,
+        "naive_local-slots-bundled",
+        _bundled_cases(2),
+        engine,
+        scorer="slots",
+        track="naive_local",
+        dataset_name="bundled",
     )
     # Perturbed dataset shape: originals + #p variants sharing group_id.
     perturbed = _bundled_cases(2)
@@ -313,8 +318,13 @@ def _build_bench_results(out: Path) -> Path:
         variant["meta"] = {"perturbation": ("ws", "numfmt")[k - 1]}
         perturbed.append(variant)
     _run_combo(
-        bench_out, "parallel-slots-perturbed", perturbed, engine,
-        scorer="slots", track="parallel", dataset_name="perturbed",
+        bench_out,
+        "parallel-slots-perturbed",
+        perturbed,
+        engine,
+        scorer="slots",
+        track="parallel",
+        dataset_name="perturbed",
     )
     assert model_dir is not None
     return _write_model_parity(model_dir, engine)
@@ -431,20 +441,77 @@ def _build_probe_json(out: Path, command: str) -> Path:
     return path
 
 
-@pytest.fixture(scope="module")
-def artifacts(tmp_path_factory):
-    """Every M5 artifact, built once per module by the REAL writers."""
-    root = tmp_path_factory.mktemp("m5-e2e")
-    out = root / "m5-run"
-    out.mkdir()
-    _build_bench_results(out)
-    def _engine():
-        return make_engine(YNLogitModel(), _Mod97Tokenizer(), model_id="fake/stable")
+_TEMPLATE_DIR: Path | None = None
 
-    _build_timing_report(out, _engine())
-    _build_invariance(out, _engine())
-    _build_summary_md(out)
-    return out
+
+def _artifact_template() -> Path:
+    """Build the full artifact tree ONCE per pytest session (the real writers
+    take ~7.5 s: bench ~1.7 s, invariance ~4.3 s, timing ~1.5 s); every test
+    then gets an INSTANT shutil.copytree copy (~0.03 s). Copies are writable
+    and independent — tests that mutate the tree (skip/fresh markers) never
+    see each other's state.
+
+    The template carries the three PIECE dirs the fake runner copies into
+    step targets too: m5-run/bench-quality, m5-run/invariance, and the
+    timing-*.json file."""
+    global _TEMPLATE_DIR
+    if _TEMPLATE_DIR is None:
+        import tempfile
+
+        _TEMPLATE_DIR = Path(tempfile.mkdtemp(prefix="m5-e2e-template-"))
+        out = _TEMPLATE_DIR / "m5-run"
+        out.mkdir()
+        _build_bench_results(out)
+
+        def _engine():
+            return make_engine(YNLogitModel(), _Mod97Tokenizer(), model_id="fake/stable")
+
+        _build_timing_report(out, _engine())
+        _build_invariance(out, _engine())
+        _build_summary_md(out)
+    return _TEMPLATE_DIR
+
+
+def _copy_template_piece(piece: str, dest: Path) -> None:
+    """Copy one template piece (bench-quality | invariance | timing) into a
+    fresh run dir — the fake runner's builders, ~0.03 s instead of ~7.5 s.
+    The pieces are byte-identical to what the real writers produce (they
+    ARE the real writers' output, built once)."""
+    import shutil
+
+    template_run = _artifact_template() / "m5-run"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if piece == "timing":
+        for timing in sorted(template_run.glob("timing-*.json")):
+            shutil.copy2(timing, dest / timing.name)
+        return
+    if piece == "bench-quality":
+        target = dest if dest.name == "bench-quality" else dest / "bench-quality"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            shutil.rmtree(target)
+        shutil.copytree(template_run / "bench-quality", target)
+        # The template's bench SUMMARY.md already exists; regenerate is not
+        # needed — it was written by the real summarizer at template build.
+        return
+    if piece == "invariance":
+        target = dest / "invariance"
+        if target.exists():
+            shutil.rmtree(target)
+        shutil.copytree(template_run / "invariance", target)
+        return
+    raise ValueError(f"unknown template piece: {piece}")
+
+
+@pytest.fixture
+def artifacts(tmp_path_factory):
+    """A fresh, writable copy of the real-writer artifact tree (see
+    _artifact_template for why: build once, copy per test)."""
+    import shutil
+
+    root = tmp_path_factory.mktemp("m5-e2e")
+    shutil.copytree(_artifact_template() / "m5-run", root / "m5-run")
+    return root / "m5-run"
 
 
 # ------------------------------------------------------- real-shaped checks
@@ -455,8 +522,13 @@ class TestRealArtifactShapes:
 
     def test_bundled_report_has_float_accuracy_no_agreement(self, artifacts):
         report = json.loads(
-            (artifacts / "bench-quality" / "m2pro-32gb-mlx-community--qwen2.5-7b-instruct-4bit"
-             / "parallel-slots-bundled" / "report.json").read_text()
+            (
+                artifacts
+                / "bench-quality"
+                / "m2pro-32gb-mlx-community--qwen2.5-7b-instruct-4bit"
+                / "parallel-slots-bundled"
+                / "report.json"
+            ).read_text()
         )
         metrics = report["metrics"]
         assert isinstance(metrics.get("accuracy"), float)
@@ -465,36 +537,59 @@ class TestRealArtifactShapes:
     def test_typesafe_report_agreement_is_dict_with_overall(self, artifacts):
         """THE shape that crashed the 8-hour run: agreement = dict."""
         report = json.loads(
-            (artifacts / "bench-quality" / "m2pro-32gb-mlx-community--qwen2.5-7b-instruct-4bit"
-             / "parallel-slots-typesafe" / "report.json").read_text()
+            (
+                artifacts
+                / "bench-quality"
+                / "m2pro-32gb-mlx-community--qwen2.5-7b-instruct-4bit"
+                / "parallel-slots-typesafe"
+                / "report.json"
+            ).read_text()
         )
         agreement = report["metrics"]["agreement"]
         assert isinstance(agreement, dict)
         assert isinstance(agreement["overall"], float)
         assert isinstance(agreement["by_workflow"], dict)
         assert set(agreement) == {
-            "overall", "by_workflow", "agreement_common_subset", "n_fields", "n_cases",
+            "overall",
+            "by_workflow",
+            "agreement_common_subset",
+            "n_fields",
+            "n_cases",
         }
 
     def test_perturbed_report_has_perturbation_flip_rate(self, artifacts):
         report = json.loads(
-            (artifacts / "bench-quality" / "m2pro-32gb-mlx-community--qwen2.5-7b-instruct-4bit"
-             / "parallel-slots-perturbed" / "report.json").read_text()
+            (
+                artifacts
+                / "bench-quality"
+                / "m2pro-32gb-mlx-community--qwen2.5-7b-instruct-4bit"
+                / "parallel-slots-perturbed"
+                / "report.json"
+            ).read_text()
         )
         rate = report["metrics"]["perturbation_flip_rate"]
         assert isinstance(rate, float) and 0.0 <= rate <= 1.0
 
     def test_naive_combo_writes_timing_json_call_level(self, artifacts):
-        combo = (artifacts / "bench-quality" / "m2pro-32gb-mlx-community--qwen2.5-7b-instruct-4bit"
-                 / "naive_local-slots-bundled")
+        combo = (
+            artifacts
+            / "bench-quality"
+            / "m2pro-32gb-mlx-community--qwen2.5-7b-instruct-4bit"
+            / "naive_local-slots-bundled"
+        )
         timing = json.loads((combo / "timing.json").read_text())
         assert timing["calls"] >= 1
         assert isinstance(timing["median"]["total_ms"], (int, float))
 
     def test_run_json_counts_and_lock_sha(self, artifacts):
         run = json.loads(
-            (artifacts / "bench-quality" / "m2pro-32gb-mlx-community--qwen2.5-7b-instruct-4bit"
-             / "parallel-slots-typesafe" / "run.json").read_text()
+            (
+                artifacts
+                / "bench-quality"
+                / "m2pro-32gb-mlx-community--qwen2.5-7b-instruct-4bit"
+                / "parallel-slots-typesafe"
+                / "run.json"
+            ).read_text()
         )
         assert set(run) >= {"run_id", "environment", "config", "counts"}
         assert run["config"]["track"] == "parallel"
@@ -522,8 +617,12 @@ class TestRealArtifactShapes:
 
     def test_parity_json_gate_shape(self, artifacts):
         parity = json.loads(
-            (artifacts / "bench-quality" / "m2pro-32gb-mlx-community--qwen2.5-7b-instruct-4bit"
-             / "parity.json").read_text()
+            (
+                artifacts
+                / "bench-quality"
+                / "m2pro-32gb-mlx-community--qwen2.5-7b-instruct-4bit"
+                / "parity.json"
+            ).read_text()
         )
         assert parity["status"] in ("PASS", "DRIFT", "FAIL")
         assert isinstance(parity["passed"], bool)
@@ -666,23 +765,23 @@ class TestM5MainEndToEnd:
                 stdout = '{"exit_code": 0, "checks": []}'
                 return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
             is_pytest = "pytest" in argv[0].split("/")[-1]
-            is_plain_dash_m = len(argv) > 1 and argv[1] == "-m" and not (
-                len(argv) > 2 and argv[2].startswith("benchmarks.")
+            is_plain_dash_m = (
+                len(argv) > 1
+                and argv[1] == "-m"
+                and not (len(argv) > 2 and argv[2].startswith("benchmarks."))
             )
             if is_pytest or is_plain_dash_m:
                 calls.append(("parity", 0))
                 return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
             if "benchmarks.invariance" in joined:
                 inv_out = Path(argv[argv.index("--out") + 1])
-                engine = make_engine(YNLogitModel(), _Mod97Tokenizer(), model_id="fake/stable")
                 target = inv_out.parent if inv_out.name == "invariance" else inv_out
-                _build_invariance_dir(target, engine)
+                _copy_template_piece("invariance", target)
                 calls.append(("invariance", 0))
                 return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
             if "benchmarks.timing" in joined:
                 timing_out = Path(argv[argv.index("--out") + 1])
-                _engine2 = make_engine(YNLogitModel(), _Mod97Tokenizer(), model_id="fake/stable")
-                _build_timing_report(timing_out, _engine2)
+                _copy_template_piece("timing", timing_out)
                 calls.append(("timing", 0))
                 return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
             if "benchmarks.probe" in joined:
@@ -728,8 +827,10 @@ class TestM5MainEndToEnd:
 
         rc = m5.main(
             [
-                "--out", str(out),
-                "--parity-models", f"{QUALITY_TARGET},{REST_MODEL}",
+                "--out",
+                str(out),
+                "--parity-models",
+                f"{QUALITY_TARGET},{REST_MODEL}",
                 "--allow-sleep",
             ]
         )
@@ -762,8 +863,12 @@ class TestM5MainEndToEnd:
         summary = (out / "SUMMARY.md").read_text()
         assert "# M5 runbook summary" in summary
         assert "## Main — bench combos" in summary
-        for combo in ("parallel-slots-bundled", "parallel-labels-typesafe",
-                      "naive_local-slots-bundled", "parallel-slots-perturbed"):
+        for combo in (
+            "parallel-slots-bundled",
+            "parallel-labels-typesafe",
+            "naive_local-slots-bundled",
+            "parallel-slots-perturbed",
+        ):
             assert combo in summary, f"combo row missing: {combo}"
         assert "## Main — timing report (quality, decide() presets)" in summary
         assert "mini_fraud" in summary
@@ -863,7 +968,7 @@ class TestM5MainEndToEnd:
         assert step_ids[0] == "doctor"
         runbook = (out / "RUNBOOK.md").read_text()
         assert "ABORT: doctor failed (exit 1); remaining steps skipped." in runbook
-        summary = (out / "SUMMARY.md")
+        summary = out / "SUMMARY.md"
         assert not summary.exists()  # the runbook never reached the summary step
 
     def test_failing_non_gate_step_recorded_and_run_continues(self, tmp_path, monkeypatch):
@@ -1002,30 +1107,17 @@ class TestM5MainEndToEnd:
 
 
 def _build_bench_results_into(out: Path) -> None:
-    """The bench step's --out target: the full results tree + SUMMARY.md
-    (real writers), exactly what jevmlx.bench.run_bench leaves behind.
-    A --fresh rerun reuses the dir: wipe it first (run_bench --fresh does
-    the same per combo)."""
-    import shutil
-
-    bench_root = out if out.name == "bench-quality" else out / "bench-quality"
-    if bench_root.exists():
-        shutil.rmtree(bench_root)
-    _build_bench_results(out)
-    from benchmarks.summarize_results import summarize
-
-    summarize(bench_root)
+    """The bench step's --out target: the full results tree + SUMMARY.md,
+    byte-identical to what jevmlx.bench.run_bench leaves behind — copied
+    from the session template (see _copy_template_piece) instead of rebuilt
+    (~7.5 s real-writer build -> ~0.03 s copy)."""
+    _copy_template_piece("bench-quality", out)
 
 
 def _build_invariance_dir(out: Path, engine) -> None:
-    """Invariance artifacts into <out>/invariance (the step's --out is
-    <runbook>/invariance). A --fresh rerun reuses the dir: wipe it first."""
-    import shutil
-
-    inv_dir = out / "invariance"
-    if inv_dir.exists():
-        shutil.rmtree(inv_dir)
-    _build_invariance(out, engine)
+    """Invariance artifacts into <out>/invariance — template copy (see
+    _copy_template_piece)."""
+    _copy_template_piece("invariance", out)
 
 
 def _build_rest_model_results(*, rest_out: Path, models_file: Path) -> None:
