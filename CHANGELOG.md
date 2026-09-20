@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+
 - W6-B7: serve.py backpressure + admission limits. The HTTP server is now
   a `ThreadingHTTPServer` (HTTP/1.0, one thread per connection) with a
   bounded admission queue (default 16, via `--queue-size`) feeding a single
@@ -26,6 +27,7 @@
   fields); only one admission queue exists. A malformed schema is 400, not a
   dropped connection. No dual-path fallbacks: tests inject the real
   admission-function shapes.
+)
 - W6-B1: ordered-enum telemetry. An enum field may declare `ordered: True`
   (schema dict) / `Field(json_schema_extra={"ordered": True})` or bare
   `Ordered()` (Pydantic) — the choices' declaration order is the ordinal
@@ -42,6 +44,7 @@
   (results contract v2). The shared TypeSafe `score` mapping emits ordered
   enums (SST-5's 0..4 rides the same branch). Ordering on boolean/multi
   fields raises at compile time.
+
 - **W5c-7 / B6 part 1** — crash-safe resumable eval infrastructure
   (`jevmlx/resume.py`). A new `--resume` flag on `jevmlx eval` verifies
   the run manifest (config, code hash, model/tokenizer revision, prompt
@@ -78,6 +81,42 @@
   per_field_accuracy with Wilson ci, valid_accuracy). check_results enforces
   the CI keys (REQUIRED_CI_KEYS). Leaderboard prints the interval next to
   every point or 'n too small'.
+
+- W6-B2: the messages form of context. `context` may be a list of
+  OpenAI-style `{"role": ..., "content": ...}` dicts (roles limited to
+  system/user/assistant; tools, images, null/empty content and other roles
+  raise `ValueError`). The library's protocol block (rules + schema) is a
+  LIBRARY-OWNED system message — the first rendered message; caller system
+  turns concatenate INTO it behind an explicit delimiter (`\n\n---\n\n`),
+  never replacing or preceding it. All non-system messages keep their order.
+  The nonce fence is NOT used in the messages form — the template's own turn
+  boundaries are the boundary. A no-system profile (Gemma, probed at load)
+  merges the protocol text into the first user turn with `\n\n`, the same
+  deterministic merge the string form uses; NO silent fallback — a template
+  rejecting the remaining roles RAISES. The messages form is its OWN prompt
+  version, `jevmlx-parallel-v10-messages`; the string form stays
+  `jevmlx-parallel-v9`. Both forms share the same `_prefill`/`_score_rows`
+  path; a messages input and the equivalent single-string input produce the
+  same field set/values but different `prompt_sha256`. The neutral prior
+  renders in the SAME FORM as the evidence pass (a single-user-turn neutral
+  conversation for the messages form). CLI: `--messages FILE|-` (JSON array),
+  mutually exclusive with `--context`. Golden vectors: one messages-form
+  vector per profile via `benchmarks/golden_prompts.py --write`; the string
+  vectors are unchanged.
+- **W6-B1 doc gap (ordinal records, from PR #72 merge)** — the ordinal record
+  carries a `source` tag: `"parallel"` (the engine's distribution-derived
+  record) or `"hard"` (non-parallel tracks — naive_local / api_baseline /
+  openai_slots — which have no distribution). A hard record's
+  `expected_index` equals its `argmax_level` (the hard pick is the entire
+  mass) with `variance = 0.0`; an invalid prediction emits the worst-distance
+  argmax. `ordinal_mae_expected` is PARALLEL-TRACK-ONLY: it skips records by
+  `source == "hard"` EXPLICITLY (the soft metric is undefined on a hard-only
+  record), and RAISES on a validated parallel record with a non-numeric
+  `expected_index` (never a silent skip). `ordinal_mae` and
+  `ordinal_confusion` run on every track.
+
+
+
 - **W6-B5 (public gold datasets, pre-M5)** — three public datasets join the
   bench: AG News (4-class enum), BoolQ (boolean noul), SST-5 (ordinal 0-4
   enum, the B1 ordered-enum derivation — no new engine field type). Pinned

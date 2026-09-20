@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 import benchmarks.golden_prompts as gp
-from jevmlx.engine import PROMPT_VERSION
+from jevmlx.engine import PROMPT_VERSION, PROMPT_VERSION_MESSAGES
 
 VECTORS = sorted((Path(__file__).parent / "golden" / "prompts").glob("*.json"))
 
@@ -41,13 +41,16 @@ def test_vectors_exist():
     cases = ("risk_enum_bool", "risk_enum_bool_labels", "tags_multi")
     for case in cases:
         assert sum(1 for n in names if n.endswith(f"__{case}")) == 3, (case, names)
-    assert len(names) == len(VECTORS) == 9
+    assert len(names) == len(VECTORS) == 12  # 9 string-form + 3 messages-form
+
+
+_VALID_VERSIONS = (PROMPT_VERSION, PROMPT_VERSION_MESSAGES)
 
 
 def test_every_vector_pins_version_profile_revision():
     for path in VECTORS:
         vector = json.loads(path.read_text(encoding="utf-8"))
-        assert vector["prompt_version"] == PROMPT_VERSION
+        assert vector["prompt_version"] in _VALID_VERSIONS, (path.name, vector["prompt_version"])
         assert vector["profile"] and vector["tokenizer_revision"] and vector["case"]
         # The full provenance triple: prompt sha, plan hash, token-ids sha.
         for key in ("prompt_sha256", "plan_hash", "token_ids_sha256"):
@@ -56,6 +59,12 @@ def test_every_vector_pins_version_profile_revision():
         assert vector["input"]["system"] and "schema" in vector["input"]
         assert vector["input"]["scoring"] in ("slots", "labels")
         assert "template_kwargs" in vector["input"] and "supports_system" in vector["input"]
+        # W6-B2: the messages-form vectors carry a message list; the string
+        # form carries a context string — never both, never neither.
+        if vector["prompt_version"] == PROMPT_VERSION_MESSAGES:
+            assert "messages" in vector["input"] and "context" not in vector["input"]
+        else:
+            assert "context" in vector["input"] and "messages" not in vector["input"]
 
 
 @network

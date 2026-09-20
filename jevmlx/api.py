@@ -526,7 +526,7 @@ def _build_field_results(
 
 def _decide_once[T: BaseModel](
     model_cls: type[T],
-    context: str,
+    context: str | list[dict],
     engine,
     schema: StructuredSchema,
     temperature: float,
@@ -688,7 +688,7 @@ def _prepare_schema(model_cls: type[BaseModel], allow_none_of_above: bool) -> St
 
 def decide[T: BaseModel](
     model_cls: type[T],
-    context: str,
+    context: str | list[dict],
     *,
     model: str = DEFAULT_MODEL,
     temperature: float = 1.0,
@@ -727,6 +727,17 @@ def decide[T: BaseModel](
     per-choice log scores and renormalises; the neutral pass is cached per
     (model, tokenizer, prompt version, scoring mode, plan hash), so
     decide_many pays it once per schema.
+
+    W6-B2 — the messages form: ``context`` may be a list of OpenAI-style
+    ``{"role": ..., "content": ...}`` dicts. Roles are limited to
+    system/user/assistant; tools, images, null content and other roles raise
+    ValueError. The library's protocol block (rules + schema) is a
+    library-owned system message: caller system turns concatenate into it
+    behind an explicit delimiter, all other messages keep their order, and
+    the nonce fence is NOT used (the template's own turn boundaries are the
+    boundary). The messages form reports prompt_version
+    "jevmlx-parallel-v10-messages"; the string form stays
+    "jevmlx-parallel-v9".
     """
     # Validate allow_none_of_above against the model BEFORE touching the
     # engine: a usage error must not pay for a model load (same rule as
@@ -753,7 +764,7 @@ def decide[T: BaseModel](
 
 def decide_many[T: BaseModel](
     model_cls: type[T],
-    contexts: Sequence[str],
+    contexts: Sequence[str | list[dict]],
     *,
     model: str = DEFAULT_MODEL,
     temperature: float = 1.0,
@@ -776,7 +787,9 @@ def decide_many[T: BaseModel](
     Raises:
         TypeError: If ``contexts`` is a bare str or bytes (a common mistake
             that would otherwise be decided one character at a time), or if
-            any item is not a str.
+            any item is neither a str nor a message list.
+        ValueError: A message list that fails W6-B2 validation (roles
+            outside system/user/assistant, tools/images/null content).
     """
     if isinstance(contexts, (str, bytes)):
         raise TypeError(
@@ -785,8 +798,12 @@ def decide_many[T: BaseModel](
         )
     contexts = list(contexts)
     for index, item in enumerate(contexts):
-        if not isinstance(item, str):
-            raise TypeError(f"contexts[{index}] must be str, not {type(item).__name__}")
+        # W6-B2: an item is the string form or the messages form (validated
+        # by the engine; a list of dicts here, a ValueError there).
+        if not isinstance(item, (str, list)):
+            raise TypeError(
+                f"contexts[{index}] must be str or a list of messages, not {type(item).__name__}"
+            )
     if not contexts:
         return []
 

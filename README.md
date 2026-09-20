@@ -123,6 +123,7 @@ jevmlx decide --backend openai --base-url http://localhost:11434/v1 --api-model 
 
 Two tradeoffs: one request per field (slower than one pass), and only the server's top-k logprobs are visible — options missing from that list get a floor probability and the telemetry flags `truncated: true`.
 
+
 ## Serve over HTTP
 
 `jevmlx serve` loads a model once and exposes `POST /decide`, `GET /health`, and `GET /ready` on a local port. One Metal GPU, one serial worker, a bounded admission queue in front.
@@ -147,6 +148,25 @@ jevmlx serve --model mlx-community/Qwen2.5-1.5B-Instruct-4bit --port 8000
 - **Queue telemetry**: `queue_depth` and `queue_wait_ms` ride every `/decide` response; `queue_depth` + `queue_capacity` ride `/health`.
 - **Worker resilience**: an exception in the decide worker is a 500 to that request; the worker catches it and continues (it does not die). `/ready` goes 503 if the worker dies.
 - **Ready vs live**: the port binds BEFORE warm-up, so `/ready` is reachable during warm-up (a 503 is a real response, not a connection refusal).
+
+### Chat messages as context (the messages form)
+
+`decide`/`decide_many`/`jevmlx decide --messages` accept `context` as an OpenAI-style message list (`[{"role": ..., "content": ...}, ...]`; roles limited to **system / user / assistant** — tools, images, null/empty content and other roles raise `ValueError`). The library's protocol block (rules + schema) is a **library-owned system message** — the first rendered message; caller `system` turns concatenate INTO it behind an explicit delimiter (`\n\n---\n\n`), never replacing or preceding it. All other messages keep their order. The nonce fence is NOT used (the template's own turn boundaries are the boundary). A no-system profile (Gemma, probed at load) merges the protocol text into the first user turn with `\n\n`; no silent fallback — a template rejecting the roles RAISES. The messages form is its own prompt version, `jevmlx-parallel-v10-messages` (the string form stays `jevmlx-parallel-v9`); both share the same `_prefill`/`_score_rows` path.
+
+```python
+result = decide(
+    SupportTriage,
+    [
+        {"role": "system", "content": "Be terse."},
+        {"role": "user", "content": ticket_text},
+    ],
+)
+```
+
+```bash
+jevmlx decide --schema ticket.json --messages ticket.jsonl   # JSON array of {role, content}
+```
+)
 
 ## Leaderboard
 
