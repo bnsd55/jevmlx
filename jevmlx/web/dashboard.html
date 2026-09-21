@@ -2,7 +2,6 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="refresh" content="__REFRESH__">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Bench Control Room</title>
 <style>
@@ -24,6 +23,7 @@ a{color:var(--drift)}
 .badge.alert{background:rgba(255,107,107,.12);color:var(--fail);border:1px solid var(--fail)}
 .badge.done{background:rgba(87,199,133,.15);color:var(--ok);border:1px solid var(--ok)}
 .badge.stopped{background:rgba(92,106,124,.15);color:var(--dim);border:1px solid var(--dim)}
+.badge.disc{background:rgba(255,107,107,.12);color:var(--fail);border:1px solid var(--fail)}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 14px}
 .panel h2{font:600 11px/1 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--dim);margin:0 0 10px;display:flex;gap:10px;align-items:baseline}
 .panel h2 .sub{font-weight:400;letter-spacing:0;text-transform:none;color:var(--faint)}
@@ -117,189 +117,329 @@ summary{cursor:pointer;color:var(--dim);font:12px var(--mono)}
 <div class="wrap" id="root"><div class="err" id="boot-err">loading /dashboard.json …</div></div>
 <script>
 "use strict";
-/* Control-room dashboard. Fetches /dashboard.json every REFRESH seconds and
-   /questions.json?combo=<id> on row click; renders client-side. No framework,
-   no CDN. Filters and sorting are client-side. TTY mode unchanged.
-   Contract: 9 top-level keys (run, now, memory, health, pipeline, aggregates,
-   results, events, history). questions() -> flat list[]. Nulls render as —. */
+/* Control-room dashboard — live via SSE + DOM patching (no reload, no root wipe).
+   First paint: fetch /dashboard.json once, build the full DOM (the only time
+   #root.innerHTML is assigned). Then EventSource('/events') pushes 'dashboard'
+   events; patchDashboard(D) updates existing nodes in place (textContent, bar
+   widths, keyed row insert/update/remove). Selection, filters, sort, scroll,
+   and open <details> are preserved across patches. No framework, no CDN.
+   Contract: 9 top-level keys. Nulls render as —. */
 const REFRESH = __REFRESH__;
 let D = null;
 let selCombo = null;
+let selComboDisplayName = null;
 let selQuestion = 0;
 let Q = [];
 let selStep = null;
 let sortKey = null, sortDir = 1;
 let rText = "", qText = "";
 let rChips = {}, qChips = {};
+let booted = false;
+let es = null; // EventSource
 
 function esc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;");}
 function pill(kind, text){return '<span class="pill '+esc(kind)+'">'+esc(text)+'</span>';}
 function fmtNum(v, d){return v==null?"—":(typeof v==="number"?v.toFixed(d??3):String(v));}
 function fmtDur(s){if(s==null)return "—";if(s<60)return Math.round(s)+" s";if(s<3600)return Math.round(s/60)+"m";return (s/3600).toFixed(1)+"h";}
 
-/* ---- top bar ---- */
-function renderTop(t){
+/* ================================================================
+   FIRST PAINT — build the full DOM once. After this, #root.innerHTML
+   is never assigned again; all updates go through patchDashboard().
+   ================================================================ */
+function initialRender(){
+  if(!D)return;
+  const root=document.getElementById("root");
+  let h="";
+  h+=buildTopHTML(D.run);
+  h+=buildNowHTML(D.now,D.memory,D.health);
+  h+=buildPipelineHTML(D.pipeline);
+  h+=buildDiagAggHTML(D.pipeline,D.aggregates);
+  h+=buildResultsHTML(D.results);
+  h+='<div id="questions-panel"></div>';
+  h+=buildEventsHistoryHTML(D.events,D.history);
+  h+='<div id="stepcard-slot"></div>';
+  h+='<div class="foot" id="foot">read-only over RUNBOOK.md · combo run.json / report.json / heartbeat.jsonl / predictions.jsonl · parity.json · SUMMARY.md · live via SSE · /dashboard.json for scripts · TTY mode unchanged</div>';
+  root.innerHTML=h;
+  booted=true;
+  wireEvents();
+  // Patch the just-built shells with the fetched payload so the first paint
+  // carries real values before the first SSE event arrives.
+  patchDashboard(D);
+  renderQuestionsPanel();
+  renderStepCard();
+}
+
+/* ---- HTML builders (used only on first paint) ---- */
+function buildTopHTML(t){
   let h='<div class="top"><div class="title">jevmlx bench control</div>';
-  h+='<span class="kv">run <b>'+esc(t.out_dir)+'</b></span>';
-  h+='<span class="kv">hash <b>'+esc(t.hash)+'</b></span>';
-  h+='<span class="kv">machine <b>'+esc(t.machine)+' · mlx '+esc(t.mlx_version)+'</b></span>';
-  h+='<span class="kv">attempt <b>'+esc(t.attempt_n)+'</b> started <b>'+esc(t.attempt_started)+'</b></span>';
-  const awake=fmtDur(t.awake_s);
-  h+='<span class="kv">awake <b>'+awake+'</b> · sleep guard <b style="color:'+(t.sleep_blocked?'var(--ok)':'var(--fail)')+'">'+(t.sleep_blocked?'on':'off')+'</b></span>';
-  h+='<div class="state">';
-  const alerts=(t.alerts||[]).length;
-  if(alerts)h+='<span class="badge alert">'+alerts+' alert'+(alerts>1?'s':'')+'</span>';
-  h+='<span class="badge '+esc(t.state)+'">'+esc(t.state)+'</span>';
+  h+='<span class="kv">run <b id="top-run">'+esc(t.out_dir)+'</b></span>';
+  h+='<span class="kv">hash <b id="top-hash">'+esc(t.hash)+'</b></span>';
+  h+='<span class="kv">machine <b id="top-machine">'+esc(t.machine)+' · mlx '+esc(t.mlx_version)+'</b></span>';
+  h+='<span class="kv">attempt <b id="top-attempt">'+fmtAttempt(t.attempt_n)+'</b> started <b id="top-started">'+esc(t.attempt_started)+'</b></span>';
+  h+='<span class="kv">awake <b id="top-awake">'+fmtDur(t.awake_s)+'</b> · sleep guard <b id="top-sleep"></b></span>';
+  h+='<div class="state" id="top-state"></div>';
+  h+='</div>';
+  return h;
+}
+function buildNowHTML(n,m,hl){
+  let h='<div class="now">';
+  h+='<div class="panel"><h2>Now <span class="sub" id="now-sub">from heartbeat.jsonl, '+esc(n.heartbeat_age_s)+' s ago</span></h2>';
+  h+='<div class="big" id="now-model"></div>';
+  h+='<div class="bar"><i id="now-bar"></i></div>';
+  h+='<div class="row" id="now-cases"></div>';
+  h+='<div class="grid3">';
+  h+='<div class="stat"><span class="l">pred lines</span><span class="v" id="now-predlines">—</span></div>';
+  h+='<div class="stat"><span class="l">combo elapsed</span><span class="v" id="now-elapsed">—</span></div>';
+  h+='<div class="stat"><span class="l">running accuracy</span><span class="v" id="now-acc">—</span></div>';
+  h+='</div></div>';
+  h+='<div class="panel mem"><h2>Memory <span class="sub" id="mem-sub"></span></h2>';
+  h+='<div class="row"><span>cache</span><b id="mem-cache">—</b></div>';
+  h+='<div class="bar mem" id="mem-cache-bar"><i></i></div>';
+  h+='<div class="row" style="margin-top:22px"><span>active</span><b id="mem-active">—</b></div>';
+  h+='<div class="bar mem" id="mem-active-bar"><i></i></div>';
+  h+='<div class="row"><span>peak this combo</span><b id="mem-peak">—</b></div>';
+  h+='<div class="bar mem" id="mem-peak-bar"><i></i></div>';
+  h+='</div>';
+  h+='<div class="panel"><h2>Health <span class="sub">rules that stop or flag the run</span></h2>';
+  h+='<div class="grid3" style="grid-template-columns:1fr 1fr" id="health-grid"></div>';
+  h+='<div class="legend" style="margin-top:12px" id="health-alerts"></div>';
   h+='</div></div>';
   return h;
 }
+function buildPipelineHTML(p){
+  let h='<div class="panel"><h2>Pipeline <span class="sub">current attempt · click a step for argv, stdout tail, error</span></h2><div class="steps" id="pipeline-steps"></div>';
+  h+='<div class="legend"><span><span class="pill ok">ok</span></span><span><span class="pill run">running</span></span><span><span class="pill fail">failed</span></span><span><span class="pill skip">skipped by marker</span></span><span>markers encode outcome, not exit code</span></div></div>';
+  return h;
+}
+function buildDiagAggHTML(p,a){
+  let h='<div class="two">';
+  h+='<div class="panel"><h2>Failure diagnosis <span class="sub" id="diag-sub"></span></h2><div class="diag" id="diag-body"></div></div>';
+  h+='<div class="panel"><h2>Aggregates so far <span class="sub" id="agg-sub"></span></h2><div class="agg" style="grid-template-columns:repeat(3,1fr)" id="agg-grid"></div></div>';
+  h+='</div>';
+  return h;
+}
+function buildResultsHTML(rows){
+  const headers=["model","dataset","scorer","track","status","accuracy 95% CI","majority","exact","parity","time/case","calls","cases","A/B Δ"];
+  let h='<div class="panel"><h2>Results <span class="sub">one row per combo · same columns as the README leaderboard · click a header to sort · click a row to load its questions below</span></h2>';
+  h+='<div class="filters"><input class="search" id="r-search" placeholder="filter: model, dataset, field…" value="'+esc(rText)+'">';
+  h+='<span id="r-chips"></span>';
+  h+='</div><div class="tw"><table class="rtable"><thead><tr id="r-head"></tr></thead><tbody id="r-body"></tbody></table></div>';
+  h+='<div class="legend"><span>accuracy = field accuracy, Wilson CI</span><span>majority = always-most-common label</span><span>exact = every field right</span><span>parity: <span class="pill pass">pass</span> &lt;0.05 nats · <span class="pill drift">drift</span> ≥0.05, winners identical · <span class="pill fail">fail</span> a winner changed</span><span>A/B Δ = main − branch</span></div></div>';
+  return h;
+}
+function buildEventsHistoryHTML(ev,hi){
+  let h='<div class="two"><div class="panel"><h2>Events <span class="sub">heartbeats, failures, sleep, stop rule · newest first</span></h2><div class="events" id="events-list"></div></div>';
+  h+='<div class="panel"><h2>History <span class="sub">previous attempts of this run dir</span></h2><div id="history-list"></div></div></div>';
+  return h;
+}
 
-/* ---- NOW cluster ---- */
-function renderNow(n, m, hl){
-  let h='<div class="now">';
-  // now
-  h+='<div class="panel"><h2>Now <span class="sub">from heartbeat.jsonl, '+esc(n.heartbeat_age_s)+' s ago</span></h2>';
-  h+='<div class="big">'+esc(n.model)+' <small>'+esc(n.track)+' · '+esc(n.scorer)+' · '+esc(n.dataset)+' · run '+n.run_i+' of '+n.run_n+'</small></div>';
+/* ================================================================
+   PATCH — update existing nodes in place. Never assign #root.innerHTML.
+   Preserves selCombo, selQuestion, filters, sort, scroll, open details.
+   ================================================================ */
+function patchDashboard(newD){
+  if(!booted){D=newD;initialRender();return;}
+  D=newD;
+  patchTop(D.run);
+  patchNow(D.now,D.memory,D.health);
+  patchPipeline(D.pipeline);
+  patchDiagAgg(D.pipeline,D.aggregates);
+  patchResults(D.results);
+  patchEventsHistory(D.events,D.history);
+  // Questions panel is on-demand (fetch on click), not patched from D.
+  renderStepCard();
+}
+function setText(id,text){const e=document.getElementById(id);if(e&&e.textContent!==text)e.textContent=text;}
+function setHTML(id,html){const e=document.getElementById(id);if(e)e.innerHTML=html;}
+function setBar(id,pct,color){const e=document.getElementById(id);if(e){const i=e.querySelector("i");if(i){i.style.width=pct+"%";if(color)i.style.background=color;}}}
+/* attempt_n is null when the data layer has no RUNBOOK attempt header —
+   show '—' not '0' or empty. */
+function fmtAttempt(n){return n==null?"—":String(n);}
+
+function patchTop(t){
+  setText("top-run",t.out_dir);
+  setText("top-hash",t.hash);
+  setText("top-machine",t.machine+" · mlx "+t.mlx_version);
+  setText("top-attempt",fmtAttempt(t.attempt_n));
+  setText("top-started",t.attempt_started);
+  setText("top-awake",fmtDur(t.awake_s));
+  const se=document.getElementById("top-sleep");
+  if(se){se.textContent=t.sleep_blocked?"on":"off";se.style.color=t.sleep_blocked?"var(--ok)":"var(--fail)";}
+  const st=document.getElementById("top-state");
+  if(st){
+    let h="";
+    const alerts=(t.alerts||[]).length;
+    if(alerts)h+='<span class="badge alert">'+alerts+' alert'+(alerts>1?'s':'')+'</span>';
+    h+='<span class="badge '+esc(t.state)+'">'+esc(t.state)+'</span>';
+    // disconnected pill (toggled by EventSource onerror/onopen)
+    if(!sseConnected)h+='<span class="badge disc">disconnected</span>';
+    st.innerHTML=h;
+  }
+}
+function patchNow(n,m,hl){
+  setText("now-sub","from heartbeat.jsonl, "+n.heartbeat_age_s+" s ago");
+  const me=document.getElementById("now-model");
+  if(me)me.innerHTML=esc(n.model)+' <small>'+esc(n.track)+' · '+esc(n.scorer)+' · '+esc(n.dataset)+' · run '+n.run_i+' of '+n.run_n+'</small>';
   const pct=n.cases_total?Math.round(n.cases_done/n.cases_total*100):0;
-  h+='<div class="bar"><i style="width:'+pct+'%"></i></div>';
-  h+='<div class="row"><span>cases <b>'+n.cases_done+' / '+n.cases_total+'</b></span><span><b>'+fmtNum(n.cases_per_h,0)+'</b> cases/h</span><span>ETA <b>'+fmtDur(n.eta_s)+'</span></b></div>';
-  h+='<div class="grid3">';
-  h+='<div class="stat"><span class="l">pred lines</span><span class="v">'+(n.pred_lines!=null?n.pred_lines.toLocaleString():"—")+'</span></div>';
-  h+='<div class="stat"><span class="l">combo elapsed</span><span class="v">'+fmtDur(n.combo_elapsed_s)+'</span></div>';
-  h+='<div class="stat"><span class="l">running accuracy</span><span class="v">'+fmtNum(n.running_accuracy,3)+' <small>maj '+fmtNum(n.running_majority,2)+'</small></span></div>';
-  h+='</div></div>';
+  setBar("now-bar",pct);
+  const ce=document.getElementById("now-cases");
+  if(ce)ce.innerHTML='<span>cases <b>'+n.cases_done+' / '+n.cases_total+'</b></span><span><b>'+fmtNum(n.cases_per_h,0)+'</b> cases/h</span><span>ETA <b>'+fmtDur(n.eta_s)+'</b></span>';
+  setText("now-predlines",n.pred_lines!=null?n.pred_lines.toLocaleString():"—");
+  setText("now-elapsed",fmtDur(n.combo_elapsed_s));
+  const ae=document.getElementById("now-acc");
+  if(ae)ae.innerHTML=fmtNum(n.running_accuracy,3)+' <small>maj '+fmtNum(n.running_majority,2)+'</small>';
   // memory
-  h+='<div class="panel mem"><h2>Memory <span class="sub">cap '+m.cap_gb+' GB · stop '+m.stop_gb+' GB · machine '+m.machine_gb+' GB</span></h2>';
-  const cacheW=m.machine_gb?Math.min(100,m.cache_gb/m.machine_gb*100):0;
+  setText("mem-sub","cap "+m.cap_gb+" GB · stop "+m.stop_gb+" GB · machine "+m.machine_gb+" GB");
+  const cacheOver=m.cache_gb>=m.stop_gb;
+  const me2=document.getElementById("mem-cache");
+  if(me2){me2.textContent=fmtNum(m.cache_gb,2)+" GB";me2.style.color=cacheOver?"var(--fail)":"var(--ok)";}
+  const capW=m.machine_gb?Math.min(100,m.cache_gb/m.machine_gb*100):0;
   const capPct=m.machine_gb?m.cap_gb/m.machine_gb*100:0;
   const stopPct=m.machine_gb?m.stop_gb/m.machine_gb*100:0;
-  const cacheOver=m.cache_gb>=m.stop_gb;
-  h+='<div class="row"><span>cache</span><b style="color:'+(cacheOver?'var(--fail)':'var(--ok)')+'">'+fmtNum(m.cache_gb,2)+' GB</b></div>';
-  h+='<div class="bar mem"><i style="width:'+cacheW+'%"></i><span class="tick cap" style="left:'+capPct+'%"></span><span class="tick" style="left:'+stopPct+'%"></span><span class="ticklabel" style="left:'+capPct+'%">cap</span><span class="ticklabel" style="left:'+stopPct+'%">stop</span></div>';
-  const activeW=m.machine_gb?Math.min(100,m.active_gb/m.machine_gb*100):0;
-  h+='<div class="row" style="margin-top:22px"><span>active</span><b>'+fmtNum(m.active_gb,2)+' GB</b></div>';
-  h+='<div class="bar mem"><i style="width:'+activeW+'%"></i></div>';
-  const peakW=m.machine_gb?Math.min(100,m.peak_gb/m.machine_gb*100):0;
+  const cbar=document.getElementById("mem-cache-bar");
+  if(cbar){cbar.innerHTML='<i style="width:'+capW+'%"></i><span class="tick cap" style="left:'+capPct+'%"></span><span class="tick" style="left:'+stopPct+'%"></span><span class="ticklabel" style="left:'+capPct+'%">cap</span><span class="ticklabel" style="left:'+stopPct+'%">stop</span>';}
+  setText("mem-active",fmtNum(m.active_gb,2)+" GB");
+  setBar("mem-active-bar",m.machine_gb?Math.min(100,m.active_gb/m.machine_gb*100):0);
   const peakOver=m.peak_gb>=m.stop_gb;
-  h+='<div class="row"><span>peak this combo</span><b style="color:'+(peakOver?'var(--amber)':'var(--ok)')+'">'+fmtNum(m.peak_gb,1)+' GB</b></div>';
-  h+='<div class="bar mem"><i style="width:'+peakW+'%;background:'+(peakOver?'var(--amber)':'var(--ok)')+'"></i></div>';
-  h+='</div>';
+  const me3=document.getElementById("mem-peak");
+  if(me3){me3.textContent=fmtNum(m.peak_gb,1)+" GB";me3.style.color=peakOver?"var(--amber)":"var(--ok)";}
+  setBar("mem-peak-bar",m.machine_gb?Math.min(100,m.peak_gb/m.machine_gb*100):0,peakOver?"var(--amber)":"var(--ok)");
   // health
-  h+='<div class="panel"><h2>Health <span class="sub">rules that stop or flag the run</span></h2>';
-  h+='<div class="grid3" style="grid-template-columns:1fr 1fr">';
   const ruleLabels={cache_over_stop:"cache > 10 GB",sleep_windows:"sleep windows",run_failed_combos:"run_failed combos",parity_fail_models:"parity fail (winner flip)",metal_alloc_retries:"metal alloc retries",heartbeat_age:"heartbeat age"};
-  for(const item of hl){
-    const lbl=ruleLabels[item.rule]||item.rule;
-    h+='<div class="stat"><span class="l">'+esc(lbl)+'</span><span class="v">'+pill(item.state,item.detail)+'</span></div>';
+  const hg=document.getElementById("health-grid");
+  if(hg){
+    let hh="";
+    for(const item of hl){const lbl=ruleLabels[item.rule]||item.rule;hh+='<div class="stat"><span class="l">'+esc(lbl)+'</span><span class="v">'+pill(item.state,item.detail)+'</span></div>';}
+    hg.innerHTML=hh;
   }
-  h+='</div>';
   const alerts=(D.run&&D.run.alerts)||[];
-  if(alerts.length){h+='<div class="legend" style="margin-top:12px"><span style="color:var(--fail)">alert:</span> '+esc(alerts.map(a=>a.text).join(" "))+'</div>';}
-  h+='</div></div>';
-  return h;
+  const ha=document.getElementById("health-alerts");
+  if(ha)ha.innerHTML=alerts.length?'<span style="color:var(--fail)">alert:</span> '+esc(alerts.map(a=>a.text).join(" ")):"";
 }
-
-/* ---- pipeline ---- */
-function renderPipeline(p){
-  let h='<div class="panel"><h2>Pipeline <span class="sub">current attempt · click a step for argv, stdout tail, error</span></h2><div class="steps">';
+function patchPipeline(p){
+  const c=document.getElementById("pipeline-steps");
+  if(!c)return;
+  // Keyed by step id: update existing, insert new, remove gone.
+  const existing={};
+  c.querySelectorAll("[data-step]").forEach(e=>existing[e.dataset.step]=e);
+  const seen=new Set();
+  // Rebuild children in order (steps are few, ~9).
+  let html="";
   for(const s of p.steps){
-    h+='<div class="step '+s.state+'" data-step="'+esc(s.id)+'">';
-    h+='<span class="n">'+esc(s.id)+'</span><span class="t">'+esc(s.title)+'</span>';
+    seen.add(s.id);
     let m="";
     if(s.wall_s!=null)m+=fmtDur(s.wall_s);
     if(s.exit!=null)m+=(m?" · ":"")+"exit "+s.exit;
     if(s.state==="running"&&s.started)m+=(m?" · ":"")+"running since "+esc(s.started);
-    if(!m)m=s.detail||esc(s.state);
-    h+='<span class="m">'+m+'</span></div>';
+    if(!m)m=esc(s.state);
+    html+='<div class="step '+s.state+'" data-step="'+esc(s.id)+'">';
+    html+='<span class="n">'+esc(s.id)+'</span><span class="t">'+esc(s.title)+'</span>';
+    html+='<span class="m">'+m+'</span></div>';
   }
-  h+='</div><div class="legend"><span><span class="pill ok">ok</span></span><span><span class="pill run">running</span></span><span><span class="pill fail">failed</span></span><span><span class="pill skip">skipped by marker</span></span><span>markers encode outcome, not exit code</span></div></div>';
-  return h;
+  c.innerHTML=html;
+  c.querySelectorAll("[data-step]").forEach(s=>{s.onclick=()=>{selStep=selStep===s.dataset.step?null:s.dataset.step;renderStepCard();};});
 }
-
-/* ---- failure diagnosis + aggregates ---- */
-function renderDiagAgg(p, a){
-  let h='<div class="two">';
-  // diagnosis: pick the first failed step
+function patchDiagAgg(p,a){
   const failStep=(p.steps||[]).find(s=>s.state==="failed");
-  h+='<div class="panel"><h2>Failure diagnosis <span class="sub">selected: '+(failStep?esc(failStep.id+" · "+failStep.title):"none")+'</span></h2>';
-  if(failStep){
-    h+='<div class="diag">';
-    if(failStep.argv)h+='<div><span class="d">step</span>     '+esc(failStep.argv)+'</div>';
-    if(failStep.stdout_tail)h+='<div><span class="d">stdout</span>  '+esc(failStep.stdout_tail)+'</div>';
-    if(failStep.error)h+='<div><span class="e">error</span>   '+esc(failStep.error)+'</div>';
-    h+='</div>';
-  } else {h+='<div class="diag"><span class="d">no failed step in the current attempt</span></div>';}
-  h+='</div>';
-  // aggregates
-  h+='<div class="panel"><h2>Aggregates so far <span class="sub">'+(a.cases_scored?a.cases_scored.toLocaleString()+" cases scored":"—")+'</span></h2><div class="agg" style="grid-template-columns:repeat(3,1fr)">';
-  h+=aggStat("field accuracy · parallel labels",fmtNum(a.field_accuracy_parallel_labels,2),"vs majority");
-  h+=aggStat("field accuracy · naive",fmtNum(a.field_accuracy_naive,2),"");
-  h+=aggStat("exact record",fmtNum(a.exact_record,2),"");
-  h+=aggStat("time per case · parallel",fmtNum(a.time_per_case_parallel_s,2)+" s","naive "+fmtNum(a.time_per_case_naive_s,1)+" s");
-  const pc=a.parity_counts||{};
-  let pPills="";
-  if(pc.pass)pPills+=pill("pass",pc.pass+" pass")+" ";
-  if(pc.drift)pPills+=pill("drift",pc.drift+" drift")+" ";
-  if(pc.fail)pPills+=pill("fail",pc.fail+" fail");
-  h+=aggStat("parity",pPills||"—","gate 0.05 nats");
-  h+=aggStat("cases scored",(a.cases_scored!=null?a.cases_scored.toLocaleString():"—"),"pred lines "+(a.pred_lines!=null?a.pred_lines.toLocaleString():"—"));
-  h+='</div></div></div>';
-  return h;
+  setText("diag-sub","selected: "+(failStep?failStep.id+" · "+failStep.title:"none"));
+  const db=document.getElementById("diag-body");
+  if(db){
+    if(failStep){
+      let h="";
+      if(failStep.argv)h+='<div><span class="d">step</span>     '+esc(failStep.argv)+'</div>';
+      if(failStep.stdout_tail)h+='<div><span class="d">stdout</span>  '+esc(failStep.stdout_tail)+'</div>';
+      if(failStep.error)h+='<div><span class="e">error</span>   '+esc(failStep.error)+'</div>';
+      db.innerHTML=h;
+    } else {db.innerHTML='<span class="d">no failed step in the current attempt</span>';}
+  }
+  setText("agg-sub",a.cases_scored?a.cases_scored.toLocaleString()+" cases scored":"—");
+  const ag=document.getElementById("agg-grid");
+  if(ag){
+    const pc=a.parity_counts||{};
+    let pPills="";
+    if(pc.pass)pPills+=pill("pass",pc.pass+" pass")+" ";
+    if(pc.drift)pPills+=pill("drift",pc.drift+" drift")+" ";
+    if(pc.fail)pPills+=pill("fail",pc.fail+" fail");
+    ag.innerHTML=
+      aggStat("field accuracy · parallel labels",fmtNum(a.field_accuracy_parallel_labels,2),"vs majority")+
+      aggStat("field accuracy · naive",fmtNum(a.field_accuracy_naive,2),"")+
+      aggStat("exact record",fmtNum(a.exact_record,2),"")+
+      aggStat("time per case · parallel",fmtNum(a.time_per_case_parallel_s,2)+" s","naive "+fmtNum(a.time_per_case_naive_s,1)+" s")+
+      aggStat("parity",pPills||"—","gate 0.05 nats")+
+      aggStat("cases scored",(a.cases_scored!=null?a.cases_scored.toLocaleString():"—"),"pred lines "+(a.pred_lines!=null?a.pred_lines.toLocaleString():"—"));
+  }
 }
 function aggStat(label,value,trend){return '<div class="stat"><span class="l">'+esc(label)+'</span><span class="v">'+value+'</span>'+(trend?'<span class="trend">'+esc(trend)+'</span>':'')+'</div>';}
 
-/* ---- results ---- */
-function renderResults(rows){
-  const headers=["model","dataset","scorer","track","status","accuracy 95% CI","majority","exact","parity","time/case","calls","cases","A/B Δ"];
-  let h='<div class="panel"><h2>Results <span class="sub">one row per combo · same columns as the README leaderboard · click a header to sort · click a row to load its questions below</span></h2>';
-  h+='<div class="filters"><input class="search" id="r-search" placeholder="filter: model, dataset, field…" value="'+esc(rText)+'">';
-  const models=[...new Set(rows.map(r=>r.model))], datasets=[...new Set(rows.map(r=>r.dataset))], scorers=[...new Set(rows.map(r=>r.scorer))], tracks=[...new Set(rows.map(r=>r.track))], statuses=["done","running","queued","failed"];
-  h+=chipGroup("model",["all",...models],rChips)+chipGroup("dataset",["all",...datasets],rChips)+chipGroup("scorer",scorers,rChips)+chipGroup("track",tracks,rChips)+chipGroup("status",statuses,rChips);
-  h+='</div><div class="tw"><table class="rtable"><tr>';
-  headers.forEach((hd,i)=>{const cls=i>=5?' class="num"':'';const arrow=sortKey===i?(sortDir>0?' ▲':' ▼'):'';h+='<th'+cls+' data-col="'+i+'">'+esc(hd)+(i>=5?'<span class="s">'+esc(arrow.trim())+'</span>':arrow)+'</th>';});
-  h+='</tr>';
+/* ---- results patch (keyed by combo_id) ---- */
+function patchResults(rows){
+  // Rebuild filter chips + headers (cheap, few elements).
+  const rc=document.getElementById("r-chips");
+  if(rc){
+    const models=[...new Set(rows.map(r=>r.model))],datasets=[...new Set(rows.map(r=>r.dataset))],scorers=[...new Set(rows.map(r=>r.scorer))],tracks=[...new Set(rows.map(r=>r.track))],statuses=["done","running","queued","failed"];
+    rc.innerHTML=chipGroup("model",["all",...models],rChips)+chipGroup("dataset",["all",...datasets],rChips)+chipGroup("scorer",scorers,rChips)+chipGroup("track",tracks,rChips)+chipGroup("status",statuses,rChips);
+    rc.querySelectorAll(".chip[data-g]").forEach(c=>{c.onclick=()=>{toggleChip(rChips,c.dataset.g,c.dataset.c);patchResults(D.results);};});
+  }
+  // Headers (rebuild on sort change).
+  const head=document.getElementById("r-head");
+  if(head){
+    const headers=["model","dataset","scorer","track","status","accuracy 95% CI","majority","exact","parity","time/case","calls","cases","A/B Δ"];
+    let hh="";
+    headers.forEach((hd,i)=>{const cls=i>=5?' class="num"':'';const arrow=sortKey===i?(sortDir>0?' ▲':' ▼'):'';hh+='<th'+cls+' data-col="'+i+'">'+esc(hd)+(i>=5?'<span class="s">'+esc(arrow.trim())+'</span>':arrow)+'</th>';});
+    head.innerHTML=hh;
+    head.querySelectorAll("th[data-col]").forEach(th=>{th.onclick=()=>{const col=parseInt(th.dataset.col);if(sortKey===col)sortDir*=-1;else{sortKey=col;sortDir=1;}patchResults(D.results);};});
+  }
+  // Body: keyed by combo_id (the out-relative path) — update existing,
+  // insert new, remove gone. combo_id is the contract identity; display_name
+  // is the combo folder name for the table cell / Questions header.
+  const body=document.getElementById("r-body");
+  if(!body)return;
+  const existing={};
+  body.querySelectorAll("tr[data-combo]").forEach(tr=>existing[tr.dataset.combo]=tr);
+  const seen=new Set();
   const fr=filterSortRows(rows);
   for(const row of fr){
-    let rc="";
-    if(row.status==="running")rc="live";
-    else if(row.parity_status==="fail")rc="bad";
-    h+='<tr class="'+rc+'" data-combo="'+esc(row.model+'|'+row.dataset+'|'+row.scorer+'|'+row.track)+'">';
-    h+='<td>'+esc(row.model)+'</td><td>'+esc(row.dataset)+'</td><td>'+esc(row.scorer)+'</td><td>'+esc(row.track)+'</td>';
-    h+='<td>'+statusPill(row)+'</td>';
+    const key=row.combo_id||(row.model+"|"+row.dataset+"|"+row.scorer+"|"+row.track);
+    seen.add(key);
+    let rc2="";
+    if(row.status==="running")rc2="live";
+    else if(row.parity_status==="fail")rc2="bad";
     const ci=(row.ci_low!=null&&row.ci_high!=null)?' <span class="ci">±'+((row.ci_high-row.ci_low)/2).toFixed(2)+'</span>':'';
-    h+='<td class="num">'+fmtNum(row.accuracy,3)+ci+'</td>';
-    h+='<td class="num">'+fmtNum(row.majority,3)+'</td>';
-    h+='<td class="num">'+fmtNum(row.exact_record,3)+'</td>';
-    h+='<td>'+parityPill(row)+'</td>';
-    h+='<td class="num">'+(row.time_per_case_s!=null?fmtNum(row.time_per_case_s,2)+" s":"—")+'</td>';
-    h+='<td class="num">'+(row.calls!=null?row.calls:"—")+'</td>';
-    h+='<td class="num">'+(row.cases!=null?row.cases:"—")+'</td>';
-    h+='<td class="num">'+abDelta(row.ab_delta)+'</td>';
-    h+='</tr>';
+    const html='<td>'+esc(row.model)+'</td><td>'+esc(row.dataset)+'</td><td>'+esc(row.scorer)+'</td><td>'+esc(row.track)+'</td>'+
+      '<td>'+statusPill(row)+'</td>'+
+      '<td class="num">'+fmtNum(row.accuracy,3)+ci+'</td>'+
+      '<td class="num">'+fmtNum(row.majority,3)+'</td>'+
+      '<td class="num">'+fmtNum(row.exact_record,3)+'</td>'+
+      '<td>'+parityPill(row)+'</td>'+
+      '<td class="num">'+(row.time_per_case_s!=null?fmtNum(row.time_per_case_s,2)+" s":"—")+'</td>'+
+      '<td class="num">'+(row.calls!=null?row.calls:"—")+'</td>'+
+      '<td class="num">'+(row.cases!=null?row.cases:"—")+'</td>'+
+      '<td class="num">'+abDelta(row.ab_delta)+'</td>';
+    let tr=existing[key];
+    if(tr){
+      // Update in place: class + innerHTML.
+      tr.className=rc2;
+      tr.innerHTML=html;
+    } else {
+      // Insert new row.
+      tr=document.createElement("tr");
+      tr.className=rc2;
+      tr.dataset.combo=key;
+      tr.innerHTML=html;
+      // On click, send combo_id (the out-relative path) verbatim to
+      // /questions.json?combo= (URL-encoded in fetchQuestions). Track the
+      // display_name separately for the Questions header.
+      tr.onclick=()=>{selCombo=tr.dataset.combo;selComboDisplayName=row.display_name||row.combo_id||key;selQuestion=0;Q=[];fetchQuestions();};
+      body.appendChild(tr);
+    }
   }
-  h+='</table></div><div class="legend"><span>accuracy = field accuracy, Wilson CI</span><span>majority = always-most-common label</span><span>exact = every field right</span><span>parity: <span class="pill pass">pass</span> &lt;0.05 nats · <span class="pill drift">drift</span> ≥0.05, winners identical · <span class="pill fail">fail</span> a winner changed</span><span>A/B Δ = main − branch</span></div></div>';
-  return h;
+  // Remove gone rows.
+  body.querySelectorAll("tr[data-combo]").forEach(tr=>{if(!seen.has(tr.dataset.combo))tr.remove();});
 }
-function statusPill(row){
-  if(row.status==="done")return pill("ok","done");
-  if(row.status==="running")return pill("run","running");
-  if(row.status==="failed")return pill("fail","failed");
-  if(row.status==="queued")return pill("skip","queued");
-  return pill("skip",row.status);
-}
-function parityPill(row){
-  if(!row.parity_status)return "—";
-  if(row.parity_status==="pass")return pill("pass","pass");
-  if(row.parity_status==="drift")return pill("drift","drift "+fmtNum(row.parity_drift,3));
-  if(row.parity_status==="fail")return pill("fail","fail · winner flip");
-  return esc(row.parity_status);
-}
+function statusPill(row){if(row.status==="done")return pill("ok","done");if(row.status==="running")return pill("run","running");if(row.status==="failed")return pill("fail","failed");if(row.status==="queued")return pill("skip","queued");return pill("skip",row.status);}
+function parityPill(row){if(!row.parity_status)return "—";if(row.parity_status==="pass")return pill("pass","pass");if(row.parity_status==="drift")return pill("drift","drift "+fmtNum(row.parity_drift,3));if(row.parity_status==="fail")return pill("fail","fail · winner flip");return esc(row.parity_status);}
 function abDelta(d){if(d==null)return "—";const dir=d>0?"up":"down";const s=d>0?"+":"−";return '<span class="delta '+dir+'">'+s+Math.abs(d).toFixed(2)+'</span>';}
-function chipGroup(g,labels,chips){
-  let h='<span class="chip g">'+esc(g)+'</span>';
-  for(const l of labels){const on=isOn(chips,g,l);h+='<span class="chip'+(on?' on':'')+'" data-g="'+esc(g)+'" data-c="'+esc(l)+'" data-scope="r">'+esc(l)+'</span>';}
-  return h;
-}
+function chipGroup(g,labels,chips){let h='<span class="chip g">'+esc(g)+'</span>';for(const l of labels){const on=isOn(chips,g,l);h+='<span class="chip'+(on?' on':'')+'" data-g="'+esc(g)+'" data-c="'+esc(l)+'" data-scope="r">'+esc(l)+'</span>';}return h;}
 function isOn(chips,g,label){const s=chips[g];if(!s||s.size===0)return label==="all";return s.has(label);}
 function filterSortRows(rows){
   let out=rows.filter(row=>{
@@ -310,17 +450,49 @@ function filterSortRows(rows){
   if(sortKey!=null){const keys=["model","dataset","scorer","track","status","accuracy","majority","exact_record","parity_drift","time_per_case_s","calls","cases","ab_delta"];const k=keys[sortKey];out.sort((a,b)=>{let va=a[k],vb=b[k];if(va==null)va=-Infinity;if(vb==null)vb=-Infinity;if(typeof va==="number"&&typeof vb==="number")return (va-vb)*sortDir;return String(va).localeCompare(String(vb))*sortDir;});}
   return out;
 }
+function toggleChip(chips,g,label){if(!chips[g])chips[g]=new Set();const s=chips[g];if(label==="all"){s.clear();}else{s.delete("all");if(s.has(label))s.delete(label);else s.add(label);}if(s.size===0)delete chips[g];}
 
-/* ---- questions ---- */
-function renderQuestions(list){
+/* ---- events + history patch ---- */
+function patchEventsHistory(ev,hi){
+  const el=document.getElementById("events-list");
+  if(el){
+    const kindPill={heartbeat:"run",combo_done:"ok",alloc_retry:"drift",step_done:"ok",attempt:"skip",run_failed:"fail",sleep:"skip"};
+    // Keyed by ts+kind — update existing, insert new at top, remove gone.
+    const existing={};
+    el.querySelectorAll("div[data-ek]").forEach(d=>existing[d.dataset.ek]=d);
+    const seen=new Set();
+    for(const e of ev){
+      const key=e.ts+"|"+e.kind+"|"+e.text;
+      if(seen.has(key))continue;
+      seen.add(key);
+      const html='<span class="ts">'+esc(e.ts)+'</span>'+pill(kindPill[e.kind]||"skip",e.kind)+'<span>'+esc(e.text)+'</span>';
+      let d=existing[key];
+      if(d){d.innerHTML=html;}
+      else{d=document.createElement("div");d.dataset.ek=key;d.innerHTML=html;el.insertBefore(d,el.firstChild);}
+    }
+    el.querySelectorAll("div[data-ek]").forEach(d=>{if(!seen.has(d.dataset.ek))d.remove();});
+  }
+  const hl=document.getElementById("history-list");
+  if(hl){
+    let h="";
+    for(const a of hi){h+='<details><summary>attempt '+a.attempt_n+' · '+esc(a.started)+' · '+esc(a.hash)+' · '+esc(a.outcome)+'</summary>';if(a.steps_failed&&a.steps_failed.length){h+='<div class="events" style="margin-top:6px">';for(const sf of a.steps_failed){h+='<div><span class="ts">—</span>'+pill("fail","fail")+'<span>'+esc(sf)+'</span></div>';}h+='</div>';}h+='</details>';}
+    hl.innerHTML=h;
+  }
+}
+
+/* ---- questions panel (on-demand, not patched from D) ---- */
+function renderQuestionsPanel(){
+  const slot=document.getElementById("questions-panel");
+  if(!slot)return;
+  if(!selCombo&&Q.length===0){slot.innerHTML="";return;}
+  const list=Q;
   const headers=["time","case · rotation","field","predicted","label","ok","p(pred)","margin","call ms","acc so far"];
-  const comboDisplay=selCombo?selCombo.split("|").join(" · "):"";
-  let h='<div class="panel"><h2>Questions <span class="sub">every decision of the selected combo'+(selCombo?' · '+esc(comboDisplay):'')+' · '+(list.length?list.length.toLocaleString()+" lines":"none")+'</span></h2>';
+  let h='<div class="panel"><h2>Questions <span class="sub">every decision of the selected combo'+(selCombo?' · '+esc(selComboDisplayName||selCombo):'')+' · '+(list.length?list.length.toLocaleString()+" lines":"none")+'</span></h2>';
   h+='<div class="filters"><input class="search" id="q-search" placeholder="filter: case id, field, label, text…" value="'+esc(qText)+'">';
   h+=chipGroup("show",["all","wrong only","near-tie","order flips"],qChips)+chipGroup("workflow",["all","invoice","security","agent trace","customer service"],qChips)+chipGroup("field",["all"],qChips);
-  h+='</div><div class="qwrap"><div class="tw qlist"><table><tr>';
+  h+='</div><div class="qwrap"><div class="tw qlist"><table><thead><tr>';
   headers.forEach((hd,i)=>{const cls=i>=6?' class="num"':'';h+='<th'+cls+'>'+esc(hd)+'</th>';});
-  h+='</tr>';
+  h+='</tr></thead><tbody>';
   const fr=filterQuestions(list);
   for(let i=0;i<fr.length;i++){const r=fr[i];const origIdx=list.indexOf(r);
     h+='<tr class="'+(origIdx===selQuestion?"sel":"")+'" data-qi="'+origIdx+'">';
@@ -331,7 +503,7 @@ function renderQuestions(list){
     h+='<td class="num">'+(r.call_ms!=null?r.call_ms:"—")+'</td><td class="num">'+fmtNum(r.acc_so_far,3)+'</td>';
     h+='</tr>';
   }
-  h+='</table></div>';
+  h+='</tbody></table></div>';
   const c=list[selQuestion];
   if(c){
     h+='<div class="qcard"><div class="qmeta">';
@@ -353,7 +525,11 @@ function renderQuestions(list){
     h+='</div></div>';
   } else {h+='<div class="qcard">no question selected — click a row</div>';}
   h+='</div></div>';
-  return h;
+  slot.innerHTML=h;
+  // Wire question-specific events.
+  slot.querySelectorAll(".qlist tr[data-qi]").forEach(tr=>{tr.onclick=()=>{selQuestion=parseInt(tr.dataset.qi);renderQuestionsPanel();};});
+  slot.querySelectorAll(".chip[data-g]").forEach(c=>{c.onclick=()=>{toggleChip(qChips,c.dataset.g,c.dataset.c);renderQuestionsPanel();};});
+  const qs=document.getElementById("q-search");if(qs){qs.oninput=()=>{qText=qs.value;renderQuestionsPanel();qs.focus();};}
 }
 function filterQuestions(list){
   let out=list;
@@ -365,22 +541,13 @@ function filterQuestions(list){
   return out;
 }
 
-/* ---- events + history ---- */
-function renderEventsHistory(ev, hi){
-  let h='<div class="two"><div class="panel"><h2>Events <span class="sub">heartbeats, failures, sleep, stop rule · newest first</span></h2><div class="events">';
-  const kindPill={heartbeat:"run",combo_done:"ok",alloc_retry:"drift",step_done:"ok",attempt:"skip",run_failed:"fail",sleep:"skip"};
-  for(const e of ev){h+='<div><span class="ts">'+esc(e.ts)+'</span>'+pill(kindPill[e.kind]||"skip",e.kind)+'<span>'+esc(e.text)+'</span></div>';}
-  h+='</div></div>';
-  h+='<div class="panel"><h2>History <span class="sub">previous attempts of this run dir</span></h2>';
-  for(const a of hi){h+='<details><summary>attempt '+a.attempt_n+' · '+esc(a.started)+' · '+esc(a.hash)+' · '+esc(a.outcome)+'</summary>';if(a.steps_failed&&a.steps_failed.length){h+='<div class="events" style="margin-top:6px">';for(const sf of a.steps_failed){h+='<div><span class="ts">—</span>'+pill("fail","fail")+'<span>'+esc(sf)+'</span></div>';}h+='</div>';}h+='</details>';}
-  h+='</div></div>';
-  return h;
-}
-
 /* ---- step popover ---- */
 function renderStepCard(){
-  if(!selStep)return "";
-  const s=(D.pipeline.steps||[]).find(x=>x.id===selStep);if(!s)return "";
+  const slot=document.getElementById("stepcard-slot");
+  if(!slot)return;
+  if(!selStep){slot.innerHTML="";return;}
+  const s=(D.pipeline.steps||[]).find(x=>x.id===selStep);
+  if(!s){slot.innerHTML="";return;}
   let h='<div class="panel stepcard" id="stepcard"><h2>'+esc(s.id)+' · '+esc(s.title)+'</h2><div class="diag">';
   h+='<div><span class="d">state</span>  '+pill(s.state,s.state)+'</div>';
   if(s.argv)h+='<div><span class="d">argv</span>   '+esc(s.argv)+'</div>';
@@ -391,63 +558,59 @@ function renderStepCard(){
   h+='</div>';
   if(s.stdout_tail){h+='<div class="diag" style="margin-top:6px;max-height:200px">'+esc(s.stdout_tail)+'</div>';}
   h+='<div style="margin-top:6px"><span class="chip" id="step-close">close</span></div></div>';
-  return h;
+  slot.innerHTML=h;
+  const sc=document.getElementById("step-close");if(sc)sc.onclick=()=>{selStep=null;renderStepCard();};
 }
 
-/* ---- main render ---- */
-function render(){
-  if(!D)return;
-  const root=document.getElementById("root");
-  let h="";
-  h+=renderTop(D.run);
-  h+=renderNow(D.now, D.memory, D.health);
-  h+=renderPipeline(D.pipeline);
-  h+=renderDiagAgg(D.pipeline, D.aggregates);
-  h+=renderResults(D.results);
-  if(Q.length||selCombo)h+=renderQuestions(Q);
-  h+=renderEventsHistory(D.events, D.history);
-  h+=renderStepCard();
-  h+='<div class="foot">read-only over RUNBOOK.md · combo run.json / report.json / heartbeat.jsonl / predictions.jsonl · parity.json · SUMMARY.md · refresh '+REFRESH+' s · /dashboard.json for scripts · TTY mode unchanged</div>';
-  root.innerHTML=h;
-  wireEvents();
-}
-
+/* ---- event wiring (first paint only) ---- */
 function wireEvents(){
-  document.querySelectorAll(".chip[data-g]").forEach(c=>{c.onclick=()=>{toggleChip(c.dataset.scope==="r"?rChips:qChips,c.dataset.g,c.dataset.c);render();};});
-  document.querySelectorAll("th[data-col]").forEach(th=>{th.onclick=()=>{const col=parseInt(th.dataset.col);if(sortKey===col)sortDir*=-1;else{sortKey=col;sortDir=1;}render();};});
-  document.querySelectorAll(".rtable tr[data-combo]").forEach(tr=>{tr.onclick=()=>{selCombo=tr.dataset.combo;selQuestion=0;Q=[];fetchQuestions();};});
-  document.querySelectorAll(".qlist tr[data-qi]").forEach(tr=>{tr.onclick=()=>{selQuestion=parseInt(tr.dataset.qi);render();};});
-  document.querySelectorAll(".step[data-step]").forEach(s=>{s.onclick=()=>{selStep=selStep===s.dataset.step?null:s.dataset.step;render();};});
-  const sc=document.getElementById("step-close");if(sc)sc.onclick=()=>{selStep=null;render();};
-  const rs=document.getElementById("r-search");if(rs){rs.oninput=()=>{rText=rs.value;render();rs.focus();};}
-  const qs=document.getElementById("q-search");if(qs){qs.oninput=()=>{qText=qs.value;render();qs.focus();};}
+  const rs=document.getElementById("r-search");if(rs){rs.oninput=()=>{rText=rs.value;patchResults(D.results);rs.focus();};}
 }
-function toggleChip(chips,g,label){if(!chips[g])chips[g]=new Set();const s=chips[g];if(label==="all"){s.clear();}else{s.delete("all");if(s.has(label))s.delete(label);else s.add(label);}if(s.size===0)delete chips[g];}
 
-/* ---- fetch loop ---- */
-async function fetchDashboard(){
+/* ================================================================
+   SSE — EventSource('/events'). On 'dashboard' event, patchDashboard.
+   On error, show 'disconnected' pill; EventSource reconnects itself.
+   ================================================================ */
+let sseConnected=false;
+function startSSE(){
+  es=new EventSource("/events");
+  es.onopen=()=>{sseConnected=true;if(D)patchTop(D.run);};
+  es.onerror=()=>{sseConnected=false;if(D)patchTop(D.run);};
+  es.addEventListener("dashboard",(ev)=>{
+    sseConnected=true;
+    try{
+      const newD=JSON.parse(ev.data);
+      patchDashboard(newD);
+    }catch(e){/* ignore malformed */}
+  });
+}
+
+/* ---- first paint: fetch /dashboard.json once, then start SSE ---- */
+async function firstPaint(){
   try{
     const r=await fetch("/dashboard.json",{cache:"no-store"});
     if(!r.ok)throw new Error("HTTP "+r.status);
     D=await r.json();
     const be=document.getElementById("boot-err");if(be)be.remove();
-    render();
-    if(selCombo&&Q.length===0)await fetchQuestions();
-  }catch(e){const be=document.getElementById("boot-err");if(be)be.textContent="cannot reach /dashboard.json: "+e.message+" — retrying";}
+    initialRender();
+    // Deep-link: ?combo=<id>&q=<n> selects a combo and question on load.
+    // combo_id is the out-relative path; look up display_name from D.results.
+    const p=new URLSearchParams(location.search);
+    const c=p.get("combo"),qi=p.get("q");
+    if(c){selCombo=c;const found=(D.results||[]).find(r=>(r.combo_id||"")===c);selComboDisplayName=found?(found.display_name||c):c;selQuestion=qi?parseInt(qi):0;await fetchQuestions();}
+    startSSE();
+  }catch(e){
+    const be=document.getElementById("boot-err");
+    if(be)be.textContent="cannot reach /dashboard.json: "+e.message+" — retrying";
+    // Retry first paint after a delay.
+    setTimeout(firstPaint,REFRESH*1000);
+  }
 }
 async function fetchQuestions(){
   if(!selCombo)return;
-  try{const r=await fetch("/questions.json?combo="+encodeURIComponent(selCombo),{cache:"no-store"});if(!r.ok)throw new Error("HTTP "+r.status);Q=await r.json();render();}catch(e){/* show stale, will retry */}
+  try{const r=await fetch("/questions.json?combo="+encodeURIComponent(selCombo),{cache:"no-store"});if(!r.ok)throw new Error("HTTP "+r.status);Q=await r.json();renderQuestionsPanel();}catch(e){/* show stale, will retry */}
 }
-fetchDashboard();
-// Deep-link support: ?combo=<id>&q=<n> selects a combo and question on load
-// (for screenshots and shareable links). 5-line addition.
-(async()=>{
-  const p=new URLSearchParams(location.search);
-  const c=p.get("combo"),qi=p.get("q");
-  if(c){selCombo=c;selQuestion=qi?parseInt(qi):0;await fetchQuestions();}
-})();
-setInterval(fetchDashboard, REFRESH*1000);
+firstPaint();
 </script>
 </body>
 </html>

@@ -70,7 +70,17 @@ def _write_valid(folder: Path, records=None):
         "counts": {"cases": 2, "fields": 2, "prediction_lines": len(records)},
     }
     (folder / "run.json").write_text(json.dumps(run, indent=2, sort_keys=True) + "\n")
-    (folder / "dataset.lock.json").write_text(json.dumps({"source": "fix"}) + "\n")
+    # parity-gates: the dataset lock lives at the MODEL folder level as
+    # <dataset>.dataset.lock.json (the parent of the combo), and run.json
+    # carries dataset_lock_sha256. The combo folder does NOT have a
+    # per-combo dataset.lock.json.
+    import hashlib
+
+    lock_content = json.dumps({"source": "fix"}) + "\n"
+    lock_path = folder.parent / "fix.dataset.lock.json"
+    lock_path.write_text(lock_content)
+    run["config"]["dataset_lock_sha256"] = hashlib.sha256(lock_content.encode()).hexdigest()
+    (folder / "run.json").write_text(json.dumps(run, indent=2, sort_keys=True) + "\n")
     # Results contract v2: the parallel track's honest timing split medians
     # (the same keys the engine's _meta carries, incl. failed_attempts and
     # peak memory).
@@ -161,10 +171,68 @@ def test_wrong_type_fails(tmp_path):
     assert any("valid" in p and "wrong type" in p for p in problems)
 
 
-def test_missing_dataset_lock_fails(tmp_path):
+def test_ordinal_keys_accepted(tmp_path):
+    """ordered/ordinal/ordinal_choices (OrdinalTelemetry, ordered=True enum
+    fields) are optional add-on keys, not contract violations. The 7B
+    typesafe combos failed 'unexpected keys [ordinal, ordinal_choices]' until
+    the contract was updated."""
     folder = tmp_path / "combo"
+    rec1 = _record()
+    rec1["ordered"] = True
+    rec1["ordinal_choices"] = ["low", "medium", "high"]
+    rec1["ordinal"] = {"argmax_level": 2, "expected_index": 2.0, "variance": 0.0}
+    rec2 = _record(case_id="c2", label="LOW", prediction="HIGH", correct=False, probability=0.3)
+    _write_valid(folder, records=[rec1, rec2])
+    ok, problems = check_folder(folder)
+    assert ok, problems
+
+
+def test_unknown_key_still_fails(tmp_path):
+    """An unrecognized key (not in the contract, not in the optional add-on
+    list) is still a contract violation."""
+    folder = tmp_path / "combo"
+    rec = _record()
+    rec["totally_unknown_key"] = 42
+    _write_valid(folder, records=[rec])
+    ok, problems = check_folder(folder)
+    assert not ok
+    assert any("unexpected keys" in p and "totally_unknown_key" in p for p in problems)
+
+
+def test_error_line_passes(tmp_path):
+    """A line with 'error' set (non-empty string) may have null
+    correct/probability/prediction/per_item_end_to_end_ms — the field's
+    scoring failed. The line is allowed and counted in the errors summary."""
+    folder = tmp_path / "combo"
+    rec_ok = _record()
+    rec_err = _record(case_id="c2", label="HIGH", prediction=None, correct=None, probability=None)
+    rec_err["error"] = "context too long for model window"
+    rec_err["per_item_end_to_end_ms"] = None
+    rec_err["log_scores"] = None
+    _write_valid(folder, records=[rec_ok, rec_err])
+    ok, problems = check_folder(folder)
+    assert ok, problems
+
+
+def test_null_without_error_fails(tmp_path):
+    """A line with null correct/per_item_end_to_end_ms and NO error key is a
+    contract violation — only error lines may have nulls."""
+    folder = tmp_path / "combo"
+    rec_ok = _record()
+    rec_bad = _record(case_id="c2", label="HIGH", prediction=None, correct=None, probability=None)
+    rec_bad["error"] = None  # no error, but nulls present
+    rec_bad["per_item_end_to_end_ms"] = None
+    _write_valid(folder, records=[rec_ok, rec_bad])
+    ok, problems = check_folder(folder)
+    assert not ok
+    assert any("per_item_end_to_end_ms" in p and "missing/invalid" in p for p in problems)
+
+
+def test_missing_dataset_lock_fails(tmp_path):
+    folder = tmp_path / "model" / "combo"
     _write_valid(folder)
-    (folder / "dataset.lock.json").unlink()
+    # Remove the model-folder lock (the one the bench writes).
+    (folder.parent / "fix.dataset.lock.json").unlink()
     ok, problems = check_folder(folder)
     assert not ok
     assert any("dataset.lock.json" in p for p in problems)
@@ -288,6 +356,7 @@ class TestParityGate:
                     "prompt_version": "jevmlx-parallel-v8",
                     "test": "test_w1a_scoring_parity_batch_vs_chunked_real_model",
                     "passed": True,
+                    "status": "PASS",
                     "max_abs_drift_nats": 0.027,
                     "max_raw_row_drift_nats": 0.031,
                     "atol": 0.05,
@@ -299,6 +368,37 @@ class TestParityGate:
         ok, problems = check_parity(tmp_path)
         assert ok
         assert problems == []
+
+    def test_drift_parity_passes_with_note(self, tmp_path):
+        """parity-gates: status=DRIFT is publishable (OK) — the note is
+        informational (batch-shape noise, not a regression). Before the
+        fix, DRIFT set passed=False and check_parity returned FAIL."""
+        from benchmarks.check_results import check_parity
+
+        (tmp_path / "parity.json").write_text(
+            json.dumps(
+                {
+                    "model": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+                    "test": "test_w1a_scoring_parity_batch_vs_chunked_real_model",
+                    "passed": False,
+                    "status": "DRIFT",
+                    "max_abs_drift_nats": 0.078,
+                    "max_raw_row_drift_nats": 0.03,
+                    "max_gap_drift_nats": 0.078,
+                    "max_margin_drift_nats": 0.05,
+                    "atol": 0.05,
+                    "winners_identical": True,
+                    "drift_envelope": {"band": 0.14},
+                    "run_at": "2026-09-18T12:00:00Z",
+                }
+            )
+        )
+        ok, problems = check_parity(tmp_path)
+        assert ok, f"DRIFT should be OK (publishable), got problems={problems}"
+        assert len(problems) == 1
+        assert "DRIFT" in problems[0]
+        assert "batched drift" in problems[0]
+        assert "inside envelope band 0.14" in problems[0]
 
     def test_missing_parity_fails(self, tmp_path):
         from benchmarks.check_results import check_parity
@@ -407,9 +507,10 @@ class TestParityGate:
         assert any("unreadable" in p for p in problems)
 
     def test_drift_status_prints_drift_word(self, tmp_path):
-        """P4/I7: a parity.json with status=DRIFT (drift >= atol, winners
-        identical, inside envelope band) prints 'DRIFT: ...' and passed
-        stays False."""
+        """parity-gates: a parity.json with status=DRIFT (drift >= atol,
+        winners identical, inside envelope band) is OK (publishable) and
+        prints the DRIFT sentence as an informational note. Before the fix,
+        DRIFT set passed=False and check_parity returned FAIL."""
         from benchmarks.check_results import check_parity
 
         (tmp_path / "parity.json").write_text(
@@ -431,10 +532,11 @@ class TestParityGate:
             )
         )
         ok, problems = check_parity(tmp_path)
-        assert not ok  # passed is False for DRIFT
-        msg = problems[0]
+        assert ok  # DRIFT is publishable (batch-shape noise, not a regression)
+        msg = problems[0]  # the informational note
         assert "DRIFT:" in msg
         assert "winners identical" in msg
+        assert "inside envelope band 0.141" in msg
         assert "envelope band 0.141" in msg
 
     def test_fail_status_prints_fail_word(self, tmp_path):
@@ -544,23 +646,72 @@ class TestParityGate:
                 }
             )
         )
-        # Results contract v2: _local_rows reads ONLY the per-item end-to-end
-        # median — without it the leaderboard FAILS the folder.
-        (combo / "predictions.jsonl").write_text(
-            json.dumps(
-                {
-                    "case_id": "c1",
-                    "field": "f",
-                    "per_item_end_to_end_ms": 810.0,
-                    "valid": True,
-                    "correct": True,
-                    "label": "A",
-                    "prediction": "A",
-                }
-            )
-            + "\n",
-            encoding="utf-8",
+        # Results contract v2: _local_rows reads the per-item end-to-end
+        # median from timing.json — without it the leaderboard FAILS.
+        (combo / "timing.json").write_text(
+            json.dumps({"median": {"per_item_end_to_end_ms": 810.0}}), encoding="utf-8"
         )
         rows = _local_rows(tmp_path)
         assert len(rows) == 1
         assert rows[0]["model"] == "qwen7b"
+
+
+def test_check_folder_lock_sha_mismatch_fails(tmp_path):
+    """parity-gates (review fix 1): the dataset lock lives at the MODEL
+    folder level as <dataset>.dataset.lock.json; check_results verifies
+    its sha256 matches run.json's dataset_lock_sha256."""
+
+    model_dir = tmp_path / "model"
+    folder = model_dir / "combo"
+    _write_valid(folder)
+    # Corrupt the lock: rewrite with different content.
+    lock_path = model_dir / "fix.dataset.lock.json"
+    lock_path.write_text(json.dumps({"source": "different"}) + "\n")
+    # run.json's sha still points at the original content.
+    ok, problems = check_folder(folder)
+    assert not ok
+    assert any("sha256 mismatch" in p for p in problems)
+
+
+def test_check_folder_missing_model_lock_fails(tmp_path):
+    """A combo whose model folder has no <dataset>.dataset.lock.json fails."""
+    model_dir = tmp_path / "model"
+    folder = model_dir / "combo"
+    _write_valid(folder)
+    (model_dir / "fix.dataset.lock.json").unlink()
+    ok, problems = check_folder(folder)
+    assert not ok
+    assert any("fix.dataset.lock.json" in p and "missing" in p for p in problems)
+
+
+def test_leaderboard_cases_from_run_json_counts(tmp_path):
+    """parity-gates (review fix 3): the 'Cases' column comes from run.json's
+    counts.cases (the source of truth), not from the agreement metrics'
+    n_cases (which can undercount when a case has no valid prediction)."""
+    from benchmarks.leaderboard import _local_rows
+
+    model_dir = tmp_path / "m2pro--qwen7b"
+    combo = model_dir / "parallel-trie-typesafe"
+    combo.mkdir(parents=True)
+    (model_dir / "parity.json").write_text(
+        json.dumps({"passed": True, "status": "PASS", "max_abs_drift_nats": 0.01, "atol": 0.05})
+    )
+    (combo / "report.json").write_text(
+        json.dumps({"metrics": {"agreement": {"agreement_common_subset": 0.9, "n_cases": 44}}})
+    )
+    (combo / "run.json").write_text(
+        json.dumps(
+            {
+                "run_id": "x",
+                "environment": {},
+                "config": {"track": "parallel", "dataset_path": "typesafe", "model": "qwen7b"},
+                "counts": {"cases": 45, "fields": 45, "prediction_lines": 44},
+            }
+        )
+    )
+    (combo / "timing.json").write_text(
+        json.dumps({"median": {"per_item_end_to_end_ms": 590.0}}), encoding="utf-8"
+    )
+    rows = _local_rows(tmp_path)
+    assert len(rows) == 1
+    assert rows[0]["cases"] == 45  # from run.json counts.cases, not n_cases=44

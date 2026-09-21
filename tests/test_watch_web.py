@@ -62,8 +62,22 @@ class TestHtmlPanels:
         ]:
             assert text in HTML, f"missing legend text: {text}"
 
-    def test_meta_refresh_present(self):
-        assert 'http-equiv="refresh"' in HTML
+    def test_no_meta_refresh(self):
+        """W6-UI-3f: the page must NOT reload via meta refresh — SSE drives updates."""
+        assert 'http-equiv="refresh"' not in HTML
+
+    def test_no_root_innerhtml_wipe(self):
+        """W6-UI-3f: #root.innerHTML is assigned only on first paint, never on patch."""
+        # The only 'root.innerHTML=' assignment is in initialRender (first paint).
+        # patchDashboard must never touch root.innerHTML.
+        assert HTML.count("root.innerHTML=h") == 1
+        assert HTML.count("root.innerHTML=") == 1
+        # No setInterval polling — SSE replaces it.
+        assert "setInterval" not in HTML
+
+    def test_sse_eventsource_present(self):
+        """W6-UI-3f: the page connects via EventSource for live updates."""
+        assert "EventSource('/events')" in HTML or 'EventSource("/events")' in HTML
 
     def test_no_external_deps(self):
         """No CDN, no framework — inline CSS + vanilla JS only."""
@@ -72,10 +86,37 @@ class TestHtmlPanels:
         assert "import " not in HTML.split("<script>")[1]
 
     def test_refresh_substitution(self):
-        """_dashboard_html injects the refresh interval."""
+        """_dashboard_html injects the refresh interval into const REFRESH."""
         html = _dashboard_html(refresh=5)
-        assert 'content="5"' in html
+        assert "const REFRESH = 5;" in html
         assert "__REFRESH__" not in html
+
+    def test_first_paint_patches_shells(self):
+        """W6-UI-3h: initialRender must call patchDashboard(D) after building
+        shells so the first paint carries real values before any SSE event."""
+        # The initialRender function must call patchDashboard(D) after setting
+        # booted=true — this is what fills NOW/MEMORY/HEALTH/AGGREGATES nodes.
+        assert "patchDashboard(D);" in HTML
+        # Verify it's inside initialRender (after booted=true).
+        idx_booted = HTML.index("booted=true;")
+        idx_patch = HTML.index("patchDashboard(D);", idx_booted)
+        assert idx_patch > idx_booted, "patchDashboard(D) must come after booted=true"
+
+    def test_combo_id_sent_verbatim_on_click(self):
+        """W6-UI-3h: the click handler sends results[i].combo_id (the
+        out-relative path) verbatim to /questions.json?combo=, not the
+        model|dataset|scorer|track pipe-string."""
+        # The row key must be row.combo_id (with a defensive fallback).
+        assert 'row.combo_id||(row.model+"|"' in HTML
+        # On click, selCombo gets the data-combo (combo_id), and
+        # selComboDisplayName gets display_name for the header.
+        assert "selCombo=tr.dataset.combo" in HTML
+        assert "selComboDisplayName=row.display_name||row.combo_id||key" in HTML
+
+    def test_attempt_null_renders_dash(self):
+        """W6-UI-3h: attempt_n=null shows '—' not '0' or empty."""
+        assert 'function fmtAttempt(n){return n==null?"—":String(n);}' in HTML
+        assert "fmtAttempt(t.attempt_n)" in HTML
 
 
 class TestContractKeys:

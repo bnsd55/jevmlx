@@ -247,7 +247,11 @@ def test_parity_report_carries_v2_keys_and_passes_check_parity(tmp_path):
     assert _parity_failed_stages(payload) == []
 
     # A winners-flip payload: the stage classifier names the stage and
-    # check_parity rejects the folder.
+    # check_parity rejects the folder. (The _DriftingModel produces DRIFT —
+    # batch-shape noise inside the envelope band, winners identical — which
+    # is now publishable, so check_parity returns OK for it. A real FAIL
+    # requires winners_identical=False; that path is covered by
+    # test_failed_parity_fails in test_check_results.py.)
     drift_dir = tmp_path.parent / "drift"
     drift_dir.mkdir()
     write_parity_json(
@@ -255,8 +259,11 @@ def test_parity_report_carries_v2_keys_and_passes_check_parity(tmp_path):
     )
     on_disk = json.loads((drift_dir / "parity.json").read_text(encoding="utf-8"))
     assert on_disk["passed"] is False
+    # DRIFT (not FAIL): winners identical, inside envelope band.
+    assert on_disk["status"] == "DRIFT"
     stages = _parity_failed_stages(on_disk)
     assert stages and stages != ["unspecified stage (payload carries no stage keys)"]
+    # parity-gates: DRIFT is publishable — check_parity returns OK with a note.
     ok, problems = check_parity(drift_dir)
-    assert ok is False
-    assert any("parity.json shows test did not pass" in p for p in problems)
+    assert ok is True
+    assert any("DRIFT" in p for p in problems)

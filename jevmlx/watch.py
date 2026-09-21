@@ -35,6 +35,9 @@ __all__ = [
     "build_questions",
     "render_html",
     "_dashboard_html",
+    "_handle_sse",
+    "_watched_files",
+    "_mtimes_signature",
     "run_watch",
 ]
 
@@ -297,27 +300,52 @@ def _state_icon(state: str) -> str:
 
 
 def _combo_dirs(out_dir: Path) -> list[Path]:
-    """All combo dirs under <out> (the out dir itself when it holds predictions).
+    """All combo dirs under <out> — discovered by directory, not by run.json.
 
-    A single-combo bench writes run.json/predictions.jsonl directly into the
-    out dir; a multi-combo bench writes them into subdirectories.
+    The real bench/m5 tree is:
+      <out>/bench-quality/<machine>-<model-slug>/<track>-<scorer>-<dataset>/...
+      <out>/bench-rest/<machine>-<model-slug>/<track>-<scorer>-<dataset>/...
+      <out>/ab/bench-quality/<machine>-quality/<combo>/...
+      <out>/invariance/extraNN/...
+
+    A LIVE combo dir has heartbeat.jsonl and predictions.jsonl but NO run.json
+    yet (run.json is written on completion). A QUEUED combo dir (never-run)
+    has no marker files — we discover it as a sibling of a known combo in the
+    same model folder. So we discover combos by ANY of heartbeat.jsonl /
+    predictions.jsonl / run.json present, PLUS sibling dirs in model folders
+    that already contain at least one combo.
     """
+    out_dir = Path(out_dir)
     combos: list[Path] = []
-    if (out_dir / "run.json").exists() or (out_dir / "predictions.jsonl").exists():
+    if not out_dir.exists():
+        return combos
+    seen: set[Path] = set()
+    # The out dir itself can be a single combo.
+    if _is_combo_dir(out_dir):
         combos.append(out_dir)
-    for child in sorted(out_dir.iterdir() if out_dir.exists() else []):
-        if not child.is_dir() or child.name.startswith(".") or child.name in ("ab", "invariance"):
-            continue
-        # A combo dir has run.json or predictions.jsonl.
-        if (child / "run.json").exists() or (child / "predictions.jsonl").exists():
-            combos.append(child)
-        else:
-            # Maybe nested: <out>/<machine-model>/<combo>/
-            for sub in sorted(child.iterdir() if child.is_dir() else []):
-                if sub.is_dir() and (
-                    (sub / "run.json").exists() or (sub / "predictions.jsonl").exists()
-                ):
-                    combos.append(sub)
+        seen.add(out_dir)
+    # rglob for combo-marker files at any depth.
+    for marker in ("run.json", "heartbeat.jsonl", "predictions.jsonl"):
+        for p in out_dir.rglob(marker):
+            combo_dir = p.parent
+            if combo_dir in seen or combo_dir == out_dir:
+                continue
+            seen.add(combo_dir)
+            combos.append(combo_dir)
+    # W6-UI-3g: discover QUEUED sibling dirs (never-run, no markers) in model
+    # folders that already have at least one combo. The model folder must be a
+    # proper descendant of <out> so we never walk above out_dir.
+    model_dirs: set[Path] = {
+        c.parent for c in combos if c.parent != out_dir and out_dir in c.parent.parents
+    }
+    for model_dir in model_dirs:
+        for sibling in sorted(model_dir.iterdir()) if model_dir.is_dir() else []:
+            if not sibling.is_dir() or sibling in seen:
+                continue
+            # A queued combo dir has a name like <track>-<scorer>-<dataset>.
+            if "-" in sibling.name and not sibling.name.startswith("."):
+                seen.add(sibling)
+                combos.append(sibling)
     return combos
 
 
@@ -429,7 +457,7 @@ def build_dashboard_renderable(out_dir: Path, *, width: int = 120) -> Group:
             records,
             model=cfg.get("model") or "—",
             source="live",
-            scorer=cfg.get("scorer") or "—",
+            scorer=_scorer_name(cfg) or "—",
             machine=machine_name,
         )
         wf = row.get("by_workflow", {})
@@ -558,13 +586,14 @@ def _extract_step_error(out_dir: Path, step_id: str) -> str | None:
 
 
 def _parse_pipeline(out_dir: Path) -> dict:
-    """Pipeline panel: steps grouped by the LAST '## attempt ' header.
+    """Pipeline panel: steps grouped by the LAST attempt.
 
-    Parses RUNBOOK.md for attempt headers ('## attempt <n> <ISO> <hash> <argv>')
-    and per-step 'started <id> <ISO>' + completion lines ('## <idx>. <title> — ...').
+    Parses RUNBOOK.md for attempt headers of two forms:
+    - W6 (#119+): '## attempt <n> <ISO> <hash> <argv>'
+    - Legacy (pre-#119): '# M5 runbook — <ISO>' (one per attempt, append-only)
+    Both split attempts; attempt_n = count; attempt_started = the ISO.
     Only the last attempt's steps are returned (the dashboard shows the
-    current attempt). Steps in plan_steps with no runbook line yet are
-    'waiting'.
+    current attempt). Steps are deduped by id: last occurrence wins.
     """
     rb = out_dir / "RUNBOOK.md"
     attempt_n = 0
@@ -575,25 +604,38 @@ def _parse_pipeline(out_dir: Path) -> dict:
             text = rb.read_text(encoding="utf-8")
         except OSError:
             text = ""
-        # Split into the last attempt block: everything after the last
-        # '## attempt ' header.
-        last_attempt_idx = text.rfind("\n## attempt ")
-        if last_attempt_idx >= 0:
-            block = text[last_attempt_idx + 1 :]
+        # Find all attempt-start lines (both forms) and take the last block.
+        import re
+
+        attempt_starts = list(
+            re.finditer(r"^(?:## attempt \d+ \S+ \S+|# M5 runbook — \S+)", text, re.MULTILINE)
+        )
+        if attempt_starts:
+            last = attempt_starts[-1]
+            block = text[last.start() :]
             first = block.split("\n", 1)[0]
-            parts = first.split(None, 4)  # ## attempt <n> <ISO> <hash> <argv...>
-            if len(parts) >= 5:
-                attempt_n = int(parts[2]) if parts[2].isdigit() else 0
-                attempt_started = parts[3]
-            elif len(parts) >= 4:
-                attempt_n = int(parts[2]) if parts[2].isdigit() else 0
-                attempt_started = parts[3]
+            # Parse the attempt header for n + started.
+            if first.startswith("## attempt "):
+                parts = first.split(None, 4)
+                if len(parts) >= 4:
+                    attempt_n = int(parts[2]) if parts[2].isdigit() else 0
+                    attempt_started = parts[3]
+            else:
+                # Legacy: '# M5 runbook — <ISO>'.
+                attempt_n = len(attempt_starts)
+                parts = first.split("—", 1)
+                if len(parts) > 1:
+                    attempt_started = parts[1].strip()
             # Walk lines: 'started <id> <ISO>' and '## <idx>. <title> — ...'.
             for line in block.splitlines()[1:]:
                 if line.startswith("started "):
                     sp = line.split(None, 2)
                     if len(sp) >= 3:
                         steps_raw.append({"id": sp[1], "started": sp[2], "state": "running"})
+                elif line.startswith("# M5 runbook — ") or line.startswith("## attempt "):
+                    # A new attempt starts within this block — stop (we only want
+                    # the last attempt's steps).
+                    break
                 elif line.startswith("## ") and not line.startswith("## attempt "):
                     sp = line.split(" — ", 1)
                     raw_title = sp[0][3:].strip()  # '1. doctor (gate)'
@@ -717,6 +759,16 @@ def _parse_pipeline(out_dir: Path) -> dict:
                         "started": None,
                     }
                 )
+    # W6-UI-3g: dedupe by id — last occurrence wins (legacy append-only
+    # RUNBOOKs stack the same step across attempts).
+    seen_ids: dict[str, dict] = {}
+    for s in steps_raw:
+        sid = s.get("id") or ""
+        if sid in seen_ids:
+            seen_ids[sid].update(s)
+        else:
+            seen_ids[sid] = s
+    steps_raw = list(seen_ids.values())
     # Enrich with stdout_tail + argv (from m5 plan_steps if importable).
     steps_out: list[dict] = []
     try:
@@ -782,6 +834,204 @@ def _iso_ts(v) -> str | None:
     return None
 
 
+def _derive_config_from_layout(combo_dir: Path) -> dict:
+    """Derive model/track/scorer/dataset when a live combo has no run.json.
+
+    Looks for a sibling run.json in the same model folder (a completed combo
+    of the same model), then falls back to the folder name
+    <track>-<scorer>-<dataset>.
+    """
+    # Try a sibling run.json in the same model folder.
+    model_dir = combo_dir.parent
+    for sibling in sorted(model_dir.iterdir()) if model_dir.is_dir() else []:
+        if sibling == combo_dir or not sibling.is_dir():
+            continue
+        sibling_run = parse_run_json(sibling)
+        if sibling_run:
+            cfg = (sibling_run.get("config") if sibling_run else {}) or {}
+            if cfg.get("model"):
+                # Carry the model; the combo folder name gives track/scorer/dataset.
+                name = combo_dir.name
+                parts = name.split("-", 2)
+                return {
+                    "model": cfg.get("model"),
+                    "track": parts[0] if len(parts) > 0 else None,
+                    "scorer": parts[1] if len(parts) > 1 else None,
+                    "dataset": parts[2] if len(parts) > 2 else None,
+                }
+    # Fallback: parse the combo folder name <track>-<scorer>-<dataset>.
+    name = combo_dir.name
+    parts = name.split("-", 2)
+    return {
+        "track": parts[0] if len(parts) > 0 else None,
+        "scorer": parts[1] if len(parts) > 1 else None,
+        "dataset": parts[2] if len(parts) > 2 else None,
+    }
+
+
+def _dataset_name(cfg: dict) -> str | None:
+    """Derive the dataset name from run.json config.
+
+    bench writes 'dataset_path' (a full path), not 'dataset'. The name is
+    the stem of that path. Falls back to 'dataset' or 'source' if present.
+    """
+    dp = cfg.get("dataset_path")
+    if dp:
+        return Path(dp).stem
+    return cfg.get("dataset") or cfg.get("source")
+
+
+def _scorer_name(cfg: dict) -> str | None:
+    """bench writes 'scoring' (not 'scorer')."""
+    return cfg.get("scorer") or cfg.get("scoring")
+
+
+def _read_runbook_hash(out_dir: Path) -> str | None:
+    """The git sha from the LAST '## attempt <n> <ISO> <hash>' RUNBOOK line.
+
+    A RUNBOOK attempt header overrides the file's environment git_sha (it is
+    the run's own hash, not the file's). Returns None when no attempt header
+    exists.
+    """
+    rb = out_dir / "RUNBOOK.md"
+    if not rb.exists():
+        return None
+    try:
+        text = rb.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    import re
+
+    headers = list(re.finditer(r"^## attempt \d+ \S+ (\S+)", text, re.MULTILINE))
+    if not headers:
+        return None
+    return headers[-1].group(1)
+
+
+def _combo_id(combo_dir: Path, out_dir: Path) -> str:
+    """The out-relative path '<bench-dir>/<model-folder>/<combo>'.
+
+    This is unique across models (two models can have the same combo folder
+    name). For a single-combo bench (run.json at the out root), returns '.'.
+    """
+    try:
+        rel = combo_dir.relative_to(out_dir)
+        rel_str = str(rel)
+        return rel_str if rel_str else "."
+    except ValueError:
+        return combo_dir.name
+
+
+def _model_from_folder(combo_dir: Path) -> str | None:
+    """Derive the model id from the parent folder slug <machine>-<model-slug>.
+
+    The slug uses '--' for '/': 'm5max-128gb-mlx-community--qwen3-8b-4bit' ->
+    'mlx-community/Qwen3-8B-4bit'. Returns None if the folder doesn't match.
+    """
+    parent = combo_dir.parent
+    slug = parent.name
+    # The slug is <machine>-<model-slug>; the model part starts after the
+    # first '--' (machine tags don't contain '--').
+    if "--" in slug:
+        idx = slug.index("--")
+        model_part = slug[idx + 2 :]
+        return model_part.replace("--", "/")
+    return None
+
+
+def _part_from_folder(combo_dir: Path, idx: int) -> str | None:
+    """Derive track/scorer/dataset from the combo folder name <track>-<scorer>-<dataset>.
+
+    idx 0=track, 1=scorer, 2=dataset. Returns None if not enough parts.
+    """
+    parts = combo_dir.name.split("-", 2)
+    if idx < len(parts):
+        return parts[idx]
+    return None
+
+
+def _mx_device_memory_gb() -> float | None:
+    """Machine total memory from mlx's device_info (Apple Silicon unified mem).
+
+    Falls back to None (caller uses env.ram_gb or 128).
+    """
+    try:
+        import mlx.core as mx
+
+        return round(mx.device_info("metal").get("memory_size", 0) / 2**30, 1) or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+_DATASET_COUNT_CACHE: dict[str, tuple[float, int]] = {}
+
+
+def _count_dataset_cases(ds_path: Path) -> int:
+    """Count lines in the dataset jsonl, cached by (path, mtime).
+
+    The dataset_path is the cached jsonl bench writes into run.json config.
+    Counting 576 lines on every refresh is wasteful; cache by mtime so a
+    growing dataset (invariance) is recounted only when it changes.
+    """
+    try:
+        mtime = ds_path.stat().st_mtime
+    except OSError:
+        return 0
+    key = str(ds_path)
+    cached = _DATASET_COUNT_CACHE.get(key)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    n = count_lines(ds_path)
+    _DATASET_COUNT_CACHE[key] = (mtime, n)
+    return n
+
+
+def _is_combo_dir(d: Path) -> bool:
+    """A combo dir has any of run.json / heartbeat.jsonl / predictions.jsonl."""
+    return any((d / m).exists() for m in ("run.json", "heartbeat.jsonl", "predictions.jsonl"))
+
+
+def _heartbeat_is_recent(hb_path: Path | None, *, max_age_s: float = 6.0) -> bool:
+    """True when the heartbeat.jsonl mtime is younger than max_age_s (3x refresh).
+
+    Heartbeat records carry NO timestamp (keys: active_memory_bytes,
+    cache_memory_bytes, cases_done, combo, elapsed_s, peak_memory_bytes,
+    pred_lines). So heartbeat age = the heartbeat.jsonl file mtime.
+    """
+    if not hb_path or not hb_path.exists():
+        return False
+    try:
+        return (time.time() - hb_path.stat().st_mtime) < max_age_s
+    except OSError:
+        return False
+
+
+def _find_live_combo(combos: list[Path]) -> tuple[Path | None, dict | None]:
+    """The live combo: the one with the newest heartbeat.jsonl mtime.
+
+    Falls back to the last combo (sorted) when no heartbeat exists.
+    """
+    best_combo: Path | None = None
+    best_mtime: float = -1.0
+    best_hb: dict | None = None
+    for c in combos:
+        hb_path = c / "heartbeat.jsonl"
+        if not hb_path.exists():
+            continue
+        try:
+            mtime = hb_path.stat().st_mtime
+        except OSError:
+            continue
+        if mtime > best_mtime:
+            best_mtime = mtime
+            best_combo = c
+            best_hb = parse_heartbeat(c)
+    if best_combo is None and combos:
+        best_combo = combos[-1]
+        best_hb = parse_heartbeat(best_combo)
+    return best_combo, best_hb
+
+
 def build_dashboard(out_dir: str | Path) -> dict:
     """The full /dashboard.json payload (frozen W6-UI-3a contract).
 
@@ -797,26 +1047,52 @@ def build_dashboard(out_dir: str | Path) -> dict:
     env = (run.get("environment") if run else {}) or {}
     cfg = (run.get("config") if run else {}) or {}
     mem_cfg = (cfg.get("memory") if cfg else {}) or {}
-    # The current/last combo with a heartbeat (the 'now' panel).
     combos = _combo_dirs(out_dir)
-    now_combo = None
-    now_hb = None
-    for c in reversed(combos):
-        hb = parse_heartbeat(c)
-        if hb:
-            now_combo = c
-            now_hb = hb
-            break
-    if now_combo is None and combos:
-        now_combo = combos[-1]
-        now_hb = parse_heartbeat(now_combo)
+    # W6-UI-3g: take environment/hash from the NEWEST run.json by mtime (not
+    # the first found). The top-level <out> may have no run.json (m5 writes
+    # one per combo).
+    if not env and combos:
+        best_run_mtime = -1.0
+        best_env = {}
+        best_mem_cfg = {}
+        for c in combos:
+            rj = c / "run.json"
+            if not rj.exists():
+                continue
+            try:
+                mtime = rj.stat().st_mtime
+            except OSError:
+                continue
+            combo_run = parse_run_json(c)
+            if combo_run and combo_run.get("environment") and mtime > best_run_mtime:
+                best_run_mtime = mtime
+                best_env = combo_run["environment"]
+                combo_cfg = (combo_run.get("config") if combo_run else {}) or {}
+                best_mem_cfg = (combo_cfg.get("memory") if combo_cfg else {}) or {}
+        if best_env:
+            env = best_env
+            if not mem_cfg:
+                mem_cfg = best_mem_cfg
+    # W6-UI-3g: a RUNBOOK attempt header (## attempt <n> <ISO> <hash>) overrides
+    # the git sha when present (it is the run's own hash, not the file's).
+    pipeline = _parse_pipeline(out_dir)
+    rb_hash = _read_runbook_hash(out_dir)
+    if rb_hash:
+        env = {**env, "git_sha": rb_hash} if env else {"git_sha": rb_hash}
+    # Find the live combo: the one with the newest heartbeat.jsonl mtime
+    # anywhere under <out>. Falls back to the last combo.
+    now_combo, now_hb = _find_live_combo(combos)
     now_combo_run = parse_run_json(now_combo) if now_combo else {}
     now_cfg = (now_combo_run.get("config") if now_combo_run else {}) or {}
-    pipeline = _parse_pipeline(out_dir)
+    # A LIVE combo may have no run.json yet — derive config from a sibling
+    # run.json (same model folder) or from the folder name
+    # <track>-<scorer>-<dataset>.
+    if not now_cfg and now_combo:
+        now_cfg = _derive_config_from_layout(now_combo)
     # --- run ---
     alerts: list[dict] = []
     # Build health first so alerts can reference it.
-    health = _build_health(out_dir, combos, now_hb, env, mem_cfg, pipeline)
+    health = _build_health(out_dir, combos, now_combo, now_hb, env, mem_cfg, pipeline)
     for h in health:
         if h.get("state") == "fail":
             alerts.append(
@@ -827,10 +1103,17 @@ def build_dashboard(out_dir: str | Path) -> dict:
                 }
             )
     sleep_blocked = _read_sleep_blocked(out_dir)
+    # state=running when the newest heartbeat.jsonl mtime is younger than 3x
+    # the refresh interval (default 6s), or a RUNBOOK step is 'running'.
+    # Heartbeat records carry NO ts — age = file mtime.
+    now_hb_path = now_combo / "heartbeat.jsonl" if now_combo else None
     state = "stopped"
-    if now_hb:
+    if _heartbeat_is_recent(now_hb_path, max_age_s=6):
         state = "running"
     elif any(s.get("state") == "running" for s in pipeline.get("steps", [])):
+        state = "running"
+    elif now_hb:
+        # Heartbeat exists but is stale — still running (just quiet).
         state = "running"
     elif (out_dir / "SUMMARY.md").exists():
         state = "done"
@@ -849,18 +1132,20 @@ def build_dashboard(out_dir: str | Path) -> dict:
     # --- now ---
     now_block = _build_now(now_combo, now_hb, now_cfg, out_dir)
     # --- memory ---
+    # W6-UI-3g: cap from the newest run.json's 'memory' block (top-level,
+    # not under config); stop_gb = the m5 stop rule constant (10 GB).
+    newest_run = parse_run_json(now_combo) if now_combo else {}
+    newest_mem = (newest_run.get("memory") if newest_run else {}) or {}
+    cap_bytes = newest_mem.get("metal_cache_limit_bytes") or mem_cfg.get("metal_cache_limit_bytes")
+    # machine_gb from mx.device_info if available (Apple Silicon).
+    machine_gb = env.get("ram_gb") or _mx_device_memory_gb() or 128
     memory_block = {
         "cache_gb": _gb(now_hb.get("cache_memory_bytes")) if now_hb else None,
         "active_gb": _gb(now_hb.get("active_memory_bytes")) if now_hb else None,
         "peak_gb": _gb(now_hb.get("peak_memory_bytes")) if now_hb else None,
-        "cap_gb": _gb(mem_cfg.get("metal_cache_limit_bytes")),
-        "stop_gb": _gb(mem_cfg.get("metal_cache_stop_bytes"))
-        or (
-            mem_cfg.get("metal_cache_stop_gb")
-            if isinstance(mem_cfg.get("metal_cache_stop_gb"), (int, float))
-            else None
-        ),
-        "machine_gb": env.get("machine_memory_gb") or env.get("total_memory_gb"),
+        "cap_gb": _gb(cap_bytes),
+        "stop_gb": 10.0,  # m5 stop rule: halt if cache >= 10 GB
+        "machine_gb": machine_gb,
     }
     # --- aggregates ---
     aggregates = _build_aggregates(out_dir, combos)
@@ -883,7 +1168,7 @@ def build_dashboard(out_dir: str | Path) -> dict:
     }
 
 
-def _build_health(out_dir, combos, now_hb, env, mem_cfg, pipeline) -> list[dict]:
+def _build_health(out_dir, combos, now_combo, now_hb, env, mem_cfg, pipeline) -> list[dict]:
     """Six health rules: ok|warn|fail with a detail string."""
     rules: list[dict] = []
     # cache_over_stop
@@ -933,21 +1218,26 @@ def _build_health(out_dir, combos, now_hb, env, mem_cfg, pipeline) -> list[dict]
             "detail": f"{n_failed} combo(s) failed",
         }
     )
-    # parity_fail_models
+    # parity_fail_models: count once per model (the parity.json is at the
+    # MODEL folder level, not per combo). Dedupe by parity.json path.
     n_parity_fail = 0
     fail_models: list[str] = []
+    seen_parity: set[Path] = set()
     for c in combos:
         model_dir = c.parent if c.parent.name != out_dir.name else c
         parity_path = model_dir / "parity.json"
-        if parity_path.exists():
-            try:
-                p = json.loads(parity_path.read_text(encoding="utf-8"))
-                if p.get("status") == "FAIL":
-                    n_parity_fail += 1
-                    if p.get("model"):
-                        fail_models.append(p["model"])
-            except (OSError, json.JSONDecodeError):
-                pass
+        if parity_path in seen_parity or not parity_path.exists():
+            continue
+        seen_parity.add(parity_path)
+        try:
+            p = json.loads(parity_path.read_text(encoding="utf-8"))
+            if p.get("status") == "FAIL":
+                n_parity_fail += 1
+                model_name = p.get("model") or _model_from_folder(c)
+                if model_name:
+                    fail_models.append(model_name)
+        except (OSError, json.JSONDecodeError):
+            pass
     fail_detail = (
         (f"{n_parity_fail} model(s): " + ", ".join(fail_models)) if fail_models else "0 models"
     )
@@ -971,10 +1261,15 @@ def _build_health(out_dir, combos, now_hb, env, mem_cfg, pipeline) -> list[dict]
             "detail": f"{n_retries} retries",
         }
     )
-    # heartbeat_age
+    # heartbeat_age = heartbeat.jsonl file mtime (records carry NO ts).
     age = None
-    if now_hb and isinstance(now_hb.get("ts"), (int, float)):
-        age = int(time.time() - now_hb["ts"])
+    if now_combo:
+        hb_path = now_combo / "heartbeat.jsonl"
+        if hb_path.exists():
+            try:
+                age = int(time.time() - hb_path.stat().st_mtime)
+            except OSError:
+                pass
     elif now_hb and isinstance(now_hb.get("elapsed_s"), (int, float)):
         age = None
     if age is None:
@@ -995,34 +1290,38 @@ def _build_now(now_combo, now_hb, now_cfg, out_dir) -> dict:
     now_counts = (now_run.get("counts") if now_run else {}) or {}
     if now_combo:
         # cases_total = the manifest's case count (authoritative), falling
-        # back to the dataset jsonl line count.
-        total = (
-            now_counts.get("cases")
-            or count_lines(now_combo / "dataset.jsonl")
-            or count_lines(out_dir / "dataset.jsonl")
-        )
+        # back to the dataset jsonl line count from config.dataset_path.
+        total = now_counts.get("cases") or 0
+        if not total:
+            # Try the dataset jsonl in the combo/out dir, then config.dataset_path.
+            ds_path = now_combo / "dataset.jsonl"
+            if not ds_path.exists():
+                ds_path = out_dir / "dataset.jsonl"
+            if not ds_path.exists():
+                dp = now_cfg.get("dataset_path") if now_cfg else None
+                if dp:
+                    ds_path = Path(dp)
+            if ds_path.exists():
+                total = _count_dataset_cases(ds_path)
         done = len(read_jsonl_safe(now_combo / "completed_cases.jsonl"))
         if now_hb and isinstance(now_hb.get("cases_done"), int):
             done = max(done, now_hb["cases_done"])
         pred_lines = now_hb.get("pred_lines", 0) if now_hb else 0
         if not pred_lines:
             pred_lines = count_lines(now_combo / "predictions.jsonl")
-    # cases_per_h over last 10 min: from heartbeat records with a ts.
+    # cases_per_h from the last two heartbeat records: (cases_done delta)
+    # / (elapsed_s delta). Heartbeat records carry NO ts — elapsed_s is the
+    # wall-clock seconds since the combo started (written by evalrun).
     cases_per_h = None
     if now_combo:
         hbs = read_jsonl_safe(now_combo / "heartbeat.jsonl")
         if len(hbs) >= 2:
-            last = hbs[-1].get("cases_done", 0) or 0
-            ten_min_ago = [
-                h
-                for h in hbs
-                if isinstance(h.get("ts"), (int, float)) and h["ts"] >= time.time() - 600
-            ]
-            if len(ten_min_ago) >= 2:
-                first = ten_min_ago[0].get("cases_done", 0) or 0
-                span_s = (ten_min_ago[-1].get("ts", 0) or 0) - (ten_min_ago[0].get("ts", 0) or 0)
-                if span_s > 0:
-                    cases_per_h = round((last - first) / span_s * 3600, 1)
+            first = hbs[0]
+            last = hbs[-1]
+            d_cases = (last.get("cases_done", 0) or 0) - (first.get("cases_done", 0) or 0)
+            d_s = (last.get("elapsed_s", 0) or 0) - (first.get("elapsed_s", 0) or 0)
+            if d_s > 0:
+                cases_per_h = round(d_cases / d_s * 3600, 1)
     eta_s = None
     elapsed = now_hb.get("elapsed_s", 0) if now_hb else 0
     if total and done and elapsed and done < total:
@@ -1040,14 +1339,20 @@ def _build_now(now_combo, now_hb, now_cfg, out_dir) -> dict:
                 running_acc = field_accuracy(labelled)
                 maj = majority_class_baseline(labelled) if labelled else None
                 running_maj = maj.get("overall") if isinstance(maj, dict) else maj
+    # heartbeat age = the heartbeat.jsonl file mtime (records carry NO ts).
     hb_age = None
-    if now_hb and isinstance(now_hb.get("ts"), (int, float)):
-        hb_age = int(time.time() - now_hb["ts"])
+    if now_combo:
+        hb_path = now_combo / "heartbeat.jsonl"
+        if hb_path.exists():
+            try:
+                hb_age = int(time.time() - hb_path.stat().st_mtime)
+            except OSError:
+                pass
     return {
         "model": now_cfg.get("model") or "—",
         "track": now_cfg.get("track") or "—",
-        "scorer": now_cfg.get("scorer") or "—",
-        "dataset": now_cfg.get("dataset") or now_cfg.get("source") or "—",
+        "scorer": _scorer_name(now_cfg) or "—",
+        "dataset": _dataset_name(now_cfg) or "—",
         "run_i": now_cfg.get("run_i"),
         "run_n": now_cfg.get("run_n"),
         "cases_done": done,
@@ -1072,6 +1377,7 @@ def _build_aggregates(out_dir, combos) -> dict:
     par_time: list[float] = []
     naive_time: list[float] = []
     parity_counts = {"pass": 0, "drift": 0, "fail": 0}
+    seen_parity_paths: set[Path] = set()
     cases_scored = 0
     pred_lines = 0
     wall_s = 0
@@ -1101,13 +1407,14 @@ def _build_aggregates(out_dir, combos) -> dict:
                 naive_time.append(t_s)
             else:
                 par_time.append(t_s)
-        # parity.
+        # parity (model-level; dedupe by parity.json path so it's counted once).
         model_dir = c.parent if c.parent.name != out_dir.name else c
         parity_path = model_dir / "parity.json"
-        if parity_path.exists():
+        if parity_path.exists() and parity_path not in seen_parity_paths:
+            seen_parity_paths.add(parity_path)
             try:
                 p = json.loads(parity_path.read_text(encoding="utf-8"))
-                st = p.get("status", "PASS")
+                st = (p.get("status", "PASS") or "PASS").lower()
                 if st in parity_counts:
                     parity_counts[st] += 1
             except (OSError, json.JSONDecodeError):
@@ -1184,11 +1491,12 @@ def _build_results(out_dir, combos, env) -> list[dict]:
         ab_delta = _ab_delta(out_dir, c, accuracy)
         rows.append(
             {
-                "combo_id": c.name,
-                "model": cfg.get("model") or "—",
-                "dataset": cfg.get("dataset") or cfg.get("source") or "—",
-                "scorer": cfg.get("scorer") or "—",
-                "track": cfg.get("track") or "parallel",
+                "combo_id": _combo_id(c, out_dir),
+                "display_name": c.name,
+                "model": cfg.get("model") or _model_from_folder(c),
+                "dataset": _dataset_name(cfg) or _part_from_folder(c, 2),
+                "scorer": _scorer_name(cfg) or _part_from_folder(c, 1),
+                "track": cfg.get("track") or _part_from_folder(c, 0) or "parallel",
                 "status": _combo_status(c, out_dir),
                 "accuracy": accuracy,
                 "ci_low": ci_low,
@@ -1235,10 +1543,17 @@ def _ab_delta(out_dir: Path, main_combo: Path, main_accuracy) -> float | None:
 def _build_events(out_dir, combos) -> list[dict]:
     """Heartbeats, combo_done, alloc_retry, step_done, attempt, newest first."""
     events: list[dict] = []
-    # Heartbeats from all combos.
+    # Heartbeats from all combos. Heartbeat records carry NO ts — use the
+    # heartbeat.jsonl file mtime as the event ts.
     for c in combos:
-        for hb in read_jsonl_safe(c / "heartbeat.jsonl"):
-            ts = hb.get("ts")
+        hb_path = c / "heartbeat.jsonl"
+        file_ts = None
+        if hb_path.exists():
+            try:
+                file_ts = _iso_ts(hb_path.stat().st_mtime)
+            except OSError:
+                file_ts = None
+        for hb in read_jsonl_safe(hb_path):
             text = (
                 f"{hb.get('combo', c.name)} {hb.get('cases_done', '?')}/?"
                 f" cache {_gb(hb.get('cache_memory_bytes'))} GB"
@@ -1248,7 +1563,7 @@ def _build_events(out_dir, combos) -> list[dict]:
             if isinstance(hb.get("alloc_retry"), int) and hb["alloc_retry"]:
                 kind = "alloc_retry"
                 text = f"Metal allocation failed, retried (x{hb['alloc_retry']})"
-            events.append({"ts": _iso_ts(ts), "kind": kind, "text": text})
+            events.append({"ts": file_ts, "kind": kind, "text": text})
     # combo_done: report.json exists -> done.
     for c in combos:
         if (c / "report.json").exists():
@@ -1330,20 +1645,34 @@ def build_questions(out_dir: str | Path, combo_id: str) -> list[dict]:
     and drift.
     """
     out_dir = Path(out_dir)
-    # Resolve the combo dir by id (name match).
-    combo_dir = None
-    for c in _combo_dirs(out_dir):
-        if c.name == combo_id:
-            combo_dir = c
-            break
+    # Resolve the combo dir by id (the out-relative path).
+    if combo_id == ".":
+        combo_dir = out_dir
+    else:
+        candidate = out_dir / combo_id
+        combo_dir = candidate if candidate.exists() else None
+    if combo_dir is None:
+        # Fallback: match by folder name (backward compat).
+        for c in _combo_dirs(out_dir):
+            if c.name == combo_id:
+                combo_dir = c
+                break
     if combo_dir is None:
         return []
     records = read_jsonl_safe(combo_dir / "predictions.jsonl")
-    # Build the dataset context lookup by case_id.
+    # Build the dataset context lookup by case_id. The dataset jsonl may be
+    # in the combo dir, the out dir, or at config.dataset_path (the absolute
+    # path bench writes into run.json).
     ctx: dict[str, str] = {}
     ds_path = combo_dir / "dataset.jsonl"
     if not ds_path.exists():
         ds_path = out_dir / "dataset.jsonl"
+    if not ds_path.exists():
+        # W6-UI-3e: read from run.json config.dataset_path.
+        combo_run = parse_run_json(combo_dir)
+        dp = ((combo_run.get("config") if combo_run else {}) or {}).get("dataset_path")
+        if dp:
+            ds_path = Path(dp)
     if ds_path.exists():
         for line in ds_path.read_text(encoding="utf-8", errors="replace").splitlines():
             line = line.strip()
@@ -1417,19 +1746,103 @@ def _dashboard_html(refresh: float) -> str:
     """Load the static control-room page and inject the refresh interval.
 
     The page is a single self-contained HTML file (inline CSS + vanilla JS,
-    no framework, no CDN) shipped at ``jevmlx/web/dashboard.html``.
+    no framework, no CDN) shipped at ``jevmlx/web/dashboard.html``. The
+    ``__REFRESH__`` placeholder becomes ``const REFRESH`` — the SSE scan
+    interval, not a meta-refresh tag (the page is live via SSE + DOM
+    patching, no full-page reload).
     """
     html_path = Path(__file__).parent / "web" / "dashboard.html"
     html = html_path.read_text(encoding="utf-8")
     return html.replace("__REFRESH__", str(int(max(1, refresh))))
 
 
+def _watched_files(out_dir: Path) -> list[Path]:
+    """Files whose mtime change signals a dashboard update.
+
+    RUNBOOK.md + every heartbeat.jsonl / run.json under <out> (including
+    combo subdirectories). Cheap os.stat scan — no file reads.
+    """
+    files = [out_dir / "RUNBOOK.md", out_dir / "run.json"]
+    for c in _combo_dirs(out_dir):
+        files.append(c / "heartbeat.jsonl")
+        files.append(c / "run.json")
+        files.append(c / "predictions.jsonl")
+    return [f for f in files if f.exists()]
+
+
+def _mtimes_signature(paths: list[Path]) -> tuple:
+    """A tuple of (path, mtime_ns) pairs — changes when any file changes."""
+    sig = []
+    for p in paths:
+        try:
+            sig.append((str(p), p.stat().st_mtime_ns))
+        except OSError:
+            sig.append((str(p), 0))
+    return tuple(sig)
+
+
+def _handle_sse(
+    out_dir: Path,
+    wfile,
+    refresh: float,
+    *,
+    mtime_source=None,
+    max_iterations: int | None = None,
+) -> None:
+    """Server-Sent Events: emit 'event: dashboard' when watched files change.
+
+    One thread per connection. Watches mtimes of RUNBOOK.md and every
+    heartbeat.jsonl / run.json / predictions.jsonl under <out> (cheap
+    os.stat scan every ``refresh`` seconds). On change, writes the full
+    build_dashboard JSON as a ``dashboard`` event. Every 15 s without
+    change, writes a ``: keepalive`` comment. The browser's EventSource
+    reconnects automatically on disconnect.
+
+    Test hooks (production ignores them):
+      * ``mtime_source``: a callable returning a signature tuple; defaults
+        to ``_mtimes_signature(_watched_files(out_dir))``. Inject a fake
+        to drive deterministic change/timeout scenarios without threads.
+      * ``max_iterations``: stop after N loop iterations (tests only).
+    """
+    import time
+
+    if mtime_source is None:
+
+        def mtime_source():
+            return _mtimes_signature(_watched_files(out_dir))
+
+    keepalive_s = 15.0
+    last_keepalive = time.monotonic()
+    last_sig = mtime_source()
+    i = 0
+    while True:
+        time.sleep(refresh)
+        sig = mtime_source()
+        now = time.monotonic()
+        if sig != last_sig:
+            last_sig = sig
+            payload = json.dumps(build_dashboard(out_dir))
+            msg = f"event: dashboard\ndata: {payload}\n\n"
+            wfile.write(msg.encode("utf-8"))
+            wfile.flush()
+            last_keepalive = now
+        elif now - last_keepalive >= keepalive_s:
+            wfile.write(b": keepalive\n\n")
+            wfile.flush()
+            last_keepalive = now
+        i += 1
+        if max_iterations is not None and i >= max_iterations:
+            break
+            last_keepalive = now
+
+
 def _serve_web(out_dir: Path, *, port: int, refresh: float) -> None:
-    """Serve the static dashboard page + JSON over stdlib http.server.
+    """Serve the static dashboard page + JSON + SSE over stdlib http.server.
 
     Routes: ``/`` (HTML page), ``/dashboard.json`` (the 9-key contract),
-    ``/questions.json?combo=<id>`` (the flat question list).
-    No new dependency, no JS framework.
+    ``/questions.json?combo=<id>`` (the flat question list), ``/events``
+    (Server-Sent Events: pushes a new dashboard payload when watched files
+    change). No new dependency, no JS framework.
     """
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from urllib.parse import parse_qs, urlparse
@@ -1441,7 +1854,6 @@ def _serve_web(out_dir: Path, *, port: int, refresh: float) -> None:
             pass
 
         def do_GET(self):
-
             parsed = urlparse(self.path)
             if parsed.path == "/dashboard.json":
                 payload = json.dumps(build_dashboard(out_dir)).encode("utf-8")
@@ -1451,6 +1863,13 @@ def _serve_web(out_dir: Path, *, port: int, refresh: float) -> None:
                 combo = qs.get("combo", [""])[0]
                 payload = json.dumps(build_questions(out_dir, combo)).encode("utf-8")
                 self._send(200, "application/json", payload)
+            elif parsed.path == "/events":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "keep-alive")
+                self.end_headers()
+                _handle_sse(out_dir, self.wfile, refresh)
             elif parsed.path == "/":
                 self._send(200, "text/html; charset=utf-8", page_html.encode("utf-8"))
             else:
@@ -1464,7 +1883,7 @@ def _serve_web(out_dir: Path, *, port: int, refresh: float) -> None:
             self.wfile.write(payload)
 
     server = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
-    print(f"[watch] web dashboard at http://127.0.0.1:{port}/ (refresh {int(refresh)}s)")
+    print(f"[watch] web dashboard at http://127.0.0.1:{port}/ (SSE, refresh {int(refresh)}s)")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

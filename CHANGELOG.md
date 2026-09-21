@@ -2,6 +2,114 @@
 
 ## Unreleased
 
+- watch page: patch on first paint; unique combo id on click. Three page
+  bugs from the M5 live report: (1) first paint built DOM shells but never
+  called `patchDashboard(D)` with the fetched `/dashboard.json` payload, so
+  NOW/MEMORY/HEALTH/AGGREGATES showed empty shells until the first SSE event —
+  `initialRender` now calls `patchDashboard(D)` after setting `booted=true`,
+  filling the shells with real values before any event arrives (same path the
+  SSE handler uses). (2) the row click sent a `model|dataset|scorer|track`
+  pipe-string as the combo id, which is not unique across models —
+  `/questions.json?combo=parallel-labels-typesafe` returned `[]`. The page now
+  keys rows by `results[i].combo_id` (the out-relative path
+  `<bench-dir>/<model-folder>/<combo>`, `'.'` for a single-combo bench) and
+  sends it verbatim (URL-encoded) to `/questions.json?combo=`; a separate
+  `display_name` (the combo folder name) is used for the Questions header.
+  Deep-link `?combo=<id>` looks up `display_name` from `D.results`. (3)
+  `attempt_n=null` rendered as empty/`0` — now shows `—` via `fmtAttempt`.
+  Tests: grep tests assert `patchDashboard(D)` is called after `booted=true`,
+  the click handler sends `combo_id` verbatim + tracks `display_name`, and
+  `fmtAttempt` renders null as `—`; Node 20 test covers `fmtAttempt`.
+
+- results contract: error lines are allowed and counted. A prediction line
+  whose `error` key is a non-empty string is an error record (the field's
+  scoring failed — e.g. a context too long for the model's window). Error
+  lines may have null `correct`, `probability`, `prediction`,
+  `per_item_end_to_end_ms`, and `log_scores`; they are allowed by the
+  contract and counted in an errors summary (per combo: count + first error
+  text) printed by `check_results` and shown in the leaderboard 'Cases'
+  column as `N (M error)`. A line with null values and NO `error` key is
+  still a contract violation. Fixes the last 2 FAILs on the 7B typesafe
+  combos (PR #122): line 288 was an error record (correct=None,
+  per_item_end_to_end_ms=None) rejected by the type checks.
+- watch: live dashboard via SSE and DOM patching (no reload, no root wipe).
+  The control-room page (`jevmlx/web/dashboard.html`) dropped its
+  `<meta http-equiv=refresh>` tag and `setInterval`+`root.innerHTML` wipe —
+  Chrome no longer reloads the whole document or destroys selection/scroll/
+  focus every refresh. The first paint fetches `/dashboard.json` once; then an
+  `EventSource('/events')` SSE connection pushes `event: dashboard` with the
+  full `build_dashboard` JSON whenever a watched file changes. The server
+  (new `GET /events` route on the existing `ThreadingHTTPServer`, one thread
+  per connection) watches the mtimes of `RUNBOOK.md` and every
+  `heartbeat.jsonl` / `run.json` / `predictions.jsonl` under `<out>` (a cheap
+  `os.stat` scan every `refresh` seconds) and emits a `: keepalive` comment
+  every 15 s when nothing changed. The browser patches the DOM in place —
+  NOW/MEMORY/HEALTH/AGGREGATES update `textContent` and bar widths of existing
+  nodes; RESULTS/PIPELINE/EVENTS are keyed by identity (combo id, step id,
+  event ts+kind) and diffed (insert/update/remove). `#root.innerHTML` is
+  assigned only on first paint, never on patch. Selection (`selCombo`,
+  `selQuestion`), filters, sort state, scroll position, and open `<details>`
+  are preserved across updates. On `EventSource` error a small "disconnected"
+  pill appears in the top bar; `EventSource` reconnects itself. Questions stay
+  on demand via `fetch` on click (not pushed). Tests: SSE handler emits a
+  dashboard event on mtime change and a keepalive comment on timeout (fake
+  `wfile` + injectable `mtime_source`, no port bind, no browser); the HTML has
+  no `meta refresh` and no `root.innerHTML=` assignment outside first paint
+  (grep tests); Node 20 test (`js/tests/dashboard-helpers.test.mjs`) exercises
+  the pure DOM-free helper functions (`esc`, `fmtNum`, `fmtDur`,
+  `statusPill`, `parityPill`, `abDelta`, `filterSortRows`, `toggleChip`) via
+  `node:vm` — no DOM framework.
+
+- watch: live-tree shapes (real run_eval fixture, header from run.json,
+  questions from real prediction lines, parity per model). Header
+  hash/machine/mlx/cap now read from any combo's run.json environment when
+  the top-level <out> lacks one; `machine_gb` reads `ram_gb`. `dataset` is
+  derived from `config.dataset_path` (stem); `scorer` from `config.scoring`.
+  `questions()` reads the dataset from `config.dataset_path` when the jsonl
+  is not in the combo/out dir. Parity FAIL is counted once per model; a
+  `run_failed` combo is `failed`, never a parity FAIL. RUNBOOK without
+  attempt headers = one attempt; each step id shows its last occurrence
+  only.
+
+- leaderboard and check_results: three contract fixes for the interim 7B
+  results (PR #122). (1) check_results resolved the dataset lock at
+  ``<dataset>.dataset.lock.json`` in the MODEL folder (the parent of the
+  combo, where the bench writes it since #84/#110) and verifies
+  ``sha256(file) == run.json``'s ``dataset_lock_sha256``; the old code
+  required a per-combo ``dataset.lock.json`` the bench never writes, so
+  every combo failed. (2) leaderboard 'Time per case' reads the call-level
+  ``per_item_end_to_end_ms`` median from ``timing.json`` (the same source
+  ``summarize_results`` uses since #99), not the per-line latency from
+  predictions (which sums rotations and inflated the 7B's time/case to
+  11.0 s while the call-level median was 0.59 s). (3) 'Cases' comes from
+  ``run.json``'s ``counts.cases`` (the source of truth), not the agreement
+  metrics' ``n_cases`` (which undercounts when a case has no valid
+  prediction).
+- watch: discover combos from the real bench/m5 layout (fixture from real
+  writers). `_combo_dirs` now rglobs for any of `run.json` / `heartbeat.jsonl`
+  / `predictions.jsonl` (a LIVE combo has heartbeat+predictions but NO
+  run.json yet). Model/track/scorer/dataset derived from run.json config when
+  present, else from a sibling run.json or the `<track>-<scorer>-<dataset>`
+  folder name. The live combo is the one with the newest `heartbeat.jsonl`
+  mtime. Heartbeat records carry NO `ts` key — age = file mtime;
+  `cases_per_h` = `(cases_done delta) / (elapsed_s delta)` across the last
+  two lines. `run.state=running` when the newest heartbeat mtime is younger
+  than 3x refresh or a RUNBOOK step is `running`. Event `ts` is ISO-8601 from
+  the heartbeat.jsonl file mtime.
+
+- leaderboard and check_results now publish PASS and DRIFT, exclude FAIL.
+  A model with parity status PASS or DRIFT appears in the leaderboard
+  (DRIFT shows the word + max drift in the Parity column) and
+  ``check_results --check-parity`` returns OK (DRIFT with an informational
+  note). Status FAIL (a winner changed, or drift beyond the band) is
+  excluded and check_results returns FAIL. ``parity.passed`` semantics in
+  ``jevmlx/parity.py`` are untouched (DRIFT and FAIL both set
+  ``passed: false``); the gate is now on ``status``, not ``passed``. Fixes
+  the interim 7B results (PR #122) where DRIFT models got no leaderboard
+  row and check_results marked every folder FAIL.
+- Fix (SUMMARY.md): the header had 14 cells but rows had 16 (P7 added
+  ``majority_baseline`` and ``exact_record`` to rows but not the header,
+  so 'case exact' showed the majority value). Header now matches rows.
 - watch: data-layer fixes from the first real render (sleep flag, ISO
   timestamps, run i/N, step titles, per-step logs). `run.sleep_blocked` and
   the `sleep_windows` health rule now read one helper (`_read_sleep_blocked`)

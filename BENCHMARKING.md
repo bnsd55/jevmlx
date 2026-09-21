@@ -71,7 +71,7 @@ run process is never touched.
 # Terminal mode (default): rich Live redraw in the terminal
 jevmlx watch benchmarks/results/<machine>-<model-slug> [--refresh 2]
 
-# Web mode: serve the control-room page (Chrome auto-reloads)
+# Web mode: serve the control-room page (live via SSE, no reload)
 jevmlx watch <out-dir> --web [--port 8765] [--no-tty]
 
 # Or start the watcher in the same terminal as the bench:
@@ -85,8 +85,18 @@ combo progress, and the last few prediction lines. Keys: `q` quit,
 
 `--web` serves a static control-room page at `http://127.0.0.1:PORT/` — a
 single self-contained HTML file (inline CSS + vanilla JS, no framework, no
-CDN) that fetches `/dashboard.json` every refresh seconds and renders
-client-side. The page has, top to bottom:
+CDN) that is **live via SSE**: the first paint fetches `/dashboard.json` once,
+then an `EventSource('/events')` connection pushes a new dashboard payload
+whenever a watched file changes (no full-page reload, no `root.innerHTML`
+wipe). The server watches the mtimes of `RUNBOOK.md` and every
+`heartbeat.jsonl` / `run.json` / `predictions.jsonl` under `<out>` (a cheap
+`os.stat` scan every `refresh` seconds) and emits `event: dashboard` with the
+full `build_dashboard` JSON on change, or a `: keepalive` comment every 15 s
+if nothing changed. The browser patches the DOM in place (text, bar widths,
+keyed row insert/update/remove) so selection, filters, sort, scroll, and open
+`<details>` are preserved across updates. On disconnect a small
+"disconnected" pill appears in the top bar; `EventSource` reconnects
+automatically. The page renders client-side and has, top to bottom:
 
 - **Top bar**: run name, freeze hash, machine + mlx version, attempt number
   + start time, awake time + sleep-guard state, state badge (running /
@@ -125,7 +135,8 @@ client-side. The page has, top to bottom:
   `<details>` blocks.
 
 `/dashboard.json` returns the raw 9-key contract for scripts;
-`/questions.json?combo=<id>` returns the flat question list. Null fields
+`/questions.json?combo=<id>` returns the flat question list;
+`/events` is the SSE stream (live updates). Null fields
 render as a dash, never break the page. Half-written trailing lines are
 truncated (same rule as `--resume`); missing files show `—`; no parse error
 ever raises. `--no-tty` runs web only; `--web` without `--no-tty` runs both
@@ -325,7 +336,16 @@ faster than a single trie-constrained pass on 255-option enums. Output:
       envelope band for the run's shape bucket (batch-shape noise, not a
       real divergence). FAIL = a winner changed, or drift beyond the band.
       ``check_results --check-parity`` prints the status word and one
-      sentence; the leaderboard shows the status word in the Parity column.`
+      sentence; the leaderboard shows the status word in the Parity column.
+
+      **Publishability** (parity-gates): a model with status PASS or DRIFT
+      is publishable — it appears in the leaderboard (DRIFT shows the word
+      + max drift in the Parity column) and ``check_results --check-parity``
+      returns OK (DRIFT with an informational note). Status FAIL (a winner
+      changed, or drift beyond the band) is excluded from the leaderboard
+      and ``check_results`` returns FAIL. ``parity.passed`` semantics in
+      ``jevmlx/parity.py`` are untouched (DRIFT and FAIL both set
+      ``passed: false``); the gate is now on ``status``, not ``passed``.`
 - [ ] `SUMMARY.md` pasted into the PR description
 - [ ] Machine specs (chip, RAM, macOS) mentioned in the PR body
 - [ ] No hand-edited numbers — recompute instead of fixing up
@@ -333,6 +353,14 @@ faster than a single trie-constrained pass on 255-option enums. Output:
       benchmarks.check_results` on the changed folders: contract keys, folder
       size, dataset lock, and report reproducibility — all must pass before
       merge)
+- **Error lines**: a prediction line whose `error` key is a non-empty string
+  is an error record (the field's scoring failed — e.g. a context too long
+  for the model's window). Error lines may have null `correct`,
+  `probability`, `prediction`, `per_item_end_to_end_ms`, and `log_scores`; they
+  are allowed by the contract and counted in an errors summary (per combo:
+  count + first error text) printed by `check_results` and shown in the
+  leaderboard 'Cases' column as `N (M error)`. A line with null values and
+  NO `error` key is still a contract violation.
 - [ ] Ran `python -m benchmarks.leaderboard --results benchmarks/results
       --readme README.md` so the README leaderboard block is up to date
       (the `--check-readme` freshness gate in `results-check` CI enforces this)
