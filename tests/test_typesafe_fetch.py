@@ -246,8 +246,32 @@ def test_read_set_split_and_field_identity(cache_dir):
     assert list(by_id) == [
         "typesafe/demo/case-a/n0",
         "typesafe/demo/case-a/n1",
-        "typesafe/demo/case-b",
     ]
+
+    # case-b's only question (q_summary) is free-text (type=text) -> no
+    # decidable field -> the group is skipped (empty schema). The fetch
+    # summary reports it.
+    _, summary, _ = fetch_all(["demo"], cache_dir)
+    assert summary["skipped_groups"] == 1
+
+
+def test_empty_schema_group_is_skipped_and_counted(cache_dir):
+    """A group where every question was skipped (unmapped qid or no
+    consensus) is NOT yielded — it has no decidable field. The fetch summary
+    counts it in 'skipped_groups' so the drop is visible.
+
+    Uses the real fetcher functions on the in-memory demo cache (no network):
+    case-b's only question (q_summary, type=text) is free-text, unmapped by
+    _field_schema, so case-b's single group yields an empty schema and is
+    skipped. case-a's groups have mapped questions and are kept."""
+    records, summary, _ = fetch_all(["demo"], cache_dir)
+    # case-a's two groups (triage + containment) survive.
+    assert len(records) == 2
+    assert all(r["schema"] for r in records)
+    # case-b's single group (all questions skipped) is dropped + counted.
+    assert summary["skipped_groups"] == 1
+    # No yielded record has an empty schema or empty labels.
+    assert all(r["schema"] and r["labels"] for r in records)
 
 
 def test_record_contract_keys_and_benchmark_only(cache_dir):
@@ -434,8 +458,9 @@ def test_cli_main_writes_jsonl_lock_and_summary(cache_dir, tmp_path, monkeypatch
     out = tmp_path / "cases.jsonl"
     rc = fetch_module.main(["--out", str(out), "--workflow", "demo"])
     assert rc == 0
-    assert len(out.read_text(encoding="utf-8").splitlines()) == 3
+    assert len(out.read_text(encoding="utf-8").splitlines()) == 2
     printed = capsys.readouterr().out
-    assert "records: 3" in printed
+    assert "records: 2" in printed
     assert "skipped questions (free text): 2" in printed
+    assert "skipped groups (empty schema): 1" in printed
     assert (tmp_path / "dataset.lock.json").exists()
