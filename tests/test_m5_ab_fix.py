@@ -235,14 +235,19 @@ def test_ab_setup_success_runs_ab_steps(tmp_path, monkeypatch):
 
     def ab_ok_run(argv, **kwargs):
         joined = " ".join(argv)
-        # ab-setup: git worktree add + uv venv + uv pip install -> all exit 0.
+        bin0 = argv[0].split("/")[-1]
+        # B8: ab-setup argv is a Python stale-worktree cleanup; git worktree
+        # add is the first extra_argv. Both must exit 0.
+        if bin0 == "python" and "-c" in argv and "rmtree" in joined:
+            calls.append(("ab-setup-cleanup", 0))
+            return subprocess.CompletedProcess(tuple(argv), 0, stdout="", stderr="")
         if "worktree" in joined and "add" in joined:
             # Create the worktree dir so later steps' cwd exists.
             wt_path = Path(argv[argv.index("--detach") + 1])
             wt_path.mkdir(parents=True, exist_ok=True)
             calls.append(("ab-setup", 0))
             return subprocess.CompletedProcess(tuple(argv), 0, stdout="", stderr="")
-        if "uv" in argv[0].split("/")[-1]:
+        if "uv" in bin0:
             calls.append(("uv", 0))
             return subprocess.CompletedProcess(tuple(argv), 0, stdout="", stderr="")
         return fake_run(argv, **kwargs)

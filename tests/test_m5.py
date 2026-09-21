@@ -108,7 +108,13 @@ class TestPlanSteps:
             "summary",
         ]
         ab_setup = next(s for s in steps if s.id == "ab-setup")
-        assert "worktree" in ab_setup.argv and "w2a-field-local" in ab_setup.argv
+        # B8: argv is a stale-worktree cleanup; git worktree add is the first
+        # extra_argv. The branch ref and worktree path appear across them.
+        all_ab_setup_tokens = list(ab_setup.argv) + [
+            t for extra in ab_setup.extra_argv for t in extra
+        ]
+        assert "worktree" in " ".join(all_ab_setup_tokens)
+        assert "w2a-field-local" in " ".join(all_ab_setup_tokens)
         assert any("uv" in " ".join(extra) for extra in ab_setup.extra_argv)
         ab_bench = next(s for s in steps if s.id == "ab-bench")
         assert ab_bench.cwd == out / "ab-worktree"
