@@ -194,8 +194,22 @@ def check_folder(folder: Path) -> tuple[bool, list[str]]:
         extra = sorted(set(record) - set(PREDICTION_LINE_KEYS))
         # perturbation / consensus / oracle_prediction are optional add-ons,
         # not contract violations (oracle_prediction rides under
-        # oracle_overrides evaluation; W3-D).
-        extra = [k for k in extra if k not in ("perturbation", "consensus", "oracle_prediction")]
+        # oracle_overrides evaluation; W3-D). ordered / ordinal /
+        # ordinal_choices are written by OrdinalTelemetry (ordered=True enum
+        # fields); they are optional — only present on ordinal fields.
+        extra = [
+            k
+            for k in extra
+            if k
+            not in (
+                "perturbation",
+                "consensus",
+                "oracle_prediction",
+                "ordered",
+                "ordinal",
+                "ordinal_choices",
+            )
+        ]
         if missing:
             problems.append(f"{name}: line {index} missing keys {missing}")
         if extra:
@@ -371,7 +385,12 @@ def _type_ok(key: str, value) -> bool:
         "type",
     }
     if value is None:
-        return key in nullable or key in ("perturbation", "consensus")
+        return key in nullable or key in (
+            "perturbation",
+            "consensus",
+            "ordinal",
+            "ordinal_choices",
+        )
     string_keys = {
         "run_id",
         "case_id",
@@ -398,6 +417,15 @@ def _type_ok(key: str, value) -> bool:
         return isinstance(value, str | bool | list)
     if key in ("error", "salvage_prediction", "label"):
         return isinstance(value, str | bool | list | int | float)
+    # ordinal telemetry (ordered=True enum fields): 'ordered' is a bool flag,
+    # 'ordinal_choices' is the list of choice strings, 'ordinal' is the
+    # per-level probability/variance dict.
+    if key == "ordered":
+        return isinstance(value, bool)
+    if key == "ordinal_choices":
+        return isinstance(value, list)
+    if key == "ordinal":
+        return isinstance(value, dict)
     return True  # unknown-but-present optional keys are not type-checked
 
 

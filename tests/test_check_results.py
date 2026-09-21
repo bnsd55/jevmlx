@@ -171,6 +171,34 @@ def test_wrong_type_fails(tmp_path):
     assert any("valid" in p and "wrong type" in p for p in problems)
 
 
+def test_ordinal_keys_accepted(tmp_path):
+    """ordered/ordinal/ordinal_choices (OrdinalTelemetry, ordered=True enum
+    fields) are optional add-on keys, not contract violations. The 7B
+    typesafe combos failed 'unexpected keys [ordinal, ordinal_choices]' until
+    the contract was updated."""
+    folder = tmp_path / "combo"
+    rec1 = _record()
+    rec1["ordered"] = True
+    rec1["ordinal_choices"] = ["low", "medium", "high"]
+    rec1["ordinal"] = {"argmax_level": 2, "expected_index": 2.0, "variance": 0.0}
+    rec2 = _record(case_id="c2", label="LOW", prediction="HIGH", correct=False, probability=0.3)
+    _write_valid(folder, records=[rec1, rec2])
+    ok, problems = check_folder(folder)
+    assert ok, problems
+
+
+def test_unknown_key_still_fails(tmp_path):
+    """An unrecognized key (not in the contract, not in the optional add-on
+    list) is still a contract violation."""
+    folder = tmp_path / "combo"
+    rec = _record()
+    rec["totally_unknown_key"] = 42
+    _write_valid(folder, records=[rec])
+    ok, problems = check_folder(folder)
+    assert not ok
+    assert any("unexpected keys" in p and "totally_unknown_key" in p for p in problems)
+
+
 def test_missing_dataset_lock_fails(tmp_path):
     folder = tmp_path / "model" / "combo"
     _write_valid(folder)
