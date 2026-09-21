@@ -118,6 +118,33 @@ class TestHtmlPanels:
         assert 'function fmtAttempt(n){return n==null?"—":String(n);}' in HTML
         assert "fmtAttempt(t.attempt_n)" in HTML
 
+    def test_fmt_nullable_present(self):
+        """W6-UI round 4: fmtNullable helper renders null/undefined as —."""
+        assert "function fmtNullable" in HTML
+        # rotation must use fmtNullable, not raw concatenation.
+        assert "fmtNullable(r.rotation)" in HTML
+        assert "fmtNullable(c.rotation)" in HTML
+        # No raw '+r.rotation+' or '+c.rotation+' concatenation left.
+        assert "+r.rotation+" not in HTML
+        assert "+c.rotation+" not in HTML
+
+    def test_fmt_num_guards_nan(self):
+        """W6-UI round 4: fmtNum guards NaN/Infinity (cases/h with <2 hb)."""
+        assert "!isFinite(v)" in HTML
+
+    def test_no_raw_null_concatenations(self):
+        """W6-UI round 4: sweep — no raw concatenation of nullable fields."""
+        # These were the spots that rendered 'null' as a literal string.
+        assert "+t.machine+" not in HTML
+        assert "+m.cap_gb+" not in HTML
+        assert "+m.stop_gb+" not in HTML
+        assert "+m.machine_gb+" not in HTML
+        assert "+n.run_i+" not in HTML
+        assert "+n.run_n+" not in HTML
+        assert "+n.heartbeat_age_s+" not in HTML
+        assert "+a.attempt_n+" not in HTML
+        assert "+s.exit+" not in HTML
+
 
 class TestContractKeys:
     """The JS must reference only keys present in the frozen contract."""
