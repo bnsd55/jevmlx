@@ -1,0 +1,402 @@
+{
+  "run": {
+    "out_dir": "m5-2026-09-20-full",
+    "hash": "dbb1ff1",
+    "machine": "M5 Max 128 GB",
+    "mlx_version": "0.32.2",
+    "attempt_n": 4,
+    "attempt_started": "02:17Z",
+    "awake_s": 24060,
+    "sleep_blocked": true,
+    "state": "running",
+    "alerts": [
+      {
+        "level": "fail",
+        "text": "Qwen3-8B slow test: batched pass changed a winner (counterparty_jurisdiction_risk). Parity will report FAIL for this model.",
+        "source": "slow tests · Qwen3-8B"
+      }
+    ]
+  },
+  "now": {
+    "model": "Qwen3-8B-4bit",
+    "track": "parallel",
+    "scorer": "slots",
+    "dataset": "typesafe",
+    "run_i": 1,
+    "run_n": 2,
+    "cases_done": 270,
+    "cases_total": 576,
+    "pred_lines": 3673,
+    "cases_per_h": 517,
+    "eta_s": 2100,
+    "combo_elapsed_s": 1884,
+    "heartbeat_age_s": 23,
+    "running_accuracy": 0.628,
+    "running_majority": 0.51
+  },
+  "memory": {
+    "cache_gb": 8.01,
+    "active_gb": 4.29,
+    "peak_gb": 86.3,
+    "cap_gb": 8,
+    "stop_gb": 10,
+    "machine_gb": 128
+  },
+  "health": [
+    {
+      "rule": "cache_over_stop",
+      "state": "ok",
+      "detail": "never"
+    },
+    {
+      "rule": "sleep_windows",
+      "state": "ok",
+      "detail": "0"
+    },
+    {
+      "rule": "run_failed_combos",
+      "state": "ok",
+      "detail": "0"
+    },
+    {
+      "rule": "parity_fail_models",
+      "state": "fail",
+      "detail": "1 model"
+    },
+    {
+      "rule": "metal_alloc_retries",
+      "state": "ok",
+      "detail": "2"
+    },
+    {
+      "rule": "heartbeat_age",
+      "state": "ok",
+      "detail": "23 s"
+    }
+  ],
+  "pipeline": {
+    "attempt_n": 4,
+    "steps": [
+      {
+        "id": "doctor",
+        "title": "gate",
+        "state": "ok",
+        "wall_s": 0.2,
+        "exit": 0,
+        "started": "02:17Z",
+        "argv": "jevmlx doctor --json",
+        "stdout_tail": null,
+        "error": null
+      },
+      {
+        "id": "slow-tests-qwen25",
+        "title": "Qwen2.5-7B",
+        "state": "skipped",
+        "wall_s": null,
+        "exit": null,
+        "started": null,
+        "argv": "pytest -m slow -q MODEL_ID=mlx-community/Qwen2.5-7B",
+        "stdout_tail": null,
+        "error": null
+      },
+      {
+        "id": "slow-tests-qwen3",
+        "title": "Qwen3-8B",
+        "state": "failed",
+        "wall_s": 28.8,
+        "exit": 1,
+        "started": "04:01Z",
+        "argv": "pytest -m slow -q MODEL_ID=mlx-community/Qwen3-8B-4bit",
+        "stdout_tail": "1 failed, 28 passed, 1 skipped in 27.5 s\nFAILED tests/test_engine.py::test_chunking_matches_full_batch_and_counts_passes\nassert winners identical across chunk sizes\nfield counterparty_jurisdiction_risk: chunked='SANCTIONED_ZONE' full='TIER_3_HIGH'",
+        "error": "batched drift changed a WINNER on this model, not just a score. Parity gate will report FAIL (fail-closed). Near-tie rescore is the mitigation."
+      },
+      {
+        "id": "slow-tests-llama-gemma",
+        "title": "Llama · Gemma",
+        "state": "ok",
+        "wall_s": null,
+        "exit": 0,
+        "started": "04:03Z",
+        "argv": "pytest -m slow -q MODEL_ID=Llama · Gemma",
+        "stdout_tail": "29 passed each",
+        "error": null
+      },
+      {
+        "id": "bench-quality",
+        "title": "7B · 12 combos",
+        "state": "ok",
+        "wall_s": 15600,
+        "exit": 0,
+        "started": "04:30Z",
+        "argv": "jevmlx bench --model Qwen2.5-7B --quality-only",
+        "stdout_tail": "12 combos · 0 failed",
+        "error": null
+      },
+      {
+        "id": "bench-rest",
+        "title": "3 models · 36 combos",
+        "state": "running",
+        "wall_s": null,
+        "exit": null,
+        "started": "08:27Z",
+        "argv": "jevmlx bench --rest",
+        "stdout_tail": "running · 14/36",
+        "error": null
+      },
+      {
+        "id": "ab-setup",
+        "title": "w2a-field-local",
+        "state": "waiting",
+        "wall_s": null,
+        "exit": null,
+        "started": null,
+        "argv": "jevmlx bench --ab w2a-field-local --setup",
+        "stdout_tail": null,
+        "error": null
+      },
+      {
+        "id": "ab-bench",
+        "title": "7B on branch",
+        "state": "waiting",
+        "wall_s": null,
+        "exit": null,
+        "started": null,
+        "argv": "jevmlx bench --ab w2a-field-local --model Qwen2.5-7B",
+        "stdout_tail": null,
+        "error": null
+      },
+      {
+        "id": "probe-summary",
+        "title": "slope · adapters",
+        "state": "waiting",
+        "wall_s": null,
+        "exit": null,
+        "started": null,
+        "argv": "jevmlx probe --summary",
+        "stdout_tail": null,
+        "error": null
+      }
+    ]
+  },
+  "aggregates": {
+    "field_accuracy_parallel_labels": 0.79,
+    "field_accuracy_naive": 0.68,
+    "exact_record": 0.21,
+    "time_per_case_parallel_s": 0.57,
+    "time_per_case_naive_s": 8.7,
+    "parity_counts": {
+      "pass": 0,
+      "drift": 3,
+      "fail": 1
+    },
+    "cases_scored": 6912,
+    "pred_lines": 148000,
+    "wall_s": 24060
+  },
+  "results": [
+    {
+      "model": "Qwen2.5-7B",
+      "dataset": "typesafe",
+      "scorer": "labels",
+      "track": "parallel",
+      "status": "done",
+      "accuracy": 0.821,
+      "ci_low": 0.78,
+      "ci_high": 0.86,
+      "majority": 0.512,
+      "exact_record": 0.2,
+      "parity_status": "drift",
+      "parity_drift": 0.051,
+      "time_per_case_s": 0.57,
+      "calls": 135,
+      "cases": 45,
+      "ab_delta": null,
+      "combo_id": "qwen25-7b-typesafe-labels-parallel"
+    },
+    {
+      "model": "Qwen2.5-7B",
+      "dataset": "typesafe",
+      "scorer": "slots",
+      "track": "parallel",
+      "status": "done",
+      "accuracy": 0.632,
+      "ci_low": 0.58,
+      "ci_high": 0.68,
+      "majority": 0.512,
+      "exact_record": 0.111,
+      "parity_status": "drift",
+      "parity_drift": 0.051,
+      "time_per_case_s": 0.4,
+      "calls": 135,
+      "cases": 45,
+      "ab_delta": null,
+      "combo_id": "qwen25-7b-typesafe-slots-parallel"
+    },
+    {
+      "model": "Qwen2.5-7B",
+      "dataset": "typesafe",
+      "scorer": "slots",
+      "track": "naive",
+      "status": "done",
+      "accuracy": 0.677,
+      "ci_low": 0.63,
+      "ci_high": 0.72,
+      "majority": 0.512,
+      "exact_record": 0.25,
+      "parity_status": null,
+      "parity_drift": null,
+      "time_per_case_s": 8.7,
+      "calls": 45,
+      "cases": 45,
+      "ab_delta": null,
+      "combo_id": "qwen25-7b-typesafe-slots-naive"
+    },
+    {
+      "model": "Qwen2.5-7B",
+      "dataset": "bundled",
+      "scorer": "labels",
+      "track": "parallel",
+      "status": "done",
+      "accuracy": 0.725,
+      "ci_low": 0.63,
+      "ci_high": 0.83,
+      "majority": 0.514,
+      "exact_record": 0.417,
+      "parity_status": "drift",
+      "parity_drift": 0.051,
+      "time_per_case_s": 0.19,
+      "calls": 72,
+      "cases": 24,
+      "ab_delta": 0.04,
+      "combo_id": "qwen25-7b-bundled-labels-parallel"
+    },
+    {
+      "model": "Qwen2.5-7B",
+      "dataset": "bundled",
+      "scorer": "slots",
+      "track": "parallel",
+      "status": "done",
+      "accuracy": 0.611,
+      "ci_low": 0.5,
+      "ci_high": 0.72,
+      "majority": 0.514,
+      "exact_record": 0.0,
+      "parity_status": "drift",
+      "parity_drift": 0.051,
+      "time_per_case_s": 0.18,
+      "calls": 72,
+      "cases": 24,
+      "ab_delta": -0.02,
+      "combo_id": "qwen25-7b-bundled-slots-parallel"
+    },
+    {
+      "model": "Qwen2.5-7B",
+      "dataset": "perturbed",
+      "scorer": "labels",
+      "track": "parallel",
+      "status": "done",
+      "accuracy": 0.723,
+      "ci_low": 0.66,
+      "ci_high": 0.78,
+      "majority": 0.509,
+      "exact_record": 0.368,
+      "parity_status": "drift",
+      "parity_drift": 0.051,
+      "time_per_case_s": 0.23,
+      "calls": 228,
+      "cases": 76,
+      "ab_delta": null,
+      "combo_id": "qwen25-7b-perturbed-labels-parallel"
+    },
+    {
+      "model": "Qwen3-8B",
+      "dataset": "bundled",
+      "scorer": "labels",
+      "track": "parallel",
+      "status": "done",
+      "accuracy": 0.764,
+      "ci_low": 0.66,
+      "ci_high": 0.86,
+      "majority": 0.514,
+      "exact_record": 0.375,
+      "parity_status": "fail",
+      "parity_drift": null,
+      "time_per_case_s": 0.22,
+      "calls": 72,
+      "cases": 24,
+      "ab_delta": null,
+      "combo_id": "qwen3-8b-bundled-labels-parallel"
+    },
+    {
+      "model": "Qwen3-8B",
+      "dataset": "typesafe",
+      "scorer": "slots",
+      "track": "parallel",
+      "status": "running",
+      "accuracy": 0.628,
+      "ci_low": null,
+      "ci_high": null,
+      "majority": 0.512,
+      "exact_record": null,
+      "parity_status": null,
+      "parity_drift": null,
+      "time_per_case_s": null,
+      "calls": null,
+      "cases": 21,
+      "ab_delta": null,
+      "combo_id": "qwen3-8b-typesafe-slots-parallel"
+    }
+  ],
+  "events": [
+    {
+      "ts": "08:58Z",
+      "kind": "heartbeat",
+      "text": "Qwen3-8B typesafe slots 270/576 · cache 8.01 GB · peak 86.3 GB"
+    },
+    {
+      "ts": "08:54Z",
+      "kind": "combo_done",
+      "text": "Qwen3-8B bundled labels · acc 0.764 · parity FAIL (winner flip)"
+    },
+    {
+      "ts": "08:31Z",
+      "kind": "alloc_retry",
+      "text": "Metal allocation failed at 16 rows, retried at 8 · 0 ms wasted"
+    },
+    {
+      "ts": "06:54Z",
+      "kind": "step_done",
+      "text": "bench quality · 12 combos · 4h 20m · 0 run_failed"
+    },
+    {
+      "ts": "02:17Z",
+      "kind": "attempt",
+      "text": "markers deleted: bench-quality, bench-rest, ab-setup, ab-bench, SUMMARY.md"
+    }
+  ],
+  "history": [
+    {
+      "attempt_n": 3,
+      "started": "02:10Z",
+      "hash": "dbb1ff1",
+      "outcome": "stopped after 201 s (B7/B8 markers)",
+      "steps_failed": [
+        "A/B: cwd does not exist: ab-worktree"
+      ]
+    },
+    {
+      "attempt_n": 2,
+      "started": "00:24Z",
+      "hash": "7e18298",
+      "outcome": "stopped (B4 B5 B6)",
+      "steps_failed": []
+    },
+    {
+      "attempt_n": 1,
+      "started": "17:46Z",
+      "hash": "9d4ddbc",
+      "outcome": "stopped (B1 B2 B3)",
+      "steps_failed": []
+    }
+  ]
+}

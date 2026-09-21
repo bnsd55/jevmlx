@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="refresh" content="__REFRESH__">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bench Control Room</title>
+<style>
+:root{
+ --bg:#0e131a;--panel:#151c25;--panel2:#1b2430;--line:#263142;--ink:#dfe6ee;--dim:#8d9aab;--faint:#5c6a7c;
+ --amber:#f2b134;--ok:#57c785;--fail:#ff6b6b;--drift:#7fb2ff;--skip:#5c6a7c;--run:#f2b134;
+ --mono:ui-monospace,Menlo,"Courier New",monospace;--sans:system-ui,-apple-system,sans-serif;
+}
+body{background:var(--bg);color:var(--ink);font:13px/1.45 var(--sans);padding-block:0 40px;padding-inline:16px}
+a{color:var(--drift)}
+.wrap{max-width:1360px;margin:0 auto;display:grid;gap:14px}
+.top{display:flex;flex-wrap:wrap;gap:10px 22px;align-items:center;padding:12px 0 8px;border-bottom:1px solid var(--line)}
+.top .title{font:600 15px/1 var(--sans);letter-spacing:.02em}
+.kv{display:flex;gap:6px;align-items:baseline;font:12px/1 var(--mono);color:var(--dim)}
+.kv b{color:var(--ink);font-weight:500}
+.state{margin-left:auto;display:flex;gap:10px;align-items:center}
+.badge{font:600 11px/1 var(--mono);letter-spacing:.08em;padding:6px 10px;border-radius:4px;text-transform:uppercase}
+.badge.run{background:rgba(242,177,52,.15);color:var(--amber);border:1px solid var(--amber)}
+.badge.alert{background:rgba(255,107,107,.12);color:var(--fail);border:1px solid var(--fail)}
+.badge.done{background:rgba(87,199,133,.15);color:var(--ok);border:1px solid var(--ok)}
+.badge.stopped{background:rgba(92,106,124,.15);color:var(--dim);border:1px solid var(--dim)}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 14px}
+.panel h2{font:600 11px/1 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--dim);margin:0 0 10px;display:flex;gap:10px;align-items:baseline}
+.panel h2 .sub{font-weight:400;letter-spacing:0;text-transform:none;color:var(--faint)}
+.now{display:grid;grid-template-columns:1.3fr 1fr 1fr;gap:14px}
+@media (max-width:900px){.now{grid-template-columns:1fr}}
+.big{font:500 26px/1.1 var(--sans);letter-spacing:-.01em}
+.big small{font:12px/1 var(--mono);color:var(--dim);display:block;margin-top:6px}
+.bar{position:relative;height:14px;background:#0b1016;border:1px solid var(--line);border-radius:3px;margin:10px 0 6px;overflow:hidden}
+.bar>i{position:absolute;left:0;top:0;bottom:0;background:var(--amber)}
+.bar.mem>i{background:var(--ok)}
+.tick{position:absolute;top:-4px;bottom:-4px;width:2px;background:var(--fail)}
+.tick.cap{background:var(--drift)}
+.ticklabel{position:absolute;top:16px;font:10px/1 var(--mono);color:var(--dim);transform:translateX(-50%)}
+.row{display:flex;justify-content:space-between;gap:10px;font:12px/1.4 var(--mono);color:var(--dim)}
+.row b{color:var(--ink);font-weight:500}
+.mem .row{margin-top:18px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:8px 14px;margin-top:6px}
+.stat{display:grid;gap:2px}
+.stat .l{font:10px/1 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--faint)}
+.stat .v{font:500 16px/1.1 var(--sans);font-variant-numeric:tabular-nums}
+.stat .v small{font:11px var(--mono);color:var(--dim)}
+.steps{display:grid;grid-template-columns:repeat(9,minmax(0,1fr));gap:6px}
+@media (max-width:1000px){.steps{grid-template-columns:repeat(3,1fr)}}
+.step{background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:8px 9px;display:grid;gap:4px;border-top-width:3px;font:12px/1.3 var(--sans);cursor:pointer}
+.step .n{font:600 11px/1 var(--mono);color:var(--dim)}
+.step .t{font-weight:500}
+.step .m{font:11px/1.3 var(--mono);color:var(--dim)}
+.step.ok{border-top-color:var(--ok)} .step.running{border-top-color:var(--amber)} .step.failed{border-top-color:var(--fail)} .step.skipped{border-top-color:var(--skip)} .step.waiting{border-top-color:var(--line);opacity:.7}
+.step.running{box-shadow:0 0 0 1px rgba(242,177,52,.35) inset}
+.pill{display:inline-block;font:600 10px/1 var(--mono);letter-spacing:.06em;padding:3px 6px;border-radius:3px;text-transform:uppercase}
+.pill.ok{background:rgba(87,199,133,.15);color:var(--ok)} .pill.run{background:rgba(242,177,52,.15);color:var(--amber)} .pill.fail{background:rgba(255,107,107,.15);color:var(--fail)} .pill.drift{background:rgba(127,178,255,.15);color:var(--drift)} .pill.skip{background:rgba(92,106,124,.2);color:var(--dim)} .pill.pass{background:rgba(87,199,133,.15);color:var(--ok)} .pill.warn{background:rgba(242,177,52,.15);color:var(--amber)}
+.two{display:grid;grid-template-columns:1.1fr .9fr;gap:14px}
+@media (max-width:1000px){.two{grid-template-columns:1fr}}
+.diag{font:12px/1.5 var(--mono);color:var(--ink);background:#0b1016;border:1px solid var(--line);border-radius:6px;padding:10px 12px;white-space:pre-wrap;overflow-x:auto}
+.diag .e{color:var(--fail)} .diag .h{color:var(--amber)} .diag .d{color:var(--dim)}
+.agg{display:grid;grid-template-columns:repeat(6,1fr);gap:10px}
+@media (max-width:1000px){.agg{grid-template-columns:repeat(3,1fr)}}
+.agg .stat{background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:10px 12px}
+.agg .stat .v{font-size:22px}
+.trend{font:10px/1 var(--mono);color:var(--dim)}
+.filters{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;align-items:center}
+.chip{font:12px/1 var(--mono);padding:6px 9px;border:1px solid var(--line);border-radius:999px;color:var(--dim);background:var(--panel2);cursor:pointer}
+.chip.on{color:var(--ink);border-color:var(--amber)}
+.chip.g{margin-left:8px;color:var(--faint);border:0;background:none;padding-left:0;cursor:default}
+.search{font:12px var(--mono);background:#0b1016;border:1px solid var(--line);color:var(--ink);border-radius:6px;padding:6px 9px;min-width:220px}
+.tw{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font:12px/1.35 var(--mono);font-variant-numeric:tabular-nums}
+th,td{text-align:left;padding:7px 9px;border-bottom:1px solid var(--line);white-space:nowrap}
+th{font-weight:500;color:var(--dim);font-size:11px;letter-spacing:.05em;text-transform:uppercase;position:sticky;top:0;background:var(--panel);cursor:pointer}
+th .s{color:var(--faint)}
+td.num{text-align:right}
+th.num{text-align:right}
+tr.live td{background:rgba(242,177,52,.06)}
+tr.bad td{background:rgba(255,107,107,.06)}
+.ci{color:var(--dim)}
+.delta.up{color:var(--ok)} .delta.down{color:var(--fail)}
+.below{color:var(--fail)}
+.events{font:12px/1.5 var(--mono)}
+.events div{display:grid;grid-template-columns:64px 88px 1fr;gap:10px;padding:3px 0;border-bottom:1px dashed #1e2733}
+.events .ts{color:var(--faint)}
+details{margin-top:8px}
+summary{cursor:pointer;color:var(--dim);font:12px var(--mono)}
+.legend{display:flex;gap:14px;flex-wrap:wrap;font:11px var(--mono);color:var(--dim);margin-top:8px}
+.foot{color:var(--faint);font:11px var(--mono);border-top:1px solid var(--line);padding-top:10px}
+.qwrap{display:grid;grid-template-columns:1.15fr .85fr;gap:14px}
+@media (max-width:1000px){.qwrap{grid-template-columns:1fr}}
+.qlist tr{cursor:pointer}
+.qlist table{font-size:11px}
+.qlist th,.qlist td{padding:5px 6px}
+.qlist td:nth-child(2){max-width:180px;overflow:hidden;text-overflow:ellipsis}
+.qlist tr.sel td{background:rgba(127,178,255,.08)}
+.qcard{background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:12px 14px;display:grid;gap:10px}
+.qcard .ctx{font:12px/1.5 var(--sans);color:var(--ink);background:#0b1016;border:1px solid var(--line);border-radius:6px;padding:10px 12px;max-height:150px;overflow:auto;white-space:pre-wrap}
+.qmeta{display:flex;flex-wrap:wrap;gap:6px 14px;font:11px/1.3 var(--mono);color:var(--dim)}
+.qmeta b{color:var(--ink);font-weight:500}
+.opts{display:grid;gap:5px}
+.opt{display:grid;grid-template-columns:150px 1fr 56px;gap:8px;align-items:center;font:12px/1.2 var(--mono)}
+.opt .ob{height:10px;background:#0b1016;border:1px solid var(--line);border-radius:3px;overflow:hidden;position:relative}
+.opt .ob i{position:absolute;left:0;top:0;bottom:0;background:var(--faint)}
+.opt.pred .ob i{background:var(--amber)} .opt.gold .ob i{background:var(--ok)} .opt.pred.gold .ob i{background:var(--ok)}
+.opt .p{text-align:right;color:var(--dim)} .opt.pred .p{color:var(--ink)}
+.tag{font:600 9px/1 var(--mono);letter-spacing:.06em;padding:2px 4px;border-radius:2px;margin-left:6px;text-transform:uppercase}
+.tag.pred{background:rgba(242,177,52,.2);color:var(--amber)} .tag.gold{background:rgba(87,199,133,.2);color:var(--ok)}
+.raw{font:11px/1.4 var(--mono);color:var(--dim)}
+.err{color:var(--fail);font:12px var(--mono);padding:6px 0}
+.stepcard{position:fixed;bottom:16px;right:16px;max-width:480px;max-height:60vh;overflow:auto;z-index:10}
+@media (prefers-reduced-motion: reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap" id="root"><div class="err" id="boot-err">loading /dashboard.json …</div></div>
+<script>
+"use strict";
+/* Control-room dashboard. Fetches /dashboard.json every REFRESH seconds and
+   /questions.json?combo=<id> on row click; renders client-side. No framework,
+   no CDN. Filters and sorting are client-side. TTY mode unchanged.
+   Contract: 9 top-level keys (run, now, memory, health, pipeline, aggregates,
+   results, events, history). questions() -> flat list[]. Nulls render as —. */
+const REFRESH = __REFRESH__;
+let D = null;
+let selCombo = null;
+let selQuestion = 0;
+let Q = [];
+let selStep = null;
+let sortKey = null, sortDir = 1;
+let rText = "", qText = "";
+let rChips = {}, qChips = {};
+
+function esc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;");}
+function pill(kind, text){return '<span class="pill '+esc(kind)+'">'+esc(text)+'</span>';}
+function fmtNum(v, d){return v==null?"—":(typeof v==="number"?v.toFixed(d??3):String(v));}
+function fmtDur(s){if(s==null)return "—";if(s<60)return Math.round(s)+" s";if(s<3600)return Math.round(s/60)+"m";return (s/3600).toFixed(1)+"h";}
+
+/* ---- top bar ---- */
+function renderTop(t){
+  let h='<div class="top"><div class="title">jevmlx bench control</div>';
+  h+='<span class="kv">run <b>'+esc(t.out_dir)+'</b></span>';
+  h+='<span class="kv">hash <b>'+esc(t.hash)+'</b></span>';
+  h+='<span class="kv">machine <b>'+esc(t.machine)+' · mlx '+esc(t.mlx_version)+'</b></span>';
+  h+='<span class="kv">attempt <b>'+esc(t.attempt_n)+'</b> started <b>'+esc(t.attempt_started)+'</b></span>';
+  const awake=fmtDur(t.awake_s);
+  h+='<span class="kv">awake <b>'+awake+'</b> · sleep guard <b style="color:'+(t.sleep_blocked?'var(--ok)':'var(--fail)')+'">'+(t.sleep_blocked?'on':'off')+'</b></span>';
+  h+='<div class="state">';
+  const alerts=(t.alerts||[]).length;
+  if(alerts)h+='<span class="badge alert">'+alerts+' alert'+(alerts>1?'s':'')+'</span>';
+  h+='<span class="badge '+esc(t.state)+'">'+esc(t.state)+'</span>';
+  h+='</div></div>';
+  return h;
+}
+
+/* ---- NOW cluster ---- */
+function renderNow(n, m, hl){
+  let h='<div class="now">';
+  // now
+  h+='<div class="panel"><h2>Now <span class="sub">from heartbeat.jsonl, '+esc(n.heartbeat_age_s)+' s ago</span></h2>';
+  h+='<div class="big">'+esc(n.model)+' <small>'+esc(n.track)+' · '+esc(n.scorer)+' · '+esc(n.dataset)+' · run '+n.run_i+' of '+n.run_n+'</small></div>';
+  const pct=n.cases_total?Math.round(n.cases_done/n.cases_total*100):0;
+  h+='<div class="bar"><i style="width:'+pct+'%"></i></div>';
+  h+='<div class="row"><span>cases <b>'+n.cases_done+' / '+n.cases_total+'</b></span><span><b>'+fmtNum(n.cases_per_h,0)+'</b> cases/h</span><span>ETA <b>'+fmtDur(n.eta_s)+'</span></b></div>';
+  h+='<div class="grid3">';
+  h+='<div class="stat"><span class="l">pred lines</span><span class="v">'+(n.pred_lines!=null?n.pred_lines.toLocaleString():"—")+'</span></div>';
+  h+='<div class="stat"><span class="l">combo elapsed</span><span class="v">'+fmtDur(n.combo_elapsed_s)+'</span></div>';
+  h+='<div class="stat"><span class="l">running accuracy</span><span class="v">'+fmtNum(n.running_accuracy,3)+' <small>maj '+fmtNum(n.running_majority,2)+'</small></span></div>';
+  h+='</div></div>';
+  // memory
+  h+='<div class="panel mem"><h2>Memory <span class="sub">cap '+m.cap_gb+' GB · stop '+m.stop_gb+' GB · machine '+m.machine_gb+' GB</span></h2>';
+  const cacheW=m.machine_gb?Math.min(100,m.cache_gb/m.machine_gb*100):0;
+  const capPct=m.machine_gb?m.cap_gb/m.machine_gb*100:0;
+  const stopPct=m.machine_gb?m.stop_gb/m.machine_gb*100:0;
+  const cacheOver=m.cache_gb>=m.stop_gb;
+  h+='<div class="row"><span>cache</span><b style="color:'+(cacheOver?'var(--fail)':'var(--ok)')+'">'+fmtNum(m.cache_gb,2)+' GB</b></div>';
+  h+='<div class="bar mem"><i style="width:'+cacheW+'%"></i><span class="tick cap" style="left:'+capPct+'%"></span><span class="tick" style="left:'+stopPct+'%"></span><span class="ticklabel" style="left:'+capPct+'%">cap</span><span class="ticklabel" style="left:'+stopPct+'%">stop</span></div>';
+  const activeW=m.machine_gb?Math.min(100,m.active_gb/m.machine_gb*100):0;
+  h+='<div class="row" style="margin-top:22px"><span>active</span><b>'+fmtNum(m.active_gb,2)+' GB</b></div>';
+  h+='<div class="bar mem"><i style="width:'+activeW+'%"></i></div>';
+  const peakW=m.machine_gb?Math.min(100,m.peak_gb/m.machine_gb*100):0;
+  const peakOver=m.peak_gb>=m.stop_gb;
+  h+='<div class="row"><span>peak this combo</span><b style="color:'+(peakOver?'var(--amber)':'var(--ok)')+'">'+fmtNum(m.peak_gb,1)+' GB</b></div>';
+  h+='<div class="bar mem"><i style="width:'+peakW+'%;background:'+(peakOver?'var(--amber)':'var(--ok)')+'"></i></div>';
+  h+='</div>';
+  // health
+  h+='<div class="panel"><h2>Health <span class="sub">rules that stop or flag the run</span></h2>';
+  h+='<div class="grid3" style="grid-template-columns:1fr 1fr">';
+  const ruleLabels={cache_over_stop:"cache > 10 GB",sleep_windows:"sleep windows",run_failed_combos:"run_failed combos",parity_fail_models:"parity fail (winner flip)",metal_alloc_retries:"metal alloc retries",heartbeat_age:"heartbeat age"};
+  for(const item of hl){
+    const lbl=ruleLabels[item.rule]||item.rule;
+    h+='<div class="stat"><span class="l">'+esc(lbl)+'</span><span class="v">'+pill(item.state,item.detail)+'</span></div>';
+  }
+  h+='</div>';
+  const alerts=(D.run&&D.run.alerts)||[];
+  if(alerts.length){h+='<div class="legend" style="margin-top:12px"><span style="color:var(--fail)">alert:</span> '+esc(alerts.map(a=>a.text).join(" "))+'</div>';}
+  h+='</div></div>';
+  return h;
+}
+
+/* ---- pipeline ---- */
+function renderPipeline(p){
+  let h='<div class="panel"><h2>Pipeline <span class="sub">current attempt · click a step for argv, stdout tail, error</span></h2><div class="steps">';
+  for(const s of p.steps){
+    h+='<div class="step '+s.state+'" data-step="'+esc(s.id)+'">';
+    h+='<span class="n">'+esc(s.id)+'</span><span class="t">'+esc(s.title)+'</span>';
+    let m="";
+    if(s.wall_s!=null)m+=fmtDur(s.wall_s);
+    if(s.exit!=null)m+=(m?" · ":"")+"exit "+s.exit;
+    if(s.state==="running"&&s.started)m+=(m?" · ":"")+"running since "+esc(s.started);
+    if(!m)m=s.detail||esc(s.state);
+    h+='<span class="m">'+m+'</span></div>';
+  }
+  h+='</div><div class="legend"><span><span class="pill ok">ok</span></span><span><span class="pill run">running</span></span><span><span class="pill fail">failed</span></span><span><span class="pill skip">skipped by marker</span></span><span>markers encode outcome, not exit code</span></div></div>';
+  return h;
+}
+
+/* ---- failure diagnosis + aggregates ---- */
+function renderDiagAgg(p, a){
+  let h='<div class="two">';
+  // diagnosis: pick the first failed step
+  const failStep=(p.steps||[]).find(s=>s.state==="failed");
+  h+='<div class="panel"><h2>Failure diagnosis <span class="sub">selected: '+(failStep?esc(failStep.id+" · "+failStep.title):"none")+'</span></h2>';
+  if(failStep){
+    h+='<div class="diag">';
+    if(failStep.argv)h+='<div><span class="d">step</span>     '+esc(failStep.argv)+'</div>';
+    if(failStep.stdout_tail)h+='<div><span class="d">stdout</span>  '+esc(failStep.stdout_tail)+'</div>';
+    if(failStep.error)h+='<div><span class="e">error</span>   '+esc(failStep.error)+'</div>';
+    h+='</div>';
+  } else {h+='<div class="diag"><span class="d">no failed step in the current attempt</span></div>';}
+  h+='</div>';
+  // aggregates
+  h+='<div class="panel"><h2>Aggregates so far <span class="sub">'+(a.cases_scored?a.cases_scored.toLocaleString()+" cases scored":"—")+'</span></h2><div class="agg" style="grid-template-columns:repeat(3,1fr)">';
+  h+=aggStat("field accuracy · parallel labels",fmtNum(a.field_accuracy_parallel_labels,2),"vs majority");
+  h+=aggStat("field accuracy · naive",fmtNum(a.field_accuracy_naive,2),"");
+  h+=aggStat("exact record",fmtNum(a.exact_record,2),"");
+  h+=aggStat("time per case · parallel",fmtNum(a.time_per_case_parallel_s,2)+" s","naive "+fmtNum(a.time_per_case_naive_s,1)+" s");
+  const pc=a.parity_counts||{};
+  let pPills="";
+  if(pc.pass)pPills+=pill("pass",pc.pass+" pass")+" ";
+  if(pc.drift)pPills+=pill("drift",pc.drift+" drift")+" ";
+  if(pc.fail)pPills+=pill("fail",pc.fail+" fail");
+  h+=aggStat("parity",pPills||"—","gate 0.05 nats");
+  h+=aggStat("cases scored",(a.cases_scored!=null?a.cases_scored.toLocaleString():"—"),"pred lines "+(a.pred_lines!=null?a.pred_lines.toLocaleString():"—"));
+  h+='</div></div></div>';
+  return h;
+}
+function aggStat(label,value,trend){return '<div class="stat"><span class="l">'+esc(label)+'</span><span class="v">'+value+'</span>'+(trend?'<span class="trend">'+esc(trend)+'</span>':'')+'</div>';}
+
+/* ---- results ---- */
+function renderResults(rows){
+  const headers=["model","dataset","scorer","track","status","accuracy 95% CI","majority","exact","parity","time/case","calls","cases","A/B Δ"];
+  let h='<div class="panel"><h2>Results <span class="sub">one row per combo · same columns as the README leaderboard · click a header to sort · click a row to load its questions below</span></h2>';
+  h+='<div class="filters"><input class="search" id="r-search" placeholder="filter: model, dataset, field…" value="'+esc(rText)+'">';
+  const models=[...new Set(rows.map(r=>r.model))], datasets=[...new Set(rows.map(r=>r.dataset))], scorers=[...new Set(rows.map(r=>r.scorer))], tracks=[...new Set(rows.map(r=>r.track))], statuses=["done","running","queued","failed"];
+  h+=chipGroup("model",["all",...models],rChips)+chipGroup("dataset",["all",...datasets],rChips)+chipGroup("scorer",scorers,rChips)+chipGroup("track",tracks,rChips)+chipGroup("status",statuses,rChips);
+  h+='</div><div class="tw"><table class="rtable"><tr>';
+  headers.forEach((hd,i)=>{const cls=i>=5?' class="num"':'';const arrow=sortKey===i?(sortDir>0?' ▲':' ▼'):'';h+='<th'+cls+' data-col="'+i+'">'+esc(hd)+(i>=5?'<span class="s">'+esc(arrow.trim())+'</span>':arrow)+'</th>';});
+  h+='</tr>';
+  const fr=filterSortRows(rows);
+  for(const row of fr){
+    let rc="";
+    if(row.status==="running")rc="live";
+    else if(row.parity_status==="fail")rc="bad";
+    h+='<tr class="'+rc+'" data-combo="'+esc(row.model+'|'+row.dataset+'|'+row.scorer+'|'+row.track)+'">';
+    h+='<td>'+esc(row.model)+'</td><td>'+esc(row.dataset)+'</td><td>'+esc(row.scorer)+'</td><td>'+esc(row.track)+'</td>';
+    h+='<td>'+statusPill(row)+'</td>';
+    const ci=(row.ci_low!=null&&row.ci_high!=null)?' <span class="ci">±'+((row.ci_high-row.ci_low)/2).toFixed(2)+'</span>':'';
+    h+='<td class="num">'+fmtNum(row.accuracy,3)+ci+'</td>';
+    h+='<td class="num">'+fmtNum(row.majority,3)+'</td>';
+    h+='<td class="num">'+fmtNum(row.exact_record,3)+'</td>';
+    h+='<td>'+parityPill(row)+'</td>';
+    h+='<td class="num">'+(row.time_per_case_s!=null?fmtNum(row.time_per_case_s,2)+" s":"—")+'</td>';
+    h+='<td class="num">'+(row.calls!=null?row.calls:"—")+'</td>';
+    h+='<td class="num">'+(row.cases!=null?row.cases:"—")+'</td>';
+    h+='<td class="num">'+abDelta(row.ab_delta)+'</td>';
+    h+='</tr>';
+  }
+  h+='</table></div><div class="legend"><span>accuracy = field accuracy, Wilson CI</span><span>majority = always-most-common label</span><span>exact = every field right</span><span>parity: <span class="pill pass">pass</span> &lt;0.05 nats · <span class="pill drift">drift</span> ≥0.05, winners identical · <span class="pill fail">fail</span> a winner changed</span><span>A/B Δ = main − branch</span></div></div>';
+  return h;
+}
+function statusPill(row){
+  if(row.status==="done")return pill("ok","done");
+  if(row.status==="running")return pill("run","running");
+  if(row.status==="failed")return pill("fail","failed");
+  if(row.status==="queued")return pill("skip","queued");
+  return pill("skip",row.status);
+}
+function parityPill(row){
+  if(!row.parity_status)return "—";
+  if(row.parity_status==="pass")return pill("pass","pass");
+  if(row.parity_status==="drift")return pill("drift","drift "+fmtNum(row.parity_drift,3));
+  if(row.parity_status==="fail")return pill("fail","fail · winner flip");
+  return esc(row.parity_status);
+}
+function abDelta(d){if(d==null)return "—";const dir=d>0?"up":"down";const s=d>0?"+":"−";return '<span class="delta '+dir+'">'+s+Math.abs(d).toFixed(2)+'</span>';}
+function chipGroup(g,labels,chips){
+  let h='<span class="chip g">'+esc(g)+'</span>';
+  for(const l of labels){const on=isOn(chips,g,l);h+='<span class="chip'+(on?' on':'')+'" data-g="'+esc(g)+'" data-c="'+esc(l)+'" data-scope="r">'+esc(l)+'</span>';}
+  return h;
+}
+function isOn(chips,g,label){const s=chips[g];if(!s||s.size===0)return label==="all";return s.has(label);}
+function filterSortRows(rows){
+  let out=rows.filter(row=>{
+    if(rText){const hay=(row.model+" "+row.dataset+" "+row.scorer+" "+row.track).toLowerCase();if(!hay.includes(rText.toLowerCase()))return false;}
+    for(const g in rChips){const s=rChips[g];if(!s||s.size===0)continue;if(s.has("all"))continue;let val=null;if(g==="model")val=row.model;else if(g==="dataset")val=row.dataset;else if(g==="scorer")val=row.scorer;else if(g==="track")val=row.track;else if(g==="status")val=row.status;if(val&&!s.has(val))return false;}
+    return true;
+  });
+  if(sortKey!=null){const keys=["model","dataset","scorer","track","status","accuracy","majority","exact_record","parity_drift","time_per_case_s","calls","cases","ab_delta"];const k=keys[sortKey];out.sort((a,b)=>{let va=a[k],vb=b[k];if(va==null)va=-Infinity;if(vb==null)vb=-Infinity;if(typeof va==="number"&&typeof vb==="number")return (va-vb)*sortDir;return String(va).localeCompare(String(vb))*sortDir;});}
+  return out;
+}
+
+/* ---- questions ---- */
+function renderQuestions(list){
+  const headers=["time","case · rotation","field","predicted","label","ok","p(pred)","margin","call ms","acc so far"];
+  const comboDisplay=selCombo?selCombo.split("|").join(" · "):"";
+  let h='<div class="panel"><h2>Questions <span class="sub">every decision of the selected combo'+(selCombo?' · '+esc(comboDisplay):'')+' · '+(list.length?list.length.toLocaleString()+" lines":"none")+'</span></h2>';
+  h+='<div class="filters"><input class="search" id="q-search" placeholder="filter: case id, field, label, text…" value="'+esc(qText)+'">';
+  h+=chipGroup("show",["all","wrong only","near-tie","order flips"],qChips)+chipGroup("workflow",["all","invoice","security","agent trace","customer service"],qChips)+chipGroup("field",["all"],qChips);
+  h+='</div><div class="qwrap"><div class="tw qlist"><table><tr>';
+  headers.forEach((hd,i)=>{const cls=i>=6?' class="num"':'';h+='<th'+cls+'>'+esc(hd)+'</th>';});
+  h+='</tr>';
+  const fr=filterQuestions(list);
+  for(let i=0;i<fr.length;i++){const r=fr[i];const origIdx=list.indexOf(r);
+    h+='<tr class="'+(origIdx===selQuestion?"sel":"")+'" data-qi="'+origIdx+'">';
+    h+='<td>'+esc(r.ts)+'</td><td>'+esc(r.case_id)+' · rot'+r.rotation+'</td><td>'+esc(r.field)+'</td>';
+    h+='<td>'+esc(r.predicted)+'</td><td>'+esc(r.label)+'</td>';
+    h+='<td>'+(r.ok?pill("ok","✓"):pill("fail","✗"))+'</td>';
+    h+='<td class="num">'+fmtNum(r.p_pred,2)+'</td><td class="num">'+fmtNum(r.margin,2)+'</td>';
+    h+='<td class="num">'+(r.call_ms!=null?r.call_ms:"—")+'</td><td class="num">'+fmtNum(r.acc_so_far,3)+'</td>';
+    h+='</tr>';
+  }
+  h+='</table></div>';
+  const c=list[selQuestion];
+  if(c){
+    h+='<div class="qcard"><div class="qmeta">';
+    h+='<span>case <b>'+esc(c.case_id)+'</b></span><span>rotation <b>'+c.rotation+'</b></span><span>field <b>'+esc(c.field)+'</b></span>';
+    h+='<span>scorer <b>'+esc(D.now?D.now.scorer:"—")+'</b></span><span>call <b>'+esc(c.call_ms!=null?c.call_ms+" ms":"—")+'</b></span>';
+    h+='</div>';
+    h+='<div class="ctx">'+esc(c.context_text)+'</div>';
+    h+='<div class="qmeta"><span>question <b>'+esc(c.field_question)+'</b></span></div>';
+    h+='<div class="opts">';
+    for(const o of c.options){const isPred=o.name===c.predicted;const isGold=o.name===c.label;const cls="opt"+(isPred?" pred":"")+(isGold?" gold":"");
+      h+='<div class="'+cls+'"><span>'+esc(o.name)+(isPred?'<span class="tag pred">predicted</span>':'')+(isGold?'<span class="tag gold">label</span>':'')+'</span>';
+      h+='<span class="ob"><i style="width:'+(o.p*100)+'%"></i></span><span class="p">'+o.p.toFixed(2)+'</span></div>';
+    }
+    h+='</div><div class="qmeta">';
+    h+='<span>margin <b>'+fmtNum(c.margin,2)+(c.margin<0.10?' (near-tie, below 0.10)':'')+'</b></span>';
+    h+='<span>same field other rotations: <b>'+esc((c.rotations_same_field||[]).join(" · "))+'</b></span>';
+    h+='<span>rescored: <b>'+(c.rescored?"yes":"no")+'</b></span>';
+    h+='<span>log-odds drift vs single: <b>'+fmtNum(c.drift,3)+'</b></span>';
+    h+='</div></div>';
+  } else {h+='<div class="qcard">no question selected — click a row</div>';}
+  h+='</div></div>';
+  return h;
+}
+function filterQuestions(list){
+  let out=list;
+  const s=qChips["show"];if(s&&s.size>0&&!s.has("all")){
+    if(s.has("wrong only"))out=out.filter(r=>!r.ok);
+    if(s.has("near-tie"))out=out.filter(r=>r.margin!=null&&r.margin<0.10);
+  }
+  if(qText){out=out.filter(r=>(r.case_id+" "+r.field+" "+r.predicted+" "+r.label+" "+(r.context_text||"")).toLowerCase().includes(qText.toLowerCase()));}
+  return out;
+}
+
+/* ---- events + history ---- */
+function renderEventsHistory(ev, hi){
+  let h='<div class="two"><div class="panel"><h2>Events <span class="sub">heartbeats, failures, sleep, stop rule · newest first</span></h2><div class="events">';
+  const kindPill={heartbeat:"run",combo_done:"ok",alloc_retry:"drift",step_done:"ok",attempt:"skip",run_failed:"fail",sleep:"skip"};
+  for(const e of ev){h+='<div><span class="ts">'+esc(e.ts)+'</span>'+pill(kindPill[e.kind]||"skip",e.kind)+'<span>'+esc(e.text)+'</span></div>';}
+  h+='</div></div>';
+  h+='<div class="panel"><h2>History <span class="sub">previous attempts of this run dir</span></h2>';
+  for(const a of hi){h+='<details><summary>attempt '+a.attempt_n+' · '+esc(a.started)+' · '+esc(a.hash)+' · '+esc(a.outcome)+'</summary>';if(a.steps_failed&&a.steps_failed.length){h+='<div class="events" style="margin-top:6px">';for(const sf of a.steps_failed){h+='<div><span class="ts">—</span>'+pill("fail","fail")+'<span>'+esc(sf)+'</span></div>';}h+='</div>';}h+='</details>';}
+  h+='</div></div>';
+  return h;
+}
+
+/* ---- step popover ---- */
+function renderStepCard(){
+  if(!selStep)return "";
+  const s=(D.pipeline.steps||[]).find(x=>x.id===selStep);if(!s)return "";
+  let h='<div class="panel stepcard" id="stepcard"><h2>'+esc(s.id)+' · '+esc(s.title)+'</h2><div class="diag">';
+  h+='<div><span class="d">state</span>  '+pill(s.state,s.state)+'</div>';
+  if(s.argv)h+='<div><span class="d">argv</span>   '+esc(s.argv)+'</div>';
+  if(s.started)h+='<div><span class="d">started</span> '+esc(s.started)+'</div>';
+  if(s.wall_s!=null)h+='<div><span class="d">wall</span>   '+fmtDur(s.wall_s)+'</div>';
+  if(s.exit!=null)h+='<div><span class="d">exit</span>    '+s.exit+'</div>';
+  if(s.error)h+='<div><span class="e">error</span>   '+esc(s.error)+'</div>';
+  h+='</div>';
+  if(s.stdout_tail){h+='<div class="diag" style="margin-top:6px;max-height:200px">'+esc(s.stdout_tail)+'</div>';}
+  h+='<div style="margin-top:6px"><span class="chip" id="step-close">close</span></div></div>';
+  return h;
+}
+
+/* ---- main render ---- */
+function render(){
+  if(!D)return;
+  const root=document.getElementById("root");
+  let h="";
+  h+=renderTop(D.run);
+  h+=renderNow(D.now, D.memory, D.health);
+  h+=renderPipeline(D.pipeline);
+  h+=renderDiagAgg(D.pipeline, D.aggregates);
+  h+=renderResults(D.results);
+  if(Q.length||selCombo)h+=renderQuestions(Q);
+  h+=renderEventsHistory(D.events, D.history);
+  h+=renderStepCard();
+  h+='<div class="foot">read-only over RUNBOOK.md · combo run.json / report.json / heartbeat.jsonl / predictions.jsonl · parity.json · SUMMARY.md · refresh '+REFRESH+' s · /dashboard.json for scripts · TTY mode unchanged</div>';
+  root.innerHTML=h;
+  wireEvents();
+}
+
+function wireEvents(){
+  document.querySelectorAll(".chip[data-g]").forEach(c=>{c.onclick=()=>{toggleChip(c.dataset.scope==="r"?rChips:qChips,c.dataset.g,c.dataset.c);render();};});
+  document.querySelectorAll("th[data-col]").forEach(th=>{th.onclick=()=>{const col=parseInt(th.dataset.col);if(sortKey===col)sortDir*=-1;else{sortKey=col;sortDir=1;}render();};});
+  document.querySelectorAll(".rtable tr[data-combo]").forEach(tr=>{tr.onclick=()=>{selCombo=tr.dataset.combo;selQuestion=0;Q=[];fetchQuestions();};});
+  document.querySelectorAll(".qlist tr[data-qi]").forEach(tr=>{tr.onclick=()=>{selQuestion=parseInt(tr.dataset.qi);render();};});
+  document.querySelectorAll(".step[data-step]").forEach(s=>{s.onclick=()=>{selStep=selStep===s.dataset.step?null:s.dataset.step;render();};});
+  const sc=document.getElementById("step-close");if(sc)sc.onclick=()=>{selStep=null;render();};
+  const rs=document.getElementById("r-search");if(rs){rs.oninput=()=>{rText=rs.value;render();rs.focus();};}
+  const qs=document.getElementById("q-search");if(qs){qs.oninput=()=>{qText=qs.value;render();qs.focus();};}
+}
+function toggleChip(chips,g,label){if(!chips[g])chips[g]=new Set();const s=chips[g];if(label==="all"){s.clear();}else{s.delete("all");if(s.has(label))s.delete(label);else s.add(label);}if(s.size===0)delete chips[g];}
+
+/* ---- fetch loop ---- */
+async function fetchDashboard(){
+  try{
+    const r=await fetch("/dashboard.json",{cache:"no-store"});
+    if(!r.ok)throw new Error("HTTP "+r.status);
+    D=await r.json();
+    const be=document.getElementById("boot-err");if(be)be.remove();
+    render();
+    if(selCombo&&Q.length===0)await fetchQuestions();
+  }catch(e){const be=document.getElementById("boot-err");if(be)be.textContent="cannot reach /dashboard.json: "+e.message+" — retrying";}
+}
+async function fetchQuestions(){
+  if(!selCombo)return;
+  try{const r=await fetch("/questions.json?combo="+encodeURIComponent(selCombo),{cache:"no-store"});if(!r.ok)throw new Error("HTTP "+r.status);Q=await r.json();render();}catch(e){/* show stale, will retry */}
+}
+fetchDashboard();
+// Deep-link support: ?combo=<id>&q=<n> selects a combo and question on load
+// (for screenshots and shareable links). 5-line addition.
+(async()=>{
+  const p=new URLSearchParams(location.search);
+  const c=p.get("combo"),qi=p.get("q");
+  if(c){selCombo=c;selQuestion=qi?parseInt(qi):0;await fetchQuestions();}
+})();
+setInterval(fetchDashboard, REFRESH*1000);
+</script>
+</body>
+</html>
