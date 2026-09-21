@@ -490,6 +490,61 @@ def _now() -> str:
     return datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _git_short_sha() -> str:
+    """Short HEAD sha (7) for the attempt header; 'unknown' if git is absent."""
+    import subprocess
+
+    try:
+        return subprocess.check_output(
+            ["git", "-C", str(REPO_ROOT), "rev-parse", "--short=7", "HEAD"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+
+
+def _count_attempts(out: Path) -> int:
+    """The next attempt number = the number of existing '## attempt ' headers + 1.
+
+    A rerun of the same out dir appends a new attempt header; the dashboard
+    parser groups steps by the LAST attempt header so only the current
+    attempt's steps show in the pipeline panel.
+    """
+    rb = out / "RUNBOOK.md"
+    if not rb.exists():
+        return 1
+    n = 0
+    for line in rb.read_text(encoding="utf-8").splitlines():
+        if line.startswith("## attempt "):
+            n += 1
+    return n + 1
+
+
+def _append_attempt_header(out: Path, argv: list[str]) -> int:
+    """Append '## attempt <n> <ISO> <hash> <argv>' at the start of every run.
+
+    Returns the attempt number. The header is appended (never rewritten) so
+    previous attempts stay in the file for the history panel. The dashboard
+    parser groups pipeline steps by the LAST '## attempt ' header.
+    """
+    attempt_n = _count_attempts(out)
+    with (out / "RUNBOOK.md").open("a", encoding="utf-8") as f:
+        f.write(f"\n## attempt {attempt_n} {_now()} {_git_short_sha()} {' '.join(argv)}\n")
+    return attempt_n
+
+
+def _append_started_line(out: Path, step_id: str) -> None:
+    """Append 'started <step id> <ISO>' before a step runs.
+
+    The existing done/failed/skipped line (from runbook_append) stays as the
+    completion record; this 'started' line lets the dashboard show a step as
+    'running' before it finishes.
+    """
+    with (out / "RUNBOOK.md").open("a", encoding="utf-8") as f:
+        f.write(f"started {step_id} {_now()}\n")
+
+
 def runbook_append(
     out: Path, index: int, step: Step, *, rc: int | None, secs: float | None, skipped: bool = False
 ) -> None:
@@ -934,6 +989,14 @@ def main(argv: list[str] | None = None) -> int:
         ]
         (out / "RUNBOOK.md").write_text("\n".join(header), encoding="utf-8")
 
+    # W6-UI-3a: append an attempt header at the start of every run (including
+    # reruns). The dashboard parser groups steps by the LAST attempt header.
+    _append_attempt_header(
+        out,
+        ["python", "-m", "benchmarks.m5", "--out", args.out]
+        + (["--ab-branch", args.ab_branch] if args.ab_branch else []),
+    )
+
     failures: list[str] = []
     worktree = out / "ab-worktree"
     # B3: when the A/B setup step fails, every later A/B step is SKIPPED
@@ -955,6 +1018,9 @@ def main(argv: list[str] | None = None) -> int:
             if ab_setup_failed and step.id.startswith("ab-"):
                 runbook_append(out, index, step, rc=None, secs=None, skipped=True)
                 continue
+            # W6-UI-3a: 'started' line before the step runs (dashboard shows
+            # 'running' before the completion line lands).
+            _append_started_line(out, step.id)
             secs = time.perf_counter()
             # B3(c): catch any unexpected exception inside a step, record
             # its type+message, and continue to the next non-dependent step.

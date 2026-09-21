@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- watch: dashboard data layer (`/dashboard.json`, `/questions.json`) and
+  m5 attempt/started lines. `build_dashboard(out_dir) -> dict` returns the
+  frozen W6-UI-3a contract (9 top-level keys: run, now, memory, health,
+  pipeline, aggregates, results, events, history). `build_questions(out_dir,
+  combo_id) -> list[dict]` returns every decision of one combo with
+  context_text joined from the cached dataset jsonl by row id. Half-written
+  lines are truncated to the last complete line (same rule as `resume.py`);
+  missing files give nulls, never exceptions. `benchmarks/m5.py` appends
+  `## attempt <n> <ISO> <hash> <argv>` at the start of every run and a
+  `started <step id> <ISO>` line before each step; the pipeline parser
+  groups steps by the last attempt header.
+
 - Vision-language checkpoints load as their inner text model (the
   mlx-lm wrapper with `language_model` is unwrapped in `load_engine`), so
   qwen3_5 / gemma3 / mistral3 VLM builds work as scoring backends.

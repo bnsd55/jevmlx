@@ -30,7 +30,9 @@ __all__ = [
     "count_lines",
     "live_table_row",
     "eta_string",
+    "build_dashboard_renderable",
     "build_dashboard",
+    "build_questions",
     "run_watch",
 ]
 
@@ -317,7 +319,7 @@ def _combo_dirs(out_dir: Path) -> list[Path]:
     return combos
 
 
-def build_dashboard(out_dir: Path, *, width: int = 120) -> Group:
+def build_dashboard_renderable(out_dir: Path, *, width: int = 120) -> Group:
     """Build the full dashboard renderable for one refresh."""
     out_dir = Path(out_dir)
     panels: list = []
@@ -489,7 +491,7 @@ def render_html(out_dir: str | Path, *, refresh: float = 2.0, width: int = 120) 
         color_system="256",
         file=open(os.devnull, "w"),
     )
-    console.print(build_dashboard(Path(out_dir), width=width))
+    console.print(build_dashboard_renderable(Path(out_dir), width=width))
     body = console.export_html(inline_styles=True)
     # Inject the auto-refresh meta tag (rich's HTML lacks it).
     meta = f'<meta http-equiv="refresh" content="{int(max(1, refresh))}">'
@@ -497,61 +499,826 @@ def render_html(out_dir: str | Path, *, refresh: float = 2.0, width: int = 120) 
     return body
 
 
-def render_json(out_dir: str | Path) -> dict:
-    """The raw dashboard numbers for scripts (the /dashboard.json payload).
+def _read_step_log_tail(out_dir: Path, step_id: str, *, n: int = 40) -> str | None:
+    """Last n lines of <step.id>.log, or None when the log is absent."""
+    log_path = out_dir / f"{step_id}.log"
+    if not log_path.exists():
+        return None
+    try:
+        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    return "\n".join(lines[-n:]) if lines else None
 
-    Keys: out_dir, elapsed_s, machine, mlx_version, model, freeze,
-    runbook (list of step dicts), combos (list with progress + row dict).
+
+def _parse_pipeline(out_dir: Path) -> dict:
+    """Pipeline panel: steps grouped by the LAST '## attempt ' header.
+
+    Parses RUNBOOK.md for attempt headers ('## attempt <n> <ISO> <hash> <argv>')
+    and per-step 'started <id> <ISO>' + completion lines ('## <idx>. <title> — ...').
+    Only the last attempt's steps are returned (the dashboard shows the
+    current attempt). Steps in plan_steps with no runbook line yet are
+    'waiting'.
+    """
+    rb = out_dir / "RUNBOOK.md"
+    attempt_n = 0
+    attempt_started = None
+    steps_raw: list[dict] = []
+    if rb.exists():
+        try:
+            text = rb.read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+        # Split into the last attempt block: everything after the last
+        # '## attempt ' header.
+        last_attempt_idx = text.rfind("\n## attempt ")
+        if last_attempt_idx >= 0:
+            block = text[last_attempt_idx + 1 :]
+            first = block.split("\n", 1)[0]
+            parts = first.split(None, 4)  # ## attempt <n> <ISO> <hash> <argv...>
+            if len(parts) >= 5:
+                attempt_n = int(parts[2]) if parts[2].isdigit() else 0
+                attempt_started = parts[3]
+            elif len(parts) >= 4:
+                attempt_n = int(parts[2]) if parts[2].isdigit() else 0
+                attempt_started = parts[3]
+            # Walk lines: 'started <id> <ISO>' and '## <idx>. <title> — ...'.
+            for line in block.splitlines()[1:]:
+                if line.startswith("started "):
+                    sp = line.split(None, 2)
+                    if len(sp) >= 3:
+                        steps_raw.append({"id": sp[1], "started": sp[2], "state": "running"})
+                elif line.startswith("## ") and not line.startswith("## attempt "):
+                    sp = line.split(" — ", 1)
+                    title = sp[0][3:].strip()
+                    # '1. doctor' -> id 'doctor' (drop the leading index).
+                    sid = title.split(".", 1)[1].strip() if "." in title.split()[0] else title
+                    sid = (
+                        title.split(" ", 1)[1] if title.split()[0].rstrip(".").isdigit() else title
+                    )
+                    tail = sp[1] if len(sp) > 1 else ""
+                    state = "running"
+                    exit_code = None
+                    wall_s = None
+                    if "skip" in tail:
+                        state = "skipped"
+                    elif "ABORT" in tail:
+                        state = "failed"
+                    elif "exit 0" in tail:
+                        state = "ok"
+                    elif "exit" in tail:
+                        state = "failed"
+                        for tok in tail.split():
+                            if tok.startswith("exit"):
+                                pass
+                            elif tok.lstrip("-").isdigit() and "exit" in tail:
+                                try:
+                                    exit_code = int(tok)
+                                except ValueError:
+                                    pass
+                    for tok in tail.replace("—", " ").split():
+                        if tok.endswith("s") and tok[:-1].replace(".", "", 1).isdigit():
+                            try:
+                                wall_s = float(tok[:-1])
+                            except ValueError:
+                                pass
+                            break
+                    if exit_code is None and "exit 0" in tail:
+                        exit_code = 0
+                    elif exit_code is None and "exit" in tail:
+                        m = tail.split("exit")
+                        if len(m) > 1:
+                            for tok in m[1].split():
+                                if tok.lstrip("-").isdigit():
+                                    exit_code = int(tok)
+                                    break
+                    # Match this completion line to the last 'started' with the
+                    # same id (or create a new entry).
+                    matched = False
+                    for s in reversed(steps_raw):
+                        if s.get("id") == sid and s.get("state") == "running" and "title" not in s:
+                            s.update(
+                                {
+                                    "title": title,
+                                    "state": state,
+                                    "wall_s": wall_s,
+                                    "exit": exit_code,
+                                }
+                            )
+                            matched = True
+                            break
+                    if not matched:
+                        steps_raw.append(
+                            {
+                                "id": sid,
+                                "title": title,
+                                "state": state,
+                                "wall_s": wall_s,
+                                "exit": exit_code,
+                                "started": None,
+                            }
+                        )
+        else:
+            # No attempt header (pre-W6 RUNBOOK): fall back to the old parse.
+            for s in parse_runbook(out_dir):
+                state = {"done": "ok", "aborted": "failed", "skipped": "skipped"}.get(
+                    s.get("state", ""), "waiting"
+                )
+                steps_raw.append(
+                    {
+                        "id": s.get("title", ""),
+                        "title": s.get("title", ""),
+                        "state": state,
+                        "wall_s": None,
+                        "exit": None,
+                        "started": None,
+                    }
+                )
+    # Enrich with stdout_tail + argv (from m5 plan_steps if importable).
+    steps_out: list[dict] = []
+    try:
+        from benchmarks.m5 import Step, plan_steps  # noqa: F401
+        # We cannot call plan_steps without args; argv comes from the runbook
+        # 'cmd:' line inside each step block instead.
+    except Exception:  # noqa: BLE001
+        pass
+    for s in steps_raw:
+        sid = s.get("id") or ""
+        step = {
+            "id": sid,
+            "title": s.get("title") or sid,
+            "state": s.get("state", "waiting"),
+            "wall_s": s.get("wall_s"),
+            "exit": s.get("exit"),
+            "started": s.get("started"),
+            "argv": [],
+            "stdout_tail": _read_step_log_tail(out_dir, sid) if sid else None,
+            "error": None,
+        }
+        steps_out.append(step)
+    return {"attempt_n": attempt_n, "attempt_started": attempt_started, "steps": steps_out}
+
+
+def _combo_status(combo_dir: Path, out_dir: Path) -> str:
+    """done | running | queued | failed for one combo dir."""
+    run_failed = (combo_dir / "run_failed.txt").exists()
+    report_exists = (combo_dir / "report.json").exists()
+    hb = parse_heartbeat(combo_dir)
+    has_preds = (combo_dir / "predictions.jsonl").exists()
+    if run_failed:
+        return "failed"
+    if report_exists:
+        return "done"
+    if hb or has_preds:
+        return "running"
+    return "queued"
+
+
+def _gb(v) -> float | None:
+    """Bytes -> GB (2**30), or None for absent/-1 sentinels."""
+    if v is None or not isinstance(v, (int, float)) or v < 0:
+        return None
+    return round(v / 2**30, 2)
+
+
+def build_dashboard(out_dir: str | Path) -> dict:
+    """The full /dashboard.json payload (frozen W6-UI-3a contract).
+
+    Pure read-only function: reads files the run already writes, truncates
+    half-written trailing lines to the last complete JSON line (same rule as
+    ``jevmlx.resume``), and returns nulls (never raises) for missing files.
+
+    Top-level keys: run, now, memory, health, pipeline, aggregates, results,
+    events, history.
     """
     out_dir = Path(out_dir)
     run = parse_run_json(out_dir)
-    env = run.get("environment", {}) if run else {}
-    cfg = run.get("config", {}) if run else {}
-    hb = parse_heartbeat(out_dir)
-    elapsed_s = (
-        hb.get("elapsed_s", 0) if hb and isinstance(hb.get("elapsed_s"), (int, float)) else 0
-    )
-    combos_out: list[dict] = []
-    for combo_dir in _combo_dirs(out_dir):
-        records = read_jsonl_safe(combo_dir / "predictions.jsonl")
-        combo_run = parse_run_json(combo_dir)
-        combo_cfg = combo_run.get("config", {}) if combo_run else {}
-        total = count_lines(combo_dir / "dataset.jsonl") or count_lines(out_dir / "dataset.jsonl")
-        done = len(read_jsonl_safe(combo_dir / "completed_cases.jsonl"))
-        combo_hb = parse_heartbeat(combo_dir)
-        if combo_hb and isinstance(combo_hb.get("cases_done"), int):
-            done = max(done, combo_hb["cases_done"])
-        row = (
-            live_table_row(
-                records,
-                model=combo_cfg.get("model") or "—",
-                source="live",
-                scorer=combo_cfg.get("scorer") or "—",
-                machine=env.get("chip") or "—",
+    env = (run.get("environment") if run else {}) or {}
+    cfg = (run.get("config") if run else {}) or {}
+    mem_cfg = (cfg.get("memory") if cfg else {}) or {}
+    # The current/last combo with a heartbeat (the 'now' panel).
+    combos = _combo_dirs(out_dir)
+    now_combo = None
+    now_hb = None
+    for c in reversed(combos):
+        hb = parse_heartbeat(c)
+        if hb:
+            now_combo = c
+            now_hb = hb
+            break
+    if now_combo is None and combos:
+        now_combo = combos[-1]
+        now_hb = parse_heartbeat(now_combo)
+    now_combo_run = parse_run_json(now_combo) if now_combo else {}
+    now_cfg = (now_combo_run.get("config") if now_combo_run else {}) or {}
+    pipeline = _parse_pipeline(out_dir)
+    # --- run ---
+    alerts: list[dict] = []
+    # Build health first so alerts can reference it.
+    health = _build_health(out_dir, combos, now_hb, env, mem_cfg, pipeline)
+    for h in health:
+        if h.get("state") == "fail":
+            alerts.append(
+                {
+                    "level": "fail",
+                    "text": h.get("detail") or h.get("rule", ""),
+                    "source": h.get("rule"),
+                }
             )
-            if records
+    sleep_blocked = False
+    rb = out_dir / "RUNBOOK.md"
+    if rb.exists():
+        try:
+            for line in rb.read_text(encoding="utf-8").splitlines():
+                if line.startswith("sleep_blocked:"):
+                    sleep_blocked = "True" in line
+                    break
+        except OSError:
+            pass
+    state = "stopped"
+    if now_hb:
+        state = "running"
+    elif any(s.get("state") == "running" for s in pipeline.get("steps", [])):
+        state = "running"
+    elif (out_dir / "SUMMARY.md").exists():
+        state = "done"
+    run_block = {
+        "out_dir": str(out_dir),
+        "hash": (env.get("git_sha") or "—")[:12],
+        "machine": env.get("chip") or env.get("machine_model") or "—",
+        "mlx_version": env.get("mlx_version") or "—",
+        "attempt_n": pipeline.get("attempt_n") or 0,
+        "attempt_started": pipeline.get("attempt_started"),
+        "awake_s": now_hb.get("elapsed_s") if now_hb else None,
+        "sleep_blocked": sleep_blocked,
+        "state": state,
+        "alerts": alerts,
+    }
+    # --- now ---
+    now_block = _build_now(now_combo, now_hb, now_cfg, out_dir)
+    # --- memory ---
+    memory_block = {
+        "cache_gb": _gb(now_hb.get("cache_memory_bytes")) if now_hb else None,
+        "active_gb": _gb(now_hb.get("active_memory_bytes")) if now_hb else None,
+        "peak_gb": _gb(now_hb.get("peak_memory_bytes")) if now_hb else None,
+        "cap_gb": _gb(mem_cfg.get("metal_cache_limit_bytes")),
+        "stop_gb": _gb(mem_cfg.get("metal_cache_stop_bytes"))
+        or (
+            mem_cfg.get("metal_cache_stop_gb")
+            if isinstance(mem_cfg.get("metal_cache_stop_gb"), (int, float))
             else None
-        )
-        combos_out.append(
+        ),
+        "machine_gb": env.get("machine_memory_gb") or env.get("total_memory_gb"),
+    }
+    # --- aggregates ---
+    aggregates = _build_aggregates(out_dir, combos)
+    # --- results ---
+    results = _build_results(out_dir, combos, env)
+    # --- events ---
+    events = _build_events(out_dir, combos)
+    # --- history ---
+    history = _build_history(out_dir)
+    return {
+        "run": run_block,
+        "now": now_block,
+        "memory": memory_block,
+        "health": health,
+        "pipeline": pipeline,
+        "aggregates": aggregates,
+        "results": results,
+        "events": events,
+        "history": history,
+    }
+
+
+def _build_health(out_dir, combos, now_hb, env, mem_cfg, pipeline) -> list[dict]:
+    """Six health rules: ok|warn|fail with a detail string."""
+    rules: list[dict] = []
+    # cache_over_stop
+    cache_gb = _gb(now_hb.get("cache_memory_bytes")) if now_hb else None
+    stop_gb = _gb(mem_cfg.get("metal_cache_stop_bytes"))
+    if cache_gb is not None and stop_gb is not None and cache_gb >= stop_gb:
+        rules.append(
             {
-                "name": combo_dir.name,
-                "done": done,
-                "total": total,
-                "progress": (done / total) if total else 0,
-                "heartbeat": combo_hb,
-                "row": row,
+                "rule": "cache_over_stop",
+                "state": "fail",
+                "detail": f"cache {cache_gb} GB >= stop {stop_gb} GB",
             }
         )
+    elif cache_gb is not None and stop_gb is not None and cache_gb >= stop_gb * 0.9:
+        rules.append(
+            {
+                "rule": "cache_over_stop",
+                "state": "warn",
+                "detail": f"cache {cache_gb} GB near stop {stop_gb} GB",
+            }
+        )
+    else:
+        rules.append(
+            {
+                "rule": "cache_over_stop",
+                "state": "ok",
+                "detail": f"cache {cache_gb} GB / stop {stop_gb} GB"
+                if cache_gb is not None
+                else "no heartbeat yet",
+            }
+        )
+    # sleep_windows
+    sleep_blocked = False
+    rb = out_dir / "RUNBOOK.md"
+    if rb.exists():
+        try:
+            for line in rb.read_text(encoding="utf-8").splitlines():
+                if line.startswith("sleep_blocked:"):
+                    sleep_blocked = "True" in line
+                    break
+        except OSError:
+            pass
+    rules.append(
+        {
+            "rule": "sleep_windows",
+            "state": "ok" if not sleep_blocked else "warn",
+            "detail": "blocked" if sleep_blocked else "caffeinated",
+        }
+    )
+    # run_failed_combos
+    n_failed = sum(1 for c in combos if (c / "run_failed.txt").exists())
+    rules.append(
+        {
+            "rule": "run_failed_combos",
+            "state": "fail" if n_failed else "ok",
+            "detail": f"{n_failed} combo(s) failed",
+        }
+    )
+    # parity_fail_models
+    n_parity_fail = 0
+    fail_models: list[str] = []
+    for c in combos:
+        model_dir = c.parent if c.parent.name != out_dir.name else c
+        parity_path = model_dir / "parity.json"
+        if parity_path.exists():
+            try:
+                p = json.loads(parity_path.read_text(encoding="utf-8"))
+                if p.get("status") == "FAIL":
+                    n_parity_fail += 1
+                    if p.get("model"):
+                        fail_models.append(p["model"])
+            except (OSError, json.JSONDecodeError):
+                pass
+    fail_detail = (
+        (f"{n_parity_fail} model(s): " + ", ".join(fail_models)) if fail_models else "0 models"
+    )
+    rules.append(
+        {
+            "rule": "parity_fail_models",
+            "state": "fail" if n_parity_fail else "ok",
+            "detail": fail_detail,
+        }
+    )
+    # metal_alloc_retries
+    n_retries = 0
+    for c in combos:
+        for hb in read_jsonl_safe(c / "heartbeat.jsonl"):
+            if isinstance(hb.get("alloc_retry"), int):
+                n_retries += hb["alloc_retry"]
+    rules.append(
+        {
+            "rule": "metal_alloc_retries",
+            "state": "warn" if n_retries else "ok",
+            "detail": f"{n_retries} retries",
+        }
+    )
+    # heartbeat_age
+    age = None
+    if now_hb and isinstance(now_hb.get("ts"), (int, float)):
+        age = int(time.time() - now_hb["ts"])
+    elif now_hb and isinstance(now_hb.get("elapsed_s"), (int, float)):
+        age = None
+    if age is None:
+        rules.append({"rule": "heartbeat_age", "state": "ok", "detail": "no heartbeat"})
+    elif age > 120:
+        rules.append({"rule": "heartbeat_age", "state": "fail", "detail": f"{age} s stale"})
+    else:
+        rules.append({"rule": "heartbeat_age", "state": "ok", "detail": f"{age} s"})
+    return rules
+
+
+def _build_now(now_combo, now_hb, now_cfg, out_dir) -> dict:
+    """The 'now' panel: current combo progress + ETA."""
+    total = 0
+    done = 0
+    pred_lines = 0
+    if now_combo:
+        total = count_lines(now_combo / "dataset.jsonl") or count_lines(out_dir / "dataset.jsonl")
+        done = len(read_jsonl_safe(now_combo / "completed_cases.jsonl"))
+        if now_hb and isinstance(now_hb.get("cases_done"), int):
+            done = max(done, now_hb["cases_done"])
+        pred_lines = now_hb.get("pred_lines", 0) if now_hb else 0
+        if not pred_lines:
+            pred_lines = count_lines(now_combo / "predictions.jsonl")
+    # cases_per_h over last 10 min: from heartbeat records with a ts.
+    cases_per_h = None
+    if now_combo:
+        hbs = read_jsonl_safe(now_combo / "heartbeat.jsonl")
+        if len(hbs) >= 2:
+            last = hbs[-1].get("cases_done", 0) or 0
+            ten_min_ago = [
+                h
+                for h in hbs
+                if isinstance(h.get("ts"), (int, float)) and h["ts"] >= time.time() - 600
+            ]
+            if len(ten_min_ago) >= 2:
+                first = ten_min_ago[0].get("cases_done", 0) or 0
+                span_s = (ten_min_ago[-1].get("ts", 0) or 0) - (ten_min_ago[0].get("ts", 0) or 0)
+                if span_s > 0:
+                    cases_per_h = round((last - first) / span_s * 3600, 1)
+    eta_s = None
+    elapsed = now_hb.get("elapsed_s", 0) if now_hb else 0
+    if total and done and elapsed and done < total:
+        eta_s = int((total - done) / (done / elapsed))
+    # running accuracy from predictions so far.
+    running_acc = None
+    running_maj = None
+    if now_combo:
+        records = read_jsonl_safe(now_combo / "predictions.jsonl")
+        if records:
+            from jevmlx.evalmetrics import field_accuracy, majority_class_baseline
+
+            labelled = [r for r in records if r.get("label") is not None]
+            if labelled:
+                running_acc = field_accuracy(labelled)
+                maj = majority_class_baseline(labelled) if labelled else None
+                running_maj = maj.get("overall") if isinstance(maj, dict) else maj
+    hb_age = None
+    if now_hb and isinstance(now_hb.get("ts"), (int, float)):
+        hb_age = int(time.time() - now_hb["ts"])
     return {
-        "out_dir": str(out_dir),
-        "elapsed_s": elapsed_s,
-        "machine": env.get("chip") or "—",
-        "mlx_version": env.get("mlx_version") or "—",
-        "model": cfg.get("model") or run.get("model") or "—",
-        "freeze": (env.get("git_sha") or "—")[:12],
-        "runbook": parse_runbook(out_dir),
-        "combos": combos_out,
+        "model": now_cfg.get("model") or "—",
+        "track": now_cfg.get("track") or "—",
+        "scorer": now_cfg.get("scorer") or "—",
+        "dataset": now_cfg.get("dataset") or now_cfg.get("source") or "—",
+        "run_i": now_cfg.get("run_i"),
+        "run_n": now_cfg.get("run_n"),
+        "cases_done": done,
+        "cases_total": total,
+        "pred_lines": pred_lines,
+        "cases_per_h": cases_per_h,
+        "eta_s": eta_s,
+        "combo_elapsed_s": elapsed,
+        "heartbeat_age_s": hb_age,
+        "running_accuracy": running_acc,
+        "running_majority": running_maj,
     }
+
+
+def _build_aggregates(out_dir, combos) -> dict:
+    """Aggregate metrics across all done/running combos."""
+    from jevmlx.evalmetrics import field_accuracy
+
+    par_acc: list[float] = []
+    naive_acc: list[float] = []
+    exact: list[float] = []
+    par_time: list[float] = []
+    naive_time: list[float] = []
+    parity_counts = {"pass": 0, "drift": 0, "fail": 0}
+    cases_scored = 0
+    pred_lines = 0
+    wall_s = 0
+    for c in combos:
+        run = parse_run_json(c)
+        metrics = (run.get("metrics") if run else {}) or {}
+        cfg = (run.get("config") if run else {}) or {}
+        track = cfg.get("track") or "parallel"
+        records = read_jsonl_safe(c / "predictions.jsonl")
+        labelled = [r for r in records if r.get("label") is not None]
+        if labelled:
+            acc = field_accuracy(labelled)
+            if acc is not None:
+                if track == "naive_local":
+                    naive_acc.append(acc)
+                else:
+                    par_acc.append(acc)
+            er = metrics.get("exact_record_accuracy")
+            if er is not None:
+                exact.append(er)
+        # time per case from timing.json median.
+        timing = _read_timing_json(c)
+        t = (timing.get("median") or {}).get("per_item_end_to_end_ms")
+        if t is not None:
+            t_s = t / 1000.0
+            if track == "naive_local":
+                naive_time.append(t_s)
+            else:
+                par_time.append(t_s)
+        # parity.
+        model_dir = c.parent if c.parent.name != out_dir.name else c
+        parity_path = model_dir / "parity.json"
+        if parity_path.exists():
+            try:
+                p = json.loads(parity_path.read_text(encoding="utf-8"))
+                st = p.get("status", "PASS")
+                if st in parity_counts:
+                    parity_counts[st] += 1
+            except (OSError, json.JSONDecodeError):
+                pass
+        cases_scored += ((run.get("counts") if run else {}) or {}).get("cases", 0) or 0
+        pred_lines += count_lines(c / "predictions.jsonl")
+        hb = parse_heartbeat(c)
+        if hb and isinstance(hb.get("elapsed_s"), (int, float)):
+            wall_s += hb["elapsed_s"]
+    return {
+        "field_accuracy_parallel_labels": round(sum(par_acc) / len(par_acc), 4)
+        if par_acc
+        else None,
+        "field_accuracy_naive": round(sum(naive_acc) / len(naive_acc), 4) if naive_acc else None,
+        "exact_record": round(sum(exact) / len(exact), 4) if exact else None,
+        "time_per_case_parallel_s": round(sum(par_time) / len(par_time), 3) if par_time else None,
+        "time_per_case_naive_s": round(sum(naive_time) / len(naive_time), 3)
+        if naive_time
+        else None,
+        "parity_counts": parity_counts,
+        "cases_scored": cases_scored,
+        "pred_lines": pred_lines,
+        "wall_s": wall_s or None,
+    }
+
+
+def _read_timing_json(combo_dir: Path) -> dict:
+    p = combo_dir / "timing.json"
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _build_results(out_dir, combos, env) -> list[dict]:
+    """One row per combo, README-leaderboard-shaped."""
+    from jevmlx.evalmetrics import field_accuracy, majority_class_baseline, wilson_interval
+
+    rows: list[dict] = []
+    for c in combos:
+        run = parse_run_json(c)
+        cfg = (run.get("config") if run else {}) or {}
+        metrics = (run.get("metrics") if run else {}) or {}
+        records = read_jsonl_safe(c / "predictions.jsonl")
+        labelled = [r for r in records if r.get("label") is not None]
+        accuracy = field_accuracy(labelled) if labelled else metrics.get("accuracy")
+        ci_low = None
+        ci_high = None
+        if accuracy is not None and labelled:
+            correct = sum(1 for r in labelled if r.get("correct") is True)
+            ci = wilson_interval(correct, len(labelled))
+            if ci:
+                ci_low, ci_high = ci.get("ci_low"), ci.get("ci_high")
+        maj = None
+        if labelled:
+            m = majority_class_baseline(labelled)
+            maj = m.get("overall") if isinstance(m, dict) else m
+        # parity for this model.
+        model_dir = c.parent if c.parent.name != out_dir.name else c
+        parity_path = model_dir / "parity.json"
+        parity_status = None
+        parity_drift = None
+        if parity_path.exists():
+            try:
+                p = json.loads(parity_path.read_text(encoding="utf-8"))
+                parity_status = p.get("status")
+                parity_drift = p.get("max_abs_drift_nats") or p.get("max_drift_nats")
+            except (OSError, json.JSONDecodeError):
+                pass
+        timing = _read_timing_json(c)
+        t = (timing.get("median") or {}).get("per_item_end_to_end_ms")
+        ab_delta = _ab_delta(out_dir, c, accuracy)
+        rows.append(
+            {
+                "model": cfg.get("model") or "—",
+                "dataset": cfg.get("dataset") or cfg.get("source") or "—",
+                "scorer": cfg.get("scorer") or "—",
+                "track": cfg.get("track") or "parallel",
+                "status": _combo_status(c, out_dir),
+                "accuracy": accuracy,
+                "ci_low": ci_low,
+                "ci_high": ci_high,
+                "majority": maj,
+                "exact_record": metrics.get("exact_record_accuracy"),
+                "parity_status": parity_status,
+                "parity_drift": parity_drift,
+                "time_per_case_s": round(t / 1000.0, 3) if t is not None else None,
+                "calls": timing.get("calls"),
+                "cases": ((run.get("counts") if run else {}) or {}).get("cases") if run else None,
+                "ab_delta": ab_delta,
+            }
+        )
+    return rows
+
+
+def _ab_delta(out_dir: Path, main_combo: Path, main_accuracy) -> float | None:
+    """main accuracy - ab accuracy for the same model, else None."""
+    if main_accuracy is None:
+        return None
+    ab_dir = out_dir / "ab"
+    if not ab_dir.exists():
+        return None
+    run = parse_run_json(main_combo)
+    model = ((run.get("config") if run else {}) or {}).get("model")
+    if not model:
+        return None
+    for c in _combo_dirs(ab_dir):
+        ab_run = parse_run_json(c)
+        ab_model = ((ab_run.get("config") if ab_run else {}) or {}).get("model")
+        if ab_model == model:
+            ab_records = read_jsonl_safe(c / "predictions.jsonl")
+            ab_labelled = [r for r in ab_records if r.get("label") is not None]
+            if ab_labelled:
+                from jevmlx.evalmetrics import field_accuracy
+
+                ab_acc = field_accuracy(ab_labelled)
+                if ab_acc is not None:
+                    return round(main_accuracy - ab_acc, 4)
+    return None
+
+
+def _build_events(out_dir, combos) -> list[dict]:
+    """Heartbeats, combo_done, alloc_retry, step_done, attempt, newest first."""
+    events: list[dict] = []
+    # Heartbeats from all combos.
+    for c in combos:
+        for hb in read_jsonl_safe(c / "heartbeat.jsonl"):
+            ts = hb.get("ts")
+            text = (
+                f"{hb.get('combo', c.name)} {hb.get('cases_done', '?')}/?"
+                f" cache {_gb(hb.get('cache_memory_bytes'))} GB"
+                f" peak {_gb(hb.get('peak_memory_bytes'))} GB"
+            )
+            kind = "heartbeat"
+            if isinstance(hb.get("alloc_retry"), int) and hb["alloc_retry"]:
+                kind = "alloc_retry"
+                text = f"Metal allocation failed, retried (x{hb['alloc_retry']})"
+            events.append({"ts": ts, "kind": kind, "text": text})
+    # combo_done: report.json exists -> done.
+    for c in combos:
+        if (c / "report.json").exists():
+            events.append({"ts": None, "kind": "combo_done", "text": f"{c.name} done"})
+    # step_done + attempt from RUNBOOK.
+    rb = out_dir / "RUNBOOK.md"
+    if rb.exists():
+        try:
+            for line in rb.read_text(encoding="utf-8").splitlines():
+                if line.startswith("## attempt "):
+                    parts = line.split(None, 4)
+                    events.append(
+                        {
+                            "ts": parts[3] if len(parts) > 3 else None,
+                            "kind": "attempt",
+                            "text": line,
+                        }
+                    )
+                elif line.startswith("## ") and "exit" in line:
+                    events.append({"ts": None, "kind": "step_done", "text": line[3:]})
+        except OSError:
+            pass
+
+    # Sort newest-first when ts is comparable; None/str ts go last.
+    def _sort_key(e):
+        ts = e.get("ts")
+        if isinstance(ts, (int, float)):
+            return (0, ts)
+        return (1, 0)
+
+    events.sort(key=_sort_key, reverse=True)
+    return events
+
+
+def _build_history(out_dir) -> list[dict]:
+    """Previous attempts (all but the last) from RUNBOOK.md attempt headers."""
+    rb = out_dir / "RUNBOOK.md"
+    if not rb.exists():
+        return []
+    try:
+        text = rb.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    # Find all '## attempt <n> <ISO> <hash> <argv>' headers and the steps
+    # that failed between each attempt and the next.
+    import re
+
+    headers = list(re.finditer(r"^## attempt (\d+) (\S+) (\S+)", text, re.MULTILINE))
+    if len(headers) <= 1:
+        return []
+    history: list[dict] = []
+    for i, m in enumerate(headers[:-1]):  # all but the last (current) attempt
+        start = m.end()
+        end = headers[i + 1].start() if i + 1 < len(headers) else len(text)
+        block = text[start:end]
+        failed: list[str] = []
+        for line in block.splitlines():
+            if line.startswith("## ") and ("exit" in line and "exit 0" not in line):
+                failed.append(line[3:].split(" — ")[0])
+        outcome = "failed" if failed else "stopped"
+        history.append(
+            {
+                "attempt_n": int(m.group(1)),
+                "started": m.group(2),
+                "hash": m.group(3),
+                "outcome": outcome,
+                "steps_failed": failed,
+            }
+        )
+    return history
+
+
+def build_questions(out_dir: str | Path, combo_id: str) -> list[dict]:
+    """The /questions.json?combo=<id> payload: every decision of one combo.
+
+    Each record carries the prediction-line fields plus context_text joined
+    from the cached dataset jsonl by row id (never stored in results),
+    options (name + p), margin, acc_so_far, rotations_same_field, rescored,
+    and drift.
+    """
+    out_dir = Path(out_dir)
+    # Resolve the combo dir by id (name match).
+    combo_dir = None
+    for c in _combo_dirs(out_dir):
+        if c.name == combo_id:
+            combo_dir = c
+            break
+    if combo_dir is None:
+        return []
+    records = read_jsonl_safe(combo_dir / "predictions.jsonl")
+    # Build the dataset context lookup by case_id.
+    ctx: dict[str, str] = {}
+    ds_path = combo_dir / "dataset.jsonl"
+    if not ds_path.exists():
+        ds_path = out_dir / "dataset.jsonl"
+    if ds_path.exists():
+        for line in ds_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                break  # half-written line
+            cid = obj.get("id")
+            if cid and isinstance(obj.get("context"), str):
+                ctx[cid] = obj["context"]
+    # Accumulate accuracy as we walk.
+    seen = 0
+    correct = 0
+    out: list[dict] = []
+    # Group by case_id+field for rotations_same_field.
+    by_case_field: dict[tuple, list[str]] = {}
+    for r in records:
+        key = (r.get("case_id"), r.get("field"))
+        by_case_field.setdefault(key, []).append(r.get("prediction"))
+    for r in records:
+        ok = r.get("correct")
+        if ok is True:
+            correct += 1
+        if ok is not None:
+            seen += 1
+        acc_so_far = round(correct / seen, 4) if seen else None
+        prob = r.get("probability")
+        per_option = r.get("per_option") or {}
+        options = [{"name": k, "p": v} for k, v in per_option.items()] if per_option else []
+        # margin = top1 - top2 from options or probability.
+        margin = None
+        if options:
+            ps = sorted((o["p"] for o in options), reverse=True)
+            margin = round(ps[0] - ps[1], 4) if len(ps) >= 2 else round(ps[0], 4) if ps else None
+        elif isinstance(prob, (int, float)):
+            margin = round(prob, 4)
+        rotations = by_case_field.get((r.get("case_id"), r.get("field")), [])
+        call_ms = r.get("per_item_end_to_end_ms") or r.get("latency_ms")
+        out.append(
+            {
+                "ts": r.get("ts"),
+                "case_id": r.get("case_id"),
+                "rotation": r.get("permutation") or r.get("rotation"),
+                "field": r.get("field"),
+                "predicted": r.get("prediction"),
+                "label": r.get("label"),
+                "ok": ok,
+                "p_pred": prob,
+                "margin": margin,
+                "call_ms": call_ms,
+                "acc_so_far": acc_so_far,
+                "options": options,
+                "context_text": ctx.get(r.get("case_id")),
+                "field_question": r.get("field_question"),
+                "rotations_same_field": rotations,
+                "rescored": r.get("rescored"),
+                "drift": r.get("drift"),
+            }
+        )
+    return out
+
+
+def render_json(out_dir: str | Path) -> dict:
+    """Backward-compat wrapper: the /dashboard.json payload (now build_dashboard)."""
+    return build_dashboard(out_dir)
 
 
 def _serve_web(out_dir: Path, *, port: int, refresh: float) -> None:
@@ -563,8 +1330,20 @@ def _serve_web(out_dir: Path, *, port: int, refresh: float) -> None:
             pass
 
         def do_GET(self):
-            if self.path == "/dashboard.json":
-                payload = json.dumps(render_json(out_dir)).encode("utf-8")
+            from urllib.parse import parse_qs, urlparse
+
+            parsed = urlparse(self.path)
+            if parsed.path == "/dashboard.json":
+                payload = json.dumps(build_dashboard(out_dir)).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+            elif parsed.path == "/questions.json":
+                qs = parse_qs(parsed.query)
+                combo = (qs.get("combo") or [""])[0]
+                payload = json.dumps(build_questions(out_dir, combo)).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(payload)))
@@ -625,7 +1404,7 @@ def run_watch(
             cols = os.get_terminal_size().columns
         except OSError:
             cols = 120
-        return build_dashboard(out_dir, width=cols)
+        return build_dashboard_renderable(out_dir, width=cols)
 
     try:
         with Live(_render(), refresh_per_second=1 / refresh, screen=True) as live:
