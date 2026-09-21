@@ -7,6 +7,19 @@
   qwen3_5 / gemma3 / mistral3 VLM builds work as scoring backends.
   Contributed in #114.
 
+- Fix (issue #105): `prior_correction` no longer reintroduces option-order
+  dependence. The neutral-context prior is now computed on a CANONICAL
+  (sorted-choices) schema, so all orderings of the same choice set share one
+  prior (applied by choice name). Before: each ordering got its own prior
+  (the prior cache key included the schema's choice order via plan_hash +
+  neutral_prompt_sha256), and each prior carried the model's position bias
+  for that ordering — subtracting a per-ordering prior did not cancel
+  position bias, it applied a different correction per ordering and flipped
+  close decisions (2/6 on the issue's 1.5B repro). After: 1/6 (residual
+  evidence-pass position sensitivity on a thin-content case — the fix
+  removed the prior's order dependence, not the model's inherent
+  evidence-position sensitivity). No default changes (prior_correction is
+  still opt-in).
 - m5: step done-markers now encode OUTCOME, not just exit code. A bench
   step is done only when no combo's `run.json` records `run_failed`/
   `load_failed` (bench exits 0 even when some combos failed, so the `.done`
