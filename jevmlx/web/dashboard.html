@@ -91,6 +91,9 @@ summary{cursor:pointer;color:var(--dim);font:12px var(--mono)}
 .qwrap{display:grid;grid-template-columns:1.15fr .85fr;gap:14px}
 @media (max-width:1000px){.qwrap{grid-template-columns:1fr}}
 .qlist tr{cursor:pointer}
+.qlist table{font-size:11px}
+.qlist th,.qlist td{padding:5px 6px}
+.qlist td:nth-child(2){max-width:180px;overflow:hidden;text-overflow:ellipsis}
 .qlist tr.sel td{background:rgba(127,178,255,.08)}
 .qcard{background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:12px 14px;display:grid;gap:10px}
 .qcard .ctx{font:12px/1.5 var(--sans);color:var(--ink);background:#0b1016;border:1px solid var(--line);border-radius:6px;padding:10px 12px;max-height:150px;overflow:auto;white-space:pre-wrap}
@@ -142,7 +145,7 @@ function renderTop(t){
   h+='<span class="kv">machine <b>'+esc(t.machine)+' · mlx '+esc(t.mlx_version)+'</b></span>';
   h+='<span class="kv">attempt <b>'+esc(t.attempt_n)+'</b> started <b>'+esc(t.attempt_started)+'</b></span>';
   const awake=fmtDur(t.awake_s);
-  h+='<span class="kv">awake <b>'+awake+'</b> · sleep guard <b style="color:'+(t.sleep_blocked?'var(--ok)':'var(--faint)')+'">'+(t.sleep_blocked?'on':'off')+'</b></span>';
+  h+='<span class="kv">awake <b>'+awake+'</b> · sleep guard <b style="color:'+(t.sleep_blocked?'var(--ok)':'var(--fail)')+'">'+(t.sleep_blocked?'on':'off')+'</b></span>';
   h+='<div class="state">';
   const alerts=(t.alerts||[]).length;
   if(alerts)h+='<span class="badge alert">'+alerts+' alert'+(alerts>1?'s':'')+'</span>';
@@ -263,7 +266,7 @@ function renderResults(rows){
     h+='<tr class="'+rc+'" data-combo="'+esc(row.model+'|'+row.dataset+'|'+row.scorer+'|'+row.track)+'">';
     h+='<td>'+esc(row.model)+'</td><td>'+esc(row.dataset)+'</td><td>'+esc(row.scorer)+'</td><td>'+esc(row.track)+'</td>';
     h+='<td>'+statusPill(row)+'</td>';
-    const ci=(row.ci_low!=null&&row.ci_high!=null)?' <span class="ci">±'+(row.ci_high-row.ci_low)/2+' </span>':'';
+    const ci=(row.ci_low!=null&&row.ci_high!=null)?' <span class="ci">±'+((row.ci_high-row.ci_low)/2).toFixed(2)+'</span>':'';
     h+='<td class="num">'+fmtNum(row.accuracy,3)+ci+'</td>';
     h+='<td class="num">'+fmtNum(row.majority,3)+'</td>';
     h+='<td class="num">'+fmtNum(row.exact_record,3)+'</td>';
@@ -311,7 +314,8 @@ function filterSortRows(rows){
 /* ---- questions ---- */
 function renderQuestions(list){
   const headers=["time","case · rotation","field","predicted","label","ok","p(pred)","margin","call ms","acc so far"];
-  let h='<div class="panel"><h2>Questions <span class="sub">every decision of the selected combo'+(selCombo?' · '+esc(selCombo):'')+' · '+(list.length?list.length.toLocaleString()+" lines":"none")+'</span></h2>';
+  const comboDisplay=selCombo?selCombo.split("|").join(" · "):"";
+  let h='<div class="panel"><h2>Questions <span class="sub">every decision of the selected combo'+(selCombo?' · '+esc(comboDisplay):'')+' · '+(list.length?list.length.toLocaleString()+" lines":"none")+'</span></h2>';
   h+='<div class="filters"><input class="search" id="q-search" placeholder="filter: case id, field, label, text…" value="'+esc(qText)+'">';
   h+=chipGroup("show",["all","wrong only","near-tie","order flips"],qChips)+chipGroup("workflow",["all","invoice","security","agent trace","customer service"],qChips)+chipGroup("field",["all"],qChips);
   h+='</div><div class="qwrap"><div class="tw qlist"><table><tr>';

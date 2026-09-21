@@ -7,7 +7,7 @@
     "attempt_n": 4,
     "attempt_started": "02:17Z",
     "awake_s": 24060,
-    "sleep_blocked": false,
+    "sleep_blocked": true,
     "state": "running",
     "alerts": [
       {
