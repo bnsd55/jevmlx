@@ -1,0 +1,17 @@
+{
+ "sources": [
+  {
+   "kind": "perturbation",
+   "input": "/Users/benshaharizad/.cache/jevmlx/bench/bundled.jsonl",
+   "variants": 3,
+   "seed": 0
+  }
+ ],
+ "parser_version": "perturb-v1",
+ "counts": {
+  "originals": 24,
+  "total": 96
+ },
+ "cases_sha256": "53c40832204078af8ac54f9e8024595257797183f2101413779ffd489601b05c",
+ "generated_at": "2026-09-21T02:17:49+00:00"
+}

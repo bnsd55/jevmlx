@@ -144,20 +144,22 @@ A **TypeScript client** (`@jevmlx/client`) lives in [`js/`](js/) — zero runtim
 Agreement with the TypeSafe public eval consensus. Official rows are cited from TypeSafe's page; local rows are measured by contributors on the 20 public examples.
 
 <!-- leaderboard:start -->
-| Model | Source | Scorer | Machine | Accuracy | Customer service | Agent trace | Security | Invoices | Time per case | Cost per case | Cases |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| **TypeSafe official (cited, retrieved 2026-09-17)** | | | | | | | | | | | |
-| Jev | official (cited) | — | — | 67.8% | 76.0% | 71.6% | 61.7% | 61.8% | 0.4s | $0.0004 | — |
-| GPT-5.6 Terra | official (cited) | — | — | 67.9% | — | — | — | — | 10.1s | $0.0304 | — |
-| Claude Sonnet 5 | official (cited) | — | — | 67.8% | — | — | — | — | 78.1s | $0.1174 | — |
-| Claude Opus 5 | official (cited) | — | — | 73.1% | — | — | — | — | 37.8s | $0.1761 | — |
-| GPT-5.6 Sol | official (cited) | — | — | 74.1% | — | — | — | — | 23.3s | $0.0836 | — |
-| Claude Haiku 4.5 | official (cited) | — | — | 53.6% | — | — | — | — | 12.5s | $0.0195 | — |
+| Model | Source | Scorer | Machine | Accuracy | Parity | Customer service | Agent trace | Security | Invoices | Time per case | Cost per case | Cases |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| **TypeSafe official (cited, retrieved 2026-09-17)** | | | | | | | | | | | | |
+| Jev | official (cited) | — | — | 67.8% | — | 76.0% | 71.6% | 61.7% | 61.8% | 0.4s | $0.0004 | — |
+| GPT-5.6 Terra | official (cited) | — | — | 67.9% | — | — | — | — | — | 10.1s | $0.0304 | — |
+| Claude Sonnet 5 | official (cited) | — | — | 67.8% | — | — | — | — | — | 78.1s | $0.1174 | — |
+| Claude Opus 5 | official (cited) | — | — | 73.1% | — | — | — | — | — | 37.8s | $0.1761 | — |
+| GPT-5.6 Sol | official (cited) | — | — | 74.1% | — | — | — | — | — | 23.3s | $0.0836 | — |
+| Claude Haiku 4.5 | official (cited) | — | — | 53.6% | — | — | — | — | — | 12.5s | $0.0195 | — |
+| **jevmlx, local (measured)** | | | | | | | | | | | | |
+| mlx-community/Qwen2.5-7B-Instruct-4bit | local | labels | m5max-128gb | 82.1% [68.7%, 90.7%] | DRIFT (0.078) | 68.0% | 39.2% | 57.6% | 84.5% | 0.6s | $0 (local) | 45 (1 error) |
+| mlx-community/Qwen2.5-7B-Instruct-4bit | local | slots | m5max-128gb | 63.2% [47.6%, 74.9%] | DRIFT (0.078) | 61.4% | 51.7% | 47.2% | 63.9% | 0.6s | $0 (local) | 45 (1 error) |
 
 _Official accuracies are on TypeSafe's full private eval; ours are on the 20 public example cases, so the numbers are indicative, not the same test._
 _Consensus label = the agreement of GPT-6 Astra + Claude Fable 5.1 (TypeSafe's reference)._
 
-No local results yet — contribute one with `jevmlx bench`.
 <!-- leaderboard:end -->
 
 ## Run the benchmark on your Mac

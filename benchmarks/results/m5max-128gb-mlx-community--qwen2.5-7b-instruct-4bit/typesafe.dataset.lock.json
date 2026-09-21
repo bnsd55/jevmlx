@@ -1,0 +1,40 @@
+{
+ "sources": [
+  {
+   "url": "https://evals.typesafe.ai/security_incidents-cases.js",
+   "sha256": "6c96b19f192d07004613afc281a31712aa7d04bd75e31a3afe2322174ade0645",
+   "fetched_at": "2026-09-17T18:34:16+00:00",
+   "etag": "\"8aa770ab7aff994e7d075483c66d03ab\""
+  },
+  {
+   "url": "https://evals.typesafe.ai/agent_trace_observability-cases.js",
+   "sha256": "4a3821a24366dc9830e12b481a23c96d0ab70e3c473b59551b88e8d0c4b615b3",
+   "fetched_at": "2026-09-17T18:34:17+00:00",
+   "etag": "\"27977ed69ce977e87e49751e4691a8d6\""
+  },
+  {
+   "url": "https://evals.typesafe.ai/invoice_processing-cases.js",
+   "sha256": "8c2f886978a30e637d577cd0713b3cf12bb622ef7210fcc9a4be47540a6df27f",
+   "fetched_at": "2026-09-17T18:34:17+00:00",
+   "etag": "\"69aac93baa3562a90227ccbde1f3364e\""
+  },
+  {
+   "url": "https://evals.typesafe.ai/customer_service-cases.js",
+   "sha256": "066f789bcc17ae906a17fc37ad4fd2f2bb1e881245aeb76b524715bc962a2493",
+   "fetched_at": "2026-09-17T18:34:17+00:00",
+   "etag": "\"1e5a58af6a69c79c1cdb9f4c7388e81a\""
+  }
+ ],
+ "parser_version": "2",
+ "counts": {
+  "workflows": 4,
+  "records": 45,
+  "fields": {
+   "boolean": 230,
+   "enum": 135,
+   "multi": 0
+  },
+  "skipped_questions": 11
+ },
+ "cases_sha256": "50401fe5facb25dce1c72713def4582512c52763c423af8f567fb2176156eeea"
+}

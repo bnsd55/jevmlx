@@ -1,0 +1,3 @@
+{"active_memory_bytes": 4287507464, "cache_memory_bytes": 8555285756, "cases_done": 25, "combo": "naive_local-slots-perturbed", "elapsed_s": 13, "peak_memory_bytes": 5030622340, "pred_lines": 75}
+{"active_memory_bytes": 4287507464, "cache_memory_bytes": 8518061308, "cases_done": 50, "combo": "naive_local-slots-perturbed", "elapsed_s": 26, "peak_memory_bytes": 5030622340, "pred_lines": 150}
+{"active_memory_bytes": 4287507464, "cache_memory_bytes": 8495418600, "cases_done": 75, "combo": "naive_local-slots-perturbed", "elapsed_s": 40, "peak_memory_bytes": 5030622340, "pred_lines": 225}
