@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- watch: live-tree shapes (real run_eval fixture, header from run.json,
+  questions from real prediction lines, parity per model). Header
+  hash/machine/mlx/cap now read from any combo's run.json environment when
+  the top-level <out> lacks one; `machine_gb` reads `ram_gb`. `dataset` is
+  derived from `config.dataset_path` (stem); `scorer` from `config.scoring`.
+  `questions()` reads the dataset from `config.dataset_path` when the jsonl
+  is not in the combo/out dir. Parity FAIL is counted once per model; a
+  `run_failed` combo is `failed`, never a parity FAIL. RUNBOOK without
+  attempt headers = one attempt; each step id shows its last occurrence
+  only.
+
 - watch: discover combos from the real bench/m5 layout (fixture from real
   writers). `_combo_dirs` now rglobs for any of `run.json` / `heartbeat.jsonl`
   / `predictions.jsonl` (a LIVE combo has heartbeat+predictions but NO

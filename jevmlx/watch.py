@@ -439,7 +439,7 @@ def build_dashboard_renderable(out_dir: Path, *, width: int = 120) -> Group:
             records,
             model=cfg.get("model") or "—",
             source="live",
-            scorer=cfg.get("scorer") or "—",
+            scorer=_scorer_name(cfg) or "—",
             machine=machine_name,
         )
         wf = row.get("by_workflow", {})
@@ -827,6 +827,23 @@ def _derive_config_from_layout(combo_dir: Path) -> dict:
     }
 
 
+def _dataset_name(cfg: dict) -> str | None:
+    """Derive the dataset name from run.json config.
+
+    bench writes 'dataset_path' (a full path), not 'dataset'. The name is
+    the stem of that path. Falls back to 'dataset' or 'source' if present.
+    """
+    dp = cfg.get("dataset_path")
+    if dp:
+        return Path(dp).stem
+    return cfg.get("dataset") or cfg.get("source")
+
+
+def _scorer_name(cfg: dict) -> str | None:
+    """bench writes 'scoring' (not 'scorer')."""
+    return cfg.get("scorer") or cfg.get("scoring")
+
+
 def _is_combo_dir(d: Path) -> bool:
     """A combo dir has any of run.json / heartbeat.jsonl / predictions.jsonl."""
     return any((d / m).exists() for m in ("run.json", "heartbeat.jsonl", "predictions.jsonl"))
@@ -888,8 +905,19 @@ def build_dashboard(out_dir: str | Path) -> dict:
     env = (run.get("environment") if run else {}) or {}
     cfg = (run.get("config") if run else {}) or {}
     mem_cfg = (cfg.get("memory") if cfg else {}) or {}
-    # The current/last combo with a heartbeat (the 'now' panel).
+    # W6-UI-3e: the top-level <out> may have no run.json (m5 writes one per
+    # combo, not at the root). Fall back to any combo's run.json for the
+    # environment + memory config so the header is not dashes.
     combos = _combo_dirs(out_dir)
+    if not env and combos:
+        for c in combos:
+            combo_run = parse_run_json(c)
+            if combo_run and combo_run.get("environment"):
+                env = combo_run["environment"]
+                combo_cfg = (combo_run.get("config") if combo_run else {}) or {}
+                if not mem_cfg and combo_cfg.get("memory"):
+                    mem_cfg = combo_cfg["memory"]
+                break
     # Find the live combo: the one with the newest heartbeat.jsonl mtime
     # anywhere under <out>. Falls back to the last combo.
     now_combo, now_hb = _find_live_combo(combos)
@@ -955,7 +983,9 @@ def build_dashboard(out_dir: str | Path) -> dict:
             if isinstance(mem_cfg.get("metal_cache_stop_gb"), (int, float))
             else None
         ),
-        "machine_gb": env.get("machine_memory_gb") or env.get("total_memory_gb"),
+        "machine_gb": env.get("ram_gb")
+        or env.get("machine_memory_gb")
+        or env.get("total_memory_gb"),
     }
     # --- aggregates ---
     aggregates = _build_aggregates(out_dir, combos)
@@ -1149,8 +1179,8 @@ def _build_now(now_combo, now_hb, now_cfg, out_dir) -> dict:
     return {
         "model": now_cfg.get("model") or "—",
         "track": now_cfg.get("track") or "—",
-        "scorer": now_cfg.get("scorer") or "—",
-        "dataset": now_cfg.get("dataset") or now_cfg.get("source") or "—",
+        "scorer": _scorer_name(now_cfg) or "—",
+        "dataset": _dataset_name(now_cfg) or "—",
         "run_i": now_cfg.get("run_i"),
         "run_n": now_cfg.get("run_n"),
         "cases_done": done,
@@ -1289,8 +1319,8 @@ def _build_results(out_dir, combos, env) -> list[dict]:
             {
                 "combo_id": c.name,
                 "model": cfg.get("model") or "—",
-                "dataset": cfg.get("dataset") or cfg.get("source") or "—",
-                "scorer": cfg.get("scorer") or "—",
+                "dataset": _dataset_name(cfg) or "—",
+                "scorer": _scorer_name(cfg) or "—",
                 "track": cfg.get("track") or "parallel",
                 "status": _combo_status(c, out_dir),
                 "accuracy": accuracy,
@@ -1449,11 +1479,19 @@ def build_questions(out_dir: str | Path, combo_id: str) -> list[dict]:
     if combo_dir is None:
         return []
     records = read_jsonl_safe(combo_dir / "predictions.jsonl")
-    # Build the dataset context lookup by case_id.
+    # Build the dataset context lookup by case_id. The dataset jsonl may be
+    # in the combo dir, the out dir, or at config.dataset_path (the absolute
+    # path bench writes into run.json).
     ctx: dict[str, str] = {}
     ds_path = combo_dir / "dataset.jsonl"
     if not ds_path.exists():
         ds_path = out_dir / "dataset.jsonl"
+    if not ds_path.exists():
+        # W6-UI-3e: read from run.json config.dataset_path.
+        combo_run = parse_run_json(combo_dir)
+        dp = ((combo_run.get("config") if combo_run else {}) or {}).get("dataset_path")
+        if dp:
+            ds_path = Path(dp)
     if ds_path.exists():
         for line in ds_path.read_text(encoding="utf-8", errors="replace").splitlines():
             line = line.strip()
