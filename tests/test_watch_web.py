@@ -21,7 +21,7 @@ HTML = (Path(__file__).parent.parent / "jevmlx" / "web" / "dashboard.html").read
     encoding="utf-8"
 )
 
-# The 9 frozen top-level keys of /dashboard.json (coder3 contract).
+# The 9 frozen top-level keys of /dashboard.json (data-layer contract).
 CONTRACT_KEYS = {
     "run",
     "now",

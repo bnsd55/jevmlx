@@ -436,6 +436,13 @@ async function fetchQuestions(){
   try{const r=await fetch("/questions.json?combo="+encodeURIComponent(selCombo),{cache:"no-store"});if(!r.ok)throw new Error("HTTP "+r.status);Q=await r.json();render();}catch(e){/* show stale, will retry */}
 }
 fetchDashboard();
+// Deep-link support: ?combo=<id>&q=<n> selects a combo and question on load
+// (for screenshots and shareable links). 5-line addition.
+(async()=>{
+  const p=new URLSearchParams(location.search);
+  const c=p.get("combo"),qi=p.get("q");
+  if(c){selCombo=c;selQuestion=qi?parseInt(qi):0;await fetchQuestions();}
+})();
 setInterval(fetchDashboard, REFRESH*1000);
 </script>
 </body>
