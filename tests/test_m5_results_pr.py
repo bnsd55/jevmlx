@@ -1,18 +1,17 @@
-"""E2e test: the results-PR step regenerates the README leaderboard and
-commits a fresh block.
+"""E2e test: the readme step regenerates the README leaderboard and verifies
+freshness.
 
-Uses a real temp git repo with a real results folder fixture written by the
-real eval writers (run_eval + write_report + compute_metrics) — no hand-made
-fixture, no fake subprocess.
+Uses a real results folder fixture written by the real eval writers
+(run_eval + write_report + compute_metrics) — no hand-made fixture, no fake
+subprocess, no temp git repo.
 """
 
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
 
-from benchmarks.m5 import Step, _execute_results_pr
+from benchmarks.m5 import Step, _execute_readme, plan_steps
 from jevmlx import evalrun
 from jevmlx.evalmetrics import compute_metrics, load_predictions
 from jevmlx.evalreport import write_report
@@ -89,101 +88,85 @@ def _write_results_folder(repo_root: Path, model_folder: str) -> Path:
     return results_root
 
 
-def _init_git_repo(path: Path) -> None:
-    """Init a git repo with a README.md (with leaderboard markers)."""
-    path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "config", "user.email", "test@test.com"], cwd=path, check=True, capture_output=True
-    )
-    subprocess.run(
-        ["git", "config", "user.name", "Test"], cwd=path, check=True, capture_output=True
-    )
-
-    # Write a README.md with leaderboard markers (the block is empty initially).
-    readme = path / "README.md"
-    readme.write_text(
-        "# jevmlx\n\n<!-- leaderboard:start -->\n| empty |\n<!-- leaderboard:end -->\n",
-        encoding="utf-8",
-    )
-    subprocess.run(["git", "add", "-A"], cwd=path, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=path, check=True, capture_output=True)
-
-
-def test_results_pr_step_regenerates_readme_and_commits(tmp_path, monkeypatch):
-    """The results-PR step:
+def test_readme_step_regenerates_and_verifies(tmp_path, monkeypatch):
+    """The readme step:
     1. regenerates the README leaderboard block,
-    2. verifies it is fresh (check_results --check-readme passes),
-    3. commits README.md with the fresh block.
+    2. verifies it is fresh (check_results --check-readme passes).
 
-    Uses a real temp git repo + real results written by run_eval +
-    write_report + compute_metrics.
+    Uses a real results folder written by run_eval + write_report +
+    compute_metrics (no hand-made fixture, no fake subprocess).
     """
     import benchmarks.m5 as m5
 
     repo_root = tmp_path / "repo"
-    _init_git_repo(repo_root)
+    repo_root.mkdir(parents=True, exist_ok=True)
 
     # Write the official.json (the leaderboard needs it for agreement).
     official_dir = repo_root / "benchmarks" / "typesafe"
     official_dir.mkdir(parents=True, exist_ok=True)
     (official_dir / "official.json").write_text("{}", encoding="utf-8")
 
+    # Write a README.md with leaderboard markers (the block is a stale placeholder).
+    readme = repo_root / "README.md"
+    readme.write_text(
+        "# jevmlx\n\n<!-- leaderboard:start -->\n| stale |\n<!-- leaderboard:end -->\n",
+        encoding="utf-8",
+    )
+
     # Write the results folder with real writers.
     model_folder = "test-host-mlx-community--qwen2.5-7b-instruct-4bit"
     _write_results_folder(repo_root, model_folder)
+
+    # Safety assertion: the real repo README.md must be unchanged after the test.
+    import hashlib
+
+    real_readme = Path(__file__).resolve().parent.parent / "README.md"
+    real_readme_sha_before = hashlib.sha256(real_readme.read_bytes()).hexdigest()
 
     # Patch REPO_ROOT so the step runs in our temp repo.
     monkeypatch.setattr(m5, "REPO_ROOT", repo_root)
 
     step = Step(
-        id="results-pr",
-        title="Regenerate README leaderboard + commit results + open PR",
+        id="readme",
+        title="Regenerate README leaderboard and verify freshness",
         argv=(),
         outputs=(repo_root / "README.md",),
         in_process=True,
     )
 
-    # Capture the log output (use a real file — subprocess.run needs fileno).
-    log_path = tmp_path / "results-pr.log"
+    # Use a real file for the log (subprocess.run needs fileno).
+    log_path = tmp_path / "readme.log"
     log = log_path.open("w", encoding="utf-8")
-    rc = _execute_results_pr(step, log)
+    rc = _execute_readme(step, log)
     log.close()
     log_text = log_path.read_text(encoding="utf-8")
-    assert rc == 0, f"results-pr step failed:\n{log_text}"
+    assert rc == 0, f"readme step failed:\n{log_text}"
 
-    # The README.md now has a non-empty leaderboard block (not the initial
-    # '| empty |' placeholder).
-    readme = (repo_root / "README.md").read_text(encoding="utf-8")
-    assert "<!-- leaderboard:start -->" in readme
-    assert "<!-- leaderboard:end -->" in readme
-    assert "| empty |" not in readme
+    # The README.md now has a fresh leaderboard block (not the stale placeholder).
+    readme_text = readme.read_text(encoding="utf-8")
+    assert "<!-- leaderboard:start -->" in readme_text
+    assert "<!-- leaderboard:end -->" in readme_text
+    assert "| stale |" not in readme_text
 
-    # The git commit contains README.md.
-    diff = subprocess.run(
-        ["git", "diff", "HEAD~1", "--name-only"],
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-    assert "README.md" in diff, f"README.md not in commit: {diff}"
+    # The real repo README.md was NOT touched by the test.
+    real_readme_sha_after = hashlib.sha256(real_readme.read_bytes()).hexdigest()
+    assert real_readme_sha_before == real_readme_sha_after, (
+        "the real repo README.md was modified by the test"
+    )
 
 
-def test_results_pr_flag_adds_step_to_plan(tmp_path):
-    """The --results-pr flag adds the results-pr step to plan_steps."""
-    from benchmarks.m5 import plan_steps
-
+def test_readme_step_appears_last_in_plan_by_default(tmp_path):
+    """The readme step is always appended after summary (no flag needed)."""
     out = tmp_path / "run"
     out.mkdir()
 
-    # Without the flag: no results-pr step.
-    steps = plan_steps(out, parity_models=[QUALITY_TARGET], results_pr=False)
-    assert not any(s.id == "results-pr" for s in steps)
-
-    # With the flag: the results-pr step is the last step.
-    steps = plan_steps(out, parity_models=[QUALITY_TARGET], results_pr=True)
-    results_steps = [s for s in steps if s.id == "results-pr"]
-    assert len(results_steps) == 1
-    assert results_steps[0].in_process is True
-    assert results_steps[0].argv == ()
+    steps = plan_steps(out, parity_models=[QUALITY_TARGET])
+    assert steps, "plan_steps returned no steps"
+    # The readme step is present.
+    readme_steps = [s for s in steps if s.id == "readme"]
+    assert len(readme_steps) == 1
+    assert readme_steps[0].in_process is True
+    assert readme_steps[0].argv == ()
+    # It is the last step (probe steps are optional and appended after).
+    # When probe=False, readme is the last step.
+    assert steps[-1].id == "readme"

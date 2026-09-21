@@ -964,6 +964,20 @@ class TestM5MainEndToEnd:
                 _build_probe_json(probe_out.parent, command)
                 calls.append((f"probe-{command}", 0))
                 return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+            # readme step: benchmarks.leaderboard writes README.md,
+            # benchmarks.check_results --check-readme verifies it.
+            if submod == "benchmarks.leaderboard":
+                readme_path = Path(argv[argv.index("--readme") + 1])
+                readme_path.parent.mkdir(parents=True, exist_ok=True)
+                readme_path.write_text(
+                    "# jevmlx\n\n<!-- leaderboard:start -->\n| fresh |\n<!-- leaderboard:end -->\n",
+                    encoding="utf-8",
+                )
+                calls.append(("readme-leaderboard", 0))
+                return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+            if submod == "benchmarks.check_results":
+                calls.append(("readme-check", 0))
+                return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
             # bench-rest: jevmlx bench --models-file (basename jevmlx + bench subcommand).
             is_bench_rest = (
                 bin0 == "jevmlx"
@@ -1039,6 +1053,7 @@ class TestM5MainEndToEnd:
             "timing",
             "bench-rest",
             "summary",
+            "readme",
         ]
 
         # SUMMARY.md: main table with one row per combo, timing block,
@@ -1108,13 +1123,15 @@ class TestM5MainEndToEnd:
 
         calls.clear()
         m5.main(["--out", str(out), "--parity-models", QUALITY_TARGET, "--allow-sleep"])
-        # B9: the summary step is NEVER skipped (always regenerated); every
-        # OTHER step is skipped because its outputs exist.
-        assert calls == []
+        # B9: the summary and readme steps are in_process and NEVER skipped
+        # (always regenerated); every OTHER step is skipped because its
+        # outputs exist. The readme step fires its two subprocess calls
+        # (leaderboard + check_results) on every run.
+        assert all(c[0].startswith("readme-") for c in calls), f"unexpected calls: {calls}"
         runbook = (out / "RUNBOOK.md").read_text()
         steps = plan_steps(out, parity_models=[QUALITY_TARGET])
-        non_summary_steps = [s for s in steps if not s.in_process]
-        assert runbook.count("skip (outputs exist)") == len(non_summary_steps)
+        non_in_process_steps = [s for s in steps if not s.in_process]
+        assert runbook.count("skip (outputs exist)") == len(non_in_process_steps)
 
     def test_fresh_reruns_despite_markers(self, tmp_path, monkeypatch):
         out = tmp_path / "run-fresh"
@@ -1316,8 +1333,10 @@ class TestM5MainEndToEnd:
 
         calls.clear()
         m5.main(["--out", str(out), "--parity-models", QUALITY_TARGET, "--allow-sleep"])
-        # No subprocess steps ran (all skipped), but SUMMARY was regenerated.
-        assert calls == []
+        # No subprocess steps ran (all skipped), but SUMMARY and readme were
+        # regenerated (in_process steps always run). The readme step fires
+        # its two subprocess calls (leaderboard + check_results).
+        assert all(c[0].startswith("readme-") for c in calls), f"unexpected calls: {calls}"
         summary2_text = (out / "SUMMARY.md").read_text()
         summary2_mtime = (out / "SUMMARY.md").stat().st_mtime_ns
         assert summary1_text == summary2_text  # same content (same artifacts)
