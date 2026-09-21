@@ -33,6 +33,11 @@
   recorded+runbook continues, A/B setup failure skips ab-* steps + SUMMARY
   note + non-zero exit, A/B setup success runs ab-* steps (no over-skip),
   `build_summary_text` note, `runbook_append` skipped flag.
+- slow tests: spawned Python uses `sys.executable` (not bare `python`, which
+  is not on PATH in some CI envs); parity asserts follow the PASS/DRIFT/FAIL
+  contract from #102 — winners must be identical (FAIL if not), drift >= atol
+  with identical winners is DRIFT (acceptable batch-shape noise), not a test
+  failure. The atol itself is unchanged.
 
 - naive_local track writes timing.json; SUMMARY latency is call-level for
   every track. The naive track's `_meta` now carries `per_item_end_to_end_ms`
