@@ -33,6 +33,8 @@ __all__ = [
     "build_dashboard_renderable",
     "build_dashboard",
     "build_questions",
+    "render_html",
+    "_dashboard_html",
     "run_watch",
 ]
 
@@ -1093,6 +1095,7 @@ def _build_results(out_dir, combos, env) -> list[dict]:
         ab_delta = _ab_delta(out_dir, c, accuracy)
         rows.append(
             {
+                "combo_id": c.name,
                 "model": cfg.get("model") or "—",
                 "dataset": cfg.get("dataset") or cfg.get("source") or "—",
                 "scorer": cfg.get("scorer") or "—",
@@ -1321,42 +1324,55 @@ def render_json(out_dir: str | Path) -> dict:
     return build_dashboard(out_dir)
 
 
+def _dashboard_html(refresh: float) -> str:
+    """Load the static control-room page and inject the refresh interval.
+
+    The page is a single self-contained HTML file (inline CSS + vanilla JS,
+    no framework, no CDN) shipped at ``jevmlx/web/dashboard.html``.
+    """
+    html_path = Path(__file__).parent / "web" / "dashboard.html"
+    html = html_path.read_text(encoding="utf-8")
+    return html.replace("__REFRESH__", str(int(max(1, refresh))))
+
+
 def _serve_web(out_dir: Path, *, port: int, refresh: float) -> None:
-    """Serve the dashboard + JSON over stdlib http.server (no new dep)."""
+    """Serve the static dashboard page + JSON over stdlib http.server.
+
+    Routes: ``/`` (HTML page), ``/dashboard.json`` (the 9-key contract),
+    ``/questions.json?combo=<id>`` (the flat question list).
+    No new dependency, no JS framework.
+    """
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import parse_qs, urlparse
+
+    page_html = _dashboard_html(refresh)
 
     class _Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):  # silence default logging
             pass
 
         def do_GET(self):
-            from urllib.parse import parse_qs, urlparse
 
             parsed = urlparse(self.path)
             if parsed.path == "/dashboard.json":
                 payload = json.dumps(build_dashboard(out_dir)).encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(payload)))
-                self.end_headers()
-                self.wfile.write(payload)
+                self._send(200, "application/json", payload)
             elif parsed.path == "/questions.json":
                 qs = parse_qs(parsed.query)
-                combo = (qs.get("combo") or [""])[0]
+                combo = qs.get("combo", [""])[0]
                 payload = json.dumps(build_questions(out_dir, combo)).encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(payload)))
-                self.end_headers()
-                self.wfile.write(payload)
+                self._send(200, "application/json", payload)
+            elif parsed.path == "/":
+                self._send(200, "text/html; charset=utf-8", page_html.encode("utf-8"))
             else:
-                html = render_html(out_dir, refresh=refresh)
-                payload = html.encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", str(len(payload)))
-                self.end_headers()
-                self.wfile.write(payload)
+                self._send(404, "text/plain", b"not found")
+
+        def _send(self, code, ctype, payload):
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
 
     server = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
     print(f"[watch] web dashboard at http://127.0.0.1:{port}/ (refresh {int(refresh)}s)")

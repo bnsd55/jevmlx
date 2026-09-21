@@ -64,41 +64,75 @@ semantics, no cross-run contamination.
 ### Watching a run (W6-UI)
 
 A many-hour bench/m5 run is blind without a watcher. `jevmlx watch` is a
-read-only live dashboard that renders from the files the run already writes —
-the run process is never touched.
+read-only dashboard that renders from the files the run already writes — the
+run process is never touched.
 
 ```bash
-# Attach to any running or finished output dir:
+# Terminal mode (default): rich Live redraw in the terminal
 jevmlx watch benchmarks/results/<machine>-<model-slug> [--refresh 2]
+
+# Web mode: serve the control-room page (Chrome auto-reloads)
+jevmlx watch <out-dir> --web [--port 8765] [--no-tty]
 
 # Or start the watcher in the same terminal as the bench:
 jevmlx bench --ui --model <model> --out <out-dir> ...
-
-# Web mode: serve the same dashboard as HTML (Chrome auto-reloads):
-jevmlx watch <out-dir> --web [--port 8765] [--no-tty]
 jevmlx bench --ui --web --no-tty --model <model> --out <out-dir> ...
 ```
 
-The dashboard shows (top to bottom): the output dir and freeze hash, the
-RUNBOOK step states (✓ done / ▶ running / ○ pending, with wall time), the
-current combo's progress bar (cases done/total, cases/h, ETA, heartbeat
-memory — cache turns red above 10 GB), a live results table with the same
-columns as the README leaderboard (accuracy with Wilson CI, the four
-workflow accuracies, time and cost per case), and the last 8 prediction
-lines. Keys: `q` quit, `p` pause.
+Terminal mode (default) is a compact rich `Live` view: step states,
+combo progress, and the last few prediction lines. Keys: `q` quit,
+`p` pause.
 
-Terminal mode is the default. `--web` renders the SAME dashboard to HTML
-via rich's `Console(record=True)` + `export_html(inline_styles=True)` and
-serves it with stdlib `http.server` at `http://127.0.0.1:PORT/` with a
-`<meta http-equiv=refresh>` tag so Chrome reloads by itself; `/dashboard.json`
-returns the raw numbers (progress, memory, table rows) for scripts. No new
-dependency, no JS framework. `--no-tty` runs web only; `--web` without
-`--no-tty` runs both the terminal render and the server.
+`--web` serves a static control-room page at `http://127.0.0.1:PORT/` — a
+single self-contained HTML file (inline CSS + vanilla JS, no framework, no
+CDN) that fetches `/dashboard.json` every refresh seconds and renders
+client-side. The page has, top to bottom:
+
+- **Top bar**: run name, freeze hash, machine + mlx version, attempt number
+  + start time, awake time + sleep-guard state, state badge (running /
+  stopped / done) and alert count.
+- **NOW**: the live combo's model, track, scorer, dataset, run i/N, a
+  progress bar (cases done/total, cases/h, ETA), pred lines, combo elapsed,
+  and running accuracy vs majority — from the latest heartbeat.
+- **MEMORY**: cache, active, and peak GB as bars against the machine total,
+  with the 8 GB cap tick and the 10 GB stop-line tick; cache/peak turn red
+  over the stop line.
+- **HEALTH**: one pill per stop/flag rule (cache over stop, sleep windows,
+  run_failed combos, parity-fail models, metal alloc retries, heartbeat
+  age) plus any active alert text.
+- **PIPELINE**: the m5 steps of the current attempt only, each with state
+  (ok / running / failed / skipped / waiting), wall, exit code; click a
+  step for its argv, stdout tail, and error in a popover.
+- **FAILURE DIAGNOSIS**: the first failed step's argv, stdout tail, and
+  error; previous failures of the run are collapsed in a `<details>`.
+- **AGGREGATES SO FAR**: field accuracy (parallel labels + naive), exact
+  record, time per case (parallel + naive), parity counts (pass / drift /
+  fail), cases scored.
+- **RESULTS**: one row per combo (model × dataset × scorer × track) with
+  the same columns as the README leaderboard (field accuracy + Wilson CI,
+  majority, exact, parity status word, time/case, calls, cases, A/B Δ).
+  Filter chips (model / dataset / scorer / track / status) + a free-text
+  filter; click a header to sort; click a row to load its questions below.
+- **QUESTIONS**: every decision of the selected combo (time, case +
+  rotation, field, predicted, label, ok, p(pred), margin, call ms, acc so
+  far). Filter chips (wrong only / near-tie / order flips / workflow /
+  field) + free-text; click a row to open the question card: context text,
+  options with probability bars (predicted + label tagged), margin,
+  same-field rotations, rescored flag, log-odds drift.
+- **EVENTS**: heartbeats, combo completions, alloc retries, step completions,
+  attempt markers, failures — newest first.
+- **HISTORY**: previous attempts of this run dir, collapsed in
+  `<details>` blocks.
+
+`/dashboard.json` returns the raw 9-key contract for scripts;
+`/questions.json?combo=<id>` returns the flat question list. Null fields
+render as a dash, never break the page. Half-written trailing lines are
+truncated (same rule as `--resume`); missing files show `—`; no parse error
+ever raises. `--no-tty` runs web only; `--web` without `--no-tty` runs both
+the terminal render and the server.
 
 When run via `bench --ui`, bench stdout goes to `<out>/bench.log` so the
-screen stays clean; on exit the `SUMMARY.md` path is printed. The watcher
-truncates half-written trailing lines (same rule as `--resume`) and shows
-`—` for missing files — it never raises on a parse error.
+screen stays clean; on exit the `SUMMARY.md` path is printed.
 
 ## 3. Commit the results folder
 

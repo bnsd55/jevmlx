@@ -13,6 +13,21 @@
   `## attempt <n> <ISO> <hash> <argv>` at the start of every run and a
   `started <step id> <ISO>` line before each step; the pipeline parser
   groups steps by the last attempt header.
+- W6-UI-3b: control-room dashboard page for `jevmlx watch --web`. The web
+  page is now a static control-room layout (inline CSS + vanilla JS, no
+  framework, no CDN) that fetches `/dashboard.json` every refresh seconds
+  and renders client-side. Panels: top bar (run, hash, machine, attempt,
+  state badge, alerts), NOW (model, combo, run i/N, cases done/total,
+  cases/h, ETA, running accuracy), MEMORY (cache/active/peak with 8 GB cap
+  tick and 10 GB stop-line tick, red when over), HEALTH (one pill per
+  stop/flag rule), PIPELINE (current-attempt steps, click for argv/stdout/
+  error), FAILURE DIAGNOSIS, AGGREGATES SO FAR, RESULTS (one row per combo,
+  same columns as the README leaderboard, filter chips + sortable headers,
+  click a row for its questions), QUESTIONS (list with wrong-only / near-tie
+  / order-flips filters + a question card with context, option probability
+  bars, margin, rotations, drift), EVENTS, HISTORY collapsed. New
+  `/questions.json?combo=<id>` endpoint. Fixture JSON
+  (`tests/fixtures/dashboard/`) is the frozen contract. 12 tests.
 
 - Vision-language checkpoints load as their inner text model (the
   mlx-lm wrapper with `language_model` is unwrapped in `load_engine`), so
