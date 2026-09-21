@@ -550,6 +550,7 @@ def runbook_append(
 ) -> None:
     """One RUNBOOK.md section per step, appended as the step completes."""
     lines = [f"## {index}. {step.title}"]
+    lines.append(f"step: {step.id}")  # W6-UI-3c: the step id for the parser
     if skipped:
         lines[0] += " — skipped: A/B setup failed"
     elif rc is None:

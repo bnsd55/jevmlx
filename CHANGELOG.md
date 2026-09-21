@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- watch: data-layer fixes from the first real render (sleep flag, ISO
+  timestamps, run i/N, step titles, per-step logs). `run.sleep_blocked` and
+  the `sleep_windows` health rule now read one helper (`_read_sleep_blocked`)
+  so they can never disagree; `sleep_blocked=True` (caffeinated) is `ok`.
+  Every event `ts` is an ISO-8601 UTC string (epoch floats converted at the
+  source via `_iso_ts`). `now.run_i`/`run_n` read from the combo's run.json
+  config (bench.py passes them through `_run_one` → `extra_config`);
+  `cases_total` reads the manifest's `counts.cases`. Pipeline step titles
+  strip the `N. ` index prefix and the `step:` line (new in `runbook_append`)
+  gives the authoritative step id for `started`-line matching. `stdout_tail`
+  reads the last 40 lines of `<step.id>.log`; `error` extracts the last
+  `Traceback|FAILED|Error|assert` block. The test fixture tree is realistic
+  (combo dirs named `<track>-<scorer>-<dataset>`, two heartbeats 5 min apart,
+  run.json with runs/run index, a parity.json with status, one step log).
+
 - watch: dashboard data layer (`/dashboard.json`, `/questions.json`) and
   m5 attempt/started lines. `build_dashboard(out_dir) -> dict` returns the
   frozen W6-UI-3a contract (9 top-level keys: run, now, memory, health,

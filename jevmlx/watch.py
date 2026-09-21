@@ -501,6 +501,25 @@ def render_html(out_dir: str | Path, *, refresh: float = 2.0, width: int = 120) 
     return body
 
 
+def _read_sleep_blocked(out_dir: Path) -> bool:
+    """One source for the sleep-guard flag: the RUNBOOK 'sleep_blocked:' line.
+
+    sleep_blocked=True means caffeinate is running (macOS idle sleep is
+    blocked, the guard is ON). Both run.sleep_blocked and the sleep_windows
+    health rule read this helper so they can never disagree.
+    """
+    rb = out_dir / "RUNBOOK.md"
+    if not rb.exists():
+        return False
+    try:
+        for line in rb.read_text(encoding="utf-8").splitlines():
+            if line.startswith("sleep_blocked:"):
+                return "True" in line
+    except OSError:
+        pass
+    return False
+
+
 def _read_step_log_tail(out_dir: Path, step_id: str, *, n: int = 40) -> str | None:
     """Last n lines of <step.id>.log, or None when the log is absent."""
     log_path = out_dir / f"{step_id}.log"
@@ -511,6 +530,31 @@ def _read_step_log_tail(out_dir: Path, step_id: str, *, n: int = 40) -> str | No
     except OSError:
         return None
     return "\n".join(lines[-n:]) if lines else None
+
+
+def _extract_step_error(out_dir: Path, step_id: str) -> str | None:
+    """The last 'Error|FAILED|Traceback' block from <step.id>.log, or None.
+
+    The failure diagnosis panel shows the error text; m5 tees each step's
+    stdout+stderr to <step.id>.log, so the error is there.
+    """
+    log_path = out_dir / f"{step_id}.log"
+    if not log_path.exists():
+        return None
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    # Find the last Traceback / FAILED / Error line and grab the block.
+    import re
+
+    matches = list(re.finditer(r"(?im)^(Traceback|FAILED|Error|EXCEPTION|assert )", text))
+    if not matches:
+        return None
+    start = matches[-1].start()
+    # Grab from that line to the end (capped at 40 lines).
+    block = text[start:].splitlines()[:40]
+    return "\n".join(block) if block else None
 
 
 def _parse_pipeline(out_dir: Path) -> dict:
@@ -552,12 +596,16 @@ def _parse_pipeline(out_dir: Path) -> dict:
                         steps_raw.append({"id": sp[1], "started": sp[2], "state": "running"})
                 elif line.startswith("## ") and not line.startswith("## attempt "):
                     sp = line.split(" — ", 1)
-                    title = sp[0][3:].strip()
-                    # '1. doctor' -> id 'doctor' (drop the leading index).
-                    sid = title.split(".", 1)[1].strip() if "." in title.split()[0] else title
-                    sid = (
-                        title.split(" ", 1)[1] if title.split()[0].rstrip(".").isdigit() else title
+                    raw_title = sp[0][3:].strip()  # '1. doctor (gate)'
+                    # Strip the leading 'N. ' index prefix -> 'doctor (gate)'.
+                    title = (
+                        raw_title.split(" ", 1)[1]
+                        if raw_title.split(" ")[0].rstrip(".").isdigit()
+                        else raw_title
                     )
+                    # The step id is the first word of the title (doctor,
+                    # parity-..., bench-quality, ...).
+                    sid = title.split(" ", 1)[0] if title else raw_title
                     tail = sp[1] if len(sp) > 1 else ""
                     state = "running"
                     exit_code = None
@@ -618,8 +666,41 @@ def _parse_pipeline(out_dir: Path) -> dict:
                                 "wall_s": wall_s,
                                 "exit": exit_code,
                                 "started": None,
+                                "argv": [],
                             }
                         )
+                elif line.startswith("step: "):
+                    # W6-UI-3c: the authoritative step id (matches 'started <id>').
+                    # The '## ' line above created an entry with a placeholder
+                    # sid (title's first word); replace it with the real id and
+                    # try to merge with a prior 'started' entry that has the
+                    # same id.
+                    real_sid = line[6:].strip()
+                    if steps_raw:
+                        steps_raw[-1]["id"] = real_sid
+                        # Merge into a prior 'started' entry if one exists.
+                        for s in reversed(steps_raw[:-1]):
+                            if (
+                                s.get("id") == real_sid
+                                and s.get("state") == "running"
+                                and "title" not in s
+                            ):
+                                s.update(
+                                    {
+                                        "title": steps_raw[-1].get("title"),
+                                        "state": steps_raw[-1].get("state"),
+                                        "wall_s": steps_raw[-1].get("wall_s"),
+                                        "exit": steps_raw[-1].get("exit"),
+                                        "argv": steps_raw[-1].get("argv", []),
+                                    }
+                                )
+                                steps_raw.pop()
+                                break
+                elif line.startswith("cmd: "):
+                    # The RUNBOOK 'cmd: <argv>' line (written by runbook_append).
+                    # Attach to the last step.
+                    if steps_raw:
+                        steps_raw[-1]["argv"] = line[5:].strip().split()
         else:
             # No attempt header (pre-W6 RUNBOOK): fall back to the old parse.
             for s in parse_runbook(out_dir):
@@ -653,9 +734,9 @@ def _parse_pipeline(out_dir: Path) -> dict:
             "wall_s": s.get("wall_s"),
             "exit": s.get("exit"),
             "started": s.get("started"),
-            "argv": [],
+            "argv": s.get("argv", []),
             "stdout_tail": _read_step_log_tail(out_dir, sid) if sid else None,
-            "error": None,
+            "error": _extract_step_error(out_dir, sid) if sid else None,
         }
         steps_out.append(step)
     return {"attempt_n": attempt_n, "attempt_started": attempt_started, "steps": steps_out}
@@ -681,6 +762,24 @@ def _gb(v) -> float | None:
     if v is None or not isinstance(v, (int, float)) or v < 0:
         return None
     return round(v / 2**30, 2)
+
+
+def _iso_ts(v) -> str | None:
+    """Convert an epoch-seconds ts to ISO-8601 UTC string; pass through None/str.
+
+    The contract requires every ts to be ISO-8601 UTC. Heartbeat records carry
+    an epoch float (time.time()); convert at the source so the page never
+    renders a raw float like '1789986387.'.
+    """
+    if v is None:
+        return None
+    if isinstance(v, str):
+        return v
+    if isinstance(v, (int, float)):
+        from datetime import UTC, datetime
+
+        return datetime.fromtimestamp(v, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return None
 
 
 def build_dashboard(out_dir: str | Path) -> dict:
@@ -727,16 +826,7 @@ def build_dashboard(out_dir: str | Path) -> dict:
                     "source": h.get("rule"),
                 }
             )
-    sleep_blocked = False
-    rb = out_dir / "RUNBOOK.md"
-    if rb.exists():
-        try:
-            for line in rb.read_text(encoding="utf-8").splitlines():
-                if line.startswith("sleep_blocked:"):
-                    sleep_blocked = "True" in line
-                    break
-        except OSError:
-            pass
+    sleep_blocked = _read_sleep_blocked(out_dir)
     state = "stopped"
     if now_hb:
         state = "running"
@@ -826,21 +916,12 @@ def _build_health(out_dir, combos, now_hb, env, mem_cfg, pipeline) -> list[dict]
             }
         )
     # sleep_windows
-    sleep_blocked = False
-    rb = out_dir / "RUNBOOK.md"
-    if rb.exists():
-        try:
-            for line in rb.read_text(encoding="utf-8").splitlines():
-                if line.startswith("sleep_blocked:"):
-                    sleep_blocked = "True" in line
-                    break
-        except OSError:
-            pass
+    sleep_blocked = _read_sleep_blocked(out_dir)
     rules.append(
         {
             "rule": "sleep_windows",
-            "state": "ok" if not sleep_blocked else "warn",
-            "detail": "blocked" if sleep_blocked else "caffeinated",
+            "state": "ok" if sleep_blocked else "warn",
+            "detail": "caffeinated" if sleep_blocked else "off (not caffeinated)",
         }
     )
     # run_failed_combos
@@ -910,8 +991,16 @@ def _build_now(now_combo, now_hb, now_cfg, out_dir) -> dict:
     total = 0
     done = 0
     pred_lines = 0
+    now_run = parse_run_json(now_combo) if now_combo else {}
+    now_counts = (now_run.get("counts") if now_run else {}) or {}
     if now_combo:
-        total = count_lines(now_combo / "dataset.jsonl") or count_lines(out_dir / "dataset.jsonl")
+        # cases_total = the manifest's case count (authoritative), falling
+        # back to the dataset jsonl line count.
+        total = (
+            now_counts.get("cases")
+            or count_lines(now_combo / "dataset.jsonl")
+            or count_lines(out_dir / "dataset.jsonl")
+        )
         done = len(read_jsonl_safe(now_combo / "completed_cases.jsonl"))
         if now_hb and isinstance(now_hb.get("cases_done"), int):
             done = max(done, now_hb["cases_done"])
@@ -1159,7 +1248,7 @@ def _build_events(out_dir, combos) -> list[dict]:
             if isinstance(hb.get("alloc_retry"), int) and hb["alloc_retry"]:
                 kind = "alloc_retry"
                 text = f"Metal allocation failed, retried (x{hb['alloc_retry']})"
-            events.append({"ts": ts, "kind": kind, "text": text})
+            events.append({"ts": _iso_ts(ts), "kind": kind, "text": text})
     # combo_done: report.json exists -> done.
     for c in combos:
         if (c / "report.json").exists():
@@ -1183,12 +1272,12 @@ def _build_events(out_dir, combos) -> list[dict]:
         except OSError:
             pass
 
-    # Sort newest-first when ts is comparable; None/str ts go last.
+    # Sort newest-first by ISO-8601 ts string; None ts go last.
     def _sort_key(e):
         ts = e.get("ts")
-        if isinstance(ts, (int, float)):
+        if isinstance(ts, str) and ts:
             return (0, ts)
-        return (1, 0)
+        return (1, "")
 
     events.sort(key=_sort_key, reverse=True)
     return events
@@ -1297,7 +1386,7 @@ def build_questions(out_dir: str | Path, combo_id: str) -> list[dict]:
         call_ms = r.get("per_item_end_to_end_ms") or r.get("latency_ms")
         out.append(
             {
-                "ts": r.get("ts"),
+                "ts": _iso_ts(r.get("ts")),
                 "case_id": r.get("case_id"),
                 "rotation": r.get("permutation") or r.get("rotation"),
                 "field": r.get("field"),

@@ -782,6 +782,8 @@ def run_bench(
                         resume=_has_manifest and run_index == 0,
                         heartbeat_every=heartbeat_every,
                         combo=combo,
+                        run_i=run_index + 1,
+                        run_n=runs,
                     )
                     print(f"  run {run_index + 1}/{runs} done")
                 assert result is not None
@@ -1036,6 +1038,8 @@ def _run_one(
     resume: bool = False,
     heartbeat_every: int = 0,
     combo: str = "",
+    run_i: int | None = None,
+    run_n: int | None = None,
 ) -> dict:
     """One eval run (in-process) + metrics + report, into combo_dir."""
     cases = _load_cases(jsonl)
@@ -1060,7 +1064,11 @@ def _run_one(
         permutations=permutations,
         split="all",
         out_dir=str(combo_dir),
-        extra_config={"scoring": scorer if track == "parallel" else "slots"},
+        extra_config={
+            "scoring": scorer if track == "parallel" else "slots",
+            "run_i": run_i,
+            "run_n": run_n,
+        },
         chat_template=chat_template,
         dataset_path=str(jsonl),
         # Provenance (F7): the dataset lock's sha256 lands in run.json so
