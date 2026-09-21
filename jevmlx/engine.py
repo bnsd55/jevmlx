@@ -3761,13 +3761,23 @@ def finalize_public_result(
     # Every engine path sets semantics records (F1): an empty group set is
     # a bug, not a fallback case — fail loudly instead of shipping a global
     # sentence that could contradict the per-field records.
+    #
+    # W6-semantics: an EMPTY schema (zero fields) is a legal schema — the
+    # typesafe dataset carries cases whose schema is {} (a workflow whose
+    # variant has no scorable fields). The engine returns a valid result
+    # with num_fields=0 and a documented 'empty schema' probability_status;
+    # it must NOT raise (the case is legal, just degenerate).
     if not clauses:
-        raise ValueError(
-            "finalize_public_result: no field carries a semantics record "
-            "(results-contract violation; the stages must set "
-            "field_telemetry[fname]['semantics'])"
-        )
-    probability_status = " per distinct semantics group | ".join(clauses)
+        if not schema.fields:
+            probability_status = "empty schema (0 fields; no scoring needed)"
+        else:
+            raise ValueError(
+                "finalize_public_result: no field carries a semantics record "
+                "(results-contract violation; the stages must set "
+                "field_telemetry[fname]['semantics'])"
+            )
+    else:
+        probability_status = " per distinct semantics group | ".join(clauses)
 
     # Bug 9 / W5b-14: the timing split is honest about the whole request
     # wall time and every key is a ledger derivation (prior_ms = the prior
