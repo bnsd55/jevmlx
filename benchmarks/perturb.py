@@ -27,10 +27,12 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import random
 import re
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Neutral preamble prepended by the "preamble" kind (must not change labels).
@@ -212,7 +214,9 @@ def perturb_cases(cases: list[dict], variants: int, seed: int) -> list[dict]:
     return out
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The perturb CLI parser (exposed for parse-only tests; see
+    tests/test_m5_e2e.py TestPlannedArgvParses)."""
     parser = argparse.ArgumentParser(
         prog="python -m benchmarks.perturb",
         description="Generate deterministic label-preserving perturbations of eval cases.",
@@ -221,6 +225,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", required=True, help="output JSONL (originals + variants)")
     parser.add_argument("--variants", type=int, default=3, help="max variants per case (default 3)")
     parser.add_argument("--seed", type=int, default=0, help="seed for shuffles (default 0)")
+    parser.add_argument(
+        "--lock",
+        default=None,
+        help="lock path (default: <out stem>.dataset.lock.json next to --out)",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
     args = parser.parse_args(argv)
 
     with open(args.input, encoding="utf-8") as f:
@@ -233,10 +247,35 @@ def main(argv: list[str] | None = None) -> int:
         for record in records:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
+    # B6: write the dataset lock so build_datasets finds the registered
+    # <name>.dataset.lock.json (without this, the bench passed a lock path
+    # that was never written and run.json's dataset_lock_sha256 raised
+    # OSError at eval time). The lock records the sha256 of the cases file
+    # just written — same shape as the synthetic/typesafe locks.
+    lock_path = (
+        Path(args.lock) if args.lock else out_path.parent / f"{out_path.stem}.dataset.lock.json"
+    )
+    lock = {
+        "sources": [
+            {
+                "kind": "perturbation",
+                "input": str(args.input),
+                "variants": args.variants,
+                "seed": args.seed,
+            }
+        ],
+        "parser_version": "perturb-v1",
+        "counts": {"originals": len(cases), "total": len(records)},
+        "cases_sha256": hashlib.sha256(out_path.read_bytes()).hexdigest(),
+        "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
+    }
+    lock_path.write_text(json.dumps(lock, indent=1) + "\n", encoding="utf-8")
+
     n_variants = len(records) - len(cases)
     print(f"cases: {len(cases)}")
     print(f"variants: {n_variants}")
     print(f"wrote {args.out}")
+    print(f"wrote {lock_path}")
     return 0
 
 

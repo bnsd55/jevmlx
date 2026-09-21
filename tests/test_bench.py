@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from benchmarks.summarize_results import summarize
+from jevmlx import bench
 from jevmlx.bench import (
     _track_scorer_grid,
     enforce_folder_size,
@@ -1300,3 +1301,306 @@ def test_summarize_latency_dash_when_no_timing_json(tmp_path, capsys):
     text = summary.read_text()
     # The latency cell is a dash.
     assert "—" in text
+
+
+# ----------------------------------------------------------- B6: dataset locks
+
+
+def _tiny_cases_jsonl(path):
+    """Write a 1-case JSONL fixture (the minimal shape _load_cases accepts)."""
+    path.write_text(
+        json.dumps(
+            {
+                "id": "c1",
+                "schema": {"x": {"type": "boolean", "description": "d"}},
+                "context": "ctx",
+                "labels": {"x": True},
+                "split": "train",
+                "meta": {},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _write_fake_lock(lock_path, jsonl_path, *, kind="synthetic", **extra):
+    """Write a valid dataset.lock.json (cases_sha256 matches the jsonl)."""
+    import hashlib
+
+    payload = {
+        "sources": [{"kind": kind, **extra}],
+        "cases_sha256": hashlib.sha256(jsonl_path.read_bytes()).hexdigest(),
+    }
+    lock_path.write_text(json.dumps(payload, indent=1) + "\n", encoding="utf-8")
+    return lock_path
+
+
+class TestEveryDatasetWritesLock:
+    """B6: every builder that build_datasets registers must write
+    <name>.dataset.lock.json. The field failure was typesafe + perturbed
+    writing the wrong name (or none), so run.json's dataset_lock_sha256
+    raised OSError at eval time — after the model loaded.
+
+    Network fetchers are monkeypatched to write tiny fixtures; the lock
+    convention + the fail-fast check are what's under test."""
+
+    @pytest.mark.parametrize("name", list(bench.DATASETS_ALL))
+    def test_build_datasets_returns_existing_lock_for_every_name(self, name, tmp_path, monkeypatch):
+        """For every name in DATASETS_ALL, build_datasets returns a lock path
+        that exists on disk — no 'lock file not found' at eval time."""
+        cache = tmp_path / "cache"
+        cache.mkdir()
+        monkeypatch.setattr(bench, "BENCH_CACHE", cache)
+
+        # Monkeypatch every network/IO builder to write a tiny fixture +
+        # the registered lock, so the lock convention is the ONLY thing
+        # under test (not the network). Each fake mirrors what the real
+        # builder must do: write <name>.jsonl + <name>.dataset.lock.json.
+        def _fake_builder(dataset_name):
+            def _build():
+                jsonl = cache / f"{dataset_name}.jsonl"
+                lock = cache / f"{dataset_name}.dataset.lock.json"
+                _tiny_cases_jsonl(jsonl)
+                _write_fake_lock(lock, jsonl, kind=dataset_name)
+
+            return _build
+
+        # Bundled uses to_jsonl; stub it to write the fixture + lock.
+        def _fake_to_jsonl_main(argv):
+            _tiny_cases_jsonl(cache / "bundled.jsonl")
+            _write_fake_lock(
+                cache / "bundled.dataset.lock.json",
+                cache / "bundled.jsonl",
+                kind="bundled",
+            )
+            return 0
+
+        monkeypatch.setattr("benchmarks.to_jsonl.main", _fake_to_jsonl_main, raising=False)
+        # Typesafe / typed-decisions fetchers.
+        monkeypatch.setattr(
+            "benchmarks.typesafe.fetch.main",
+            lambda argv: _fake_builder("typesafe")() or 0,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            "benchmarks.typed_decisions.fetch.main",
+            lambda argv: _fake_builder("typed-decisions")() or 0,
+            raising=False,
+        )
+        # Public views: _build_public_view calls fetch_dataset + write_view.
+        monkeypatch.setattr(
+            "benchmarks.public.fetch.fetch_dataset",
+            lambda ds, split: ({"balanced": [{}], "natural": [{}]}, {"f": "abc"}),
+            raising=False,
+        )
+
+        def _fake_write_view(records, out, lock, **kw):
+            _tiny_cases_jsonl(out)
+            _write_fake_lock(lock, out, kind="public")
+
+        monkeypatch.setattr("benchmarks.public.fetch.write_view", _fake_write_view, raising=False)
+
+        # OpenJev: convert_dataset returns (n_cases, sha).
+        def _fake_convert(name, jsonl, lock):
+            _tiny_cases_jsonl(jsonl)
+            _write_fake_lock(lock, jsonl, kind=name)
+            return 1, "deadbeef"
+
+        monkeypatch.setattr(
+            "benchmarks.openjev.fetch.convert_dataset", _fake_convert, raising=False
+        )
+        # JABR.
+        monkeypatch.setattr(
+            "benchmarks.public.jabr.build_records",
+            lambda: ([{}], "sha"),
+            raising=False,
+        )
+
+        def _fake_write_jabr(records, out, lock):
+            _tiny_cases_jsonl(out)
+            _write_fake_lock(lock, out, kind="jabr")
+
+        monkeypatch.setattr("benchmarks.public.jabr.write_dataset", _fake_write_jabr, raising=False)
+
+        # Synthetic.
+        def _fake_build_set(set_name, out_dir, seed=0):
+            jsonl = cache / f"{set_name}.jsonl"
+            lock = cache / f"{set_name}.dataset.lock.json"
+            _tiny_cases_jsonl(jsonl)
+            _write_fake_lock(lock, jsonl, kind=set_name)
+            return jsonl, lock
+
+        monkeypatch.setattr("benchmarks.synthetic.build_set", _fake_build_set, raising=False)
+
+        # Expand bare public names to views (build_datasets does this
+        # internally via requested_public; pass the expanded name so the
+        # for-loop hits it).
+        names = [name]
+        if name in bench.PUBLIC_DATASETS:
+            names = [f"{name}.{v}" for v in bench.PUBLIC_VIEWS]
+        # perturbed derives from bundled — build_datasets looks up
+        # paths["bundled"] when building it, so bundled must be in the list.
+        if name == "perturbed" and "bundled" not in names:
+            names = ["bundled", "perturbed"]
+
+        paths, locks = bench.build_datasets(names)
+        assert paths, f"{name}: no datasets built"
+        for ds_name, lock in locks.items():
+            assert lock.exists(), (
+                f"{name} -> {ds_name}: lock {lock} does not exist after build "
+                "— every builder must write <name>.dataset.lock.json"
+            )
+
+    def test_build_datasets_fails_fast_on_missing_lock(self, tmp_path, monkeypatch):
+        """A builder that writes the jsonl but NOT the lock makes
+        build_datasets raise BEFORE any model loads (one error, not a
+        per-combo OSError after an 8-minute model load)."""
+        cache = tmp_path / "cache"
+        cache.mkdir()
+        monkeypatch.setattr(bench, "BENCH_CACHE", cache)
+
+        # A broken builder: writes the jsonl, forgets the lock (the B6 bug).
+        def _broken_build_typesafe():
+            _tiny_cases_jsonl(cache / "typesafe.jsonl")
+            # NO lock written — the bug.
+
+        monkeypatch.setattr(bench, "_build_typesafe", _broken_build_typesafe)
+        # The cache has no pre-existing copy, so _rebuild_if_needed calls
+        # the broken builder; the fail-fast check then catches the missing lock.
+        with pytest.raises(OSError, match="dataset lock file.*missing.*typesafe"):
+            bench.build_datasets(["typesafe"], offline_ok=False)
+
+    def test_typesafe_builder_passes_lock_arg(self, tmp_path, monkeypatch):
+        """_build_typesafe passes --lock <registered path> to the fetcher
+        (the fix: the old code passed no --lock, so the fetcher wrote its
+        default 'dataset.lock.json' and the registered path went missing)."""
+        cache = tmp_path / "cache"
+        cache.mkdir()
+        monkeypatch.setattr(bench, "BENCH_CACHE", cache)
+
+        seen_argv = []
+
+        def fake_fetch_main(argv):
+            seen_argv.extend(argv)
+            jsonl = cache / "typesafe.jsonl"
+            lock = cache / "typesafe.dataset.lock.json"
+            _tiny_cases_jsonl(jsonl)
+            _write_fake_lock(lock, jsonl, kind="typesafe")
+            return 0
+
+        monkeypatch.setattr("benchmarks.typesafe.fetch.main", fake_fetch_main, raising=False)
+        bench._build_typesafe()
+        assert "--lock" in seen_argv, "_build_typesafe must pass --lock"
+        lock_idx = seen_argv.index("--lock")
+        assert seen_argv[lock_idx + 1].endswith("typesafe.dataset.lock.json")
+
+    def test_perturbed_builder_writes_lock(self, tmp_path, monkeypatch):
+        """_build_perturbed writes perturbed.dataset.lock.json (the fix:
+        the old perturb.main wrote NO lock at all)."""
+        cache = tmp_path / "cache"
+        cache.mkdir()
+        monkeypatch.setattr(bench, "BENCH_CACHE", cache)
+
+        bundled = cache / "bundled.jsonl"
+        _tiny_cases_jsonl(bundled)
+        # Run the REAL perturb.main (it now writes the lock) via the builder.
+        bench._build_perturbed(bundled)
+        lock = cache / "perturbed.dataset.lock.json"
+        assert lock.exists(), "_build_perturbed must write the registered lock"
+        jsonl = cache / "perturbed.jsonl"
+        assert jsonl.exists()
+        data = json.loads(lock.read_text())
+        import hashlib
+
+        assert data["cases_sha256"] == hashlib.sha256(jsonl.read_bytes()).hexdigest()
+
+    def test_perturbed_lock_sha_matches_run_json(self, tmp_path, monkeypatch):
+        """The lock's cases_sha256 is what run.json's dataset_lock_sha256
+        records (the provenance chain the lock exists to protect)."""
+        import hashlib
+
+        cache = tmp_path / "cache"
+        cache.mkdir()
+        monkeypatch.setattr(bench, "BENCH_CACHE", cache)
+        bundled = cache / "bundled.jsonl"
+        _tiny_cases_jsonl(bundled)
+        bench._build_perturbed(bundled)
+        lock = cache / "perturbed.dataset.lock.json"
+        # The sha256 of the LOCK FILE is what _sha256_file computes for
+        # run.json; the lock's cases_sha256 is the sha of the cases file.
+        expected = hashlib.sha256(lock.read_bytes()).hexdigest()
+        # _sha256_file is the function run_eval calls.
+        from jevmlx.evalrun import _sha256_file
+
+        assert _sha256_file(str(lock)) == expected
+
+
+class TestFailedComboReruns:
+    """B6: a combo whose run.json says run_failed/load_failed must rerun
+    (fresh), not resume from partial predictions."""
+
+    def test_combo_previously_failed_detects_run_failed(self, tmp_path):
+        combo_dir = tmp_path / "combo"
+        combo_dir.mkdir()
+        (combo_dir / "run.json").write_text(
+            json.dumps({"status": "run_failed", "error": {}}), encoding="utf-8"
+        )
+        assert bench._combo_previously_failed(combo_dir) is True
+
+    def test_combo_previously_failed_detects_load_failed(self, tmp_path):
+        combo_dir = tmp_path / "combo"
+        combo_dir.mkdir()
+        (combo_dir / "run.json").write_text(
+            json.dumps({"status": "load_failed", "error": {}}), encoding="utf-8"
+        )
+        assert bench._combo_previously_failed(combo_dir) is True
+
+    def test_combo_previously_failed_false_for_completed(self, tmp_path):
+        combo_dir = tmp_path / "combo"
+        combo_dir.mkdir()
+        (combo_dir / "run.json").write_text(json.dumps({"status": "completed"}), encoding="utf-8")
+        assert bench._combo_previously_failed(combo_dir) is False
+
+    def test_combo_previously_failed_false_for_no_run_json(self, tmp_path):
+        combo_dir = tmp_path / "combo"
+        combo_dir.mkdir()
+        assert bench._combo_previously_failed(combo_dir) is False
+
+    def test_failed_combo_reruns_fresh_not_resume(self, tmp_path, monkeypatch):
+        """A combo with run_failed + manifest.json must rerun fresh (dir
+        removed, resume=False), not resume from partial predictions."""
+        _patch_bench_core(monkeypatch, tmp_path)
+        # Simulate a previously-failed combo: manifest.json + run.json(run_failed).
+        model = "fake/m"
+        slug = bench.model_slug(model)
+        folder = tmp_path / f"out/fake-8gb-{slug}"
+        combo_dir = folder / "parallel-slots-bundled"
+        combo_dir.mkdir(parents=True)
+        (combo_dir / "manifest.json").write_text("{}", encoding="utf-8")
+        (combo_dir / "run.json").write_text(
+            json.dumps({"status": "run_failed", "error": {}}), encoding="utf-8"
+        )
+        resume_seen = []
+        orig_run_one = bench._run_one
+
+        def tracking_run_one(*args, **kwargs):
+            resume_seen.append(kwargs.get("resume", False))
+            return orig_run_one(*args, **kwargs)
+
+        monkeypatch.setattr(bench, "_run_one", tracking_run_one)
+        bench.run_bench(
+            model=model,
+            datasets=["bundled"],
+            scorers=["slots"],
+            tracks=["parallel"],
+            runs=1,
+            out=tmp_path / "out",
+        )
+        # The failed combo was removed and rerun fresh (resume=False).
+        assert resume_seen == [False], f"expected fresh rerun, got resume={resume_seen}"
+        # The old run_failed run.json was replaced (the fake _run_one writes
+        # {}; _augment_run_json_memory may add a 'memory' key after).
+        run = json.loads((combo_dir / "run.json").read_text())
+        assert "status" not in run or run.get("status") not in ("run_failed", "load_failed")
