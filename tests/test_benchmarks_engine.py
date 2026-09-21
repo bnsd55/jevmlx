@@ -269,7 +269,13 @@ def test_layer_bisect_main_with_fake_engine(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         "benchmarks.layer_bisect.followup_attention_isolation",
-        lambda *a, **kw: {"M=16": {}, "M=32": {}, "M=112": {}},
+        lambda *a, **kw: {
+            m: {
+                step: {"max_abs_diff": 0.0, "max_abs_activation": 0.0, "relative_diff": 0.0}
+                for step in ("qkv", "qk_rope", "sdpa", "out")
+            }
+            for m in ("M=16", "M=32", "M=112")
+        },
     )
     monkeypatch.setattr(
         "benchmarks.layer_bisect.followup_cache_and_mask_info",
@@ -278,10 +284,27 @@ def test_layer_bisect_main_with_fake_engine(tmp_path, monkeypatch):
             "cache_dtype": "float16",
             "cache_has_bits": False,
             "sdpa_function": "none",
+            "per_M": {
+                m: {
+                    "mask_type": "none",
+                    "mask_shape": "(1,1)",
+                    "q_shape": "(1,1)",
+                    "k_shape": "(1,1)",
+                    "v_shape": "(1,1)",
+                    "cache_offset": 0,
+                }
+                for m in ("M=16", "M=32", "M=112")
+            },
         },
     )
     monkeypatch.setattr(
-        "benchmarks.layer_bisect.followup_insitu_vs_recomputed", lambda *a, **kw: {}
+        "benchmarks.layer_bisect.followup_insitu_vs_recomputed",
+        lambda *a, **kw: {
+            "per_layer_diff": [],
+            "first_above_1e-4": None,
+            "insitu_vs_recomputed": {},
+            "decision_token_match": True,
+        },
     )
     # engine.model.model(...) is called for the fp32 warmup.
     import mlx.core as mx

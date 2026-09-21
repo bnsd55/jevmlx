@@ -19,6 +19,27 @@
   a `--lock` arg and writes the lock (cases_sha256, same shape as the
   synthetic/typesafe locks). A combo whose `run.json` says `run_failed` or
   `load_failed` now reruns fresh (not resume from partial predictions).
+- M5 B5: `benchmarks/probe.py` no longer unpacks
+  `model, tokenizer = load_engine(...)` (load_engine returns the frozen
+  Engine dataclass since the Engine PR; the unpack raised
+  `TypeError: cannot unpack non-iterable Engine object` for both slope and
+  adapters). Fixed to `engine = load_engine(...)` using `engine.model` /
+  `engine.tokenizer`. Audited every script under `benchmarks/` — only
+  `probe.py` had the stale unpack; all others (`compat`, `driftprobe`,
+  `layer_bisect`, `naive_vs_parallel`, `timing`, `invariance`) already use
+  `engine = load_engine()` correctly. Root cause of the miss: tests only
+  PARSED these scripts' argv; nothing EXECUTED `main()` with a fake Engine.
+  Added `tests/test_benchmarks_engine.py`: 8 fake-engine `main()` tests
+  (probe slope, probe adapters, naive_vs_parallel, timing, driftprobe,
+  layer_bisect, compat, invariance) — each monkeypatches `load_engine` to
+  return a fake Engine and asserts the output files exist with the expected
+  keys. All MLX-conditional (`@requires_mlx`); `layer_bisect` mocks the
+  deep followup functions (needs a real mlx_lm model structure).
+- Fix: `benchmarks/driftprobe.py` `_persist_envelope` did
+  `report.get("width_matrix", {}).get("widths", [])` but `width_matrix` is
+  a `list[dict]`, not a dict with a `"widths"` key — raised
+  `AttributeError: 'list' object has no attribute 'get'`. Fixed to iterate
+  the list directly.
 - Fix: `jevmlx bench --models-file <f>` no longer requires `--model`.
   `--model` and `--models-file` are now a mutually exclusive group with
   exactly one required (the field failure: the M5 `bench the remaining
