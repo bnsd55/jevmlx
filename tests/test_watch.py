@@ -927,3 +927,380 @@ class TestDashboardContract:
         # Must not raise; the broken line is truncated.
         d = build_dashboard(out)
         assert isinstance(d, dict)
+
+
+# --- W6-UI-3d: discover combos from the real bench/m5 layout ---------------
+
+
+class TestRealBenchLayout:
+    """Fixture built by the REAL writers (run_bench_models with a fake engine),
+    not hand-made directories. Asserts the data layer finds combos at the real
+    depth: <out>/<machine>-<slug>/<track>-<scorer>-<dataset>/run.json."""
+
+    @staticmethod
+    def _patch_bench_with_heartbeat(monkeypatch, tmp_path):
+        """Patch bench core with a fake _run_one that writes a real run.json
+        (config + counts) and a heartbeat.jsonl, so the watcher can discover
+        combos, derive model/track/scorer/dataset from config, and find the
+        live combo by heartbeat mtime."""
+        import time as _time
+
+        from jevmlx import bench
+
+        def fake_run_one(
+            model,
+            track,
+            scorer,
+            jsonl,
+            combo_dir,
+            dataset_lock_path=None,
+            resume=False,
+            heartbeat_every=0,
+            combo="",
+            run_i=None,
+            run_n=None,
+        ):
+            combo_dir.mkdir(parents=True, exist_ok=True)
+            (combo_dir / "run.json").write_text(
+                json.dumps(
+                    {
+                        "run_id": f"r-{model}-{combo}",
+                        "environment": {"chip": "fake-8gb"},
+                        "config": {
+                            "model": model,
+                            "track": track,
+                            "scorer": scorer,
+                            "dataset": "bundled",
+                            "run_i": run_i or 1,
+                            "run_n": run_n or 1,
+                        },
+                        "counts": {"cases": 24},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            # A heartbeat (the live combo gets a fresh one).
+            (combo_dir / "heartbeat.jsonl").write_text(
+                json.dumps(
+                    {
+                        "combo": combo,
+                        "cases_done": 12,
+                        "pred_lines": 144,
+                        "elapsed_s": 60,
+                        "peak_memory_bytes": 4 * 2**30,
+                        "active_memory_bytes": 2 * 2**30,
+                        "cache_memory_bytes": 1 * 2**30,
+                        "ts": _time.time(),
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (combo_dir / "predictions.jsonl").write_text(
+                json.dumps(
+                    {
+                        "case_id": "c0",
+                        "field": "verdict",
+                        "prediction": "yes",
+                        "label": "yes",
+                        "correct": True,
+                        "probability": 0.9,
+                        "per_option": {"yes": 0.9, "no": 0.1},
+                        "permutation": 0,
+                        "per_item_end_to_end_ms": 212,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (combo_dir / "report.json").write_text(
+                json.dumps(
+                    {
+                        "environment": {"chip": "fake-8gb"},
+                        "metrics": {"accuracy": 0.9, "n_cases": 24, "latency_ms_p50": 1.0},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return {"run": {"model": model}}
+
+        monkeypatch.setattr(bench, "preflight", lambda force, machine_override: "fake-8gb")
+        monkeypatch.setattr(
+            bench,
+            "build_datasets",
+            lambda datasets: (
+                {"bundled": tmp_path / "b.jsonl"},
+                {"bundled": tmp_path / "b.dataset.lock.json"},
+            ),
+        )
+        monkeypatch.setattr(
+            bench, "_load_engine_with_timeout", lambda model, timeout: (object(), object())
+        )
+        monkeypatch.setattr(bench, "_run_one", fake_run_one)
+        monkeypatch.setattr(bench, "_print_pr_instructions", lambda folder, last_run: None)
+        monkeypatch.setattr(bench, "BENCH_CACHE", tmp_path / "cache")
+
+    def test_dashboard_finds_combos_in_real_bench_layout(self, tmp_path, monkeypatch):
+        """The data layer discovers combos by rglob for run.json, finding the
+        real depth: <out>/bench-quality/<machine>-<slug>/<combo>/run.json."""
+        from jevmlx import bench
+        from jevmlx.watch import _combo_dirs
+
+        self._patch_bench_with_heartbeat(monkeypatch, tmp_path)
+        out = tmp_path / "m5-run"
+        # m5 writes to <out>/bench-quality and <out>/bench-rest.
+        bench.run_bench_models(
+            models=["org/model-a"],
+            datasets=["bundled"],
+            scorers=["slots"],
+            tracks=["parallel"],
+            out=out / "bench-quality",
+            runs=1,
+        )
+        bench.run_bench_models(
+            models=["org/model-b"],
+            datasets=["bundled"],
+            scorers=["labels"],
+            tracks=["parallel"],
+            out=out / "bench-rest",
+            runs=1,
+        )
+        # The combo dirs are at depth 3 under <out>.
+        combos = _combo_dirs(out)
+        assert len(combos) == 2
+        # run.json exists in each.
+        for c in combos:
+            assert (c / "run.json").exists()
+
+    def test_results_have_one_row_per_real_combo(self, tmp_path, monkeypatch):
+        """results[] has one row per combo, with model/track/scorer derived
+        from run.json config (not folder names)."""
+        from jevmlx import bench
+        from jevmlx.watch import build_dashboard
+
+        self._patch_bench_with_heartbeat(monkeypatch, tmp_path)
+        out = tmp_path / "m5-run"
+        bench.run_bench_models(
+            models=["org/model-a", "org/model-b"],
+            datasets=["bundled"],
+            scorers=["slots"],
+            tracks=["parallel"],
+            out=out / "bench-quality",
+            runs=1,
+        )
+        d = build_dashboard(out)
+        results = d["results"]
+        assert len(results) == 2  # one per model
+        models = {r["model"] for r in results}
+        assert models == {"org/model-a", "org/model-b"}
+        # track/scorer derived from config, not folder names.
+        for r in results:
+            assert r["track"] == "parallel"
+            assert r["scorer"] == "slots"
+
+    def test_now_picks_live_combo_by_heartbeat_mtime(self, tmp_path, monkeypatch):
+        """NOW picks the combo with the newest heartbeat.jsonl mtime."""
+        from jevmlx import bench
+        from jevmlx.watch import build_dashboard
+
+        self._patch_bench_with_heartbeat(monkeypatch, tmp_path)
+        out = tmp_path / "m5-run"
+        bench.run_bench_models(
+            models=["org/model-a", "org/model-b"],
+            datasets=["bundled"],
+            scorers=["slots"],
+            tracks=["parallel"],
+            out=out / "bench-quality",
+            runs=1,
+        )
+        # Touch model-b's heartbeat to make it the newest.
+        b_hb = list((out / "bench-quality").rglob("heartbeat.jsonl"))
+        for hb in b_hb:
+            if "model-b" in str(hb):
+                hb.touch()
+        d = build_dashboard(out)
+        assert d["now"]["model"] == "org/model-b"
+        assert d["now"]["cases_done"] == 12
+        assert d["run"]["state"] == "running"
+
+    def test_questions_returns_rows_for_real_combo(self, tmp_path, monkeypatch):
+        """questions.json returns rows for a combo discovered at real depth."""
+        from jevmlx import bench
+        from jevmlx.watch import _combo_dirs, build_questions
+
+        self._patch_bench_with_heartbeat(monkeypatch, tmp_path)
+        out = tmp_path / "m5-run"
+        bench.run_bench_models(
+            models=["org/model-a"],
+            datasets=["bundled"],
+            scorers=["slots"],
+            tracks=["parallel"],
+            out=out / "bench-quality",
+            runs=1,
+        )
+        combos = _combo_dirs(out)
+        assert len(combos) == 1
+        combo_id = combos[0].name
+        qs = build_questions(out, combo_id)
+        assert len(qs) == 1
+        assert qs[0]["case_id"] == "c0"
+        assert qs[0]["predicted"] == "yes"
+
+    def test_live_combo_without_run_json_is_discovered(self, tmp_path, monkeypatch):
+        """A LIVE combo dir has heartbeat.jsonl + predictions.jsonl but NO
+        run.json yet. _combo_dirs discovers it by any marker file."""
+        from jevmlx.watch import _combo_dirs, build_dashboard
+
+        out = tmp_path / "m5-run"
+        # The real tree: bench-quality/<machine>-<model>/<combo>/
+        combo = out / "bench-quality" / "m5max-128gb-qwen3" / "parallel-labels-typesafe"
+        combo.mkdir(parents=True)
+        # NO run.json — the combo is still running.
+        (combo / "heartbeat.jsonl").write_text(
+            json.dumps(
+                {
+                    "active_memory_bytes": 4 * 2**30,
+                    "cache_memory_bytes": 8 * 2**30,
+                    "cases_done": 12,
+                    "combo": "parallel-labels-typesafe",
+                    "elapsed_s": 60,
+                    "peak_memory_bytes": 6 * 2**30,
+                    "pred_lines": 144,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (combo / "predictions.jsonl").write_text(
+            json.dumps(
+                {
+                    "case_id": "c0",
+                    "field": "v",
+                    "prediction": "yes",
+                    "label": "yes",
+                    "correct": True,
+                    "probability": 0.9,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        combos = _combo_dirs(out)
+        assert combo in combos
+        # build_dashboard does not raise; NOW picks it.
+        d = build_dashboard(out)
+        assert d["now"]["cases_done"] == 12
+        assert d["now"]["track"] == "parallel"  # from folder name
+
+    def test_heartbeat_has_no_ts_age_uses_file_mtime(self, tmp_path, monkeypatch):
+        """Heartbeat records carry NO ts key. Age = heartbeat.jsonl file mtime."""
+        import time as _time
+
+        from jevmlx.watch import _heartbeat_is_recent, build_dashboard
+
+        out = tmp_path / "m5-run"
+        combo = out / "bench-quality" / "m5max-128gb-qwen3" / "parallel-labels-typesafe"
+        combo.mkdir(parents=True)
+        hb_path = combo / "heartbeat.jsonl"
+        hb_path.write_text(
+            json.dumps(
+                {
+                    "cases_done": 5,
+                    "elapsed_s": 10,
+                    "combo": "x",
+                    "cache_memory_bytes": 0,
+                    "peak_memory_bytes": 0,
+                    "active_memory_bytes": 0,
+                    "pred_lines": 50,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        # The heartbeat is fresh (just written).
+        assert _heartbeat_is_recent(hb_path, max_age_s=6)
+        # Make it stale.
+        import os
+
+        old_ts = _time.time() - 300
+        os.utime(hb_path, (old_ts, old_ts))
+        assert not _heartbeat_is_recent(hb_path, max_age_s=6)
+        # build_dashboard: heartbeat_age_s is the file age.
+        d = build_dashboard(out)
+        assert d["now"]["heartbeat_age_s"] is not None
+        assert d["now"]["heartbeat_age_s"] >= 290
+
+    def test_cases_per_h_from_elapsed_s_delta(self, tmp_path, monkeypatch):
+        """cases_per_h = (cases_done delta) / (elapsed_s delta) across the last
+        two heartbeat lines. No ts key needed."""
+        from jevmlx.watch import build_dashboard
+
+        out = tmp_path / "m5-run"
+        combo = out / "bench-quality" / "m5max-128gb-qwen3" / "parallel-labels-typesafe"
+        combo.mkdir(parents=True)
+        (combo / "heartbeat.jsonl").write_text(
+            json.dumps(
+                {
+                    "cases_done": 100,
+                    "elapsed_s": 100,
+                    "combo": "x",
+                    "cache_memory_bytes": 0,
+                    "peak_memory_bytes": 0,
+                    "active_memory_bytes": 0,
+                    "pred_lines": 1200,
+                }
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "cases_done": 160,
+                    "elapsed_s": 200,
+                    "combo": "x",
+                    "cache_memory_bytes": 0,
+                    "peak_memory_bytes": 0,
+                    "active_memory_bytes": 0,
+                    "pred_lines": 1920,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (combo / "run.json").write_text(
+            json.dumps({"config": {"model": "m", "track": "parallel"}, "counts": {"cases": 576}}),
+            encoding="utf-8",
+        )
+        d = build_dashboard(out)
+        # (160-100)/(200-100)*3600 = 60/100*3600 = 2160 cases/h.
+        assert d["now"]["cases_per_h"] == 2160.0
+
+    def test_event_ts_is_iso_from_heartbeat_mtime(self, tmp_path, monkeypatch):
+        """Event ts is ISO-8601 from the heartbeat.jsonl file mtime (no ts key
+        in the record)."""
+        from jevmlx.watch import build_dashboard
+
+        out = tmp_path / "m5-run"
+        combo = out / "bench-quality" / "m5max-128gb-qwen3" / "parallel-labels-typesafe"
+        combo.mkdir(parents=True)
+        (combo / "heartbeat.jsonl").write_text(
+            json.dumps(
+                {
+                    "cases_done": 5,
+                    "elapsed_s": 10,
+                    "combo": "x",
+                    "cache_memory_bytes": 0,
+                    "peak_memory_bytes": 0,
+                    "active_memory_bytes": 0,
+                    "pred_lines": 50,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        d = build_dashboard(out)
+        hb_events = [e for e in d["events"] if e["kind"] == "heartbeat"]
+        assert len(hb_events) >= 1
+        for e in hb_events:
+            ts = e.get("ts")
+            if ts is not None:
+                assert isinstance(ts, str)
+                assert ts.endswith("Z")

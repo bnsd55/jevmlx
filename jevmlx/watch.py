@@ -297,27 +297,37 @@ def _state_icon(state: str) -> str:
 
 
 def _combo_dirs(out_dir: Path) -> list[Path]:
-    """All combo dirs under <out> (the out dir itself when it holds predictions).
+    """All combo dirs under <out> — discovered by directory, not by run.json.
 
-    A single-combo bench writes run.json/predictions.jsonl directly into the
-    out dir; a multi-combo bench writes them into subdirectories.
+    The real bench/m5 tree is:
+      <out>/bench-quality/<machine>-<model-slug>/<track>-<scorer>-<dataset>/...
+      <out>/bench-rest/<machine>-<model-slug>/<track>-<scorer>-<dataset>/...
+      <out>/ab/bench-quality/<machine>-quality/<combo>/...
+      <out>/invariance/extraNN/...
+
+    A LIVE combo dir has heartbeat.jsonl and predictions.jsonl but NO run.json
+    yet (run.json is written on completion). So we discover combos by ANY of
+    heartbeat.jsonl / predictions.jsonl / run.json present; model/track/scorer/
+    dataset are derived from run.json config when present, else from the
+    sibling run.json or folder names.
     """
+    out_dir = Path(out_dir)
     combos: list[Path] = []
-    if (out_dir / "run.json").exists() or (out_dir / "predictions.jsonl").exists():
+    if not out_dir.exists():
+        return combos
+    seen: set[Path] = set()
+    # The out dir itself can be a single combo.
+    if _is_combo_dir(out_dir):
         combos.append(out_dir)
-    for child in sorted(out_dir.iterdir() if out_dir.exists() else []):
-        if not child.is_dir() or child.name.startswith(".") or child.name in ("ab", "invariance"):
-            continue
-        # A combo dir has run.json or predictions.jsonl.
-        if (child / "run.json").exists() or (child / "predictions.jsonl").exists():
-            combos.append(child)
-        else:
-            # Maybe nested: <out>/<machine-model>/<combo>/
-            for sub in sorted(child.iterdir() if child.is_dir() else []):
-                if sub.is_dir() and (
-                    (sub / "run.json").exists() or (sub / "predictions.jsonl").exists()
-                ):
-                    combos.append(sub)
+        seen.add(out_dir)
+    # rglob for combo-marker files at any depth.
+    for marker in ("run.json", "heartbeat.jsonl", "predictions.jsonl"):
+        for p in out_dir.rglob(marker):
+            combo_dir = p.parent
+            if combo_dir in seen or combo_dir == out_dir:
+                continue
+            seen.add(combo_dir)
+            combos.append(combo_dir)
     return combos
 
 
@@ -782,6 +792,87 @@ def _iso_ts(v) -> str | None:
     return None
 
 
+def _derive_config_from_layout(combo_dir: Path) -> dict:
+    """Derive model/track/scorer/dataset when a live combo has no run.json.
+
+    Looks for a sibling run.json in the same model folder (a completed combo
+    of the same model), then falls back to the folder name
+    <track>-<scorer>-<dataset>.
+    """
+    # Try a sibling run.json in the same model folder.
+    model_dir = combo_dir.parent
+    for sibling in sorted(model_dir.iterdir()) if model_dir.is_dir() else []:
+        if sibling == combo_dir or not sibling.is_dir():
+            continue
+        sibling_run = parse_run_json(sibling)
+        if sibling_run:
+            cfg = (sibling_run.get("config") if sibling_run else {}) or {}
+            if cfg.get("model"):
+                # Carry the model; the combo folder name gives track/scorer/dataset.
+                name = combo_dir.name
+                parts = name.split("-", 2)
+                return {
+                    "model": cfg.get("model"),
+                    "track": parts[0] if len(parts) > 0 else None,
+                    "scorer": parts[1] if len(parts) > 1 else None,
+                    "dataset": parts[2] if len(parts) > 2 else None,
+                }
+    # Fallback: parse the combo folder name <track>-<scorer>-<dataset>.
+    name = combo_dir.name
+    parts = name.split("-", 2)
+    return {
+        "track": parts[0] if len(parts) > 0 else None,
+        "scorer": parts[1] if len(parts) > 1 else None,
+        "dataset": parts[2] if len(parts) > 2 else None,
+    }
+
+
+def _is_combo_dir(d: Path) -> bool:
+    """A combo dir has any of run.json / heartbeat.jsonl / predictions.jsonl."""
+    return any((d / m).exists() for m in ("run.json", "heartbeat.jsonl", "predictions.jsonl"))
+
+
+def _heartbeat_is_recent(hb_path: Path | None, *, max_age_s: float = 6.0) -> bool:
+    """True when the heartbeat.jsonl mtime is younger than max_age_s (3x refresh).
+
+    Heartbeat records carry NO timestamp (keys: active_memory_bytes,
+    cache_memory_bytes, cases_done, combo, elapsed_s, peak_memory_bytes,
+    pred_lines). So heartbeat age = the heartbeat.jsonl file mtime.
+    """
+    if not hb_path or not hb_path.exists():
+        return False
+    try:
+        return (time.time() - hb_path.stat().st_mtime) < max_age_s
+    except OSError:
+        return False
+
+
+def _find_live_combo(combos: list[Path]) -> tuple[Path | None, dict | None]:
+    """The live combo: the one with the newest heartbeat.jsonl mtime.
+
+    Falls back to the last combo (sorted) when no heartbeat exists.
+    """
+    best_combo: Path | None = None
+    best_mtime: float = -1.0
+    best_hb: dict | None = None
+    for c in combos:
+        hb_path = c / "heartbeat.jsonl"
+        if not hb_path.exists():
+            continue
+        try:
+            mtime = hb_path.stat().st_mtime
+        except OSError:
+            continue
+        if mtime > best_mtime:
+            best_mtime = mtime
+            best_combo = c
+            best_hb = parse_heartbeat(c)
+    if best_combo is None and combos:
+        best_combo = combos[-1]
+        best_hb = parse_heartbeat(best_combo)
+    return best_combo, best_hb
+
+
 def build_dashboard(out_dir: str | Path) -> dict:
     """The full /dashboard.json payload (frozen W6-UI-3a contract).
 
@@ -799,24 +890,21 @@ def build_dashboard(out_dir: str | Path) -> dict:
     mem_cfg = (cfg.get("memory") if cfg else {}) or {}
     # The current/last combo with a heartbeat (the 'now' panel).
     combos = _combo_dirs(out_dir)
-    now_combo = None
-    now_hb = None
-    for c in reversed(combos):
-        hb = parse_heartbeat(c)
-        if hb:
-            now_combo = c
-            now_hb = hb
-            break
-    if now_combo is None and combos:
-        now_combo = combos[-1]
-        now_hb = parse_heartbeat(now_combo)
+    # Find the live combo: the one with the newest heartbeat.jsonl mtime
+    # anywhere under <out>. Falls back to the last combo.
+    now_combo, now_hb = _find_live_combo(combos)
     now_combo_run = parse_run_json(now_combo) if now_combo else {}
     now_cfg = (now_combo_run.get("config") if now_combo_run else {}) or {}
+    # A LIVE combo may have no run.json yet — derive config from a sibling
+    # run.json (same model folder) or from the folder name
+    # <track>-<scorer>-<dataset>.
+    if not now_cfg and now_combo:
+        now_cfg = _derive_config_from_layout(now_combo)
     pipeline = _parse_pipeline(out_dir)
     # --- run ---
     alerts: list[dict] = []
     # Build health first so alerts can reference it.
-    health = _build_health(out_dir, combos, now_hb, env, mem_cfg, pipeline)
+    health = _build_health(out_dir, combos, now_combo, now_hb, env, mem_cfg, pipeline)
     for h in health:
         if h.get("state") == "fail":
             alerts.append(
@@ -827,10 +915,17 @@ def build_dashboard(out_dir: str | Path) -> dict:
                 }
             )
     sleep_blocked = _read_sleep_blocked(out_dir)
+    # state=running when the newest heartbeat.jsonl mtime is younger than 3x
+    # the refresh interval (default 6s), or a RUNBOOK step is 'running'.
+    # Heartbeat records carry NO ts — age = file mtime.
+    now_hb_path = now_combo / "heartbeat.jsonl" if now_combo else None
     state = "stopped"
-    if now_hb:
+    if _heartbeat_is_recent(now_hb_path, max_age_s=6):
         state = "running"
     elif any(s.get("state") == "running" for s in pipeline.get("steps", [])):
+        state = "running"
+    elif now_hb:
+        # Heartbeat exists but is stale — still running (just quiet).
         state = "running"
     elif (out_dir / "SUMMARY.md").exists():
         state = "done"
@@ -883,7 +978,7 @@ def build_dashboard(out_dir: str | Path) -> dict:
     }
 
 
-def _build_health(out_dir, combos, now_hb, env, mem_cfg, pipeline) -> list[dict]:
+def _build_health(out_dir, combos, now_combo, now_hb, env, mem_cfg, pipeline) -> list[dict]:
     """Six health rules: ok|warn|fail with a detail string."""
     rules: list[dict] = []
     # cache_over_stop
@@ -971,10 +1066,15 @@ def _build_health(out_dir, combos, now_hb, env, mem_cfg, pipeline) -> list[dict]
             "detail": f"{n_retries} retries",
         }
     )
-    # heartbeat_age
+    # heartbeat_age = heartbeat.jsonl file mtime (records carry NO ts).
     age = None
-    if now_hb and isinstance(now_hb.get("ts"), (int, float)):
-        age = int(time.time() - now_hb["ts"])
+    if now_combo:
+        hb_path = now_combo / "heartbeat.jsonl"
+        if hb_path.exists():
+            try:
+                age = int(time.time() - hb_path.stat().st_mtime)
+            except OSError:
+                pass
     elif now_hb and isinstance(now_hb.get("elapsed_s"), (int, float)):
         age = None
     if age is None:
@@ -1007,22 +1107,19 @@ def _build_now(now_combo, now_hb, now_cfg, out_dir) -> dict:
         pred_lines = now_hb.get("pred_lines", 0) if now_hb else 0
         if not pred_lines:
             pred_lines = count_lines(now_combo / "predictions.jsonl")
-    # cases_per_h over last 10 min: from heartbeat records with a ts.
+    # cases_per_h from the last two heartbeat records: (cases_done delta)
+    # / (elapsed_s delta). Heartbeat records carry NO ts — elapsed_s is the
+    # wall-clock seconds since the combo started (written by evalrun).
     cases_per_h = None
     if now_combo:
         hbs = read_jsonl_safe(now_combo / "heartbeat.jsonl")
         if len(hbs) >= 2:
-            last = hbs[-1].get("cases_done", 0) or 0
-            ten_min_ago = [
-                h
-                for h in hbs
-                if isinstance(h.get("ts"), (int, float)) and h["ts"] >= time.time() - 600
-            ]
-            if len(ten_min_ago) >= 2:
-                first = ten_min_ago[0].get("cases_done", 0) or 0
-                span_s = (ten_min_ago[-1].get("ts", 0) or 0) - (ten_min_ago[0].get("ts", 0) or 0)
-                if span_s > 0:
-                    cases_per_h = round((last - first) / span_s * 3600, 1)
+            first = hbs[0]
+            last = hbs[-1]
+            d_cases = (last.get("cases_done", 0) or 0) - (first.get("cases_done", 0) or 0)
+            d_s = (last.get("elapsed_s", 0) or 0) - (first.get("elapsed_s", 0) or 0)
+            if d_s > 0:
+                cases_per_h = round(d_cases / d_s * 3600, 1)
     eta_s = None
     elapsed = now_hb.get("elapsed_s", 0) if now_hb else 0
     if total and done and elapsed and done < total:
@@ -1040,9 +1137,15 @@ def _build_now(now_combo, now_hb, now_cfg, out_dir) -> dict:
                 running_acc = field_accuracy(labelled)
                 maj = majority_class_baseline(labelled) if labelled else None
                 running_maj = maj.get("overall") if isinstance(maj, dict) else maj
+    # heartbeat age = the heartbeat.jsonl file mtime (records carry NO ts).
     hb_age = None
-    if now_hb and isinstance(now_hb.get("ts"), (int, float)):
-        hb_age = int(time.time() - now_hb["ts"])
+    if now_combo:
+        hb_path = now_combo / "heartbeat.jsonl"
+        if hb_path.exists():
+            try:
+                hb_age = int(time.time() - hb_path.stat().st_mtime)
+            except OSError:
+                pass
     return {
         "model": now_cfg.get("model") or "—",
         "track": now_cfg.get("track") or "—",
@@ -1235,10 +1338,17 @@ def _ab_delta(out_dir: Path, main_combo: Path, main_accuracy) -> float | None:
 def _build_events(out_dir, combos) -> list[dict]:
     """Heartbeats, combo_done, alloc_retry, step_done, attempt, newest first."""
     events: list[dict] = []
-    # Heartbeats from all combos.
+    # Heartbeats from all combos. Heartbeat records carry NO ts — use the
+    # heartbeat.jsonl file mtime as the event ts.
     for c in combos:
-        for hb in read_jsonl_safe(c / "heartbeat.jsonl"):
-            ts = hb.get("ts")
+        hb_path = c / "heartbeat.jsonl"
+        file_ts = None
+        if hb_path.exists():
+            try:
+                file_ts = _iso_ts(hb_path.stat().st_mtime)
+            except OSError:
+                file_ts = None
+        for hb in read_jsonl_safe(hb_path):
             text = (
                 f"{hb.get('combo', c.name)} {hb.get('cases_done', '?')}/?"
                 f" cache {_gb(hb.get('cache_memory_bytes'))} GB"
@@ -1248,7 +1358,7 @@ def _build_events(out_dir, combos) -> list[dict]:
             if isinstance(hb.get("alloc_retry"), int) and hb["alloc_retry"]:
                 kind = "alloc_retry"
                 text = f"Metal allocation failed, retried (x{hb['alloc_retry']})"
-            events.append({"ts": _iso_ts(ts), "kind": kind, "text": text})
+            events.append({"ts": file_ts, "kind": kind, "text": text})
     # combo_done: report.json exists -> done.
     for c in combos:
         if (c / "report.json").exists():

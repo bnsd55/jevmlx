@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- watch: discover combos from the real bench/m5 layout (fixture from real
+  writers). `_combo_dirs` now rglobs for any of `run.json` / `heartbeat.jsonl`
+  / `predictions.jsonl` (a LIVE combo has heartbeat+predictions but NO
+  run.json yet). Model/track/scorer/dataset derived from run.json config when
+  present, else from a sibling run.json or the `<track>-<scorer>-<dataset>`
+  folder name. The live combo is the one with the newest `heartbeat.jsonl`
+  mtime. Heartbeat records carry NO `ts` key — age = file mtime;
+  `cases_per_h` = `(cases_done delta) / (elapsed_s delta)` across the last
+  two lines. `run.state=running` when the newest heartbeat mtime is younger
+  than 3x refresh or a RUNBOOK step is `running`. Event `ts` is ISO-8601 from
+  the heartbeat.jsonl file mtime.
+
 - watch: data-layer fixes from the first real render (sleep flag, ISO
   timestamps, run i/N, step titles, per-step logs). `run.sleep_blocked` and
   the `sleep_windows` health rule now read one helper (`_read_sleep_blocked`)
