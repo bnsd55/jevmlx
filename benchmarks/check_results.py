@@ -214,8 +214,28 @@ def check_folder(folder: Path) -> tuple[bool, list[str]]:
             problems.append(f"{name}: line {index} missing keys {missing}")
         if extra:
             problems.append(f"{name}: line {index} unexpected keys {extra}")
+        # Error lines: when 'error' is a non-empty string, the field's
+        # scoring failed — correct, probability, prediction,
+        # per_item_end_to_end_ms, and log_scores may be null. The line is
+        # counted in an errors summary (below), not a contract violation.
+        # A line with null values and NO error stays a FAIL.
+        is_error_line = isinstance(record.get("error"), str) and bool(record["error"])
         for key in PREDICTION_LINE_KEYS:
             if key not in record:
+                continue
+            # Skip type checks for nullable-on-error keys when this is an
+            # error line — they are legitimately null.
+            if is_error_line and key in (
+                "correct",
+                "probability",
+                "prediction",
+                "per_item_end_to_end_ms",
+                "log_scores",
+                "per_option",
+                "rows",
+                "passes",
+                "latency_ms",
+            ):
                 continue
             if not _type_ok(key, record[key]):
                 problems.append(
@@ -331,8 +351,13 @@ def check_folder(folder: Path) -> tuple[bool, list[str]]:
     # single path reports it since W5c-3 (elapsed - plan), the batched path
     # since W5-D finding 27/N6. A parallel line without it is a broken
     # folder (no fallback; the leaderboard reads this key).
+    # Exception: error lines (error key set) may have null
+    # per_item_end_to_end_ms — the field's scoring failed before timing
+    # was recorded.
     if is_parallel:
         for index, record in enumerate(records):
+            if isinstance(record.get("error"), str) and record["error"]:
+                continue  # error line: timing not recorded
             ms = record.get(PER_ITEM_END_TO_END_KEY)
             if not _is_number(ms):
                 problems.append(
@@ -598,6 +623,31 @@ def _parity_failed_stages(parity: dict) -> list[str]:
     return stages
 
 
+def _error_lines_in_folder(folder: Path) -> list[tuple[int, str]]:
+    """(line index, error text) for every error record in predictions.jsonl.
+
+    An error line is one whose 'error' key is a non-empty string — the
+    field's scoring failed (e.g. a context too long for the model's window).
+    These lines are allowed by the contract (correct, probability,
+    per_item_end_to_end_ms may be null) and counted in the errors summary.
+    """
+    pred_path = folder / "predictions.jsonl"
+    gz = folder / "predictions.jsonl.gz"
+    path = pred_path if pred_path.exists() else gz
+    if not path.exists():
+        return []
+    try:
+        records = _read_predictions_lines(path)
+    except (OSError, json.JSONDecodeError):
+        return []
+    errors = []
+    for index, record in enumerate(records):
+        err = record.get("error")
+        if isinstance(err, str) and err:
+            errors.append((index, err))
+    return errors
+
+
 def check_root(root: Path) -> list[tuple[Path, bool, list[str]]]:
     """Validate every combo folder under root. Returns per-folder results."""
     folders = _find_combo_folders(root)
@@ -611,7 +661,7 @@ def check_root(root: Path) -> list[tuple[Path, bool, list[str]]]:
 
 
 def _summary(results: list[tuple[Path, bool, list[str]]]) -> str:
-    """One-line-per-folder summary table."""
+    """One-line-per-folder summary table + errors section."""
     out = io.StringIO()
     out.write("| folder | status | checks |\n")
     out.write("|---|---|---|\n")
@@ -619,6 +669,16 @@ def _summary(results: list[tuple[Path, bool, list[str]]]) -> str:
         status = "OK" if ok else "FAIL"
         n = len(problems) if problems else 0
         out.write(f"| {folder.name or folder} | {status} | {n} |\n")
+    # Errors section: per combo, count + first error text.
+    error_lines = []
+    for folder, _ok, _problems in results:
+        errors = _error_lines_in_folder(folder)
+        if errors:
+            first = errors[0][1][:80]
+            error_lines.append(f"  {folder.name}: {len(errors)} error line(s), first: {first}")
+    if error_lines:
+        out.write("\nerrors:\n")
+        out.write("\n".join(error_lines) + "\n")
     return out.getvalue()
 
 

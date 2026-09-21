@@ -199,6 +199,35 @@ def test_unknown_key_still_fails(tmp_path):
     assert any("unexpected keys" in p and "totally_unknown_key" in p for p in problems)
 
 
+def test_error_line_passes(tmp_path):
+    """A line with 'error' set (non-empty string) may have null
+    correct/probability/prediction/per_item_end_to_end_ms — the field's
+    scoring failed. The line is allowed and counted in the errors summary."""
+    folder = tmp_path / "combo"
+    rec_ok = _record()
+    rec_err = _record(case_id="c2", label="HIGH", prediction=None, correct=None, probability=None)
+    rec_err["error"] = "context too long for model window"
+    rec_err["per_item_end_to_end_ms"] = None
+    rec_err["log_scores"] = None
+    _write_valid(folder, records=[rec_ok, rec_err])
+    ok, problems = check_folder(folder)
+    assert ok, problems
+
+
+def test_null_without_error_fails(tmp_path):
+    """A line with null correct/per_item_end_to_end_ms and NO error key is a
+    contract violation — only error lines may have nulls."""
+    folder = tmp_path / "combo"
+    rec_ok = _record()
+    rec_bad = _record(case_id="c2", label="HIGH", prediction=None, correct=None, probability=None)
+    rec_bad["error"] = None  # no error, but nulls present
+    rec_bad["per_item_end_to_end_ms"] = None
+    _write_valid(folder, records=[rec_ok, rec_bad])
+    ok, problems = check_folder(folder)
+    assert not ok
+    assert any("per_item_end_to_end_ms" in p and "missing/invalid" in p for p in problems)
+
+
 def test_missing_dataset_lock_fails(tmp_path):
     folder = tmp_path / "model" / "combo"
     _write_valid(folder)
