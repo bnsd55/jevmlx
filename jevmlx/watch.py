@@ -24,6 +24,7 @@ from rich.table import Table
 
 __all__ = [
     "read_jsonl_safe",
+    "read_jsonl_or_gz",
     "parse_runbook",
     "parse_run_json",
     "parse_heartbeat",
@@ -110,6 +111,43 @@ def read_jsonl_safe(path: Path, *, max_lines: int = 0) -> list[dict]:
         if isinstance(obj, dict):
             out.append(obj)
     return out
+
+
+def read_jsonl_or_gz(path: Path, *, max_lines: int = 0) -> list[dict]:
+    """Read a .jsonl or .jsonl.gz file (finished combos are gzipped).
+
+    Tries ``path`` (plain .jsonl) first; if absent, tries ``path + '.gz'``.
+    Same truncation / half-line rules as ``read_jsonl_safe``. Used for
+    predictions.jsonl (the bench finalizer gzips finished combos) and
+    any other artifact that may be gzipped.
+    """
+    if path.exists():
+        return read_jsonl_safe(path, max_lines=max_lines)
+    gz = Path(str(path) + ".gz")
+    if gz.exists():
+        import gzip
+
+        try:
+            text = gzip.decompress(gz.read_bytes()).decode("utf-8", errors="replace")
+        except (OSError, EOFError):
+            return []
+        lines = text.splitlines()
+        if max_lines:
+            lines = lines[-max_lines:]
+        out: list[dict] = []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                _stderr_once(f"truncated {gz.name} at a malformed line")
+                break
+            if isinstance(obj, dict):
+                out.append(obj)
+        return out
+    return []
 
 
 def parse_runbook(out_dir: Path) -> list[dict]:
@@ -448,7 +486,7 @@ def build_dashboard_renderable(out_dir: Path, *, width: int = 120) -> Group:
         results.add_column(col)
     machine_name = env.get("chip") or "—"
     for combo_dir in combos:
-        records = read_jsonl_safe(combo_dir / "predictions.jsonl")
+        records = read_jsonl_or_gz(combo_dir / "predictions.jsonl")
         if not records:
             continue
         combo_run = parse_run_json(combo_dir)
@@ -482,7 +520,7 @@ def build_dashboard_renderable(out_dir: Path, *, width: int = 120) -> Group:
     # --- LAST QUESTIONS (tail of predictions.jsonl) ---
     if combos:
         combo_dir = combos[-1]
-        tail = read_jsonl_safe(combo_dir / "predictions.jsonl", max_lines=8)
+        tail = read_jsonl_or_gz(combo_dir / "predictions.jsonl", max_lines=8)
         if tail:
             q = Table(title="Last questions", expand=True)
             for col in ("case_id", "field", "pred", "label", "ok", "margin", "ms"):
@@ -604,15 +642,55 @@ def _parse_pipeline(out_dir: Path) -> dict:
             text = rb.read_text(encoding="utf-8")
         except OSError:
             text = ""
-        # Find all attempt-start lines (both forms) and take the last block.
+        # Find all attempt-start lines (both forms).
         import re
 
         attempt_starts = list(
             re.finditer(r"^(?:## attempt \d+ \S+ \S+|# M5 runbook — \S+)", text, re.MULTILINE)
         )
         if attempt_starts:
-            last = attempt_starts[-1]
-            block = text[last.start() :]
+            # W6-UI round 4: pick the LIVE attempt — the one that has a
+            # 'started <id> <ISO>' line with no matching completion (still
+            # running). If none is running, pick the newest by started time
+            # (the last block). Previously this took the last block by
+            # position, which picked a finished probe/A/B attempt when a
+            # later one was still running.
+            blocks = []
+            for idx, m in enumerate(attempt_starts):
+                start = m.start()
+                end = (
+                    attempt_starts[idx + 1].start() if idx + 1 < len(attempt_starts) else len(text)
+                )
+                blocks.append(text[start:end])
+
+            # Classify each block: running if it has an unmatched 'started' line.
+            def _block_is_running(blk: str) -> bool:
+                started_ids = set()
+                completed_ids = set()
+                for line in blk.splitlines()[1:]:
+                    if line.startswith("started "):
+                        sp = line.split(None, 2)
+                        if len(sp) >= 3:
+                            started_ids.add(sp[1])
+                    elif line.startswith("## ") and not line.startswith("## attempt "):
+                        sp = line.split(" — ", 1)
+                        raw_title = sp[0][3:].strip()
+                        sid = (
+                            (
+                                raw_title.split(" ", 1)[1].split(" ", 1)[0]
+                                if raw_title.split(" ")[0].rstrip(".").isdigit()
+                                else raw_title.split(" ", 1)[0]
+                            )
+                            if raw_title
+                            else ""
+                        )
+                        tail = sp[1] if len(sp) > 1 else ""
+                        if "exit" in tail or "skip" in tail or "ABORT" in tail:
+                            completed_ids.add(sid)
+                return bool(started_ids - completed_ids)
+
+            running_blocks = [b for b in blocks if _block_is_running(b)]
+            block = running_blocks[0] if running_blocks else blocks[-1]
             first = block.split("\n", 1)[0]
             # Parse the attempt header for n + started.
             if first.startswith("## attempt "):
@@ -1330,7 +1408,7 @@ def _build_now(now_combo, now_hb, now_cfg, out_dir) -> dict:
     running_acc = None
     running_maj = None
     if now_combo:
-        records = read_jsonl_safe(now_combo / "predictions.jsonl")
+        records = read_jsonl_or_gz(now_combo / "predictions.jsonl")
         if records:
             from jevmlx.evalmetrics import field_accuracy, majority_class_baseline
 
@@ -1386,7 +1464,7 @@ def _build_aggregates(out_dir, combos) -> dict:
         metrics = (run.get("metrics") if run else {}) or {}
         cfg = (run.get("config") if run else {}) or {}
         track = cfg.get("track") or "parallel"
-        records = read_jsonl_safe(c / "predictions.jsonl")
+        records = read_jsonl_or_gz(c / "predictions.jsonl")
         labelled = [r for r in records if r.get("label") is not None]
         if labelled:
             acc = field_accuracy(labelled)
@@ -1460,7 +1538,7 @@ def _build_results(out_dir, combos, env) -> list[dict]:
         run = parse_run_json(c)
         cfg = (run.get("config") if run else {}) or {}
         metrics = (run.get("metrics") if run else {}) or {}
-        records = read_jsonl_safe(c / "predictions.jsonl")
+        records = read_jsonl_or_gz(c / "predictions.jsonl")
         labelled = [r for r in records if r.get("label") is not None]
         accuracy = field_accuracy(labelled) if labelled else metrics.get("accuracy")
         ci_low = None
@@ -1529,7 +1607,7 @@ def _ab_delta(out_dir: Path, main_combo: Path, main_accuracy) -> float | None:
         ab_run = parse_run_json(c)
         ab_model = ((ab_run.get("config") if ab_run else {}) or {}).get("model")
         if ab_model == model:
-            ab_records = read_jsonl_safe(c / "predictions.jsonl")
+            ab_records = read_jsonl_or_gz(c / "predictions.jsonl")
             ab_labelled = [r for r in ab_records if r.get("label") is not None]
             if ab_labelled:
                 from jevmlx.evalmetrics import field_accuracy
@@ -1659,7 +1737,7 @@ def build_questions(out_dir: str | Path, combo_id: str) -> list[dict]:
                 break
     if combo_dir is None:
         return []
-    records = read_jsonl_safe(combo_dir / "predictions.jsonl")
+    records = read_jsonl_or_gz(combo_dir / "predictions.jsonl")
     # Build the dataset context lookup by case_id. The dataset jsonl may be
     # in the combo dir, the out dir, or at config.dataset_path (the absolute
     # path bench writes into run.json).

@@ -68,6 +68,7 @@ vm.runInContext(defScript, context);
 const {
   esc,
   fmtNum,
+  fmtNullable,
   fmtDur,
   fmtAttempt,
   statusPill,
@@ -92,14 +93,41 @@ describe("dashboard pure helpers", () => {
     it("renders null as em dash", () => {
       assert.equal(fmtNum(null), "—");
     });
+    it("renders NaN as em dash (W6-UI round 4: cases/h with <2 heartbeats)", () => {
+      assert.equal(fmtNum(NaN), "—");
+    });
+    it("renders Infinity as em dash", () => {
+      assert.equal(fmtNum(Infinity), "—");
+    });
+    it("renders -Infinity as em dash", () => {
+      assert.equal(fmtNum(-Infinity), "—");
+    });
     it("renders a number with default 3 decimals", () => {
       assert.equal(fmtNum(0.123456), "0.123");
     });
     it("renders a number with custom decimals", () => {
       assert.equal(fmtNum(0.123456, 2), "0.12");
     });
+    it("renders a non-numeric string as em dash (isFinite guard)", () => {
+      assert.equal(fmtNum("abc"), "—");
+    });
+  });
+
+  describe("fmtNullable", () => {
+    it("renders null as em dash (W6-UI round 4: rotation=null)", () => {
+      assert.equal(fmtNullable(null), "—");
+    });
+    it("renders undefined as em dash", () => {
+      assert.equal(fmtNullable(undefined), "—");
+    });
+    it("renders a number as string", () => {
+      assert.equal(fmtNullable(3), "3");
+    });
+    it("renders 0 as '0' (not dash)", () => {
+      assert.equal(fmtNullable(0), "0");
+    });
     it("renders a string as-is", () => {
-      assert.equal(fmtNum("abc"), "abc");
+      assert.equal(fmtNullable("high"), "high");
     });
   });
 

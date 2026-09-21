@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+- watch: round 4a (nits, gz predictions, live attempt). Two nits from the
+  M5 live report at b46ba81 + two data-layer bugs that need no real shapes:
+  (A) rotation=null rendered the literal 'null' in PIPELINE/RESULTS rows —
+  new `fmtNullable` JS helper renders null/undefined as '—'; swept 6 raw
+  concatenation spots (t.machine, m.cap_gb/stop_gb/machine_gb, n.run_i/run_n,
+  n.heartbeat_age_s, a.attempt_n, s.exit, r.rotation, c.rotation). `fmtNum`
+  now guards `!isFinite(v)` so cases/h with <2 heartbeats shows '—' not
+  NaN/Infinity. (B) cases_per_h is already None when <2 heartbeats exist
+  (Python guard); the JS guard is the belt-and-suspenders fix. (1)
+  `questions.json` returned 0 rows for finished combos because predictions
+  are `predictions.jsonl.gz` — new `read_jsonl_or_gz` tries the plain `.jsonl`
+  first, then `.jsonl.gz` (gzip module); all 7 predictions reads updated.
+  (4) PIPELINE showed a finished probe/A/B attempt instead of the live rest
+  bench — the attempt selector now scans all `# M5 runbook` / `## attempt`
+  blocks and picks the one with an unmatched `started` line (still running);
+  falls back to the newest by started time when none is running. Previously
+  it took the last block by position. Tests: 6 new in test_watch_round4
+  (cases/h with 0/1/2 heartbeats via the real `_heartbeat` writer, gz
+  predictions, live-attempt selection, newest-when-none-running fallback);
+  3 new in test_watch_web (fmtNullable present, fmtNum NaN guard, no raw
+  null concatenations); 8 new in dashboard-helpers.test.mjs (fmtNullable,
+  fmtNum NaN/Infinity). Bugs 2/3/5/6 (cases_total, run_i/run_n, cap_gb,
+  folder-derived rows, one model name) deferred to round 4b after M5 real
+  shapes.
+
 - leaderboard: the naive_local track (generate JSON + parse) is now a row
   (Scorer 'naive (generate+parse)', Parity '—', Time per case from
   timing.json, Cases with '(M error)' note). It was the comparison baseline

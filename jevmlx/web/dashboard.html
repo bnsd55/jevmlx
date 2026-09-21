@@ -139,7 +139,10 @@ let es = null; // EventSource
 
 function esc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;");}
 function pill(kind, text){return '<span class="pill '+esc(kind)+'">'+esc(text)+'</span>';}
-function fmtNum(v, d){return v==null?"—":(typeof v==="number"?v.toFixed(d??3):String(v));}
+/* fmtNullable: never render the literal 'null'/'undefined' — show — for null/undefined. */
+function fmtNullable(v){return v==null?"—":String(v);}
+/* fmtNum: guard NaN/Infinity (cases/h with <2 heartbeats) as well as null. */
+function fmtNum(v, d){if(v==null||!isFinite(v))return "—";return typeof v==="number"?v.toFixed(d??3):String(v);}
 function fmtDur(s){if(s==null)return "—";if(s<60)return Math.round(s)+" s";if(s<3600)return Math.round(s/60)+"m";return (s/3600).toFixed(1)+"h";}
 
 /* ================================================================
@@ -259,7 +262,7 @@ function fmtAttempt(n){return n==null?"—":String(n);}
 function patchTop(t){
   setText("top-run",t.out_dir);
   setText("top-hash",t.hash);
-  setText("top-machine",t.machine+" · mlx "+t.mlx_version);
+  setText("top-machine",fmtNullable(t.machine)+" · mlx "+fmtNullable(t.mlx_version));
   setText("top-attempt",fmtAttempt(t.attempt_n));
   setText("top-started",t.attempt_started);
   setText("top-awake",fmtDur(t.awake_s));
@@ -277,19 +280,19 @@ function patchTop(t){
   }
 }
 function patchNow(n,m,hl){
-  setText("now-sub","from heartbeat.jsonl, "+n.heartbeat_age_s+" s ago");
+  setText("now-sub","from heartbeat.jsonl, "+fmtNullable(n.heartbeat_age_s)+" s ago");
   const me=document.getElementById("now-model");
-  if(me)me.innerHTML=esc(n.model)+' <small>'+esc(n.track)+' · '+esc(n.scorer)+' · '+esc(n.dataset)+' · run '+n.run_i+' of '+n.run_n+'</small>';
+  if(me)me.innerHTML=esc(n.model)+' <small>'+esc(n.track)+' · '+esc(n.scorer)+' · '+esc(n.dataset)+' · run '+fmtNullable(n.run_i)+' of '+fmtNullable(n.run_n)+'</small>';
   const pct=n.cases_total?Math.round(n.cases_done/n.cases_total*100):0;
   setBar("now-bar",pct);
   const ce=document.getElementById("now-cases");
-  if(ce)ce.innerHTML='<span>cases <b>'+n.cases_done+' / '+n.cases_total+'</b></span><span><b>'+fmtNum(n.cases_per_h,0)+'</b> cases/h</span><span>ETA <b>'+fmtDur(n.eta_s)+'</b></span>';
+  if(ce)ce.innerHTML='<span>cases <b>'+fmtNullable(n.cases_done)+' / '+fmtNullable(n.cases_total)+'</b></span><span><b>'+fmtNum(n.cases_per_h,0)+'</b> cases/h</span><span>ETA <b>'+fmtDur(n.eta_s)+'</b></span>';
   setText("now-predlines",n.pred_lines!=null?n.pred_lines.toLocaleString():"—");
   setText("now-elapsed",fmtDur(n.combo_elapsed_s));
   const ae=document.getElementById("now-acc");
   if(ae)ae.innerHTML=fmtNum(n.running_accuracy,3)+' <small>maj '+fmtNum(n.running_majority,2)+'</small>';
   // memory
-  setText("mem-sub","cap "+m.cap_gb+" GB · stop "+m.stop_gb+" GB · machine "+m.machine_gb+" GB");
+  setText("mem-sub","cap "+fmtNullable(m.cap_gb)+" GB · stop "+fmtNullable(m.stop_gb)+" GB · machine "+fmtNullable(m.machine_gb)+" GB");
   const cacheOver=m.cache_gb>=m.stop_gb;
   const me2=document.getElementById("mem-cache");
   if(me2){me2.textContent=fmtNum(m.cache_gb,2)+" GB";me2.style.color=cacheOver?"var(--fail)":"var(--ok)";}
@@ -329,7 +332,7 @@ function patchPipeline(p){
     seen.add(s.id);
     let m="";
     if(s.wall_s!=null)m+=fmtDur(s.wall_s);
-    if(s.exit!=null)m+=(m?" · ":"")+"exit "+s.exit;
+    if(s.exit!=null)m+=(m?" · ":"")+"exit "+fmtNullable(s.exit);
     if(s.state==="running"&&s.started)m+=(m?" · ":"")+"running since "+esc(s.started);
     if(!m)m=esc(s.state);
     html+='<div class="step '+s.state+'" data-step="'+esc(s.id)+'">';
@@ -475,7 +478,7 @@ function patchEventsHistory(ev,hi){
   const hl=document.getElementById("history-list");
   if(hl){
     let h="";
-    for(const a of hi){h+='<details><summary>attempt '+a.attempt_n+' · '+esc(a.started)+' · '+esc(a.hash)+' · '+esc(a.outcome)+'</summary>';if(a.steps_failed&&a.steps_failed.length){h+='<div class="events" style="margin-top:6px">';for(const sf of a.steps_failed){h+='<div><span class="ts">—</span>'+pill("fail","fail")+'<span>'+esc(sf)+'</span></div>';}h+='</div>';}h+='</details>';}
+    for(const a of hi){h+='<details><summary>attempt '+fmtAttempt(a.attempt_n)+' · '+esc(a.started)+' · '+esc(a.hash)+' · '+esc(a.outcome)+'</summary>';if(a.steps_failed&&a.steps_failed.length){h+='<div class="events" style="margin-top:6px">';for(const sf of a.steps_failed){h+='<div><span class="ts">—</span>'+pill("fail","fail")+'<span>'+esc(sf)+'</span></div>';}h+='</div>';}h+='</details>';}
     hl.innerHTML=h;
   }
 }
@@ -496,7 +499,7 @@ function renderQuestionsPanel(){
   const fr=filterQuestions(list);
   for(let i=0;i<fr.length;i++){const r=fr[i];const origIdx=list.indexOf(r);
     h+='<tr class="'+(origIdx===selQuestion?"sel":"")+'" data-qi="'+origIdx+'">';
-    h+='<td>'+esc(r.ts)+'</td><td>'+esc(r.case_id)+' · rot'+r.rotation+'</td><td>'+esc(r.field)+'</td>';
+    h+='<td>'+esc(r.ts)+'</td><td>'+esc(r.case_id)+' · rot'+fmtNullable(r.rotation)+'</td><td>'+esc(r.field)+'</td>';
     h+='<td>'+esc(r.predicted)+'</td><td>'+esc(r.label)+'</td>';
     h+='<td>'+(r.ok?pill("ok","✓"):pill("fail","✗"))+'</td>';
     h+='<td class="num">'+fmtNum(r.p_pred,2)+'</td><td class="num">'+fmtNum(r.margin,2)+'</td>';
@@ -507,7 +510,7 @@ function renderQuestionsPanel(){
   const c=list[selQuestion];
   if(c){
     h+='<div class="qcard"><div class="qmeta">';
-    h+='<span>case <b>'+esc(c.case_id)+'</b></span><span>rotation <b>'+c.rotation+'</b></span><span>field <b>'+esc(c.field)+'</b></span>';
+    h+='<span>case <b>'+esc(c.case_id)+'</b></span><span>rotation <b>'+fmtNullable(c.rotation)+'</b></span><span>field <b>'+esc(c.field)+'</b></span>';
     h+='<span>scorer <b>'+esc(D.now?D.now.scorer:"—")+'</b></span><span>call <b>'+esc(c.call_ms!=null?c.call_ms+" ms":"—")+'</b></span>';
     h+='</div>';
     h+='<div class="ctx">'+esc(c.context_text)+'</div>';
@@ -553,7 +556,7 @@ function renderStepCard(){
   if(s.argv)h+='<div><span class="d">argv</span>   '+esc(s.argv)+'</div>';
   if(s.started)h+='<div><span class="d">started</span> '+esc(s.started)+'</div>';
   if(s.wall_s!=null)h+='<div><span class="d">wall</span>   '+fmtDur(s.wall_s)+'</div>';
-  if(s.exit!=null)h+='<div><span class="d">exit</span>    '+s.exit+'</div>';
+  if(s.exit!=null)h+='<div><span class="d">exit</span>    '+fmtNullable(s.exit)+'</div>';
   if(s.error)h+='<div><span class="e">error</span>   '+esc(s.error)+'</div>';
   h+='</div>';
   if(s.stdout_tail){h+='<div class="diag" style="margin-top:6px;max-height:200px">'+esc(s.stdout_tail)+'</div>';}
