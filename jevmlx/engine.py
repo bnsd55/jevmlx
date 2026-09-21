@@ -234,6 +234,7 @@ def _load_engine_resolved(model_id: str):
     logger.info("Loading %s into Apple Silicon unified memory...", model_id)
     t0 = time.perf_counter()
     model, tokenizer = load(model_id)
+    model = _text_model(model)
     logger.info("Engine loaded in %.2fs.", time.perf_counter() - t0)
 
     # The prompt profile is resolved ONCE here and carried on the Engine —
@@ -546,6 +547,20 @@ def _validate_json(current_text: str, schema: StructuredSchema):
         is_valid_json and isinstance(parsed_json, dict) and not missing_keys and not invalid_enums
     )
     return parsed_json, is_valid_json, parse_error, missing_keys, invalid_enums, schema_match
+
+
+def _text_model(model):
+    """The text stack of a loaded model.
+
+    Vision-language checkpoints (qwen3_5, gemma3, mistral3) load as a wrapper
+    with no ``model`` attribute and the text model under ``language_model``.
+    The engine only runs text passes, so it scores with that inner model,
+    which carries its own ``model``, head, ``args.vocab_size``, ``layers`` and
+    ``make_cache``.
+    """
+    if not hasattr(model, "model") and hasattr(model, "language_model"):
+        return model.language_model
+    return model
 
 
 def _vocab_size_of(model) -> int:
