@@ -12,6 +12,27 @@
   typesafe.fetch), and `tests/test_m5_e2e.py` parses every planned step argv
   against the REAL parser — so a CLI contract break fails the e2e test in
   seconds instead of after an 8-hour model run.
+- M5 B2: `benchmarks/m5.py` A/B worktree now resolves the branch ref via
+  `_resolve_ab_ref` — tries the local branch first, then `origin/<branch>`
+  (remote-tracking ref). Fixes the field failure where `git worktree add
+  --detach <path> w2a-field-local` hit 'fatal: invalid reference' because only
+  `origin/w2a-field-local` existed on the M5 clone. One resolver, no dual
+  code paths; falls back to the bare name so `git worktree add` emits the
+  real error when neither resolves.
+- M5 B3: a failed A/B setup step no longer crashes the runbook. (a) A step
+  whose declared `cwd` is missing is recorded as failed (exit -1) in the
+  step log, never raised. (b) When `ab-setup` fails, every later `ab-*` step
+  is SKIPPED with a RUNBOOK line 'skipped: A/B setup failed', and SUMMARY
+  still runs for the main side with an 'A/B: not run (setup failed)' note
+  (via an `ab-failed.txt` marker the summary step reads). (c) Any unexpected
+  exception inside a step is caught in the main loop, recorded with its
+  type+message in the step log, and the runbook continues to the next
+  non-dependent step. (d) `m5` exit code stays non-zero when any step
+  failed. 10 tests (`tests/test_m5_ab_fix.py`): `_resolve_ab_ref` (local /
+  origin fallback / neither), missing-cwd recorded, exception caught+
+  recorded+runbook continues, A/B setup failure skips ab-* steps + SUMMARY
+  note + non-zero exit, A/B setup success runs ab-* steps (no over-skip),
+  `build_summary_text` note, `runbook_append` skipped flag.
 
 - naive_local track writes timing.json; SUMMARY latency is call-level for
   every track. The naive track's `_meta` now carries `per_item_end_to_end_ms`
