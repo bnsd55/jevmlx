@@ -35,6 +35,9 @@ __all__ = [
     "build_questions",
     "render_html",
     "_dashboard_html",
+    "_handle_sse",
+    "_watched_files",
+    "_mtimes_signature",
     "run_watch",
 ]
 
@@ -1565,19 +1568,103 @@ def _dashboard_html(refresh: float) -> str:
     """Load the static control-room page and inject the refresh interval.
 
     The page is a single self-contained HTML file (inline CSS + vanilla JS,
-    no framework, no CDN) shipped at ``jevmlx/web/dashboard.html``.
+    no framework, no CDN) shipped at ``jevmlx/web/dashboard.html``. The
+    ``__REFRESH__`` placeholder becomes ``const REFRESH`` — the SSE scan
+    interval, not a meta-refresh tag (the page is live via SSE + DOM
+    patching, no full-page reload).
     """
     html_path = Path(__file__).parent / "web" / "dashboard.html"
     html = html_path.read_text(encoding="utf-8")
     return html.replace("__REFRESH__", str(int(max(1, refresh))))
 
 
+def _watched_files(out_dir: Path) -> list[Path]:
+    """Files whose mtime change signals a dashboard update.
+
+    RUNBOOK.md + every heartbeat.jsonl / run.json under <out> (including
+    combo subdirectories). Cheap os.stat scan — no file reads.
+    """
+    files = [out_dir / "RUNBOOK.md", out_dir / "run.json"]
+    for c in _combo_dirs(out_dir):
+        files.append(c / "heartbeat.jsonl")
+        files.append(c / "run.json")
+        files.append(c / "predictions.jsonl")
+    return [f for f in files if f.exists()]
+
+
+def _mtimes_signature(paths: list[Path]) -> tuple:
+    """A tuple of (path, mtime_ns) pairs — changes when any file changes."""
+    sig = []
+    for p in paths:
+        try:
+            sig.append((str(p), p.stat().st_mtime_ns))
+        except OSError:
+            sig.append((str(p), 0))
+    return tuple(sig)
+
+
+def _handle_sse(
+    out_dir: Path,
+    wfile,
+    refresh: float,
+    *,
+    mtime_source=None,
+    max_iterations: int | None = None,
+) -> None:
+    """Server-Sent Events: emit 'event: dashboard' when watched files change.
+
+    One thread per connection. Watches mtimes of RUNBOOK.md and every
+    heartbeat.jsonl / run.json / predictions.jsonl under <out> (cheap
+    os.stat scan every ``refresh`` seconds). On change, writes the full
+    build_dashboard JSON as a ``dashboard`` event. Every 15 s without
+    change, writes a ``: keepalive`` comment. The browser's EventSource
+    reconnects automatically on disconnect.
+
+    Test hooks (production ignores them):
+      * ``mtime_source``: a callable returning a signature tuple; defaults
+        to ``_mtimes_signature(_watched_files(out_dir))``. Inject a fake
+        to drive deterministic change/timeout scenarios without threads.
+      * ``max_iterations``: stop after N loop iterations (tests only).
+    """
+    import time
+
+    if mtime_source is None:
+
+        def mtime_source():
+            return _mtimes_signature(_watched_files(out_dir))
+
+    keepalive_s = 15.0
+    last_keepalive = time.monotonic()
+    last_sig = mtime_source()
+    i = 0
+    while True:
+        time.sleep(refresh)
+        sig = mtime_source()
+        now = time.monotonic()
+        if sig != last_sig:
+            last_sig = sig
+            payload = json.dumps(build_dashboard(out_dir))
+            msg = f"event: dashboard\ndata: {payload}\n\n"
+            wfile.write(msg.encode("utf-8"))
+            wfile.flush()
+            last_keepalive = now
+        elif now - last_keepalive >= keepalive_s:
+            wfile.write(b": keepalive\n\n")
+            wfile.flush()
+            last_keepalive = now
+        i += 1
+        if max_iterations is not None and i >= max_iterations:
+            break
+            last_keepalive = now
+
+
 def _serve_web(out_dir: Path, *, port: int, refresh: float) -> None:
-    """Serve the static dashboard page + JSON over stdlib http.server.
+    """Serve the static dashboard page + JSON + SSE over stdlib http.server.
 
     Routes: ``/`` (HTML page), ``/dashboard.json`` (the 9-key contract),
-    ``/questions.json?combo=<id>`` (the flat question list).
-    No new dependency, no JS framework.
+    ``/questions.json?combo=<id>`` (the flat question list), ``/events``
+    (Server-Sent Events: pushes a new dashboard payload when watched files
+    change). No new dependency, no JS framework.
     """
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from urllib.parse import parse_qs, urlparse
@@ -1589,7 +1676,6 @@ def _serve_web(out_dir: Path, *, port: int, refresh: float) -> None:
             pass
 
         def do_GET(self):
-
             parsed = urlparse(self.path)
             if parsed.path == "/dashboard.json":
                 payload = json.dumps(build_dashboard(out_dir)).encode("utf-8")
@@ -1599,6 +1685,13 @@ def _serve_web(out_dir: Path, *, port: int, refresh: float) -> None:
                 combo = qs.get("combo", [""])[0]
                 payload = json.dumps(build_questions(out_dir, combo)).encode("utf-8")
                 self._send(200, "application/json", payload)
+            elif parsed.path == "/events":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "keep-alive")
+                self.end_headers()
+                _handle_sse(out_dir, self.wfile, refresh)
             elif parsed.path == "/":
                 self._send(200, "text/html; charset=utf-8", page_html.encode("utf-8"))
             else:
@@ -1612,7 +1705,7 @@ def _serve_web(out_dir: Path, *, port: int, refresh: float) -> None:
             self.wfile.write(payload)
 
     server = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
-    print(f"[watch] web dashboard at http://127.0.0.1:{port}/ (refresh {int(refresh)}s)")
+    print(f"[watch] web dashboard at http://127.0.0.1:{port}/ (SSE, refresh {int(refresh)}s)")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
