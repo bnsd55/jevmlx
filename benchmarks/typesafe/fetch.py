@@ -281,7 +281,7 @@ def _model_answers(case: dict, node_name: str, qid: str) -> dict:
     return answers
 
 
-def iter_case_records(workflow: str, eval_obj: dict) -> Iterator[dict]:
+def iter_case_records(workflow: str, eval_obj: dict, stats: dict | None = None) -> Iterator[dict]:
     """Yield one eval record per distinct read-set of each published case.
 
     Field identity is ``(node_id, qid, occurrence)``: a qid answered at more
@@ -291,16 +291,26 @@ def iter_case_records(workflow: str, eval_obj: dict) -> Iterator[dict]:
     different read-sets, the case is split into one record per read-set with
     ``/n<k>`` id suffixes and the original case id as ``group_id``; otherwise
     it stays a single record.
+
+    ``stats`` (optional) accumulates drop counters: ``skipped_groups`` (a
+    group where every question was skipped) and ``skipped_questions``. The
+    caller reads them for the fetch summary.
     """
     catalog = eval_obj["questions"]
+    stats = stats if stats is not None else {}
     for example in eval_obj["examples"]:
         case_id = example["case_id"]
         case = eval_obj["cases"][case_id]
-        yield from _case_records(workflow, case_id, case, eval_obj, catalog)
+        yield from _case_records(workflow, case_id, case, eval_obj, catalog, stats)
 
 
 def _case_records(
-    workflow: str, case_id: str, case: dict, eval_obj: dict, catalog: list[dict]
+    workflow: str,
+    case_id: str,
+    case: dict,
+    eval_obj: dict,
+    catalog: list[dict],
+    stats: dict | None = None,
 ) -> Iterator[dict]:
     # qid -> node index map for this case (union over every model's nodes;
     # the catalog is workflow-wide, so any node's map contributes).
@@ -372,6 +382,17 @@ def _case_records(
         record_id = f"typesafe/{workflow}/{case_id}"
         if len(groups) > 1:
             record_id += f"/n{group_index}"
+        # A group where every question was skipped (unmapped qid or no
+        # consensus) yields an empty schema — no decidable field. Do not
+        # yield it: the engine cannot classify a context with no field to
+        # fill, and a record with schema={} + labels={} crashes the bench's
+        # metric collector. Count it in the stats dict so the fetch summary
+        # reports the drop.
+        if not schema:
+            if stats is not None:
+                stats["skipped_groups"] = stats.get("skipped_groups", 0) + 1
+                stats["skipped_questions"] = stats.get("skipped_questions", 0) + skipped
+            continue
         yield {
             "id": record_id,
             "group_id": f"typesafe/{workflow}/{case_id}",
@@ -399,21 +420,22 @@ def fetch_all(
     cache_dir = cache_dir or CACHE_DIR
     records: list[dict] = []
     field_types = {"boolean": 0, "enum": 0, "multi": 0}
-    skipped_questions = 0
+    stats: dict[str, int] = {"skipped_questions": 0, "skipped_groups": 0}
     sources: list[dict] = []
     for workflow in workflows:
         eval_obj, source_meta = fetch_workflow(workflow, cache_dir, refresh=refresh)
         sources.append(source_meta)
-        for record in iter_case_records(workflow, eval_obj):
+        for record in iter_case_records(workflow, eval_obj, stats):
             records.append(record)
-            skipped_questions += record.pop("skipped_questions")
+            stats["skipped_questions"] += record.pop("skipped_questions")
             for field in record["schema"].values():
                 field_types[field["type"]] += 1
     summary = {
         "workflows": len(workflows),
         "records": len(records),
         "fields": field_types,
-        "skipped_questions": skipped_questions,
+        "skipped_questions": stats["skipped_questions"],
+        "skipped_groups": stats["skipped_groups"],
     }
     return records, summary, sources
 
@@ -488,6 +510,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"records: {summary['records']}")
     print(f"fields: {summary['fields']['boolean']} boolean, {summary['fields']['enum']} enum")
     print(f"skipped questions (free text): {summary['skipped_questions']}")
+    if summary.get("skipped_groups"):
+        print(f"skipped groups (empty schema): {summary['skipped_groups']}")
     print(f"wrote {args.out}")
     print(f"wrote {lock_path}")
     return 0
