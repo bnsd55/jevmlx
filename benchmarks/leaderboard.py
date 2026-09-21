@@ -295,6 +295,10 @@ def _local_rows(results_root: Path) -> list[dict]:
                 if run_counts_cases is not None
                 else (n_cases if n_cases is not None else n_fields)
             )
+            # Count error lines (scoring failures) for the row note.
+            from benchmarks.check_results import _error_lines_in_folder
+
+            error_count = len(_error_lines_in_folder(combo))
             # W6-B1: for non-TypeSafe datasets (jabr), the per-workflow
             # breakdown comes from per_workflow_accuracy (general metric),
             # and the overall accuracy from metrics["accuracy"].
@@ -351,6 +355,7 @@ def _local_rows(results_root: Path) -> list[dict]:
                     "time_per_case_s": time_per_case_s,
                     "cost_per_case_usd": "$0 (local)",
                     "cases": cases_count,
+                    "error_count": error_count,
                 }
             )
     return rows
@@ -410,6 +415,10 @@ def _row_line(r: dict) -> str:
         parity_cell = f"DRIFT ({r.get('parity_max_drift', 0):.3f})"
     else:
         parity_cell = str(parity_word)
+    # Cases cell: counts.cases (45) + error note if there are error lines.
+    cases_cell = str(r.get("cases", "—"))
+    if r.get("error_count"):
+        cases_cell += f" ({r['error_count']} error)"
     return (
         f"| {r['model']} | {r['source']} | {r.get('scorer', '—')} | "
         f"{r.get('machine', '—')} | {_fmt_pct_with_ci(r.get('accuracy'), r.get('accuracy_ci'))} | "
@@ -417,7 +426,7 @@ def _row_line(r: dict) -> str:
         f"{' | '.join(wf_cells)} | "
         f"{_fmt_seconds(r.get('time_per_case_s'))} | "
         f"{cost_cell} | "
-        f"{r.get('cases', '—')} |"
+        f"{cases_cell} |"
     )
 
 

@@ -353,6 +353,14 @@ faster than a single trie-constrained pass on 255-option enums. Output:
       benchmarks.check_results` on the changed folders: contract keys, folder
       size, dataset lock, and report reproducibility — all must pass before
       merge)
+- **Error lines**: a prediction line whose `error` key is a non-empty string
+  is an error record (the field's scoring failed — e.g. a context too long
+  for the model's window). Error lines may have null `correct`,
+  `probability`, `prediction`, `per_item_end_to_end_ms`, and `log_scores`; they
+  are allowed by the contract and counted in an errors summary (per combo:
+  count + first error text) printed by `check_results` and shown in the
+  leaderboard 'Cases' column as `N (M error)`. A line with null values and
+  NO `error` key is still a contract violation.
 - [ ] Ran `python -m benchmarks.leaderboard --results benchmarks/results
       --readme README.md` so the README leaderboard block is up to date
       (the `--check-readme` freshness gate in `results-check` CI enforces this)

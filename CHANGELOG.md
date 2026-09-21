@@ -21,6 +21,17 @@
   the click handler sends `combo_id` verbatim + tracks `display_name`, and
   `fmtAttempt` renders null as `—`; Node 20 test covers `fmtAttempt`.
 
+- results contract: error lines are allowed and counted. A prediction line
+  whose `error` key is a non-empty string is an error record (the field's
+  scoring failed — e.g. a context too long for the model's window). Error
+  lines may have null `correct`, `probability`, `prediction`,
+  `per_item_end_to_end_ms`, and `log_scores`; they are allowed by the
+  contract and counted in an errors summary (per combo: count + first error
+  text) printed by `check_results` and shown in the leaderboard 'Cases'
+  column as `N (M error)`. A line with null values and NO `error` key is
+  still a contract violation. Fixes the last 2 FAILs on the 7B typesafe
+  combos (PR #122): line 288 was an error record (correct=None,
+  per_item_end_to_end_ms=None) rejected by the type checks.
 - watch: live dashboard via SSE and DOM patching (no reload, no root wipe).
   The control-room page (`jevmlx/web/dashboard.html`) dropped its
   `<meta http-equiv=refresh>` tag and `setInterval`+`root.innerHTML` wipe —
