@@ -1108,13 +1108,13 @@ class TestM5MainEndToEnd:
 
         calls.clear()
         m5.main(["--out", str(out), "--parity-models", QUALITY_TARGET, "--allow-sleep"])
-        # Every step was skipped: no subprocess work at all, and the runbook
-        # marks them 'skip (outputs exist)'.
+        # B9: the summary step is NEVER skipped (always regenerated); every
+        # OTHER step is skipped because its outputs exist.
         assert calls == []
         runbook = (out / "RUNBOOK.md").read_text()
-        assert runbook.count("skip (outputs exist)") == len(
-            plan_steps(out, parity_models=[QUALITY_TARGET])
-        )
+        steps = plan_steps(out, parity_models=[QUALITY_TARGET])
+        non_summary_steps = [s for s in steps if not s.in_process]
+        assert runbook.count("skip (outputs exist)") == len(non_summary_steps)
 
     def test_fresh_reruns_despite_markers(self, tmp_path, monkeypatch):
         out = tmp_path / "run-fresh"
@@ -1268,6 +1268,63 @@ class TestM5MainEndToEnd:
         assert real_os.environ.get("JEVMLX_M5_CAFFEINATED") != "1"  # popped
         runbook = (out / "RUNBOOK.md").read_text()
         assert "sleep_blocked: False" in runbook
+
+    def test_b7_bench_reruns_when_combo_failed(self, tmp_path, monkeypatch):
+        """B7: a bench step whose combos include a run_failed/load_failed
+        combo is NOT done on rerun — it reruns so the failed combos get
+        retried (bench itself skips the clean combos). The .done marker
+        alone is insufficient because bench exits 0 when at least one
+        combo succeeded."""
+        import json as _json
+
+        out = tmp_path / "run-b7"
+        calls: list[tuple[str, int]] = []
+        fake_run = self._fake_run_factory(out, calls)
+        monkeypatch.setattr(m5, "subprocess", self._fake_subprocess(fake_run))
+        monkeypatch.delenv("JEVMLX_M5_CAFFEINATED", raising=False)
+        m5.main(["--out", str(out), "--parity-models", QUALITY_TARGET, "--allow-sleep"])
+
+        # Sabotage one combo's run.json to record a run_failed status.
+        model_dir = out / "bench-quality" / "m2pro-32gb-mlx-community--qwen2.5-7b-instruct-4bit"
+        failed_combo = next(model_dir.iterdir())
+        run_json = failed_combo / "run.json"
+        run_json.write_text(
+            _json.dumps({"status": "run_failed", "error": {"type": "Test", "message": "sim"}}),
+            encoding="utf-8",
+        )
+
+        calls.clear()
+        m5.main(["--out", str(out), "--parity-models", QUALITY_TARGET, "--allow-sleep"])
+        # The bench-quality step RERAN (not skipped) because a combo failed.
+        bench_calls = [c for c in calls if c[0] == "bench"]
+        assert bench_calls, "bench-quality should have rerun (a combo failed)"
+        runbook = (out / "RUNBOOK.md").read_text()
+        assert "jevmlx bench --model quality" in runbook
+
+    def test_b9_summary_always_regenerates(self, tmp_path, monkeypatch):
+        """B9: SUMMARY.md is a pure function of the JSON artifacts — it is
+        ALWAYS regenerated, never marker-skipped. A second run rewrites it
+        even when every other step is skipped."""
+        out = tmp_path / "run-b9"
+        calls: list[tuple[str, int]] = []
+        fake_run = self._fake_run_factory(out, calls)
+        monkeypatch.setattr(m5, "subprocess", self._fake_subprocess(fake_run))
+        monkeypatch.delenv("JEVMLX_M5_CAFFEINATED", raising=False)
+        m5.main(["--out", str(out), "--parity-models", QUALITY_TARGET, "--allow-sleep"])
+        summary1_text = (out / "SUMMARY.md").read_text()
+        summary1_mtime = (out / "SUMMARY.md").stat().st_mtime_ns
+
+        calls.clear()
+        m5.main(["--out", str(out), "--parity-models", QUALITY_TARGET, "--allow-sleep"])
+        # No subprocess steps ran (all skipped), but SUMMARY was regenerated.
+        assert calls == []
+        summary2_text = (out / "SUMMARY.md").read_text()
+        summary2_mtime = (out / "SUMMARY.md").stat().st_mtime_ns
+        assert summary1_text == summary2_text  # same content (same artifacts)
+        assert summary2_mtime > summary1_mtime  # but rewritten (regenerated)
+        runbook = (out / "RUNBOOK.md").read_text()
+        # The summary step section shows it RAN (exit 0), not 'skip'.
+        assert "SUMMARY.md (main vs A/B) — exit 0" in runbook
 
     # -- helpers ---------------------------------------------------------
 

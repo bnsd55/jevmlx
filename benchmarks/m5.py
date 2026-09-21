@@ -12,13 +12,18 @@ Each step is a subprocess logged with wall time and exit status into
  5. ``benchmarks.timing --model quality --reps 5``.
  6. ``jevmlx bench --models-file`` for the remaining parity models.
  7. With ``--ab-branch``: a temp worktree of that branch, its own venv, and
-    steps 3+4 rerun there (A/B against main). The worktree is removed after.
+    steps 3+4 rerun there (A/B against main). The worktree is removed only
+    after SUMMARY succeeds; a failed runbook leaves it for a rerun (B8).
  8. ``<out>/SUMMARY.md`` comparing main vs A/B: agreement, flip rate, drift,
-    time per case, peak memory — from the produced json files only.
+    time per case, peak memory — from the produced json files only. Always
+    regenerated (B9: a pure function of the JSON, never marker-skipped).
 
 Idempotent: a step whose outputs already exist is skipped (``--fresh``
-ignores the markers and reruns). The step planner and the summary builder
-are pure functions tested with fakes; no model ever loads in a unit test.
+ignores the markers and reruns). B7: bench steps are done only when no
+combo's run.json records run_failed/load_failed (bench exits 0 even when
+some combos failed). B8: ab-setup is done only when the worktree AND its
+venv python exist. The step planner and the summary builder are pure
+functions tested with fakes; no model ever loads in a unit test.
 
 Usage:
     python -m benchmarks.m5 --out m5-2026-09-18 [--models-file models.txt]
@@ -65,7 +70,14 @@ DEFAULT_PARITY_MODELS = (
 class Step:
     """One runbook step: a subprocess (or the in-process summary), its idempotency
     outputs, and logging metadata. ``extra_argv`` runs after ``argv`` into the
-    same log (multi-command setup steps); every command must exit 0."""
+    same log (multi-command setup steps); every command must exit 0.
+
+    B7: bench steps set ``bench_results_dir`` so ``step_done`` can check every
+    combo's ``run.json`` for ``run_failed``/``load_failed`` — a step whose
+    combos include a failure is NOT done (it reruns; bench itself skips the
+    clean combos and reruns the failed ones, so this is cheap). B9: the
+    summary step has ``in_process=True`` and ``step_done`` always returns
+    False for it (SUMMARY is a pure function of the JSON, always regenerated)."""
 
     id: str
     title: str
@@ -80,6 +92,8 @@ class Step:
     pre_target: Path | None = None
     extra_argv: tuple[tuple[str, ...], ...] = ()
     in_process: bool = False  # the summary step: rendered from artifacts
+    # B7: for bench steps, the --out dir whose combo subdirs carry run.json.
+    bench_results_dir: Path | None = None
 
 
 def _venv_bin(name: str) -> str:
@@ -200,6 +214,7 @@ def plan_steps(
                 str(out / "bench-quality"),
             ),
             outputs=(out / "bench-quality.done",),
+            bench_results_dir=out / "bench-quality",
         )
     )
     steps.append(
@@ -268,6 +283,7 @@ def plan_steps(
                     str(out / "bench-rest"),
                 ),
                 outputs=(out / "bench-rest.done",),
+                bench_results_dir=out / "bench-rest",
             )
         )
     if ab_branch is not None:
@@ -283,8 +299,29 @@ def plan_steps(
             Step(
                 id="ab-setup",
                 title=f"A/B setup: worktree + venv for {ab_branch}",
-                argv=("git", "worktree", "add", "--detach", str(worktree), ab_ref),
+                argv=(
+                    sys.executable,
+                    "-c",
+                    # B8: remove a stale worktree dir (one without a venv
+                    # python) before `git worktree add` — a prior run that
+                    # failed before summary left it in place for a rerun, but
+                    # git worktree add refuses an existing path. This is a
+                    # no-op when the worktree is absent or already complete.
+                    "import shutil, sys; from pathlib import Path; "
+                    f"wt = Path({str(worktree)!r}); "
+                    f"vp = wt / '.venv' / 'bin' / 'python'; "
+                    "shutil.rmtree(wt, ignore_errors=True) "
+                    "if wt.exists() and not vp.exists() else None",
+                ),
                 extra_argv=(
+                    (
+                        "git",
+                        "worktree",
+                        "add",
+                        "--detach",
+                        str(worktree),
+                        ab_ref,
+                    ),
                     (
                         shutil.which("uv") or "uv",
                         "venv",
@@ -397,9 +434,52 @@ def plan_steps(
     return steps
 
 
+def _bench_has_failed_combo(results_dir: Path) -> bool:
+    """B7: True when any combo subdir under a bench results dir has a
+    ``run.json`` whose ``status`` is ``run_failed`` or ``load_failed``.
+
+    Bench exits 0 when at least one combo succeeded, so the .done marker
+    alone is not a sufficient done-signal: a rerun must re-enter the bench
+    step so the failed combos rerun (bench itself skips the clean combos
+    and reruns the failed ones, so this is cheap)."""
+    if not results_dir.is_dir():
+        return False
+    for run_json in results_dir.glob("**/run.json"):
+        try:
+            status = json.loads(run_json.read_text(encoding="utf-8")).get("status")
+        except (OSError, json.JSONDecodeError):
+            continue
+        if status in ("run_failed", "load_failed"):
+            return True
+    return False
+
+
 def step_done(step: Step, fresh: bool) -> bool:
-    """Idempotency rule: skip when every output exists, unless --fresh."""
-    return not fresh and all(p.exists() for p in step.outputs)
+    """Idempotency rule: skip when the step is done, unless --fresh.
+
+    B7: a bench step is done only when its .done marker exists AND no combo's
+    run.json records a run_failed/load_failed status (bench exits 0 even when
+    some combos failed, so the marker alone is insufficient).
+    B8: ab-setup is done only when the worktree AND its venv python exist
+    (the .done marker alone never skips it — the runbook's finally-block may
+    have removed the worktree after a prior run, and a rerun must rebuild it).
+    B9: the summary step (in_process) is NEVER done — SUMMARY.md is a pure
+    function of the JSON artifacts and is always regenerated."""
+    if fresh:
+        return False
+    if step.in_process:
+        return False  # B9: SUMMARY always regenerates
+    if step.id == "ab-setup":
+        # B8: the worktree + venv python must exist, not just the .done marker.
+        worktree = step.outputs[0].parent / "ab-worktree"
+        venv_python = worktree / ".venv" / "bin" / "python"
+        return all(p.exists() for p in step.outputs) and venv_python.exists()
+    if step.bench_results_dir is not None:
+        # B7: done only when the marker exists AND no combo failed.
+        if not all(p.exists() for p in step.outputs):
+            return False
+        return not _bench_has_failed_combo(step.bench_results_dir)
+    return all(p.exists() for p in step.outputs)
 
 
 def _step_env(step: Step) -> dict[str, str]:
@@ -860,6 +940,12 @@ def main(argv: list[str] | None = None) -> int:
     # with a RUNBOOK line. The summary step still runs for the main side
     # with an 'A/B: not run' note.
     ab_setup_failed = False
+    # B8: the A/B worktree is removed ONLY after the summary step succeeds
+    # (not in a finally block). A runbook that fails before summary leaves
+    # the worktree in place so a rerun can reuse it; a rerun whose worktree
+    # was externally removed will have ab-setup rerun (step_done checks the
+    # venv python, not just the .done marker) and rebuild it.
+    summary_succeeded = False
     try:
         for index, step in enumerate(steps, 1):
             if step_done(step, args.fresh):
@@ -884,6 +970,8 @@ def main(argv: list[str] | None = None) -> int:
                 for marker in step.outputs:
                     if marker.name == f"{step.id}.done":
                         marker.touch()
+                if step.in_process:
+                    summary_succeeded = True
             else:
                 failures.append(step.id)
                 # B3(b): mark A/B setup as failed so later ab-* steps skip.
@@ -899,7 +987,11 @@ def main(argv: list[str] | None = None) -> int:
                         )
                     return 1
     finally:
-        if worktree.exists() and shutil.which("git"):
+        # B8: remove the A/B worktree ONLY after summary succeeded. A failed
+        # runbook leaves it for a rerun; --fresh reruns ab-setup which
+        # rebuilds the worktree (the stale one is removed by the ab-setup
+        # pre-step when the venv python is missing).
+        if summary_succeeded and worktree.exists() and shutil.which("git"):
             subprocess.run(
                 ["git", "worktree", "remove", "--force", str(worktree)],
                 cwd=REPO_ROOT,

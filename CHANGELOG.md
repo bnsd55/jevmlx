@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- m5: step done-markers now encode OUTCOME, not just exit code. A bench
+  step is done only when no combo's `run.json` records `run_failed`/
+  `load_failed` (bench exits 0 even when some combos failed, so the `.done`
+  marker alone was a false positive — a rerun skipped the step and the
+  failed combos never retried). A/B setup is done only when the worktree
+  AND its venv python exist (the `.done` marker alone never skips it — the
+  runbook's finally-block removed the worktree after every run, so a rerun
+  skipped setup and every A/B step failed with 'cwd does not exist'). The
+  worktree is now removed only after SUMMARY succeeds; a failed runbook
+  leaves it for a rerun. SUMMARY.md is always regenerated (a pure function
+  of the JSON, never marker-skipped). `--fresh` semantics unchanged.
+
 - m5: `plan_steps` resolves the quality alias ONCE on the main side
   (`jevmlx.models.resolve_model`) and passes the concrete Hub id in EVERY
   argv the runbook builds, main and A/B (bench, invariance, timing, probe,
