@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- watch page: patch on first paint; unique combo id on click. Three page
+  bugs from the M5 live report: (1) first paint built DOM shells but never
+  called `patchDashboard(D)` with the fetched `/dashboard.json` payload, so
+  NOW/MEMORY/HEALTH/AGGREGATES showed empty shells until the first SSE event —
+  `initialRender` now calls `patchDashboard(D)` after setting `booted=true`,
+  filling the shells with real values before any event arrives (same path the
+  SSE handler uses). (2) the row click sent a `model|dataset|scorer|track`
+  pipe-string as the combo id, which is not unique across models —
+  `/questions.json?combo=parallel-labels-typesafe` returned `[]`. The page now
+  keys rows by `results[i].combo_id` (the out-relative path
+  `<bench-dir>/<model-folder>/<combo>`, `'.'` for a single-combo bench) and
+  sends it verbatim (URL-encoded) to `/questions.json?combo=`; a separate
+  `display_name` (the combo folder name) is used for the Questions header.
+  Deep-link `?combo=<id>` looks up `display_name` from `D.results`. (3)
+  `attempt_n=null` rendered as empty/`0` — now shows `—` via `fmtAttempt`.
+  Tests: grep tests assert `patchDashboard(D)` is called after `booted=true`,
+  the click handler sends `combo_id` verbatim + tracks `display_name`, and
+  `fmtAttempt` renders null as `—`; Node 20 test covers `fmtAttempt`.
+
 - watch: live dashboard via SSE and DOM patching (no reload, no root wipe).
   The control-room page (`jevmlx/web/dashboard.html`) dropped its
   `<meta http-equiv=refresh>` tag and `setInterval`+`root.innerHTML` wipe —
