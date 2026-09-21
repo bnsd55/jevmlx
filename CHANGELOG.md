@@ -13,6 +13,20 @@
   attempt headers = one attempt; each step id shows its last occurrence
   only.
 
+- leaderboard and check_results: three contract fixes for the interim 7B
+  results (PR #122). (1) check_results resolved the dataset lock at
+  ``<dataset>.dataset.lock.json`` in the MODEL folder (the parent of the
+  combo, where the bench writes it since #84/#110) and verifies
+  ``sha256(file) == run.json``'s ``dataset_lock_sha256``; the old code
+  required a per-combo ``dataset.lock.json`` the bench never writes, so
+  every combo failed. (2) leaderboard 'Time per case' reads the call-level
+  ``per_item_end_to_end_ms`` median from ``timing.json`` (the same source
+  ``summarize_results`` uses since #99), not the per-line latency from
+  predictions (which sums rotations and inflated the 7B's time/case to
+  11.0 s while the call-level median was 0.59 s). (3) 'Cases' comes from
+  ``run.json``'s ``counts.cases`` (the source of truth), not the agreement
+  metrics' ``n_cases`` (which undercounts when a case has no valid
+  prediction).
 - watch: discover combos from the real bench/m5 layout (fixture from real
   writers). `_combo_dirs` now rglobs for any of `run.json` / `heartbeat.jsonl`
   / `predictions.jsonl` (a LIVE combo has heartbeat+predictions but NO

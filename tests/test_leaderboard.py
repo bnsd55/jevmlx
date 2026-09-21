@@ -172,12 +172,12 @@ def _write_local_result_v2(root: Path) -> Path:
     """Same fixture, but predictions carry the results-contract-v2 per-item
     end-to-end timing (the only shape the leaderboard accepts now)."""
     combo = next(p for p in (root / "m1-8gb-fake").iterdir() if p.is_dir())
-    records = []
-    for i, line in enumerate((combo / "predictions.jsonl").read_text().splitlines()):
-        rec = json.loads(line)
-        rec["per_item_end_to_end_ms"] = 700.0 + i * 100  # median 0.85s -> 0.8s at 1dp
-        records.append(json.dumps(rec))
-    (combo / "predictions.jsonl").write_text("\n".join(records) + "\n", encoding="utf-8")
+    # parity-gates: time/case comes from timing.json median
+    # per_item_end_to_end_ms (same source as summarize_results since #99),
+    # not from prediction lines.
+    (combo / "timing.json").write_text(
+        json.dumps({"median": {"per_item_end_to_end_ms": 850.0}}), encoding="utf-8"
+    )
     return root
 
 
@@ -189,7 +189,12 @@ def _add_typed_decisions_combo(root: Path) -> None:
     dst.mkdir()
     run = json.loads((src / "run.json").read_text())
     run["config"]["dataset_path"] = "/cache/jevmlx/bench/typed-decisions.jsonl"
+    run["counts"]["cases"] = 400  # match the report's n_cases
     (dst / "run.json").write_text(json.dumps(run), encoding="utf-8")
+    # parity-gates: timing.json at the combo level (time/case source).
+    (dst / "timing.json").write_text(
+        json.dumps({"median": {"per_item_end_to_end_ms": 850.0}}), encoding="utf-8"
+    )
     report = json.loads((src / "report.json").read_text())
     report["metrics"]["agreement"]["agreement_common_subset"] = 0.6
     report["metrics"]["agreement"]["n_cases"] = 400
@@ -206,7 +211,9 @@ def _add_typed_decisions_combo(root: Path) -> None:
         "counts": {},
         "cases_sha256": "x",
     }
-    (dst / "typed-decisions.dataset.lock.json").write_text(json.dumps(lock), encoding="utf-8")
+    (machine_dir / "typed-decisions.dataset.lock.json").write_text(
+        json.dumps(lock), encoding="utf-8"
+    )
 
 
 def test_typed_decisions_rows_render_in_their_own_group(tmp_path):
@@ -412,21 +419,15 @@ def test_main_check_readme_exits_0_when_fresh(tmp_path, capsys):
 
 def test_local_rows_accept_single_path_folder(tmp_path):
     """W5c-3: the single path (run_parallel_generation) also reports
-    per_item_end_to_end_ms — a parallel folder whose lines carry it but no
-    batched pair (group_wall_ms/per_item_amortized_ms) is a valid folder:
-    the leaderboard must accept it (the contract is per-item e2e, not
-    batched-specific keys)."""
-    import json as _json
-
+    per_item_end_to_end_ms — a parallel folder whose timing.json carries
+    it is a valid folder: the leaderboard must accept it."""
     official = _write_official(tmp_path)
     results = _write_local_result(tmp_path)
     combo = next(p for p in (results / "m1-8gb-fake").iterdir() if p.is_dir())
-    records = []
-    for i, line in enumerate((combo / "predictions.jsonl").read_text().splitlines()):
-        rec = _json.loads(line)
-        rec["per_item_end_to_end_ms"] = 500.0 + i * 100  # median 0.65s -> 0.7s at 1dp
-        records.append(_json.dumps(rec))
-    (combo / "predictions.jsonl").write_text("\n".join(records) + "\n", encoding="utf-8")
+    # parity-gates: time/case from timing.json median per_item_end_to_end_ms
+    (combo / "timing.json").write_text(
+        json.dumps({"median": {"per_item_end_to_end_ms": 650.0}}), encoding="utf-8"
+    )
     table = build_table(results, None, official)
     assert "fake-1b" in table
     assert "0.7s" in table  # per-item e2e median, not the latency_ms median

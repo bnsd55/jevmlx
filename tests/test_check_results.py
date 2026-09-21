@@ -70,7 +70,17 @@ def _write_valid(folder: Path, records=None):
         "counts": {"cases": 2, "fields": 2, "prediction_lines": len(records)},
     }
     (folder / "run.json").write_text(json.dumps(run, indent=2, sort_keys=True) + "\n")
-    (folder / "dataset.lock.json").write_text(json.dumps({"source": "fix"}) + "\n")
+    # parity-gates: the dataset lock lives at the MODEL folder level as
+    # <dataset>.dataset.lock.json (the parent of the combo), and run.json
+    # carries dataset_lock_sha256. The combo folder does NOT have a
+    # per-combo dataset.lock.json.
+    import hashlib
+
+    lock_content = json.dumps({"source": "fix"}) + "\n"
+    lock_path = folder.parent / "fix.dataset.lock.json"
+    lock_path.write_text(lock_content)
+    run["config"]["dataset_lock_sha256"] = hashlib.sha256(lock_content.encode()).hexdigest()
+    (folder / "run.json").write_text(json.dumps(run, indent=2, sort_keys=True) + "\n")
     # Results contract v2: the parallel track's honest timing split medians
     # (the same keys the engine's _meta carries, incl. failed_attempts and
     # peak memory).
@@ -162,9 +172,10 @@ def test_wrong_type_fails(tmp_path):
 
 
 def test_missing_dataset_lock_fails(tmp_path):
-    folder = tmp_path / "combo"
+    folder = tmp_path / "model" / "combo"
     _write_valid(folder)
-    (folder / "dataset.lock.json").unlink()
+    # Remove the model-folder lock (the one the bench writes).
+    (folder.parent / "fix.dataset.lock.json").unlink()
     ok, problems = check_folder(folder)
     assert not ok
     assert any("dataset.lock.json" in p for p in problems)
@@ -578,23 +589,72 @@ class TestParityGate:
                 }
             )
         )
-        # Results contract v2: _local_rows reads ONLY the per-item end-to-end
-        # median — without it the leaderboard FAILS the folder.
-        (combo / "predictions.jsonl").write_text(
-            json.dumps(
-                {
-                    "case_id": "c1",
-                    "field": "f",
-                    "per_item_end_to_end_ms": 810.0,
-                    "valid": True,
-                    "correct": True,
-                    "label": "A",
-                    "prediction": "A",
-                }
-            )
-            + "\n",
-            encoding="utf-8",
+        # Results contract v2: _local_rows reads the per-item end-to-end
+        # median from timing.json — without it the leaderboard FAILS.
+        (combo / "timing.json").write_text(
+            json.dumps({"median": {"per_item_end_to_end_ms": 810.0}}), encoding="utf-8"
         )
         rows = _local_rows(tmp_path)
         assert len(rows) == 1
         assert rows[0]["model"] == "qwen7b"
+
+
+def test_check_folder_lock_sha_mismatch_fails(tmp_path):
+    """parity-gates (review fix 1): the dataset lock lives at the MODEL
+    folder level as <dataset>.dataset.lock.json; check_results verifies
+    its sha256 matches run.json's dataset_lock_sha256."""
+
+    model_dir = tmp_path / "model"
+    folder = model_dir / "combo"
+    _write_valid(folder)
+    # Corrupt the lock: rewrite with different content.
+    lock_path = model_dir / "fix.dataset.lock.json"
+    lock_path.write_text(json.dumps({"source": "different"}) + "\n")
+    # run.json's sha still points at the original content.
+    ok, problems = check_folder(folder)
+    assert not ok
+    assert any("sha256 mismatch" in p for p in problems)
+
+
+def test_check_folder_missing_model_lock_fails(tmp_path):
+    """A combo whose model folder has no <dataset>.dataset.lock.json fails."""
+    model_dir = tmp_path / "model"
+    folder = model_dir / "combo"
+    _write_valid(folder)
+    (model_dir / "fix.dataset.lock.json").unlink()
+    ok, problems = check_folder(folder)
+    assert not ok
+    assert any("fix.dataset.lock.json" in p and "missing" in p for p in problems)
+
+
+def test_leaderboard_cases_from_run_json_counts(tmp_path):
+    """parity-gates (review fix 3): the 'Cases' column comes from run.json's
+    counts.cases (the source of truth), not from the agreement metrics'
+    n_cases (which can undercount when a case has no valid prediction)."""
+    from benchmarks.leaderboard import _local_rows
+
+    model_dir = tmp_path / "m2pro--qwen7b"
+    combo = model_dir / "parallel-trie-typesafe"
+    combo.mkdir(parents=True)
+    (model_dir / "parity.json").write_text(
+        json.dumps({"passed": True, "status": "PASS", "max_abs_drift_nats": 0.01, "atol": 0.05})
+    )
+    (combo / "report.json").write_text(
+        json.dumps({"metrics": {"agreement": {"agreement_common_subset": 0.9, "n_cases": 44}}})
+    )
+    (combo / "run.json").write_text(
+        json.dumps(
+            {
+                "run_id": "x",
+                "environment": {},
+                "config": {"track": "parallel", "dataset_path": "typesafe", "model": "qwen7b"},
+                "counts": {"cases": 45, "fields": 45, "prediction_lines": 44},
+            }
+        )
+    )
+    (combo / "timing.json").write_text(
+        json.dumps({"median": {"per_item_end_to_end_ms": 590.0}}), encoding="utf-8"
+    )
+    rows = _local_rows(tmp_path)
+    assert len(rows) == 1
+    assert rows[0]["cases"] == 45  # from run.json counts.cases, not n_cases=44

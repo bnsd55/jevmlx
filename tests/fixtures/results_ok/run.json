@@ -1,6 +1,6 @@
 {
   "config": {
-    "dataset_lock_sha256": null,
+    "dataset_lock_sha256": "cb7503298d0ba0288cd8b16495a35eb9c662e7a18ac9958071b687d6dee79878",
     "dataset_path": "fix",
     "model": "fake",
     "model_revision": null,
