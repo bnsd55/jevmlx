@@ -24,6 +24,18 @@
   does NOT mask it). 4 tests (empty schema returns valid result, probability
   status, non-empty-with-no-semantics still raises, the actual typesafe case).
 
+- evalrun: persist raw_text on naive error rows. When parse_baseline_output
+  fails (error row), the naive tracks (naive_local, api_baseline) now persist
+  the raw generated text on that prediction line under key `raw_text`
+  (truncated to 4000 chars with a `...[truncated N chars]` suffix). This lets
+  a failed parse be inspected and re-scored offline without re-running the
+  model — the 7B naive_local-slots-typesafe error cases (int where string
+  expected) previously discarded the raw text, so they could not be recovered.
+  Error rows only: valid rows never carry `raw_text` (keeps predictions
+  small). `check_results` accepts `raw_text` as an optional key (schema
+  allowlist). 2 tests (error row carries raw_text, valid row does not;
+  truncation to 4000 chars).
+
 - baseline: accept numeric scalars for string-digit enum choices. The naive
   baseline parser (`jevmlx/baseline.py:_validate_field`) rejected an integer
   where the schema expects a string from `('0','1','2','3')` — e.g.

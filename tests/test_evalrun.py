@@ -820,3 +820,76 @@ def test_naive_track_prediction_lines_carry_per_item_end_to_end_ms(tmp_path):
     )
     line = _read_lines(out / "predictions.jsonl")[0]
     assert line["per_item_end_to_end_ms"] == 570.0
+
+
+def test_naive_error_row_carries_raw_text_valid_row_does_not(tmp_path):
+    """raw_text is persisted on ERROR rows only (so a failed parse can be
+    inspected / re-scored offline), never on valid rows (keeps predictions
+    small)."""
+    cases = [
+        {
+            "id": "naive/err-0",
+            "schema": {"verdict": {"type": "enum", "choices": ["yes", "no"]}},
+            "context": "Evidence A.",
+            "labels": {"verdict": "yes"},
+            "split": "train",
+        },
+        {
+            "id": "naive/ok-0",
+            "schema": {"verdict": {"type": "enum", "choices": ["yes", "no"]}},
+            "context": "Evidence B.",
+            "labels": {"verdict": "no"},
+            "split": "train",
+        },
+    ]
+
+    def naive_decide(schema_dict, context, constraints=None, oracle_overrides=None):
+        is_err = context.startswith("Evidence A")
+        return {
+            "verdict": {
+                "prediction": None if is_err else "no",
+                "valid": not is_err,
+                "error": "invalid value for verdict: 2" if is_err else None,
+            },
+            "_meta": {
+                "latency_ms": 100.0,
+                "total_ms": 100.0,
+                "per_item_end_to_end_ms": 100.0,
+                "generated_tokens": 10,
+                "rows": None,
+                "passes": 10,
+                "raw_text": '{"verdict": 2}' if is_err else '{"verdict": "no"}',
+            },
+        }
+
+    out = tmp_path / "naive_raw"
+    evalrun.run_eval(
+        cases,
+        naive_decide,
+        track="naive_local",
+        model="fake/model",
+        out_dir=str(out),
+        run_id="r-naive-raw",
+    )
+    lines = _read_lines(out / "predictions.jsonl")
+    err_line = next(ln for ln in lines if ln["case_id"] == "naive/err-0")
+    ok_line = next(ln for ln in lines if ln["case_id"] == "naive/ok-0")
+    # error row carries raw_text
+    assert err_line["error"]
+    assert err_line["raw_text"] == '{"verdict": 2}'
+    # valid row does NOT carry raw_text (keeps predictions small)
+    assert "raw_text" not in ok_line
+    assert ok_line["valid"] is True
+
+
+def test_naive_raw_text_truncated_to_4000_chars():
+    """raw_text is truncated to 4000 chars with a count suffix."""
+    from jevmlx.evalrun import _RAW_TEXT_TRUNCATE, _truncate_raw_text
+
+    short = "x" * 100
+    assert _truncate_raw_text(short) == short
+    assert _truncate_raw_text(None) is None
+    long = "y" * (_RAW_TEXT_TRUNCATE + 500)
+    out = _truncate_raw_text(long)
+    assert len(out) == _RAW_TEXT_TRUNCATE + len("...[truncated 500 chars]")
+    assert out.endswith("...[truncated 500 chars]")

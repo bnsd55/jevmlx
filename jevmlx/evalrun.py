@@ -384,6 +384,23 @@ def _attach_ordinal(field, entry: dict) -> None:
     }
 
 
+_RAW_TEXT_TRUNCATE = 4000
+
+
+def _truncate_raw_text(text: str | None) -> str | None:
+    """Truncate raw generated text to _RAW_TEXT_TRUNCATE chars with a count suffix.
+
+    Persisted on error rows only so the failed parse can be inspected (and
+    re-scored offline) without re-running the model. None passes through.
+    """
+    if text is None:
+        return None
+    if len(text) <= _RAW_TEXT_TRUNCATE:
+        return text
+    n = len(text) - _RAW_TEXT_TRUNCATE
+    return text[:_RAW_TEXT_TRUNCATE] + f"...[truncated {n} chars]"
+
+
 def naive_local_decide_fn(engine) -> DecideFn:
     """Track ``naive_local``: the same local model free-writes the JSON object.
     Takes the loaded :class:`Engine`.
@@ -424,6 +441,10 @@ def naive_local_decide_fn(engine) -> DecideFn:
             "generated_tokens": result.get("total_tokens"),
             "rows": None,
             "passes": result.get("total_tokens"),
+            # raw_text: the generated JSON text, truncated. Persisted on error
+            # rows only (see the line builder) so a failed parse can be
+            # inspected / re-scored offline without re-running the model.
+            "raw_text": _truncate_raw_text(result.get("raw_text")),
         }
         return out
 
@@ -461,6 +482,9 @@ def api_baseline_decide_fn(
             "per_item_end_to_end_ms": result.get("latency_ms"),
             "rows": None,
             "passes": None,
+            # raw_text: the API response text, truncated. Persisted on error
+            # rows only (see the line builder).
+            "raw_text": _truncate_raw_text(result.get("raw")),
         }
         return out
 
@@ -982,6 +1006,12 @@ def run_eval(
                         "salvage_prediction": res.get("salvage_prediction"),
                         "oracle_prediction": oracle_results.get(fname),
                     }
+                    # raw_text: persisted on ERROR rows only (keeps predictions
+                    # small). Lets a failed parse be inspected / re-scored
+                    # offline without re-running the model. Sourced from the
+                    # naive track _meta (naive_local, api_baseline).
+                    if res.get("error") and meta.get("raw_text"):
+                        line["raw_text"] = meta["raw_text"]
                     if ordinal_choices:
                         line["ordinal_choices"] = ordinal_choices
                         line["ordinal"] = ordinal_record
