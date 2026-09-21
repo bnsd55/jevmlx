@@ -623,7 +623,8 @@ class TestDashboardContract:
         self._build_fixture(out)
         run = build_dashboard(out)["run"]
         assert run["out_dir"] == str(out)
-        assert run["hash"] == "dbb1ff1abcde"
+        # Hash from the RUNBOOK attempt header (7-char git short sha).
+        assert run["hash"] == "dbb1ff1"
         assert run["machine"] == "M5 Max"
         assert run["mlx_version"] == "0.32.2"
         assert run["attempt_n"] == 2  # last attempt header
@@ -1504,3 +1505,152 @@ class TestRealRunEvalShapes:
         # Steps show their last occurrence only.
         steps = d["pipeline"]["steps"]
         assert len(steps) == 1
+
+    def test_combo_id_is_out_relative_path(self, tmp_path, monkeypatch):
+        """Fix 7: combo_id is the out-relative path, unique across models."""
+        out = self._build_real_fixture(tmp_path, monkeypatch)
+
+        from jevmlx.watch import _combo_dirs, _combo_id, build_dashboard
+
+        combos = _combo_dirs(out)
+        assert len(combos) == 1
+        c = combos[0]
+        # combo_id is out-relative: 'bench-quality/<model-folder>/<combo>'.
+        cid = _combo_id(c, out)
+        assert cid.startswith("bench-quality/")
+        assert cid.endswith(c.name)
+        # results[].combo_id matches.
+        d = build_dashboard(out)
+        assert d["results"][0]["combo_id"] == cid
+        assert d["results"][0]["display_name"] == c.name
+
+    def test_questions_accepts_out_relative_combo_id(self, tmp_path, monkeypatch):
+        """Fix 7: /questions.json?combo=<out-relative-path> resolves."""
+        out = self._build_real_fixture(tmp_path, monkeypatch)
+        from jevmlx.watch import _combo_dirs, _combo_id, build_questions
+
+        combos = _combo_dirs(out)
+        cid = _combo_id(combos[0], out)
+        qs = build_questions(out, cid)
+        assert len(qs) > 0
+        assert qs[0]["context_text"] is not None
+
+    def test_header_hash_from_newest_run_json(self, tmp_path, monkeypatch):
+        """Fix 1: header hash from the NEWEST run.json by mtime."""
+        out = self._build_real_fixture(tmp_path, monkeypatch)
+        import os
+        import time as _time
+
+        from jevmlx.watch import _combo_dirs, build_dashboard
+
+        combos = _combo_dirs(out)
+        # Touch the run.json to make it the newest.
+        rj = combos[0] / "run.json"
+        os.utime(rj, (_time.time(), _time.time()))
+        d = build_dashboard(out)
+        assert d["run"]["hash"] != "—"
+        assert d["run"]["machine"] != "—"
+
+    def test_header_hash_from_runbook_attempt_header(self, tmp_path, monkeypatch):
+        """Fix 1: a RUNBOOK attempt header overrides the file git_sha."""
+        out = self._build_real_fixture(tmp_path, monkeypatch)
+        (out / "RUNBOOK.md").write_text(
+            "## attempt 1 2026-09-21T12:00:00Z abc1234 python -m benchmarks.m5\n",
+            encoding="utf-8",
+        )
+        from jevmlx.watch import build_dashboard
+
+        d = build_dashboard(out)
+        assert d["run"]["hash"] == "abc1234"
+        assert d["run"]["attempt_n"] == 1
+
+    def test_legacy_runbook_splits_on_m5_header(self, tmp_path, monkeypatch):
+        """Fix 2: legacy RUNBOOK '# M5 runbook — <ISO>' splits attempts;
+        PIPELINE shows only the last attempt's steps."""
+        out = self._build_real_fixture(tmp_path, monkeypatch)
+        (out / "RUNBOOK.md").write_text(
+            "\n".join(
+                [
+                    "# M5 runbook — 2026-09-20T17:45:00Z",
+                    "## 1. doctor — exit 0 — 0.2s",
+                    "## 2. bench — exit 1 — 100.0s",
+                    "# M5 runbook — 2026-09-20T18:00:00Z",
+                    "## 1. doctor — exit 0 — 0.1s",
+                    "## 2. bench — exit 0 — 200.0s",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        from jevmlx.watch import build_dashboard
+
+        d = build_dashboard(out)
+        pipeline = d["pipeline"]
+        # attempt_n = 2 (two '# M5 runbook' lines).
+        assert pipeline["attempt_n"] == 2
+        assert pipeline["attempt_started"] == "2026-09-20T18:00:00Z"
+        # Only the last attempt's steps (2), not 4 stacked.
+        assert len(pipeline["steps"]) == 2
+
+    def test_cases_total_from_dataset_path(self, tmp_path, monkeypatch):
+        """Fix 3: cases_total resolved from config.dataset_path line count."""
+        out = self._build_real_fixture(tmp_path, monkeypatch)
+        from jevmlx.watch import build_dashboard
+
+        d = build_dashboard(out)
+        # The fixture has 6 cases.
+        assert d["now"]["cases_total"] == 6
+
+    def test_memory_cap_from_newest_run_json(self, tmp_path, monkeypatch):
+        """Fix 4: cap_gb from the newest run.json memory block; stop_gb = 10."""
+        out = self._build_real_fixture(tmp_path, monkeypatch)
+        from jevmlx.watch import build_dashboard
+
+        d = build_dashboard(out)
+        assert d["memory"]["stop_gb"] == 10.0
+        # cap_gb may be None if no memory block; machine_gb is present.
+        assert d["memory"]["machine_gb"] is not None
+
+    def test_parity_fail_counted_once_per_model(self, tmp_path, monkeypatch):
+        """Fix 6: parity FAIL counted once per model, not per combo."""
+        out = self._build_real_fixture(tmp_path, monkeypatch)
+        from jevmlx.watch import _combo_dirs, build_dashboard
+
+        combos = _combo_dirs(out)
+        model_dir = combos[0].parent
+        # Write a FAIL parity.json at the model level.
+        (model_dir / "parity.json").write_text(
+            json.dumps(
+                {
+                    "model": "test-model",
+                    "status": "FAIL",
+                    "max_abs_drift_nats": 0.08,
+                    "winners_identical": False,
+                }
+            ),
+            encoding="utf-8",
+        )
+        d = build_dashboard(out)
+        parity_rule = next(h for h in d["health"] if h["rule"] == "parity_fail_models")
+        # 1 model, not 1 per combo.
+        assert "1 model" in parity_rule["detail"]
+        # aggregates parity_counts also counted once.
+        assert d["aggregates"]["parity_counts"]["fail"] == 1
+
+    def test_combo_without_run_json_derives_model_from_folder(self, tmp_path, monkeypatch):
+        """Fix 5: combos without run.json derive model from the parent folder
+        slug <machine>-<model-slug> and track/scorer/dataset from the combo
+        folder name."""
+        out = self._build_real_fixture(tmp_path, monkeypatch)
+        # Add a combo dir with NO run.json (queued).
+        from jevmlx.watch import _combo_dirs, build_dashboard
+
+        model_dir = _combo_dirs(out)[0].parent
+        queued = model_dir / "naive-slots-bundled"
+        queued.mkdir(parents=True, exist_ok=True)
+        d = build_dashboard(out)
+        queued_row = next(r for r in d["results"] if r["combo_id"].endswith("naive-slots-bundled"))
+        assert queued_row["status"] == "queued"
+        assert queued_row["model"] != "—"
+        assert queued_row["track"] == "naive"
+        assert queued_row["scorer"] == "slots"
+        assert queued_row["dataset"] == "bundled"
