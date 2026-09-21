@@ -301,6 +301,19 @@ def build_datasets(
             paths[name] = jsonl
             paths_locks[name] = lock
 
+    # B6: fail fast — every registered dataset must have its lock file on
+    # disk right after building. A missing lock here (a builder that wrote
+    # the wrong name, or wrote none) used to surface per-combo at eval time
+    # as 'OSError: dataset lock file not found' AFTER the model loaded — an
+    # 8-minute waste. This single check runs before any model loads.
+    missing = [name for name, lock in paths_locks.items() if not lock.exists()]
+    if missing:
+        raise OSError(
+            "dataset lock file(s) missing after build: "
+            + ", ".join(f"{n} -> {paths_locks[n]}" for n in sorted(missing))
+            + " — every builder must write <name>.dataset.lock.json"
+        )
+
     return paths, paths_locks
 
 
@@ -348,8 +361,15 @@ def _build_typesafe() -> None:
     from benchmarks.typesafe.fetch import main as fetch_main
 
     out = str(BENCH_CACHE / "typesafe.jsonl")
+    lock = str(BENCH_CACHE / "typesafe.dataset.lock.json")
     print("building typesafe dataset (downloads from the network)...")
-    rc = fetch_main(["--out", out])
+    # --lock: the registered lock name is <dataset>.dataset.lock.json
+    # (build_datasets reads it back from there). Without --lock the fetcher
+    # writes its default 'dataset.lock.json', so the registered path goes
+    # missing and run.json's dataset_lock_sha256 raised OSError at eval
+    # time (the B6 field failure). Same convention as _build_bundled /
+    # _build_typed_decisions.
+    rc = fetch_main(["--out", out, "--lock", lock])
     if rc != 0:
         raise OSError("typesafe fetch failed")
 
@@ -492,6 +512,10 @@ def _build_perturbed(bundled: Path) -> None:
             "3",
             "--seed",
             "0",
+            # B6: the registered lock name is <dataset>.dataset.lock.json
+            # (same convention as every other builder).
+            "--lock",
+            str(BENCH_CACHE / "perturbed.dataset.lock.json"),
         ]
     )
 
@@ -542,6 +566,20 @@ def _load_engine_with_timeout(model: str, load_timeout: float) -> Any:
     if "error" in outcome:
         raise outcome["error"]
     return outcome["result"]
+
+
+def _combo_previously_failed(combo_dir: Path) -> bool:
+    """B6: True when the combo's run.json records a run_failed/load_failed
+    status — a failed combo must rerun fresh, not resume from partial
+    predictions (which are not a valid resume point)."""
+    run_path = combo_dir / "run.json"
+    if not run_path.is_file():
+        return False
+    try:
+        status = json.loads(run_path.read_text(encoding="utf-8")).get("status")
+    except (OSError, json.JSONDecodeError):
+        return False
+    return status in ("run_failed", "load_failed")
 
 
 def _write_failure_run(combo_dir: Path, status: str, exc: BaseException) -> Path:
@@ -674,6 +712,17 @@ def run_bench(
                 import shutil as _shutil
 
                 print(f"=== {combo}: --fresh, removing existing dir ===")
+                _shutil.rmtree(combo_dir)
+                combo_dir.mkdir(parents=True, exist_ok=True)
+            # B6: a combo whose run.json says run_failed/load_failed must
+            # rerun (fresh), not resume — a failed run's partial predictions
+            # are not a valid resume point. Without this, a transient failure
+            # (e.g. a missing lock, now fixed) stuck the combo as 'resume'
+            # forever because manifest.json existed from the partial run.
+            elif _combo_previously_failed(combo_dir):
+                import shutil as _shutil
+
+                print(f"=== {combo}: previous run failed, removing dir to rerun ===")
                 _shutil.rmtree(combo_dir)
                 combo_dir.mkdir(parents=True, exist_ok=True)
             _has_manifest = (combo_dir / "manifest.json").is_file()

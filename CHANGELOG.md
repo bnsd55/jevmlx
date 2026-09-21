@@ -9,6 +9,16 @@
   cross-branch argv — an A/B branch may predate the alias resolver and ask
   the Hub for a repo named 'quality' (401).
 
+- Fix: every dataset builder now writes `<name>.dataset.lock.json` at the
+  registered name. The field failure (M5 full list on 7e18298): every
+  typesafe and perturbed combo was `run_failed` with `OSError: dataset lock
+  file not found` because `_build_typesafe` passed no `--lock` (the fetcher
+  wrote its default `dataset.lock.json`) and `_build_perturbed` wrote no
+  lock at all. `build_datasets` now fails fast — one error before any model
+  loads — if any registered lock is missing after build. `perturb.main` grew
+  a `--lock` arg and writes the lock (cases_sha256, same shape as the
+  synthetic/typesafe locks). A combo whose `run.json` says `run_failed` or
+  `load_failed` now reruns fresh (not resume from partial predictions).
 - Fix: `jevmlx bench --models-file <f>` no longer requires `--model`.
   `--model` and `--models-file` are now a mutually exclusive group with
   exactly one required (the field failure: the M5 `bench the remaining

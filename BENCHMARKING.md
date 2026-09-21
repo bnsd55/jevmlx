@@ -127,6 +127,11 @@ Paste `SUMMARY.md` into the PR description and link the machine specs
   (below), the two OpenJev datasets (below), and deterministic
   perturbations of the bundled cases — built once into
   `~/.cache/jevmlx/bench/` and reused while the lock files match.
+  **Lock convention:** every builder writes `<name>.dataset.lock.json` next
+  to `<name>.jsonl` (one lock per dataset, registered name); `build_datasets`
+  fails fast if any registered lock is missing after build — before any model
+  loads — so a broken lock is one error, not a per-combo `OSError` after an
+  8-minute model load.
   Perturbation kinds (W6-B2): four context-side (`ws` whitespace
   normalisation, `preamble` neutral preamble, `numfmt` number reformatting,
   `shuffle` block-order shuffle) plus two label-preserving SCHEMA kinds —
