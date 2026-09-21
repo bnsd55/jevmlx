@@ -159,6 +159,12 @@ def plan_steps(
     from jevmlx.models import resolve_model
 
     out = Path(out)
+    # B4: resolve the quality alias ONCE on the main side. The concrete Hub
+    # id is passed in EVERY argv the runbook builds, main and A/B (bench,
+    # invariance, timing, probe, pytest MODEL_ID). Aliases are for humans
+    # at the CLI, never for cross-branch argv — an A/B branch may predate
+    # the alias resolver and ask the Hub for a repo named 'quality' (401).
+    quality_id = resolve_model(quality)
     steps: list[Step] = []
     steps.append(
         Step(
@@ -189,7 +195,7 @@ def plan_steps(
                 _venv_bin("jevmlx"),
                 "bench",
                 "--model",
-                quality,
+                quality_id,
                 "--out",
                 str(out / "bench-quality"),
             ),
@@ -205,7 +211,7 @@ def plan_steps(
                 "-m",
                 "benchmarks.invariance",
                 "--model",
-                quality,
+                quality_id,
                 "--data",
                 str(typesafe_data),
                 "--out",
@@ -233,7 +239,7 @@ def plan_steps(
                 "-m",
                 "benchmarks.timing",
                 "--model",
-                quality,
+                quality_id,
                 "--reps",
                 str(reps),
                 "--out",
@@ -241,11 +247,11 @@ def plan_steps(
             ),
             outputs=(
                 out / "timing.done",
-                out / f"timing-{resolve_model(quality).replace('/', '_')}.json",
+                out / f"timing-{quality_id.replace('/', '_')}.json",
             ),
         )
     )
-    rest = [m for m in parity_models if m != resolve_model(quality)]
+    rest = [m for m in parity_models if m != quality_id]
     if rest:
         rest_file = out / "models-rest.txt"
         rest_file.write_text("\n".join(rest) + "\n", encoding="utf-8")
@@ -310,7 +316,7 @@ def plan_steps(
                     str(worktree / ".venv" / "bin" / "jevmlx"),
                     "bench",
                     "--model",
-                    quality,
+                    quality_id,
                     "--out",
                     str(out / "ab" / "bench-quality"),
                 ),
@@ -327,7 +333,7 @@ def plan_steps(
                     "-m",
                     "benchmarks.invariance",
                     "--model",
-                    quality,
+                    quality_id,
                     "--data",
                     str(typesafe_data),
                     "--out",
@@ -361,7 +367,7 @@ def plan_steps(
                     "-m",
                     "benchmarks.probe",
                     "--model",
-                    quality,
+                    quality_id,
                     "--command",
                     "slope",
                     "--out",
@@ -379,7 +385,7 @@ def plan_steps(
                     "-m",
                     "benchmarks.probe",
                     "--model",
-                    quality,
+                    quality_id,
                     "--command",
                     "adapters",
                     "--out",

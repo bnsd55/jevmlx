@@ -857,6 +857,37 @@ class TestPlannedArgvParses:
                 ["bench", "--model", "quality", "--models-file", "/tmp/m.txt", "--out", "/tmp/o"]
             )
 
+    def test_no_alias_token_as_model_value_in_planned_argv(self, tmp_path):
+        """B4: every planned argv passes the RESOLVED Hub id (not an alias)
+        as the --model value. An A/B branch may predate the alias resolver,
+        so a cross-branch argv carrying 'quality' asks the Hub for a repo
+        named 'quality' (401). Aliases are for humans at the CLI only."""
+        from jevmlx.models import MODEL_ALIASES
+
+        out = tmp_path / "run"
+        out.mkdir()  # plan_steps writes models-rest.txt into <out>
+        steps = plan_steps(
+            out,
+            parity_models=[QUALITY_TARGET, REST_MODEL],
+            ab_branch="w2a-field-local",  # exercise the A/B argv too
+            probe=True,
+        )
+        alias_tokens = set(MODEL_ALIASES)
+        checked = 0
+        for step in steps:
+            for argv in (step.argv, step.pre_argv, *(step.extra_argv or ())):
+                if not argv or "--model" not in argv:
+                    continue
+                idx = argv.index("--model")
+                model_val = argv[idx + 1]
+                checked += 1
+                assert model_val not in alias_tokens, (
+                    f"step {step.id}: --model value {model_val!r} is an alias, "
+                    "not a resolved Hub id; cross-branch argv must carry the "
+                    "concrete id"
+                )
+        assert checked, "no --model argv was checked"
+
     def test_bench_requires_one_of_model_or_models_file(self):
         from jevmlx.cli import build_parser
 

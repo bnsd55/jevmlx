@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- m5: `plan_steps` resolves the quality alias ONCE on the main side
+  (`jevmlx.models.resolve_model`) and passes the concrete Hub id in EVERY
+  argv the runbook builds, main and A/B (bench, invariance, timing, probe,
+  pytest `MODEL_ID`). Aliases are for humans at the CLI, never for
+  cross-branch argv — an A/B branch may predate the alias resolver and ask
+  the Hub for a repo named 'quality' (401).
+
 - Fix: `jevmlx bench --models-file <f>` no longer requires `--model`.
   `--model` and `--models-file` are now a mutually exclusive group with
   exactly one required (the field failure: the M5 `bench the remaining
