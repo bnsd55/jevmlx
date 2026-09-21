@@ -197,6 +197,9 @@ def check_folder(folder: Path) -> tuple[bool, list[str]]:
         # oracle_overrides evaluation; W3-D). ordered / ordinal /
         # ordinal_choices are written by OrdinalTelemetry (ordered=True enum
         # fields); they are optional — only present on ordinal fields.
+        # raw_text is written by naive tracks (naive_local, api_baseline) on
+        # ERROR rows only — the truncated generated text, so a failed parse
+        # can be inspected / re-scored offline without re-running the model.
         extra = [
             k
             for k in extra
@@ -208,6 +211,7 @@ def check_folder(folder: Path) -> tuple[bool, list[str]]:
                 "ordered",
                 "ordinal",
                 "ordinal_choices",
+                "raw_text",
             )
         ]
         if missing:
