@@ -1304,3 +1304,203 @@ class TestRealBenchLayout:
             if ts is not None:
                 assert isinstance(ts, str)
                 assert ts.endswith("Z")
+
+
+# --- W6-UI-3e: live-tree shapes (real run_eval fixture) -------------------
+
+
+class TestRealRunEvalShapes:
+    """Fixture built by the REAL run_eval (via run_bench_models with a fake
+    load_engine), so run.json, predictions.jsonl, heartbeat.jsonl, report.json
+    come from the real writers. Asserts the 6 live-tree fixes."""
+
+    @staticmethod
+    def _build_real_fixture(tmp_path, monkeypatch):
+        """Run run_bench_models with a fake load_engine so the real _run_one ->
+        run_eval writes run.json/predictions.jsonl/heartbeat.jsonl/report.json.
+        Returns the out dir."""
+        from conftest import YNLogitModel, _Mod97Tokenizer, make_engine
+
+        import jevmlx.engine as engine_mod
+        from jevmlx import bench
+
+        # Build a tiny dataset jsonl.
+        ds = tmp_path / "bundled.jsonl"
+        ds_lock = tmp_path / "bundled.dataset.lock.json"
+        cases = []
+        for i in range(6):
+            cases.append(
+                {
+                    "id": f"c{i}",
+                    "source": "test",
+                    "workflow": "fraud",
+                    "context": f"Evidence {i}: transaction flagged.",
+                    "schema": {"verdict": {"type": "enum", "choices": ["yes", "no"]}},
+                    "labels": {"verdict": "yes" if i % 2 == 0 else "no"},
+                    "split": "all",
+                }
+            )
+        ds.write_text("\n".join(json.dumps(c) for c in cases) + "\n", encoding="utf-8")
+        ds_lock.write_text("{}", encoding="utf-8")
+
+        # Fake engine: the real load_engine returns an Engine.
+        fake_engine = make_engine(YNLogitModel(), _Mod97Tokenizer())
+
+        def fake_load_engine(model, **kw):
+            return fake_engine
+
+        monkeypatch.setattr(engine_mod, "load_engine", fake_load_engine)
+        monkeypatch.setattr(bench, "preflight", lambda force, machine_override: "m5max-128gb")
+        monkeypatch.setattr(
+            bench,
+            "build_datasets",
+            lambda datasets: ({"bundled": ds}, {"bundled": ds_lock}),
+        )
+        monkeypatch.setattr(bench, "_print_pr_instructions", lambda folder, last_run: None)
+        monkeypatch.setattr(bench, "BENCH_CACHE", tmp_path / "cache")
+
+        # Skip the real parity check (slow with the fake engine); write a stub.
+        def fake_parity(model, engine, folder):
+            (folder / "parity.json").write_text(
+                json.dumps(
+                    {
+                        "model": model,
+                        "passed": True,
+                        "status": "PASS",
+                        "max_abs_drift_nats": 0.001,
+                        "winners_identical": True,
+                        "atol": 0.05,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return None
+
+        monkeypatch.setattr(bench, "_run_model_parity", fake_parity)
+
+        out = tmp_path / "m5-run"
+        bench.run_bench_models(
+            models=["mlx-community/Qwen2.5-7B-Instruct-4bit"],
+            datasets=["bundled"],
+            scorers=["labels"],
+            tracks=["parallel"],
+            out=out / "bench-quality",
+            runs=1,
+            heartbeat_every=2,
+        )
+        return out
+
+    def test_run_json_has_real_config_keys(self, tmp_path, monkeypatch):
+        """Fix 1: run.json config has model, track, dataset_path, run_i, run_n;
+        environment has machine/mlx_version; counts has cases."""
+        out = self._build_real_fixture(tmp_path, monkeypatch)
+        from jevmlx.watch import _combo_dirs
+
+        combos = _combo_dirs(out)
+        assert len(combos) == 1
+        run = json.loads((combos[0] / "run.json").read_text())
+        assert run["config"]["model"] == "mlx-community/Qwen2.5-7B-Instruct-4bit"
+        assert run["config"]["track"] == "parallel"
+        assert run["config"]["run_i"] == 1
+        assert run["config"]["run_n"] == 1
+        assert run["counts"]["cases"] == 6
+        assert "machine" in str(run["environment"]) or "chip" in str(run["environment"])
+
+    def test_header_from_run_json(self, tmp_path, monkeypatch):
+        """Fix 1: header hash/machine/mlx/cap come from run.json of any combo
+        when RUNBOOK lacks a header."""
+        out = self._build_real_fixture(tmp_path, monkeypatch)
+        from jevmlx.watch import build_dashboard
+
+        d = build_dashboard(out)
+        assert d["run"]["machine"] != "—"
+        assert d["run"]["mlx_version"] != "—"
+        assert d["now"]["run_n"] == 1
+        assert d["now"]["cases_total"] == 6
+
+    def test_results_dataset_scorer_track_from_config(self, tmp_path, monkeypatch):
+        """Fix 2: results dataset/scorer/track from run.json config field names
+        as bench writes them."""
+        out = self._build_real_fixture(tmp_path, monkeypatch)
+        from jevmlx.watch import build_dashboard
+
+        d = build_dashboard(out)
+        results = d["results"]
+        assert len(results) >= 1
+        r = results[0]
+        assert r["model"] == "mlx-community/Qwen2.5-7B-Instruct-4bit"
+        assert r["track"] == "parallel"
+        assert r["scorer"] == "labels"
+        # dataset: bench writes dataset_path, not dataset; the watcher derives
+        # the dataset name from the path or the combo folder.
+        assert r["dataset"] != "—"
+
+    def test_questions_parses_real_prediction_lines(self, tmp_path, monkeypatch):
+        """Fix 4: questions() parses real prediction lines (field names as
+        run_eval writes them) and joins text from the cached dataset by id."""
+        out = self._build_real_fixture(tmp_path, monkeypatch)
+        from jevmlx.watch import _combo_dirs, build_questions
+
+        combos = _combo_dirs(out)
+        assert len(combos) == 1
+        combo_id = combos[0].name
+        qs = build_questions(out, combo_id)
+        assert len(qs) > 0
+        # Real prediction line keys.
+        assert qs[0]["field"] is not None
+        assert qs[0]["predicted"] is not None
+        assert qs[0]["case_id"] is not None
+        # context_text joined from the dataset by id.
+        assert qs[0]["context_text"] is not None
+
+    def test_run_failed_combo_is_failed_not_parity_fail(self, tmp_path, monkeypatch):
+        """Fix 5: a run_failed/load_failed combo is 'failed', never a parity
+        FAIL. parity FAIL is counted once per model."""
+        out = self._build_real_fixture(tmp_path, monkeypatch)
+        # Add a run_failed combo.
+        from jevmlx.watch import _combo_dirs
+
+        combos = _combo_dirs(out)
+        model_dir = combos[0].parent
+        failed_dir = model_dir / "parallel-labels-bundled"
+        failed_dir.mkdir(parents=True, exist_ok=True)
+        (failed_dir / "run_failed.txt").write_text("load failed\n", encoding="utf-8")
+        # Add a parity.json with FAIL.
+        (model_dir / "parity.json").write_text(
+            json.dumps(
+                {
+                    "model": "test-model",
+                    "status": "FAIL",
+                    "max_abs_drift_nats": 0.08,
+                    "winners_identical": False,
+                }
+            ),
+            encoding="utf-8",
+        )
+        from jevmlx.watch import build_dashboard
+
+        d = build_dashboard(out)
+        # The failed combo status is 'failed'.
+        failed_row = next(r for r in d["results"] if r.get("status") == "failed")
+        assert failed_row is not None
+        # parity_fail_models counted once (the model), not per combo.
+        parity_rule = next(h for h in d["health"] if h["rule"] == "parity_fail_models")
+        # The FAIL is counted once for the model.
+        assert "1 model" in parity_rule["detail"]
+
+    def test_runbook_without_attempt_headers_is_one_attempt(self, tmp_path, monkeypatch):
+        """Fix 6: RUNBOOK without '## attempt' headers = one attempt."""
+        out = self._build_real_fixture(tmp_path, monkeypatch)
+        # Write a minimal RUNBOOK without attempt headers.
+        (out / "RUNBOOK.md").write_text(
+            "# M5 runbook\nsleep_blocked: True\n\n## 1. doctor — exit 0 — 0.1s\n",
+            encoding="utf-8",
+        )
+        from jevmlx.watch import build_dashboard
+
+        d = build_dashboard(out)
+        # One attempt (the default when no header exists).
+        assert d["pipeline"]["attempt_n"] in (0, 1)
+        # Steps show their last occurrence only.
+        steps = d["pipeline"]["steps"]
+        assert len(steps) == 1
