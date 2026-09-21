@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+- watch: live dashboard via SSE and DOM patching (no reload, no root wipe).
+  The control-room page (`jevmlx/web/dashboard.html`) dropped its
+  `<meta http-equiv=refresh>` tag and `setInterval`+`root.innerHTML` wipe —
+  Chrome no longer reloads the whole document or destroys selection/scroll/
+  focus every refresh. The first paint fetches `/dashboard.json` once; then an
+  `EventSource('/events')` SSE connection pushes `event: dashboard` with the
+  full `build_dashboard` JSON whenever a watched file changes. The server
+  (new `GET /events` route on the existing `ThreadingHTTPServer`, one thread
+  per connection) watches the mtimes of `RUNBOOK.md` and every
+  `heartbeat.jsonl` / `run.json` / `predictions.jsonl` under `<out>` (a cheap
+  `os.stat` scan every `refresh` seconds) and emits a `: keepalive` comment
+  every 15 s when nothing changed. The browser patches the DOM in place —
+  NOW/MEMORY/HEALTH/AGGREGATES update `textContent` and bar widths of existing
+  nodes; RESULTS/PIPELINE/EVENTS are keyed by identity (combo id, step id,
+  event ts+kind) and diffed (insert/update/remove). `#root.innerHTML` is
+  assigned only on first paint, never on patch. Selection (`selCombo`,
+  `selQuestion`), filters, sort state, scroll position, and open `<details>`
+  are preserved across updates. On `EventSource` error a small "disconnected"
+  pill appears in the top bar; `EventSource` reconnects itself. Questions stay
+  on demand via `fetch` on click (not pushed). Tests: SSE handler emits a
+  dashboard event on mtime change and a keepalive comment on timeout (fake
+  `wfile` + injectable `mtime_source`, no port bind, no browser); the HTML has
+  no `meta refresh` and no `root.innerHTML=` assignment outside first paint
+  (grep tests); Node 20 test (`js/tests/dashboard-helpers.test.mjs`) exercises
+  the pure DOM-free helper functions (`esc`, `fmtNum`, `fmtDur`,
+  `statusPill`, `parityPill`, `abDelta`, `filterSortRows`, `toggleChip`) via
+  `node:vm` — no DOM framework.
+
 - watch: live-tree shapes (real run_eval fixture, header from run.json,
   questions from real prediction lines, parity per model). Header
   hash/machine/mlx/cap now read from any combo's run.json environment when

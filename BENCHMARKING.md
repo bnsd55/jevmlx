@@ -71,7 +71,7 @@ run process is never touched.
 # Terminal mode (default): rich Live redraw in the terminal
 jevmlx watch benchmarks/results/<machine>-<model-slug> [--refresh 2]
 
-# Web mode: serve the control-room page (Chrome auto-reloads)
+# Web mode: serve the control-room page (live via SSE, no reload)
 jevmlx watch <out-dir> --web [--port 8765] [--no-tty]
 
 # Or start the watcher in the same terminal as the bench:
@@ -85,8 +85,18 @@ combo progress, and the last few prediction lines. Keys: `q` quit,
 
 `--web` serves a static control-room page at `http://127.0.0.1:PORT/` — a
 single self-contained HTML file (inline CSS + vanilla JS, no framework, no
-CDN) that fetches `/dashboard.json` every refresh seconds and renders
-client-side. The page has, top to bottom:
+CDN) that is **live via SSE**: the first paint fetches `/dashboard.json` once,
+then an `EventSource('/events')` connection pushes a new dashboard payload
+whenever a watched file changes (no full-page reload, no `root.innerHTML`
+wipe). The server watches the mtimes of `RUNBOOK.md` and every
+`heartbeat.jsonl` / `run.json` / `predictions.jsonl` under `<out>` (a cheap
+`os.stat` scan every `refresh` seconds) and emits `event: dashboard` with the
+full `build_dashboard` JSON on change, or a `: keepalive` comment every 15 s
+if nothing changed. The browser patches the DOM in place (text, bar widths,
+keyed row insert/update/remove) so selection, filters, sort, scroll, and open
+`<details>` are preserved across updates. On disconnect a small
+"disconnected" pill appears in the top bar; `EventSource` reconnects
+automatically. The page renders client-side and has, top to bottom:
 
 - **Top bar**: run name, freeze hash, machine + mlx version, attempt number
   + start time, awake time + sleep-guard state, state badge (running /
@@ -125,7 +135,8 @@ client-side. The page has, top to bottom:
   `<details>` blocks.
 
 `/dashboard.json` returns the raw 9-key contract for scripts;
-`/questions.json?combo=<id>` returns the flat question list. Null fields
+`/questions.json?combo=<id>` returns the flat question list;
+`/events` is the SSE stream (live updates). Null fields
 render as a dash, never break the page. Half-written trailing lines are
 truncated (same rule as `--resume`); missing files show `—`; no parse error
 ever raises. `--no-tty` runs web only; `--web` without `--no-tty` runs both

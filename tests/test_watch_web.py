@@ -62,8 +62,22 @@ class TestHtmlPanels:
         ]:
             assert text in HTML, f"missing legend text: {text}"
 
-    def test_meta_refresh_present(self):
-        assert 'http-equiv="refresh"' in HTML
+    def test_no_meta_refresh(self):
+        """W6-UI-3f: the page must NOT reload via meta refresh — SSE drives updates."""
+        assert 'http-equiv="refresh"' not in HTML
+
+    def test_no_root_innerhtml_wipe(self):
+        """W6-UI-3f: #root.innerHTML is assigned only on first paint, never on patch."""
+        # The only 'root.innerHTML=' assignment is in initialRender (first paint).
+        # patchDashboard must never touch root.innerHTML.
+        assert HTML.count("root.innerHTML=h") == 1
+        assert HTML.count("root.innerHTML=") == 1
+        # No setInterval polling — SSE replaces it.
+        assert "setInterval" not in HTML
+
+    def test_sse_eventsource_present(self):
+        """W6-UI-3f: the page connects via EventSource for live updates."""
+        assert "EventSource('/events')" in HTML or 'EventSource("/events")' in HTML
 
     def test_no_external_deps(self):
         """No CDN, no framework — inline CSS + vanilla JS only."""
@@ -72,9 +86,9 @@ class TestHtmlPanels:
         assert "import " not in HTML.split("<script>")[1]
 
     def test_refresh_substitution(self):
-        """_dashboard_html injects the refresh interval."""
+        """_dashboard_html injects the refresh interval into const REFRESH."""
         html = _dashboard_html(refresh=5)
-        assert 'content="5"' in html
+        assert "const REFRESH = 5;" in html
         assert "__REFRESH__" not in html
 
 
