@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Fix: `finalize_public_result` raised `ValueError: no field carries a
+  semantics record` on typesafe cases with an empty schema (`{}`). Root
+  cause: the typesafe dataset carries cases whose schema is `{}` (a workflow
+  variant with no scorable fields, e.g.
+  `typesafe/security_incidents/art_T1546.018-2__change_covers__t2/n1`). The
+  engine loops over `schema.fields` (empty), `field_telemetry` stays `{}`,
+  and the finalizer raised a results-contract violation that is actually a
+  legal degenerate case. Fix at the owning layer: an empty schema is legal —
+  the engine returns a valid result with `num_fields=0`, `parsed_json={}`
+  and `probability_status='empty schema (0 fields; no scoring needed)'`.
+  The `ValueError` still fires for a NON-empty schema where no field has a
+  semantics record (a real contract violation — the empty-schema exemption
+  does NOT mask it). 4 tests (empty schema returns valid result, probability
+  status, non-empty-with-no-semantics still raises, the actual typesafe case).
+
 - watch page: patch on first paint; unique combo id on click. Three page
   bugs from the M5 live report: (1) first paint built DOM shells but never
   called `patchDashboard(D)` with the fetched `/dashboard.json` payload, so
