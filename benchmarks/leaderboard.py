@@ -26,7 +26,7 @@ c. **jevmlx, local (measured)**: ``benchmarks/results`` folders on the
 d. **jevmlx, local on LocalLLaMA/typed-decisions (measured)**: same columns
    for results folders on the ``typed-decisions`` dataset (the task published
    as versioned parquet; official ``test`` split, 400 cases). Kept as its own
-   group: it is a different test set from the 20 public examples.
+   group: it is a different test set from the public examples.
 
 With ``--readme`` the table is written between
 ``<!-- leaderboard:start -->`` / ``<!-- leaderboard:end -->`` markers.
@@ -273,8 +273,14 @@ def _local_rows(results_root: Path) -> list[dict]:
             track = config.get("track", "")
             dataset = config.get("dataset_path", "") or ""
             dataset_name = dataset if "/" not in dataset else Path(dataset).stem
-            if track != "parallel" or dataset_name not in _LOCAL_GROUPS:
+            # Emit both 'parallel' (the real scorer) and 'naive_local' (the
+            # generate-JSON-then-parse baseline the project argues against).
+            # Naive rows show Scorer 'naive (generate+parse)' and Parity '—'
+            # (no batch/chunked parity test — the naive track is a single
+            # generate+parse path, not a scoring path).
+            if track not in ("parallel", "naive_local") or dataset_name not in _LOCAL_GROUPS:
                 continue
+            is_naive = track == "naive_local"
             metrics = report.get("metrics", {})
             ta = metrics.get("agreement", {})
             ta = ta if isinstance(ta, dict) else {}
@@ -316,6 +322,11 @@ def _local_rows(results_root: Path) -> list[dict]:
                 n_cases = n_fields
             model = config.get("model", "")
             _, scorer, _ = _combo_parts(combo)
+            if is_naive:
+                # The naive baseline: generate JSON + parse (no scoring).
+                # Scorer column distinguishes it from the real slots/labels
+                # scorers; Parity is '—' (no batch/chunked test).
+                scorer = "naive (generate+parse)"
             machine, _ = _machine_model(combo)
             # Time per case in seconds: the honest per-item end-to-end
             # median (results contract v2) — no fallback. A parallel combo
@@ -339,8 +350,8 @@ def _local_rows(results_root: Path) -> list[dict]:
                     "source": "local",
                     "scorer": scorer,
                     "machine": machine,
-                    "parity_status": parity_status,
-                    "parity_max_drift": parity_max_drift,
+                    "parity_status": "—" if is_naive else parity_status,
+                    "parity_max_drift": 0.0 if is_naive else parity_max_drift,
                     "accuracy": agreement,
                     # W6-B6b/F1: Wilson CI on the agreement accuracy.
                     "accuracy_ci": _agreement_ci(agreement, cases_count),
@@ -559,9 +570,20 @@ def build_table(
 
     # Caption lines.
     lines.append("")
+    # Derive the case count from the results (counts.cases of the local
+    # rows), never a literal — the typesafe dataset grows over time.
+    _local_case_counts = sorted({r["cases"] for r in local_rows if r.get("cases") is not None})
+    if len(_local_case_counts) == 1:
+        _cases_phrase = f"the {_local_case_counts[0]} public example cases"
+    elif _local_case_counts:
+        _cases_phrase = (
+            f"the public example cases ({_local_case_counts[0]}–{_local_case_counts[-1]} per row)"
+        )
+    else:
+        _cases_phrase = "the public example cases"
     lines.append(
         "_Official accuracies are on TypeSafe's full private eval; ours are on "
-        "the 20 public example cases, so the numbers are indicative, not the "
+        f"{_cases_phrase}, so the numbers are indicative, not the "
         "same test._"
     )
     typed_rows = [r for r in local_rows if r.get("dataset") == "typed-decisions"]
