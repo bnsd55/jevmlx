@@ -108,6 +108,39 @@ class TestParseBaselineOutput:
         assert strict["action"] is None and salvage["action"] is None
         assert any("invalid value for action" in e and "MAYBE" in e for e in errors)
 
+    def test_numeric_scalar_coerced_for_string_digit_enum(self):
+        """int 2 for choices ('0','1','2','3') is accepted as '2' — a baseline
+        must not lose a semantically-correct case to a type-only mismatch."""
+        schema = StructuredSchema(
+            {"level": {"type": "enum", "choices": ["0", "1", "2", "3"], "description": "Level"}}
+        )
+        strict, salvage, errors = parse_baseline_output('{"level": 2}', schema)
+        assert errors == []
+        assert strict["level"] == "2"
+        assert salvage["level"] == "2"
+
+    def test_numeric_scalar_not_in_choices_still_errors(self):
+        """A numeric scalar that str-coerces to a non-choice still errors
+        (str(2.5)=='2.5' is not in ('0','1','2','3'))."""
+        schema = StructuredSchema(
+            {"level": {"type": "enum", "choices": ["0", "1", "2", "3"], "description": "Level"}}
+        )
+        strict, salvage, errors = parse_baseline_output('{"level": 2.5}', schema)
+        assert strict["level"] is None
+        assert salvage["level"] is None
+        assert any("invalid value for level" in e and "2.5" in e for e in errors)
+
+    def test_wrong_string_enum_still_errors_after_coercion(self):
+        """A wrong string ('MAYBE') still errors — coercion only rescues
+        numeric scalars, never wrong strings."""
+        schema = StructuredSchema(
+            {"action": {"type": "enum", "choices": ["APPROVE", "REJECT"], "description": "Act"}}
+        )
+        strict, salvage, errors = parse_baseline_output('{"action": "MAYBE"}', schema)
+        assert strict["action"] is None
+        assert salvage["action"] is None
+        assert any("invalid value for action" in e and "MAYBE" in e for e in errors)
+
     def test_extra_keys_are_errors(self):
         strict, salvage, errors = parse_baseline_output(
             '{"action": "APPROVE", "amount_valid": true, "tags": [], "notes": "hi"}', SCHEMA

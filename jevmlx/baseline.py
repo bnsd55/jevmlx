@@ -99,7 +99,11 @@ def _validate_field(name: str, field, raw) -> tuple[bool, object, str | None]:
     Returns (ok, value, problem): value is the parsed value when usable for
     salvage, None only for wrong-typed values; problem is the error string or
     None. Multi arrays may be empty (the schema adds no non-empty constraint)
-    but duplicates and out-of-choices items are errors.
+    but duplicates and out-of-choices items are errors. Numeric scalars (int/float)
+    for string-digit enum choices are str-coerced before the membership check,
+    so int 2 for choices ('0','1','2','3') is accepted as '2' (a baseline must
+    not lose a semantically-correct case to a type-only mismatch); wrong values
+    like str(2.5)=='2.5' or a non-choice string still error.
     """
     if field.field_type == "boolean":
         if isinstance(raw, bool):
@@ -117,6 +121,15 @@ def _validate_field(name: str, field, raw) -> tuple[bool, object, str | None]:
         return True, raw, None
     if isinstance(raw, str) and raw in field.choices:
         return True, raw, None
+    # A naive baseline must not lose a semantically-correct case to a type-only
+    # mismatch (int 2 where the schema wants string '2'). Coerce non-str
+    # scalars (int/float) to str before the membership check; this rescues
+    # str(2)=='2' but not str(2.5)=='2.5' or a wrong string like 'MAYBE'.
+    # Booleans are already handled by the earlier field_type == 'boolean' branch.
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        coerced = str(raw)
+        if coerced in field.choices:
+            return True, coerced, None
     return False, None, f"invalid value for {name}: {raw!r} (allowed: {field.choices})"
 
 
