@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- leaderboard: the naive_local track (generate JSON + parse) is now a row
+  (Scorer 'naive (generate+parse)', Parity '—', Time per case from
+  timing.json, Cases with '(M error)' note). It was the comparison baseline
+  the project argues against, but the leaderboard emitted only parallel
+  rows. The footnote 'N public example cases' is now derived from the
+  results' counts.cases (never a literal 20); README prose lines outside
+  the generated block no longer state a number.
 - Fix: `finalize_public_result` raised `ValueError: no field carries a
   semantics record` on typesafe cases with an empty schema (`{}`). Root
   cause: the typesafe dataset carries cases whose schema is `{}` (a workflow

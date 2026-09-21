@@ -508,3 +508,115 @@ def test_leaderboard_excludes_missing_parity(tmp_path):
     (root / "m1-8gb-fake" / "parity.json").unlink()
     table = build_table(root, None, official)
     assert "fake-1b" not in table
+
+
+def _write_naive_combo(root: Path) -> Path:
+    """Add a naive_local-slots-typesafe combo (the generate+parse baseline).
+
+    Mirrors the real 7B results folder: track=naive_local, timing.json with
+    call-level median, error lines (invalid enum values).
+    """
+    machine_dir = root / "m1-8gb-fake"
+    combo = machine_dir / "naive_local-slots-typesafe"
+    combo.mkdir(parents=True, exist_ok=True)
+    run = {
+        "run_id": "r-naive",
+        "environment": {"chip": "fake"},
+        "config": {
+            "model": "fake-1b",
+            "track": "naive_local",
+            "dataset_path": "/cache/jevmlx/bench/typesafe.jsonl",
+        },
+        "counts": {"cases": 5, "fields": 5, "prediction_lines": 5},
+    }
+    (combo / "run.json").write_text(json.dumps(run), encoding="utf-8")
+    (combo / "timing.json").write_text(
+        json.dumps({"median": {"per_item_end_to_end_ms": 1480.0}}), encoding="utf-8"
+    )
+    report = {
+        "environment": {"chip": "fake"},
+        "metrics": {
+            "agreement": {
+                "agreement_common_subset": 0.6,
+                "by_workflow": {"customer_service": 0.7},
+                "n_fields": 5,
+                "n_cases": 5,
+            }
+        },
+    }
+    (combo / "report.json").write_text(json.dumps(report), encoding="utf-8")
+    records = []
+    for i in range(5):
+        if i < 2:
+            # 2 error lines (invalid enum value — the naive parser failed).
+            records.append(
+                json.dumps(
+                    {
+                        "case_id": f"c{i}",
+                        "field": "f",
+                        "valid": False,
+                        "correct": None,
+                        "label": "A",
+                        "prediction": None,
+                        "error": f"invalid value for f: {i}",
+                        "latency_ms": 1500.0,
+                    }
+                )
+            )
+        else:
+            records.append(
+                json.dumps(
+                    {
+                        "case_id": f"c{i}",
+                        "field": "f",
+                        "valid": True,
+                        "correct": True,
+                        "label": "A",
+                        "prediction": "A",
+                        "latency_ms": 1400.0,
+                    }
+                )
+            )
+    (combo / "predictions.jsonl").write_text("\n".join(records) + "\n", encoding="utf-8")
+    return root
+
+
+def test_leaderboard_includes_naive_baseline_row(tmp_path):
+    """The naive_local track (generate JSON + parse) is the baseline the
+    project argues against. It must appear as a row: Scorer 'naive
+    (generate+parse)', Parity '—', Time per case from timing.json, Cases
+    with '(M error)' note.
+    """
+    official = _write_official(tmp_path)
+    root = _write_local_result(tmp_path)
+    _write_local_result_v2(root)
+    _write_naive_combo(root)
+    table = build_table(root, None, official)
+    # The naive row appears.
+    assert "naive (generate+parse)" in table
+    # Parity is '—' for the naive row (no batch/chunked test).
+    # Find the naive row line and check the Parity cell.
+    naive_line = next(line for line in table.splitlines() if "naive (generate+parse)" in line)
+    cells = [c.strip() for c in naive_line.split("|")]
+    # cells: ['', model, source, scorer, machine, accuracy, parity, ...]
+    parity_cell = cells[6]
+    assert parity_cell == "—", f"naive row parity should be '—', got {parity_cell!r}"
+    # Time per case from timing.json (1.48s -> rounds to 1.5s).
+    assert "1.5s" in naive_line
+    # Cases with error note.
+    assert "5 (2 error)" in naive_line
+
+
+def test_leaderboard_case_count_derived_from_results(tmp_path):
+    """The footnote 'N public example cases' is derived from the results'
+    counts.cases, never a literal 20."""
+    official = _write_official(tmp_path)
+    root = _write_local_result(tmp_path)
+    _write_local_result_v2(root)
+    _write_naive_combo(root)
+    table = build_table(root, None, official)
+    # The footnote derives the count from the local rows (4 cases for the
+    # parallel combo, 5 for naive — min=4, max=5; when there's a single
+    # count it shows that number).
+    assert "20 public example cases" not in table
+    assert "public example cases" in table

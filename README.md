@@ -135,13 +135,13 @@ Backpressure: **429 + `Retry-After`** when the queue is full (`--queue-size`, de
 
 ## What the numbers mean
 
-[BENCHMARKING.md](BENCHMARKING.md) documents the eval methodology: accuracy against the TypeSafe public consensus, the majority baseline, and exact-record agreement; parity (batched vs. single-call within `PARITY_ATOL`); and the drift band (log-score and probability-margin drift between runs). The leaderboard below cites official TypeSafe accuracies; local rows are measured by contributors on the 20 public examples.
+[BENCHMARKING.md](BENCHMARKING.md) documents the eval methodology: accuracy against the TypeSafe public consensus, the majority baseline, and exact-record agreement; parity (batched vs. single-call within `PARITY_ATOL`); and the drift band (log-score and probability-margin drift between runs). The leaderboard below cites official TypeSafe accuracies; local rows are measured by contributors on the public examples.
 
 A **TypeScript client** (`@jevmlx/client`) lives in [`js/`](js/) — zero runtime deps, mirrors the server's JSON shapes exactly (types derived from fixture responses dumped by the server). Install from the GitHub path (no npm publish yet): `npm install github:bnsd55/jevmlx#main`. See [`js/README.md`](js/README.md) for the full API.
 
 ## Leaderboard
 
-Agreement with the TypeSafe public eval consensus. Official rows are cited from TypeSafe's page; local rows are measured by contributors on the 20 public examples.
+Agreement with the TypeSafe public eval consensus. Official rows are cited from TypeSafe's page; local rows are measured by contributors on the public examples.
 
 <!-- leaderboard:start -->
 | Model | Source | Scorer | Machine | Accuracy | Parity | Customer service | Agent trace | Security | Invoices | Time per case | Cost per case | Cases |
@@ -154,10 +154,11 @@ Agreement with the TypeSafe public eval consensus. Official rows are cited from 
 | GPT-5.6 Sol | official (cited) | — | — | 74.1% | — | — | — | — | — | 23.3s | $0.0836 | — |
 | Claude Haiku 4.5 | official (cited) | — | — | 53.6% | — | — | — | — | — | 12.5s | $0.0195 | — |
 | **jevmlx, local (measured)** | | | | | | | | | | | | |
+| mlx-community/Qwen2.5-7B-Instruct-4bit | local | naive (generate+parse) | m5max-128gb | 67.7% [52.1%, 78.6%] | — | 72.8% | 53.8% | 45.9% | 73.4% | 1.5s | $0 (local) | 45 (7 error) |
 | mlx-community/Qwen2.5-7B-Instruct-4bit | local | labels | m5max-128gb | 82.1% [68.7%, 90.7%] | DRIFT (0.078) | 68.0% | 39.2% | 57.6% | 84.5% | 0.6s | $0 (local) | 45 (1 error) |
 | mlx-community/Qwen2.5-7B-Instruct-4bit | local | slots | m5max-128gb | 63.2% [47.6%, 74.9%] | DRIFT (0.078) | 61.4% | 51.7% | 47.2% | 63.9% | 0.6s | $0 (local) | 45 (1 error) |
 
-_Official accuracies are on TypeSafe's full private eval; ours are on the 20 public example cases, so the numbers are indicative, not the same test._
+_Official accuracies are on TypeSafe's full private eval; ours are on the 45 public example cases, so the numbers are indicative, not the same test._
 _Consensus label = the agreement of GPT-6 Astra + Claude Fable 5.1 (TypeSafe's reference)._
 
 <!-- leaderboard:end -->
