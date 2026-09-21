@@ -24,6 +24,21 @@
   does NOT mask it). 4 tests (empty schema returns valid result, probability
   status, non-empty-with-no-semantics still raises, the actual typesafe case).
 
+- baseline: accept numeric scalars for string-digit enum choices. The naive
+  baseline parser (`jevmlx/baseline.py:_validate_field`) rejected an integer
+  where the schema expects a string from `('0','1','2','3')` — e.g.
+  `{"request_specificity": 2}` — failing the `isinstance(raw, str)` guard
+  before the membership check, so the case counted as an error instead of
+  being scored. The 7B naive_local-slots-typesafe run lost 7 cases this way
+  (4x `expressed_satisfaction`, 2x `churn_risk`, 1x `request_specificity`,
+  all int 0/2/3 for string choices '0'..'3'). Fix: coerce non-str scalars
+  (int/float) with `str(value)` before the membership check — `str(2)=='2'`
+  is accepted, `str(2.5)=='2.5'` and wrong strings like `'MAYBE'` still error.
+  Booleans are unaffected (handled by the earlier `field_type == 'boolean'`
+  branch). Naive-only: the engine's own `_validate_json` (telemetry, not
+  scoring) is unchanged; the scored parallel/slots paths use the token scorer.
+  3 tests (int 2 -> '2', float 2.5 errors, 'MAYBE' errors).
+
 - watch page: patch on first paint; unique combo id on click. Three page
   bugs from the M5 live report: (1) first paint built DOM shells but never
   called `patchDashboard(D)` with the fetched `/dashboard.json` payload, so
