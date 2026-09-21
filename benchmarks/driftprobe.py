@@ -595,7 +595,11 @@ def _persist_envelope(engine: Engine, report: dict[str, Any], out_dir: str) -> l
 
     key = envelope_key(engine)
     by_bucket: dict[str, float] = {}
-    for entry in report.get("width_matrix", {}).get("widths", []):
+    # width_matrix is a list[dict] (one entry per width×slot_mode), not a
+    # dict with a 'widths' key.
+    for entry in report.get("width_matrix") or []:
+        if not isinstance(entry, dict):
+            continue
         n = entry.get("tensor_rows")
         d_gap = (entry.get("d_gap") or {}).get("max")
         if not isinstance(n, int) or not isinstance(d_gap, (int, float)):

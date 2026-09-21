@@ -215,18 +215,18 @@ def main(argv: list[str] | None = None) -> int:
 
     from jevmlx.engine import load_engine
 
-    model, tokenizer = load_engine(args.model)
+    engine = load_engine(args.model)
     out_path = Path(args.out) if args.out else Path(f"probe-{args.model.replace('/', '_')}.json")
     payload: dict = {"model": args.model}
 
     if args.command in ("slope", "both"):
-        payload["slope"] = probe_slope(model)
+        payload["slope"] = probe_slope(engine.model)
         for line in slope_table_lines(payload["slope"]):
             print(line)
     if args.command in ("adapters", "both"):
         from jevmlx.parity import bundled_preset_specs
 
-        payload["adapters"] = probe_adapters(model, tokenizer, bundled_preset_specs())
+        payload["adapters"] = probe_adapters(engine.model, engine.tokenizer, bundled_preset_specs())
         for line in adapters_table_lines(payload["adapters"]):
             print(line)
 
