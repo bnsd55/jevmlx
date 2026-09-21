@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Vision-language checkpoints load as their inner text model (the
+  mlx-lm wrapper with `language_model` is unwrapped in `load_engine`), so
+  qwen3_5 / gemma3 / mistral3 VLM builds work as scoring backends.
+  Contributed in #114.
+
 - m5: step done-markers now encode OUTCOME, not just exit code. A bench
   step is done only when no combo's `run.json` records `run_failed`/
   `load_failed` (bench exits 0 even when some combos failed, so the `.done`
