@@ -235,9 +235,12 @@ def _per_item_end_to_end_ms(folder: Path) -> float | None:
 def _local_rows(results_root: Path) -> list[dict]:
     """One row per results folder with dataset=typesafe and track=parallel.
 
-    W4-A: a model appears only if its folder has a passing slow parity test
-    (parity.json with ``passed: true``). Without it, the model is excluded
-    from the leaderboard — it hasn't proven batch/chunked log_score parity.
+    W4-A / issue parity-gates: a model appears if its folder's parity.json
+    records status PASS or DRIFT. PASS = all drifts < atol. DRIFT = some
+    drift >= atol but winners identical on all cases AND max drift inside the
+    persisted envelope band (batch-shape noise, not a real divergence) —
+    publishable, the Parity column shows the word + max drift. FAIL (a winner
+    changed, or drift beyond the band) stays excluded.
 
     Time per case (review follow-up on #48): read ONLY the honest
     per-item end-to-end median (results contract v2). There are no pre-v2
@@ -252,7 +255,8 @@ def _local_rows(results_root: Path) -> list[dict]:
     if not results_root.exists():
         return rows
     for machine_dir in sorted(p for p in results_root.iterdir() if p.is_dir()):
-        # W4-A: skip models without a passing parity test.
+        # W4-A / parity-gates: include PASS and DRIFT; exclude FAIL and
+        # missing/unreadable parity.
         parity_path = machine_dir / "parity.json"
         if not parity_path.exists():
             continue
@@ -260,11 +264,16 @@ def _local_rows(results_root: Path) -> list[dict]:
             parity = json.loads(parity_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if not parity.get("passed"):
-            continue
-        # P4/I7: the status word (PASS for leaderboard rows — DRIFT/FAIL
-        # models are excluded by the passed gate above).
         parity_status = parity.get("status", "PASS")
+        if parity_status not in ("PASS", "DRIFT"):
+            continue
+        # The max drift for the Parity column (DRIFT rows show it; PASS
+        # rows show 0 / the measured value, which is < atol).
+        parity_max_drift = max(
+            parity.get("max_abs_drift_nats", 0.0) or 0.0,
+            parity.get("max_gap_drift_nats", 0.0) or 0.0,
+            parity.get("max_margin_drift_nats", 0.0) or 0.0,
+        )
         for combo in sorted(p for p in machine_dir.iterdir() if p.is_dir()):
             report_path = combo / "report.json"
             if not report_path.exists():
@@ -328,6 +337,7 @@ def _local_rows(results_root: Path) -> list[dict]:
                     "scorer": scorer,
                     "machine": machine,
                     "parity_status": parity_status,
+                    "parity_max_drift": parity_max_drift,
                     "accuracy": agreement,
                     # W6-B6b/F1: Wilson CI on the agreement accuracy.
                     "accuracy_ci": _agreement_ci(
@@ -391,10 +401,18 @@ def _row_line(r: dict) -> str:
     wf_cells = [_fmt_pct(wf.get(key)) for key, _ in _WORKFLOW_COLS]
     cost = r.get("cost_per_case_usd")
     cost_cell = cost if isinstance(cost, str) else _fmt_cost(cost)
+    # Parity column: PASS shows the word; DRIFT shows the word + max drift
+    # (publishable batch-shape noise); the column never shows FAIL (those
+    # models are excluded by _local_rows).
+    parity_word = r.get("parity_status", "—")
+    if parity_word == "DRIFT":
+        parity_cell = f"DRIFT ({r.get('parity_max_drift', 0):.3f})"
+    else:
+        parity_cell = str(parity_word)
     return (
         f"| {r['model']} | {r['source']} | {r.get('scorer', '—')} | "
         f"{r.get('machine', '—')} | {_fmt_pct_with_ci(r.get('accuracy'), r.get('accuracy_ci'))} | "
-        f"{r.get('parity_status', '—')} | "
+        f"{parity_cell} | "
         f"{' | '.join(wf_cells)} | "
         f"{_fmt_seconds(r.get('time_per_case_s'))} | "
         f"{cost_cell} | "

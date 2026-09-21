@@ -442,3 +442,68 @@ def test_local_rows_fail_without_per_item_timing(tmp_path):
     results = _write_local_result(tmp_path)  # v1 lines: latency_ms only
     with _pytest.raises(ValueError, match="per_item_end_to_end_ms"):
         build_table(results, None, official)
+
+
+def _write_local_result_with_parity(tmp_path: Path, *, status: str, passed: bool) -> Path:
+    """A results folder whose parity.json has a given status + passed flag.
+
+    Reuses _write_local_result_v2's shape (valid per-item timing) and
+    overwrites parity.json with the requested status."""
+    root = _write_local_result(tmp_path)
+    _write_local_result_v2(root)  # upgrade predictions to v2 timing
+    machine_dir = root / "m1-8gb-fake"
+    parity = {
+        "model": "fake-1b",
+        "test": "w1a",
+        "passed": passed,
+        "status": status,
+        "max_abs_drift_nats": 0.078 if status == "DRIFT" else 0.02,
+        "max_gap_drift_nats": 0.078 if status == "DRIFT" else 0.01,
+        "max_margin_drift_nats": 0.05 if status == "DRIFT" else 0.01,
+        "max_raw_row_drift_nats": 0.03,
+        "atol": 0.05,
+        "winners_identical": True,
+        "drift_envelope": {"band": 0.14} if status == "DRIFT" else {},
+    }
+    (machine_dir / "parity.json").write_text(json.dumps(parity), encoding="utf-8")
+    return root
+
+
+def test_leaderboard_includes_drift_model(tmp_path):
+    """A model with parity status=DRIFT (publishable batch-shape noise)
+    appears in the leaderboard, and the Parity column shows 'DRIFT' + max drift."""
+    official = _write_official(tmp_path)
+    results = _write_local_result_with_parity(tmp_path, status="DRIFT", passed=False)
+    table = build_table(results, None, official)
+    assert "fake-1b" in table
+    assert "DRIFT" in table
+    # The Parity column shows the word (not just the status code).
+    assert "DRIFT (0.078)" in table
+
+
+def test_leaderboard_includes_pass_model(tmp_path):
+    """A model with parity status=PASS appears in the leaderboard."""
+    official = _write_official(tmp_path)
+    results = _write_local_result_with_parity(tmp_path, status="PASS", passed=True)
+    table = build_table(results, None, official)
+    assert "fake-1b" in table
+    assert "PASS" in table
+
+
+def test_leaderboard_excludes_fail_model(tmp_path):
+    """A model with parity status=FAIL (a winner changed, or drift beyond
+    the band) is excluded from the leaderboard — no row."""
+    official = _write_official(tmp_path)
+    results = _write_local_result_with_parity(tmp_path, status="FAIL", passed=False)
+    table = build_table(results, None, official)
+    assert "fake-1b" not in table
+
+
+def test_leaderboard_excludes_missing_parity(tmp_path):
+    """A model with no parity.json is excluded."""
+    official = _write_official(tmp_path)
+    root = _write_local_result(tmp_path)
+    _write_local_result_v2(root)
+    (root / "m1-8gb-fake" / "parity.json").unlink()
+    table = build_table(root, None, official)
+    assert "fake-1b" not in table

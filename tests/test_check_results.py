@@ -288,6 +288,7 @@ class TestParityGate:
                     "prompt_version": "jevmlx-parallel-v8",
                     "test": "test_w1a_scoring_parity_batch_vs_chunked_real_model",
                     "passed": True,
+                    "status": "PASS",
                     "max_abs_drift_nats": 0.027,
                     "max_raw_row_drift_nats": 0.031,
                     "atol": 0.05,
@@ -299,6 +300,37 @@ class TestParityGate:
         ok, problems = check_parity(tmp_path)
         assert ok
         assert problems == []
+
+    def test_drift_parity_passes_with_note(self, tmp_path):
+        """parity-gates: status=DRIFT is publishable (OK) — the note is
+        informational (batch-shape noise, not a regression). Before the
+        fix, DRIFT set passed=False and check_parity returned FAIL."""
+        from benchmarks.check_results import check_parity
+
+        (tmp_path / "parity.json").write_text(
+            json.dumps(
+                {
+                    "model": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+                    "test": "test_w1a_scoring_parity_batch_vs_chunked_real_model",
+                    "passed": False,
+                    "status": "DRIFT",
+                    "max_abs_drift_nats": 0.078,
+                    "max_raw_row_drift_nats": 0.03,
+                    "max_gap_drift_nats": 0.078,
+                    "max_margin_drift_nats": 0.05,
+                    "atol": 0.05,
+                    "winners_identical": True,
+                    "drift_envelope": {"band": 0.14},
+                    "run_at": "2026-09-18T12:00:00Z",
+                }
+            )
+        )
+        ok, problems = check_parity(tmp_path)
+        assert ok, f"DRIFT should be OK (publishable), got problems={problems}"
+        assert len(problems) == 1
+        assert "DRIFT" in problems[0]
+        assert "batched drift" in problems[0]
+        assert "inside envelope band 0.14" in problems[0]
 
     def test_missing_parity_fails(self, tmp_path):
         from benchmarks.check_results import check_parity
@@ -407,9 +439,10 @@ class TestParityGate:
         assert any("unreadable" in p for p in problems)
 
     def test_drift_status_prints_drift_word(self, tmp_path):
-        """P4/I7: a parity.json with status=DRIFT (drift >= atol, winners
-        identical, inside envelope band) prints 'DRIFT: ...' and passed
-        stays False."""
+        """parity-gates: a parity.json with status=DRIFT (drift >= atol,
+        winners identical, inside envelope band) is OK (publishable) and
+        prints the DRIFT sentence as an informational note. Before the fix,
+        DRIFT set passed=False and check_parity returned FAIL."""
         from benchmarks.check_results import check_parity
 
         (tmp_path / "parity.json").write_text(
@@ -431,10 +464,11 @@ class TestParityGate:
             )
         )
         ok, problems = check_parity(tmp_path)
-        assert not ok  # passed is False for DRIFT
-        msg = problems[0]
+        assert ok  # DRIFT is publishable (batch-shape noise, not a regression)
+        msg = problems[0]  # the informational note
         assert "DRIFT:" in msg
         assert "winners identical" in msg
+        assert "inside envelope band 0.141" in msg
         assert "envelope band 0.141" in msg
 
     def test_fail_status_prints_fail_word(self, tmp_path):
