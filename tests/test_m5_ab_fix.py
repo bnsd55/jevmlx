@@ -178,7 +178,13 @@ def test_ab_setup_failure_skips_ab_steps_and_summaries(tmp_path, monkeypatch):
 
     def ab_failing_run(argv, **kwargs):
         joined = " ".join(argv)
-        # The ab-setup step runs 'git worktree add --detach <path> <ref>'.
+        bin0 = argv[0].split("/")[-1]
+        # _resolve_ab_ref runs 'git rev-parse --verify <ref>' before ab-setup.
+        if bin0 == "git" and "rev-parse" in joined:
+            calls.append(("rev-parse", 0))
+            return subprocess.CompletedProcess(tuple(argv), 0, stdout="deadbeef\n", stderr="")
+        # The ab-setup step runs 'git worktree add --detach <path> <ref>'
+        # as its first extra_argv (after the python cleanup argv).
         if "worktree" in joined and "add" in joined:
             calls.append(("ab-setup", 1))
             return subprocess.CompletedProcess(tuple(argv), 1, stdout="", stderr="bad ref")
@@ -238,9 +244,17 @@ def test_ab_setup_success_runs_ab_steps(tmp_path, monkeypatch):
         bin0 = argv[0].split("/")[-1]
         # B8: ab-setup argv is a Python stale-worktree cleanup; git worktree
         # add is the first extra_argv. Both must exit 0.
-        if bin0 == "python" and "-c" in argv and "rmtree" in joined:
+        # Match by basename prefix (python/python3) — sys.executable's
+        # basename differs per environment (uv managed CPython is 'python3').
+        is_python = bin0.startswith("python")
+        if is_python and "-c" in argv and "rmtree" in joined:
             calls.append(("ab-setup-cleanup", 0))
             return subprocess.CompletedProcess(tuple(argv), 0, stdout="", stderr="")
+        # _resolve_ab_ref runs 'git rev-parse --verify <ref>' before ab-setup;
+        # return exit 0 with a fake sha so the origin/<branch> ref resolves.
+        if bin0 == "git" and "rev-parse" in joined:
+            calls.append(("rev-parse", 0))
+            return subprocess.CompletedProcess(tuple(argv), 0, stdout="deadbeef\n", stderr="")
         if "worktree" in joined and "add" in joined:
             # Create the worktree dir so later steps' cwd exists.
             wt_path = Path(argv[argv.index("--detach") + 1])
