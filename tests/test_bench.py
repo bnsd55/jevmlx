@@ -302,6 +302,8 @@ def _patch_bench_core(monkeypatch, tmp_path, failing_models=()):
         resume=False,
         heartbeat_every=0,
         combo="",
+        run_i=None,
+        run_n=None,
     ):
         if model in failing_models:
             raise RuntimeError(f"load failed for {model}")

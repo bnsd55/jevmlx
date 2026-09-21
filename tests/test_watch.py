@@ -393,7 +393,14 @@ class TestDashboardContract:
 
     @staticmethod
     def _build_fixture(out: Path) -> None:
-        """Build the fixture tree under <out>."""
+        """Build a realistic fixture tree under <out>.
+
+        Combo dirs named <track>-<scorer>-<dataset> like bench.py writes;
+        two heartbeats 5 min apart so cases_per_h and eta_s are numbers;
+        run.json with runs/run index; a parity.json with status; one step log.
+        """
+        import time as _time
+
         # run.json at the top level (m5 run dir).
         (out / "run.json").write_text(
             json.dumps(
@@ -417,12 +424,12 @@ class TestDashboardContract:
             ),
             encoding="utf-8",
         )
-        # RUNBOOK.md with two attempt headers.
+        # RUNBOOK.md with two attempt headers + cmd lines.
         (out / "RUNBOOK.md").write_text(
             "\n".join(
                 [
                     "# M5 runbook — 2026-09-21T00:00:00Z",
-                    "sleep_blocked: False",
+                    "sleep_blocked: True",
                     "",
                     "## attempt 1 2026-09-21T00:00:00Z aaa111 python -m benchmarks.m5 --out .",
                     "started doctor 2026-09-21T00:00:01Z",
@@ -431,46 +438,116 @@ class TestDashboardContract:
                     "## attempt 2 2026-09-21T02:17:00Z dbb1ff1 python -m benchmarks.m5 --out .",
                     "started doctor 2026-09-21T02:17:01Z",
                     "## 1. doctor — exit 0 — 0.2s — 2026-09-21T02:17:01Z",
+                    "step: doctor",
+                    "cmd: .venv/bin/jevmlx doctor --json",
                     "started parity-mlx-community_Qwen3-8B-4bit 2026-09-21T02:18:00Z",
                     "## 2. pytest -m slow (Qwen3-8B) — exit 1 — 28.8s — 2026-09-21T02:18:29Z",
+                    "step: parity-mlx-community_Qwen3-8B-4bit",
+                    "cmd: .venv/bin/pytest -m slow -q",
                     "started bench-quality 2026-09-21T02:19:00Z",
                     "## 3. jevmlx bench --model quality — exit 0 — 15600.0s — 2026-09-21T06:39:00Z",
+                    "step: bench-quality",
+                    "cmd: .venv/bin/jevmlx bench "
+                    "--model mlx-community/Qwen2.5-7B-Instruct-4bit --out bench-quality",
                     "",
                 ]
             ),
             encoding="utf-8",
         )
-        # A failed combo (run_failed.txt).
-        failed_dir = out / "bench-failed"
+        # A step log with an error (the failed slow test).
+        (out / "parity-mlx-community_Qwen3-8B-4bit.log").write_text(
+            "\n".join(
+                [
+                    "============================= test session starts "
+                    "=============================",
+                    "collected 30 items",
+                    "tests/test_engine.py::test_chunking_matches_full_batch PASSED",
+                    "tests/test_engine.py::test_w1a_scoring_parity FAILED",
+                    "",
+                    "=================================== FAILURES "
+                    "===================================",
+                    "FAILED tests/test_engine.py::test_w1a_scoring_parity"
+                    "_batch_vs_chunked_real_model",
+                    "assert winners identical across chunk sizes",
+                    "field counterparty_jurisdiction_risk: chunked='SAN' full='TIER_3'",
+                    "========================= 1 failed, 28 passed in 27.5s "
+                    "=========================",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        # A failed combo (run_failed.txt), named like bench.py writes.
+        failed_dir = out / "parallel-labels-bundled-gemma"
         failed_dir.mkdir()
         (failed_dir / "run.json").write_text(
             json.dumps(
-                {"config": {"model": "gemma-3-12B", "track": "parallel"}, "counts": {"cases": 24}}
+                {
+                    "config": {"model": "gemma-3-12B", "track": "parallel", "scorer": "labels"},
+                    "counts": {"cases": 24},
+                }
             ),
             encoding="utf-8",
         )
         (failed_dir / "run_failed.txt").write_text("crash\n", encoding="utf-8")
-        # A running combo with heartbeat.
-        running_dir = out / "bench-running"
+        # A parity.json with FAIL status (model-level).
+        (out / "parity.json").write_text(
+            json.dumps(
+                {
+                    "model": "Qwen3-8B",
+                    "passed": False,
+                    "status": "FAIL",
+                    "max_abs_drift_nats": 0.08,
+                    "winners_identical": False,
+                    "atol": 0.05,
+                }
+            ),
+            encoding="utf-8",
+        )
+        # A running combo with two heartbeats 5 min apart, named like bench.py.
+        running_dir = out / "parallel-labels-typesafe-qwen3"
         running_dir.mkdir()
         (running_dir / "run.json").write_text(
             json.dumps(
                 {
-                    "config": {"model": "Qwen3-8B", "track": "parallel", "scorer": "labels"},
+                    "config": {
+                        "model": "Qwen3-8B",
+                        "track": "parallel",
+                        "scorer": "labels",
+                        "dataset": "typesafe",
+                        "run_i": 1,
+                        "run_n": 2,
+                    },
                     "counts": {"cases": 576},
                 }
             ),
             encoding="utf-8",
         )
+        # dataset.jsonl with 576 lines (matching counts.cases).
         (running_dir / "dataset.jsonl").write_text(
-            "\n".join(json.dumps({"id": f"c{i}", "context": f"ctx-{i}"}) for i in range(10)) + "\n",
+            "\n".join(json.dumps({"id": f"c{i}", "context": f"ctx-{i}"}) for i in range(576))
+            + "\n",
             encoding="utf-8",
         )
-        now_ts = __import__("time").time()
+        now_ts = _time.time()
+        # Two heartbeats 5 min (300s) apart: cases_done 200 then 270.
         (running_dir / "heartbeat.jsonl").write_text(
             json.dumps(
                 {
-                    "combo": "bench-running",
+                    "combo": "parallel-labels-typesafe-qwen3",
+                    "cases_done": 200,
+                    "pred_lines": 2700,
+                    "elapsed_s": 1584,
+                    "peak_memory_bytes": 86 * 2**30,
+                    "active_memory_bytes": 4 * 2**30,
+                    "cache_memory_bytes": 8 * 2**30,
+                    "ts": now_ts - 300,
+                }
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "combo": "parallel-labels-typesafe-qwen3",
                     "cases_done": 270,
                     "pred_lines": 3673,
                     "elapsed_s": 1884,
@@ -483,7 +560,7 @@ class TestDashboardContract:
             + "\n",
             encoding="utf-8",
         )
-        # predictions.jsonl with a couple of labelled rows.
+        # predictions.jsonl with a couple of labelled rows (same case, two rotations).
         (running_dir / "predictions.jsonl").write_text(
             "\n".join(
                 [
@@ -502,7 +579,7 @@ class TestDashboardContract:
                     ),
                     json.dumps(
                         {
-                            "case_id": "c1",
+                            "case_id": "c0",
                             "field": "verdict",
                             "prediction": "no",
                             "label": "yes",
@@ -551,7 +628,7 @@ class TestDashboardContract:
         assert run["mlx_version"] == "0.32.2"
         assert run["attempt_n"] == 2  # last attempt header
         assert run["attempt_started"] == "2026-09-21T02:17:00Z"
-        assert run["sleep_blocked"] is False
+        assert run["sleep_blocked"] is True  # caffeinated (guard on)
         assert run["state"] == "running"  # heartbeat present
 
     def test_pipeline_groups_by_last_attempt(self, tmp_path):
@@ -660,11 +737,14 @@ class TestDashboardContract:
         now = build_dashboard(out)["now"]
         assert now["model"] == "Qwen3-8B"
         assert now["cases_done"] == 270
-        assert now["cases_total"] == 10  # dataset.jsonl has 10 lines
-        # ETA = (total - done) / (done / elapsed). done (270) > total (10)
-        # because heartbeat cases_done exceeds dataset lines; ETA is None.
-        assert now["eta_s"] is None
+        assert now["cases_total"] == 576  # manifest counts.cases
+        assert now["run_i"] == 1
+        assert now["run_n"] == 2
+        # ETA = (total - done) / (done / elapsed) = (576-270)/(270/1884).
+        assert now["eta_s"] is not None and now["eta_s"] > 0
         assert now["pred_lines"] == 3673
+        # cases_per_h from two heartbeats 5 min apart (200->270 in 300s).
+        assert now["cases_per_h"] is not None and now["cases_per_h"] > 0
 
     def test_history_previous_attempts(self, tmp_path):
         from jevmlx.watch import build_dashboard
@@ -707,20 +787,19 @@ class TestDashboardContract:
         out = tmp_path / "run"
         out.mkdir()
         self._build_fixture(out)
-        qs = build_questions(out, "bench-running")
+        qs = build_questions(out, "parallel-labels-typesafe-qwen3")
         assert len(qs) == 2
         # context_text joined from dataset.jsonl by case_id.
         assert qs[0]["context_text"] == "ctx-0"
-        assert qs[1]["context_text"] == "ctx-1"
+        assert qs[1]["context_text"] == "ctx-0"  # same case, rotation 1
         # options carried from per_option.
         assert {o["name"] for o in qs[0]["options"]} == {"yes", "no"}
         # margin = top1 - top2.
         assert qs[0]["margin"] == 0.8  # 0.9 - 0.1
         # acc_so_far: first correct -> 1.0.
         assert qs[0]["acc_so_far"] == 1.0
-        # rotations_same_field: both rows are field 'verdict' but different
-        # cases, so each case has 1 rotation.
-        assert len(qs[0]["rotations_same_field"]) == 1
+        # rotations_same_field: both rows are case c0 field 'verdict' (2 rotations).
+        assert len(qs[0]["rotations_same_field"]) == 2
 
     def test_questions_missing_combo_returns_empty(self, tmp_path):
         from jevmlx.watch import build_questions
@@ -729,6 +808,84 @@ class TestDashboardContract:
         out.mkdir()
         self._build_fixture(out)
         assert build_questions(out, "no-such-combo") == []
+
+    def test_sleep_flag_agrees_between_run_and_health(self, tmp_path):
+        """Fix 1: run.sleep_blocked and the sleep_windows health rule read the
+        same RUNBOOK line, so they can never disagree."""
+        from jevmlx.watch import _read_sleep_blocked, build_dashboard
+
+        out = tmp_path / "run"
+        out.mkdir()
+        self._build_fixture(out)
+        d = build_dashboard(out)
+        sleep_flag = _read_sleep_blocked(out)
+        assert d["run"]["sleep_blocked"] is sleep_flag
+        sleep_rule = next(h for h in d["health"] if h["rule"] == "sleep_windows")
+        # sleep_blocked=True (caffeinated) -> ok state, detail caffeinated.
+        assert sleep_rule["state"] == "ok"
+        assert "caffeinated" in sleep_rule["detail"]
+
+    def test_event_timestamps_are_iso_strings(self, tmp_path):
+        """Fix 2: every event ts is an ISO-8601 UTC string, never an epoch float."""
+        from jevmlx.watch import build_dashboard
+
+        out = tmp_path / "run"
+        out.mkdir()
+        self._build_fixture(out)
+        events = build_dashboard(out)["events"]
+        assert len(events) > 0
+        for e in events:
+            ts = e.get("ts")
+            if ts is not None:
+                assert isinstance(ts, str), f"ts is {type(ts).__name__}, not str"
+                # ISO-8601 UTC ends with Z.
+                assert ts.endswith("Z"), f"ts {ts!r} is not ISO-8601 UTC"
+
+    def test_pipeline_step_titles_are_human_text(self, tmp_path):
+        """Fix 4: step titles are the m5 Step.title text ('doctor', 'pytest ...'),
+        not raw argv; the leading 'N. ' index is stripped."""
+        from jevmlx.watch import build_dashboard
+
+        out = tmp_path / "run"
+        out.mkdir()
+        self._build_fixture(out)
+        steps = build_dashboard(out)["pipeline"]["steps"]
+        titles = [s["title"] for s in steps]
+        # No leading index prefix like '1. ' or '2. '.
+        for t in titles:
+            assert not t.split()[0].rstrip(".").isdigit(), f"title {t!r} has index prefix"
+        # The doctor step title is 'doctor' (from Step.title='doctor (gate)').
+        assert any("doctor" in t for t in titles)
+
+    def test_pipeline_step_has_argv_stdout_tail_and_error(self, tmp_path):
+        """Fix 5: the failed step has argv (from cmd:), stdout_tail (last 40
+        lines of <step.id>.log), and error (the FAILED block)."""
+        from jevmlx.watch import build_dashboard
+
+        out = tmp_path / "run"
+        out.mkdir()
+        self._build_fixture(out)
+        steps = build_dashboard(out)["pipeline"]["steps"]
+        parity_step = next(s for s in steps if "parity" in s["id"])
+        assert parity_step["state"] == "failed"
+        assert parity_step["exit"] == 1
+        assert parity_step["argv"]  # cmd: line captured
+        assert parity_step["stdout_tail"] is not None
+        assert "FAILED" in parity_step["stdout_tail"]
+        assert parity_step["error"] is not None
+        assert "winners" in parity_step["error"] or "FAILED" in parity_step["error"]
+
+    def test_results_combo_names_match_bench_convention(self, tmp_path):
+        """Fix 6: combo dirs are named <track>-<scorer>-<dataset> like bench.py."""
+        from jevmlx.watch import build_dashboard
+
+        out = tmp_path / "run"
+        out.mkdir()
+        self._build_fixture(out)
+        # The running combo dir name is parallel-labels-typesafe-qwen3.
+        d = build_dashboard(out)
+        # results has a row for it.
+        assert any(r["track"] == "parallel" for r in d["results"])
 
     def test_dashboard_never_raises_on_missing_files(self, tmp_path):
         from jevmlx.watch import build_dashboard
