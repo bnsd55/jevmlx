@@ -309,10 +309,11 @@ def _combo_dirs(out_dir: Path) -> list[Path]:
       <out>/invariance/extraNN/...
 
     A LIVE combo dir has heartbeat.jsonl and predictions.jsonl but NO run.json
-    yet (run.json is written on completion). So we discover combos by ANY of
-    heartbeat.jsonl / predictions.jsonl / run.json present; model/track/scorer/
-    dataset are derived from run.json config when present, else from the
-    sibling run.json or folder names.
+    yet (run.json is written on completion). A QUEUED combo dir (never-run)
+    has no marker files — we discover it as a sibling of a known combo in the
+    same model folder. So we discover combos by ANY of heartbeat.jsonl /
+    predictions.jsonl / run.json present, PLUS sibling dirs in model folders
+    that already contain at least one combo.
     """
     out_dir = Path(out_dir)
     combos: list[Path] = []
@@ -331,6 +332,20 @@ def _combo_dirs(out_dir: Path) -> list[Path]:
                 continue
             seen.add(combo_dir)
             combos.append(combo_dir)
+    # W6-UI-3g: discover QUEUED sibling dirs (never-run, no markers) in model
+    # folders that already have at least one combo. The model folder must be a
+    # proper descendant of <out> so we never walk above out_dir.
+    model_dirs: set[Path] = {
+        c.parent for c in combos if c.parent != out_dir and out_dir in c.parent.parents
+    }
+    for model_dir in model_dirs:
+        for sibling in sorted(model_dir.iterdir()) if model_dir.is_dir() else []:
+            if not sibling.is_dir() or sibling in seen:
+                continue
+            # A queued combo dir has a name like <track>-<scorer>-<dataset>.
+            if "-" in sibling.name and not sibling.name.startswith("."):
+                seen.add(sibling)
+                combos.append(sibling)
     return combos
 
 
@@ -571,13 +586,14 @@ def _extract_step_error(out_dir: Path, step_id: str) -> str | None:
 
 
 def _parse_pipeline(out_dir: Path) -> dict:
-    """Pipeline panel: steps grouped by the LAST '## attempt ' header.
+    """Pipeline panel: steps grouped by the LAST attempt.
 
-    Parses RUNBOOK.md for attempt headers ('## attempt <n> <ISO> <hash> <argv>')
-    and per-step 'started <id> <ISO>' + completion lines ('## <idx>. <title> — ...').
+    Parses RUNBOOK.md for attempt headers of two forms:
+    - W6 (#119+): '## attempt <n> <ISO> <hash> <argv>'
+    - Legacy (pre-#119): '# M5 runbook — <ISO>' (one per attempt, append-only)
+    Both split attempts; attempt_n = count; attempt_started = the ISO.
     Only the last attempt's steps are returned (the dashboard shows the
-    current attempt). Steps in plan_steps with no runbook line yet are
-    'waiting'.
+    current attempt). Steps are deduped by id: last occurrence wins.
     """
     rb = out_dir / "RUNBOOK.md"
     attempt_n = 0
@@ -588,25 +604,38 @@ def _parse_pipeline(out_dir: Path) -> dict:
             text = rb.read_text(encoding="utf-8")
         except OSError:
             text = ""
-        # Split into the last attempt block: everything after the last
-        # '## attempt ' header.
-        last_attempt_idx = text.rfind("\n## attempt ")
-        if last_attempt_idx >= 0:
-            block = text[last_attempt_idx + 1 :]
+        # Find all attempt-start lines (both forms) and take the last block.
+        import re
+
+        attempt_starts = list(
+            re.finditer(r"^(?:## attempt \d+ \S+ \S+|# M5 runbook — \S+)", text, re.MULTILINE)
+        )
+        if attempt_starts:
+            last = attempt_starts[-1]
+            block = text[last.start() :]
             first = block.split("\n", 1)[0]
-            parts = first.split(None, 4)  # ## attempt <n> <ISO> <hash> <argv...>
-            if len(parts) >= 5:
-                attempt_n = int(parts[2]) if parts[2].isdigit() else 0
-                attempt_started = parts[3]
-            elif len(parts) >= 4:
-                attempt_n = int(parts[2]) if parts[2].isdigit() else 0
-                attempt_started = parts[3]
+            # Parse the attempt header for n + started.
+            if first.startswith("## attempt "):
+                parts = first.split(None, 4)
+                if len(parts) >= 4:
+                    attempt_n = int(parts[2]) if parts[2].isdigit() else 0
+                    attempt_started = parts[3]
+            else:
+                # Legacy: '# M5 runbook — <ISO>'.
+                attempt_n = len(attempt_starts)
+                parts = first.split("—", 1)
+                if len(parts) > 1:
+                    attempt_started = parts[1].strip()
             # Walk lines: 'started <id> <ISO>' and '## <idx>. <title> — ...'.
             for line in block.splitlines()[1:]:
                 if line.startswith("started "):
                     sp = line.split(None, 2)
                     if len(sp) >= 3:
                         steps_raw.append({"id": sp[1], "started": sp[2], "state": "running"})
+                elif line.startswith("# M5 runbook — ") or line.startswith("## attempt "):
+                    # A new attempt starts within this block — stop (we only want
+                    # the last attempt's steps).
+                    break
                 elif line.startswith("## ") and not line.startswith("## attempt "):
                     sp = line.split(" — ", 1)
                     raw_title = sp[0][3:].strip()  # '1. doctor (gate)'
@@ -730,6 +759,16 @@ def _parse_pipeline(out_dir: Path) -> dict:
                         "started": None,
                     }
                 )
+    # W6-UI-3g: dedupe by id — last occurrence wins (legacy append-only
+    # RUNBOOKs stack the same step across attempts).
+    seen_ids: dict[str, dict] = {}
+    for s in steps_raw:
+        sid = s.get("id") or ""
+        if sid in seen_ids:
+            seen_ids[sid].update(s)
+        else:
+            seen_ids[sid] = s
+    steps_raw = list(seen_ids.values())
     # Enrich with stdout_tail + argv (from m5 plan_steps if importable).
     steps_out: list[dict] = []
     try:
@@ -847,6 +886,106 @@ def _scorer_name(cfg: dict) -> str | None:
     return cfg.get("scorer") or cfg.get("scoring")
 
 
+def _read_runbook_hash(out_dir: Path) -> str | None:
+    """The git sha from the LAST '## attempt <n> <ISO> <hash>' RUNBOOK line.
+
+    A RUNBOOK attempt header overrides the file's environment git_sha (it is
+    the run's own hash, not the file's). Returns None when no attempt header
+    exists.
+    """
+    rb = out_dir / "RUNBOOK.md"
+    if not rb.exists():
+        return None
+    try:
+        text = rb.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    import re
+
+    headers = list(re.finditer(r"^## attempt \d+ \S+ (\S+)", text, re.MULTILINE))
+    if not headers:
+        return None
+    return headers[-1].group(1)
+
+
+def _combo_id(combo_dir: Path, out_dir: Path) -> str:
+    """The out-relative path '<bench-dir>/<model-folder>/<combo>'.
+
+    This is unique across models (two models can have the same combo folder
+    name). For a single-combo bench (run.json at the out root), returns '.'.
+    """
+    try:
+        rel = combo_dir.relative_to(out_dir)
+        rel_str = str(rel)
+        return rel_str if rel_str else "."
+    except ValueError:
+        return combo_dir.name
+
+
+def _model_from_folder(combo_dir: Path) -> str | None:
+    """Derive the model id from the parent folder slug <machine>-<model-slug>.
+
+    The slug uses '--' for '/': 'm5max-128gb-mlx-community--qwen3-8b-4bit' ->
+    'mlx-community/Qwen3-8B-4bit'. Returns None if the folder doesn't match.
+    """
+    parent = combo_dir.parent
+    slug = parent.name
+    # The slug is <machine>-<model-slug>; the model part starts after the
+    # first '--' (machine tags don't contain '--').
+    if "--" in slug:
+        idx = slug.index("--")
+        model_part = slug[idx + 2 :]
+        return model_part.replace("--", "/")
+    return None
+
+
+def _part_from_folder(combo_dir: Path, idx: int) -> str | None:
+    """Derive track/scorer/dataset from the combo folder name <track>-<scorer>-<dataset>.
+
+    idx 0=track, 1=scorer, 2=dataset. Returns None if not enough parts.
+    """
+    parts = combo_dir.name.split("-", 2)
+    if idx < len(parts):
+        return parts[idx]
+    return None
+
+
+def _mx_device_memory_gb() -> float | None:
+    """Machine total memory from mlx's device_info (Apple Silicon unified mem).
+
+    Falls back to None (caller uses env.ram_gb or 128).
+    """
+    try:
+        import mlx.core as mx
+
+        return round(mx.device_info("metal").get("memory_size", 0) / 2**30, 1) or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+_DATASET_COUNT_CACHE: dict[str, tuple[float, int]] = {}
+
+
+def _count_dataset_cases(ds_path: Path) -> int:
+    """Count lines in the dataset jsonl, cached by (path, mtime).
+
+    The dataset_path is the cached jsonl bench writes into run.json config.
+    Counting 576 lines on every refresh is wasteful; cache by mtime so a
+    growing dataset (invariance) is recounted only when it changes.
+    """
+    try:
+        mtime = ds_path.stat().st_mtime
+    except OSError:
+        return 0
+    key = str(ds_path)
+    cached = _DATASET_COUNT_CACHE.get(key)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    n = count_lines(ds_path)
+    _DATASET_COUNT_CACHE[key] = (mtime, n)
+    return n
+
+
 def _is_combo_dir(d: Path) -> bool:
     """A combo dir has any of run.json / heartbeat.jsonl / predictions.jsonl."""
     return any((d / m).exists() for m in ("run.json", "heartbeat.jsonl", "predictions.jsonl"))
@@ -908,19 +1047,38 @@ def build_dashboard(out_dir: str | Path) -> dict:
     env = (run.get("environment") if run else {}) or {}
     cfg = (run.get("config") if run else {}) or {}
     mem_cfg = (cfg.get("memory") if cfg else {}) or {}
-    # W6-UI-3e: the top-level <out> may have no run.json (m5 writes one per
-    # combo, not at the root). Fall back to any combo's run.json for the
-    # environment + memory config so the header is not dashes.
     combos = _combo_dirs(out_dir)
+    # W6-UI-3g: take environment/hash from the NEWEST run.json by mtime (not
+    # the first found). The top-level <out> may have no run.json (m5 writes
+    # one per combo).
     if not env and combos:
+        best_run_mtime = -1.0
+        best_env = {}
+        best_mem_cfg = {}
         for c in combos:
+            rj = c / "run.json"
+            if not rj.exists():
+                continue
+            try:
+                mtime = rj.stat().st_mtime
+            except OSError:
+                continue
             combo_run = parse_run_json(c)
-            if combo_run and combo_run.get("environment"):
-                env = combo_run["environment"]
+            if combo_run and combo_run.get("environment") and mtime > best_run_mtime:
+                best_run_mtime = mtime
+                best_env = combo_run["environment"]
                 combo_cfg = (combo_run.get("config") if combo_run else {}) or {}
-                if not mem_cfg and combo_cfg.get("memory"):
-                    mem_cfg = combo_cfg["memory"]
-                break
+                best_mem_cfg = (combo_cfg.get("memory") if combo_cfg else {}) or {}
+        if best_env:
+            env = best_env
+            if not mem_cfg:
+                mem_cfg = best_mem_cfg
+    # W6-UI-3g: a RUNBOOK attempt header (## attempt <n> <ISO> <hash>) overrides
+    # the git sha when present (it is the run's own hash, not the file's).
+    pipeline = _parse_pipeline(out_dir)
+    rb_hash = _read_runbook_hash(out_dir)
+    if rb_hash:
+        env = {**env, "git_sha": rb_hash} if env else {"git_sha": rb_hash}
     # Find the live combo: the one with the newest heartbeat.jsonl mtime
     # anywhere under <out>. Falls back to the last combo.
     now_combo, now_hb = _find_live_combo(combos)
@@ -931,7 +1089,6 @@ def build_dashboard(out_dir: str | Path) -> dict:
     # <track>-<scorer>-<dataset>.
     if not now_cfg and now_combo:
         now_cfg = _derive_config_from_layout(now_combo)
-    pipeline = _parse_pipeline(out_dir)
     # --- run ---
     alerts: list[dict] = []
     # Build health first so alerts can reference it.
@@ -975,20 +1132,20 @@ def build_dashboard(out_dir: str | Path) -> dict:
     # --- now ---
     now_block = _build_now(now_combo, now_hb, now_cfg, out_dir)
     # --- memory ---
+    # W6-UI-3g: cap from the newest run.json's 'memory' block (top-level,
+    # not under config); stop_gb = the m5 stop rule constant (10 GB).
+    newest_run = parse_run_json(now_combo) if now_combo else {}
+    newest_mem = (newest_run.get("memory") if newest_run else {}) or {}
+    cap_bytes = newest_mem.get("metal_cache_limit_bytes") or mem_cfg.get("metal_cache_limit_bytes")
+    # machine_gb from mx.device_info if available (Apple Silicon).
+    machine_gb = env.get("ram_gb") or _mx_device_memory_gb() or 128
     memory_block = {
         "cache_gb": _gb(now_hb.get("cache_memory_bytes")) if now_hb else None,
         "active_gb": _gb(now_hb.get("active_memory_bytes")) if now_hb else None,
         "peak_gb": _gb(now_hb.get("peak_memory_bytes")) if now_hb else None,
-        "cap_gb": _gb(mem_cfg.get("metal_cache_limit_bytes")),
-        "stop_gb": _gb(mem_cfg.get("metal_cache_stop_bytes"))
-        or (
-            mem_cfg.get("metal_cache_stop_gb")
-            if isinstance(mem_cfg.get("metal_cache_stop_gb"), (int, float))
-            else None
-        ),
-        "machine_gb": env.get("ram_gb")
-        or env.get("machine_memory_gb")
-        or env.get("total_memory_gb"),
+        "cap_gb": _gb(cap_bytes),
+        "stop_gb": 10.0,  # m5 stop rule: halt if cache >= 10 GB
+        "machine_gb": machine_gb,
     }
     # --- aggregates ---
     aggregates = _build_aggregates(out_dir, combos)
@@ -1061,21 +1218,26 @@ def _build_health(out_dir, combos, now_combo, now_hb, env, mem_cfg, pipeline) ->
             "detail": f"{n_failed} combo(s) failed",
         }
     )
-    # parity_fail_models
+    # parity_fail_models: count once per model (the parity.json is at the
+    # MODEL folder level, not per combo). Dedupe by parity.json path.
     n_parity_fail = 0
     fail_models: list[str] = []
+    seen_parity: set[Path] = set()
     for c in combos:
         model_dir = c.parent if c.parent.name != out_dir.name else c
         parity_path = model_dir / "parity.json"
-        if parity_path.exists():
-            try:
-                p = json.loads(parity_path.read_text(encoding="utf-8"))
-                if p.get("status") == "FAIL":
-                    n_parity_fail += 1
-                    if p.get("model"):
-                        fail_models.append(p["model"])
-            except (OSError, json.JSONDecodeError):
-                pass
+        if parity_path in seen_parity or not parity_path.exists():
+            continue
+        seen_parity.add(parity_path)
+        try:
+            p = json.loads(parity_path.read_text(encoding="utf-8"))
+            if p.get("status") == "FAIL":
+                n_parity_fail += 1
+                model_name = p.get("model") or _model_from_folder(c)
+                if model_name:
+                    fail_models.append(model_name)
+        except (OSError, json.JSONDecodeError):
+            pass
     fail_detail = (
         (f"{n_parity_fail} model(s): " + ", ".join(fail_models)) if fail_models else "0 models"
     )
@@ -1128,12 +1290,19 @@ def _build_now(now_combo, now_hb, now_cfg, out_dir) -> dict:
     now_counts = (now_run.get("counts") if now_run else {}) or {}
     if now_combo:
         # cases_total = the manifest's case count (authoritative), falling
-        # back to the dataset jsonl line count.
-        total = (
-            now_counts.get("cases")
-            or count_lines(now_combo / "dataset.jsonl")
-            or count_lines(out_dir / "dataset.jsonl")
-        )
+        # back to the dataset jsonl line count from config.dataset_path.
+        total = now_counts.get("cases") or 0
+        if not total:
+            # Try the dataset jsonl in the combo/out dir, then config.dataset_path.
+            ds_path = now_combo / "dataset.jsonl"
+            if not ds_path.exists():
+                ds_path = out_dir / "dataset.jsonl"
+            if not ds_path.exists():
+                dp = now_cfg.get("dataset_path") if now_cfg else None
+                if dp:
+                    ds_path = Path(dp)
+            if ds_path.exists():
+                total = _count_dataset_cases(ds_path)
         done = len(read_jsonl_safe(now_combo / "completed_cases.jsonl"))
         if now_hb and isinstance(now_hb.get("cases_done"), int):
             done = max(done, now_hb["cases_done"])
@@ -1208,6 +1377,7 @@ def _build_aggregates(out_dir, combos) -> dict:
     par_time: list[float] = []
     naive_time: list[float] = []
     parity_counts = {"pass": 0, "drift": 0, "fail": 0}
+    seen_parity_paths: set[Path] = set()
     cases_scored = 0
     pred_lines = 0
     wall_s = 0
@@ -1237,13 +1407,14 @@ def _build_aggregates(out_dir, combos) -> dict:
                 naive_time.append(t_s)
             else:
                 par_time.append(t_s)
-        # parity.
+        # parity (model-level; dedupe by parity.json path so it's counted once).
         model_dir = c.parent if c.parent.name != out_dir.name else c
         parity_path = model_dir / "parity.json"
-        if parity_path.exists():
+        if parity_path.exists() and parity_path not in seen_parity_paths:
+            seen_parity_paths.add(parity_path)
             try:
                 p = json.loads(parity_path.read_text(encoding="utf-8"))
-                st = p.get("status", "PASS")
+                st = (p.get("status", "PASS") or "PASS").lower()
                 if st in parity_counts:
                     parity_counts[st] += 1
             except (OSError, json.JSONDecodeError):
@@ -1320,11 +1491,12 @@ def _build_results(out_dir, combos, env) -> list[dict]:
         ab_delta = _ab_delta(out_dir, c, accuracy)
         rows.append(
             {
-                "combo_id": c.name,
-                "model": cfg.get("model") or "—",
-                "dataset": _dataset_name(cfg) or "—",
-                "scorer": _scorer_name(cfg) or "—",
-                "track": cfg.get("track") or "parallel",
+                "combo_id": _combo_id(c, out_dir),
+                "display_name": c.name,
+                "model": cfg.get("model") or _model_from_folder(c),
+                "dataset": _dataset_name(cfg) or _part_from_folder(c, 2),
+                "scorer": _scorer_name(cfg) or _part_from_folder(c, 1),
+                "track": cfg.get("track") or _part_from_folder(c, 0) or "parallel",
                 "status": _combo_status(c, out_dir),
                 "accuracy": accuracy,
                 "ci_low": ci_low,
@@ -1473,12 +1645,18 @@ def build_questions(out_dir: str | Path, combo_id: str) -> list[dict]:
     and drift.
     """
     out_dir = Path(out_dir)
-    # Resolve the combo dir by id (name match).
-    combo_dir = None
-    for c in _combo_dirs(out_dir):
-        if c.name == combo_id:
-            combo_dir = c
-            break
+    # Resolve the combo dir by id (the out-relative path).
+    if combo_id == ".":
+        combo_dir = out_dir
+    else:
+        candidate = out_dir / combo_id
+        combo_dir = candidate if candidate.exists() else None
+    if combo_dir is None:
+        # Fallback: match by folder name (backward compat).
+        for c in _combo_dirs(out_dir):
+            if c.name == combo_id:
+                combo_dir = c
+                break
     if combo_dir is None:
         return []
     records = read_jsonl_safe(combo_dir / "predictions.jsonl")
