@@ -1392,7 +1392,17 @@ def _get_or_compute_prior(
     renders into the prompt) plus the scoring-plan hash. Two schemas with
     identical choices but different descriptions produce different prompt
     hashes and never share a prior.
+
+    Issue #105: the prior is computed on a CANONICAL (sorted-choices) schema
+    so it is order-invariant by construction. Two orderings of the same
+    choice SET share one prior (applied by choice NAME via _apply_prior);
+    the prior captures the model's bias toward choice names, not positions.
     """
+    # Issue #105: canonicalize enum choice order before computing the prior
+    # so all orderings of the same choice set share one prior entry. The
+    # prior is applied by choice name (not position), so the canonical
+    # ordering's prior is valid for any ordering of the evidence schema.
+    schema = schema.canonicalized_for_prior()
     tokenizer = engine.tokenizer
     plan_hash = schema.plan_hash(tokenizer, scoring)
     if neutral_prompt_sha256 is None:

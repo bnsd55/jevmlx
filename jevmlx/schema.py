@@ -816,6 +816,45 @@ class StructuredSchema:
     def get_field_names(self) -> list[str]:
         return list(self.fields.keys())
 
+    def canonicalized_for_prior(self) -> "StructuredSchema":
+        """A schema with every enum field's choices SORTED, for the prior pass.
+
+        Issue #105: the neutral-context prior is computed on the schema's
+        prompt, which lists choices in declared order. Two orderings of the
+        same choice SET produce different prompts -> different prior cache
+        entries -> different priors. Each prior carries the model's position
+        bias for THAT ordering (the first-listed option gets the highest
+        log-score), so subtracting a per-ordering prior does NOT cancel
+        position bias — it applies a different correction per ordering and
+        can flip close decisions.
+
+        The fix: compute the prior ONCE on a CANONICAL (sorted-choices)
+        schema, and apply it by choice NAME (which ``_apply_prior`` already
+        does). The prior then captures the model's inherent bias toward
+        certain choice NAMES (semantics), not positions, and is identical
+        for every ordering of the same choice set.
+
+        Boolean and multi fields are unaffected (booleans are always
+        ``("true", "false")``; multi fields are scored per-option Y/N, not
+        as a position-sensitive enum). Only enum/choice/selection fields
+        are re-sorted.
+        """
+        if not self.fields:
+            return self
+        changed = False
+        new_dict: dict[str, Any] = {}
+        for name, fd in self.fields.items():
+            d = fd.to_dict()
+            if fd.field_type in ("enum", "choice", "selection") and len(fd.choices) > 1:
+                sorted_choices = tuple(sorted(fd.choices))
+                if sorted_choices != fd.choices:
+                    changed = True
+                    d["choices"] = list(sorted_choices)
+            new_dict[name] = d
+        if not changed:
+            return self
+        return StructuredSchema(new_dict)
+
     def __getitem__(self, key: str) -> FieldDefinition:
         return self.fields[key]
 
