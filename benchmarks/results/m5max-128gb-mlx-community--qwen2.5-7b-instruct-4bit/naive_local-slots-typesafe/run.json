@@ -1,0 +1,41 @@
+{
+  "circuit_breaker": null,
+  "config": {
+    "dataset_lock_sha256": "03eae290c3587ab85235e1825722a0971661b416b6a3b92f5e6ba32ec087ad0a",
+    "dataset_path": "/Users/benshaharizad/.cache/jevmlx/bench/typesafe.jsonl",
+    "model": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+    "model_revision": null,
+    "permutations": "none",
+    "prompt_version": null,
+    "quantization": null,
+    "scoring": "slots",
+    "split": "all",
+    "temperature": 1.0,
+    "tokenizer_chat_template_sha256": "cd8e9439f0570856fd70470bf8889ebd8b5d1107207f67a5efb46e342330527f",
+    "track": "naive_local"
+  },
+  "counts": {
+    "cases": 45,
+    "fields": 365,
+    "prediction_lines": 365
+  },
+  "environment": {
+    "chip": "Apple M5 Max",
+    "git_sha": "dbb1ff1f04a0bce4b20817e4c09eae2b5a3d2ad3",
+    "jevmlx_version": "0.1.0",
+    "machine_model": "Mac17,7",
+    "macos_version": "26.6.2",
+    "mlx_lm_version": "0.31.3",
+    "mlx_version": "0.32.2",
+    "python_version": "3.12.14",
+    "ram_gb": 128.0,
+    "timestamp_utc": "2026-09-21T06:36:05+00:00"
+  },
+  "memory": {
+    "active_memory_bytes": 4287507464,
+    "cache_memory_bytes": 8590397228,
+    "metal_cache_limit_bytes": 8589934592,
+    "peak_memory_bytes": 13466725384
+  },
+  "run_id": "20260921T063403Z-ac3897"
+}

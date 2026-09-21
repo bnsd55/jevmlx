@@ -1,0 +1,10 @@
+{
+ "sources": [],
+ "parser_version": "1",
+ "counts": {
+  "records": 24,
+  "families": 2
+ },
+ "cases_sha256": "f0db839b631be31aa0e90c4fc89a617b89cdc349c776e38dcb226c8cb08c2083",
+ "fetched_at": "2026-09-20T17:52:38+00:00"
+}
