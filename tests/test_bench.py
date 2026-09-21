@@ -278,6 +278,52 @@ def test_summarize_writes_folder_readme(tmp_path):
     assert "jevmlx bench" in (root / "README.md").read_text(encoding="utf-8")
 
 
+def test_summarize_header_cell_count_matches_rows(tmp_path):
+    """parity-gates (B): SUMMARY.md header and separator have the SAME cell
+    count as every data row (P7 added majority_baseline and exact_record to
+    rows but not the header, so 'case exact' showed the majority value)."""
+    root = Path(tmp_path)
+    model_dir = root / "m5max-128gb--model-a"
+    _write_report(
+        model_dir / "parallel-trie-bundled",
+        {
+            "accuracy": 0.83,
+            "case_exact_match": 0.5,
+            "majority_class_baseline": 0.4,
+            "exact_record_accuracy": 0.3,
+            "balanced_accuracy": {"f1": 0.8, "f2": 0.6},
+            "ece_5bin_equal_mass": 0.04,
+            "any_flip_rate": 0.05,
+            "perturbation_flip_rate": 0.1,
+            "latency_ms_p50": 12.5,
+            "n_cases": 24,
+        },
+    )
+    (model_dir / "parity.json").write_text(
+        json.dumps({"passed": True, "max_abs_drift_nats": 0.01, "atol": 0.05}),
+        encoding="utf-8",
+    )
+    text = summarize(root).read_text(encoding="utf-8")
+    lines = [ln for ln in text.splitlines() if ln.startswith("|")]
+    assert len(lines) >= 3  # header + sep + >=1 row
+    header_cells = lines[0].count("|") - 1
+    sep_cells = lines[1].count("|") - 1
+    assert header_cells == sep_cells, f"header={header_cells} sep={sep_cells}"
+    for row_line in lines[2:]:
+        row_cells = row_line.count("|") - 1
+        assert row_cells == header_cells, (
+            f"row has {row_cells} cells, header has {header_cells}: {row_line}"
+        )
+    # Named columns carry the right metric (not shifted by the missing
+    # header cells): majority baseline and exact record appear in their own
+    # columns, not overwriting 'case exact'.
+    assert "majority baseline" in lines[0]
+    assert "exact record" in lines[0]
+    # The values 0.4 (majority) and 0.3 (exact record) are present.
+    assert "0.4" in text
+    assert "0.3" in text
+
+
 # --- multi-model bench (I9) ------------------------------------------------
 
 

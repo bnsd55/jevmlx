@@ -232,14 +232,15 @@ def summarize(out: Path, parity_note: str | None = None) -> Path:
     _write_folder_readme(out, gzipped)
 
     header = (
-        "| machine | model | track | scorer | dataset | field acc | case exact "
-        "| bal acc mean | ECE | any-flip | perturb-flip | p50 latency (ms) | calls | n_cases |"
+        "| machine | model | track | scorer | dataset | field acc | majority baseline "
+        "| case exact | exact record | bal acc mean | ECE | any-flip | perturb-flip "
+        "| p50 latency (ms) | calls | n_cases |"
     )
     lines = [
         "# Bench summary",
         "",
         header,
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     columns = [
         "machine",

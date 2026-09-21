@@ -336,7 +336,16 @@ faster than a single trie-constrained pass on 255-option enums. Output:
       envelope band for the run's shape bucket (batch-shape noise, not a
       real divergence). FAIL = a winner changed, or drift beyond the band.
       ``check_results --check-parity`` prints the status word and one
-      sentence; the leaderboard shows the status word in the Parity column.`
+      sentence; the leaderboard shows the status word in the Parity column.
+
+      **Publishability** (parity-gates): a model with status PASS or DRIFT
+      is publishable — it appears in the leaderboard (DRIFT shows the word
+      + max drift in the Parity column) and ``check_results --check-parity``
+      returns OK (DRIFT with an informational note). Status FAIL (a winner
+      changed, or drift beyond the band) is excluded from the leaderboard
+      and ``check_results`` returns FAIL. ``parity.passed`` semantics in
+      ``jevmlx/parity.py`` are untouched (DRIFT and FAIL both set
+      ``passed: false``); the gate is now on ``status``, not ``passed``.`
 - [ ] `SUMMARY.md` pasted into the PR description
 - [ ] Machine specs (chip, RAM, macOS) mentioned in the PR body
 - [ ] No hand-edited numbers — recompute instead of fixing up

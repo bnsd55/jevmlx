@@ -37,7 +37,6 @@ when the README's marker block differs.
 from __future__ import annotations
 
 import json
-import statistics
 import sys
 from pathlib import Path
 
@@ -197,47 +196,39 @@ def _load_published(path: Path | None) -> tuple[list[dict], dict]:
 
 
 def _per_item_end_to_end_ms(folder: Path) -> float | None:
-    """Median per-item END-TO-END latency (ms) from predictions.jsonl.
+    """The call-level per_item_end_to_end_ms median from timing.json.
 
-    Results contract v2 (W5-D finding 27, W5c-3): parallel prediction lines
-    carry ``per_item_end_to_end_ms`` — that context's own prefill span plus
-    its assembly span (single path) or plus its amortized group share
-    (batched path) — the honest per-case number either way. Returns None
-    when the lines carry no such key: the caller FAILS the folder (results
-    contract v2; no pre-v2 folders exist on main, so there is no fallback).
+    parity-gates (review fix 2): ONE definition — the same source
+    summarize_results uses since #99 (timing.json median
+    per_item_end_to_end_ms), NOT the per-line latency_ms from predictions
+    (which sums rotations and inflated the 7B's time/case to 11.0 s while
+    the call-level median was 0.59 s). Returns None when timing.json is
+    absent or has no median — the caller FAILS the folder (no fallback to
+    line latency).
     """
-    import gzip
-
-    pred = folder / "predictions.jsonl"
-    gz = folder / "predictions.jsonl.gz"
-    if not pred.exists() and not gz.exists():
+    timing_path = folder / "timing.json"
+    if not timing_path.is_file():
         return None
-
-    def opener():
-        if pred.exists():
-            return open(pred, encoding="utf-8")
-        return gzip.open(gz, "rt", encoding="utf-8")
-
-    values: list[float] = []
-    with opener() as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            ms = json.loads(line).get("per_item_end_to_end_ms")
-            if isinstance(ms, int | float):
-                values.append(float(ms))
-    if not values:
+    try:
+        timing = json.loads(timing_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
         return None
-    return statistics.median(values)
+    median = timing.get("median") or {}
+    ms = median.get("per_item_end_to_end_ms")
+    if isinstance(ms, (int, float)):
+        return float(ms)
+    return None
 
 
 def _local_rows(results_root: Path) -> list[dict]:
     """One row per results folder with dataset=typesafe and track=parallel.
 
-    W4-A: a model appears only if its folder has a passing slow parity test
-    (parity.json with ``passed: true``). Without it, the model is excluded
-    from the leaderboard — it hasn't proven batch/chunked log_score parity.
+    W4-A / issue parity-gates: a model appears if its folder's parity.json
+    records status PASS or DRIFT. PASS = all drifts < atol. DRIFT = some
+    drift >= atol but winners identical on all cases AND max drift inside the
+    persisted envelope band (batch-shape noise, not a real divergence) —
+    publishable, the Parity column shows the word + max drift. FAIL (a winner
+    changed, or drift beyond the band) stays excluded.
 
     Time per case (review follow-up on #48): read ONLY the honest
     per-item end-to-end median (results contract v2). There are no pre-v2
@@ -252,7 +243,8 @@ def _local_rows(results_root: Path) -> list[dict]:
     if not results_root.exists():
         return rows
     for machine_dir in sorted(p for p in results_root.iterdir() if p.is_dir()):
-        # W4-A: skip models without a passing parity test.
+        # W4-A / parity-gates: include PASS and DRIFT; exclude FAIL and
+        # missing/unreadable parity.
         parity_path = machine_dir / "parity.json"
         if not parity_path.exists():
             continue
@@ -260,11 +252,16 @@ def _local_rows(results_root: Path) -> list[dict]:
             parity = json.loads(parity_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if not parity.get("passed"):
-            continue
-        # P4/I7: the status word (PASS for leaderboard rows — DRIFT/FAIL
-        # models are excluded by the passed gate above).
         parity_status = parity.get("status", "PASS")
+        if parity_status not in ("PASS", "DRIFT"):
+            continue
+        # The max drift for the Parity column (DRIFT rows show it; PASS
+        # rows show 0 / the measured value, which is < atol).
+        parity_max_drift = max(
+            parity.get("max_abs_drift_nats", 0.0) or 0.0,
+            parity.get("max_gap_drift_nats", 0.0) or 0.0,
+            parity.get("max_margin_drift_nats", 0.0) or 0.0,
+        )
         for combo in sorted(p for p in machine_dir.iterdir() if p.is_dir()):
             report_path = combo / "report.json"
             if not report_path.exists():
@@ -287,6 +284,17 @@ def _local_rows(results_root: Path) -> list[dict]:
             )
             n_cases = ta.get("n_cases")
             n_fields = ta.get("n_fields")
+            # parity-gates (review fix 3): 'Cases' comes from run.json's
+            # counts.cases (the source of truth), not from the agreement
+            # metrics' n_cases (which can undercount when a case has no
+            # valid prediction). If counts.cases is missing, fall back to
+            # the agreement n_cases, then n_fields.
+            run_counts_cases = (run.get("counts") or {}).get("cases")
+            cases_count = (
+                run_counts_cases
+                if run_counts_cases is not None
+                else (n_cases if n_cases is not None else n_fields)
+            )
             # W6-B1: for non-TypeSafe datasets (jabr), the per-workflow
             # breakdown comes from per_workflow_accuracy (general metric),
             # and the overall accuracy from metrics["accuracy"].
@@ -311,7 +319,7 @@ def _local_rows(results_root: Path) -> list[dict]:
             end_to_end = _per_item_end_to_end_ms(combo)
             if end_to_end is None:
                 raise ValueError(
-                    f"{combo}: predictions carry no per_item_end_to_end_ms — "
+                    f"{combo}: timing.json has no median per_item_end_to_end_ms — "
                     "results contract v2 requires it (rerun the bench; "
                     "check_results rejects this folder too)"
                 )
@@ -328,11 +336,10 @@ def _local_rows(results_root: Path) -> list[dict]:
                     "scorer": scorer,
                     "machine": machine,
                     "parity_status": parity_status,
+                    "parity_max_drift": parity_max_drift,
                     "accuracy": agreement,
                     # W6-B6b/F1: Wilson CI on the agreement accuracy.
-                    "accuracy_ci": _agreement_ci(
-                        agreement, n_cases if n_cases is not None else n_fields
-                    ),
+                    "accuracy_ci": _agreement_ci(agreement, cases_count),
                     "by_workflow": {
                         "customer_service": by_workflow.get("customer_service"),
                         "agent_trace_observability": by_workflow.get("agent_trace_observability"),
@@ -343,15 +350,19 @@ def _local_rows(results_root: Path) -> list[dict]:
                     else {key: by_workflow.get(key) for key, _ in _JABR_TASK_COLS},
                     "time_per_case_s": time_per_case_s,
                     "cost_per_case_usd": "$0 (local)",
-                    "cases": n_cases if n_cases is not None else n_fields,
+                    "cases": cases_count,
                 }
             )
     return rows
 
 
 def _lock_revision(combo: Path, dataset_name: str) -> str | None:
-    """The dataset revision recorded in the copied <name>.dataset.lock.json."""
-    lock_path = combo / f"{dataset_name}.dataset.lock.json"
+    """The dataset revision recorded in <name>.dataset.lock.json.
+
+    Since #84/#110 the lock lives at the MODEL folder level (the parent of
+    the combo), not in the combo folder itself.
+    """
+    lock_path = combo.parent / f"{dataset_name}.dataset.lock.json"
     if not lock_path.exists():
         return None
     try:
@@ -391,10 +402,18 @@ def _row_line(r: dict) -> str:
     wf_cells = [_fmt_pct(wf.get(key)) for key, _ in _WORKFLOW_COLS]
     cost = r.get("cost_per_case_usd")
     cost_cell = cost if isinstance(cost, str) else _fmt_cost(cost)
+    # Parity column: PASS shows the word; DRIFT shows the word + max drift
+    # (publishable batch-shape noise); the column never shows FAIL (those
+    # models are excluded by _local_rows).
+    parity_word = r.get("parity_status", "—")
+    if parity_word == "DRIFT":
+        parity_cell = f"DRIFT ({r.get('parity_max_drift', 0):.3f})"
+    else:
+        parity_cell = str(parity_word)
     return (
         f"| {r['model']} | {r['source']} | {r.get('scorer', '—')} | "
         f"{r.get('machine', '—')} | {_fmt_pct_with_ci(r.get('accuracy'), r.get('accuracy_ci'))} | "
-        f"{r.get('parity_status', '—')} | "
+        f"{parity_cell} | "
         f"{' | '.join(wf_cells)} | "
         f"{_fmt_seconds(r.get('time_per_case_s'))} | "
         f"{cost_cell} | "

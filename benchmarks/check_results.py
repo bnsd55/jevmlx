@@ -6,14 +6,18 @@ Usage::
     python -m benchmarks.check_results <results_dir> [<results_dir> ...]
 
 Each ``results_dir`` is a combo folder (predictions.jsonl + run.json +
-report.json + dataset.lock.json) or a parent containing combo folders (the
+report.json) or a parent containing combo folders (the
 ``<machine>-<model>/<track>-<scorer>-<dataset>`` layout produced by
-``jevmlx bench``). The checker:
+``jevmlx bench``). The dataset lock file
+(``<dataset>.dataset.lock.json``) lives at the MODEL folder level (the
+parent of the combo), not in the combo folder itself. The checker:
 
 1. Finds every combo folder under the given roots.
 2. For each combo: every predictions.jsonl line has the frozen contract keys
    (:data:`jevmlx.evalrun.PREDICTION_LINE_KEYS`) with the right types;
-   run.json has the required top-level keys; dataset.lock.json is present;
+   run.json has the required top-level keys; the dataset lock
+   (``<dataset>.dataset.lock.json`` in the model folder) is present and its
+   sha256 matches run.json's ``dataset_lock_sha256``;
    the folder is under 5 MB (predictions may be gzipped).
 3. Recomputes report.json's metrics from predictions.jsonl via
    :func:`jevmlx.evalmetrics.compute_metrics` and diffs against the
@@ -150,15 +154,17 @@ def check_folder(folder: Path) -> tuple[bool, list[str]]:
     problems: list[str] = []
     name = str(folder)
 
-    # Required files.
+    # Required files. NOTE: the dataset lock is NOT a per-combo file —
+    # since #84/#110 the bench writes <dataset>.dataset.lock.json at the
+    # MODEL folder level (the parent of this combo) and run.json carries
+    # dataset_lock_sha256. The lock is resolved + sha-verified below, after
+    # run.json is read.
     pred_path = folder / "predictions.jsonl"
     run_path = folder / "run.json"
-    lock_path = folder / "dataset.lock.json"
     report_path = folder / "report.json"
     for required, label in (
         (pred_path, "predictions.jsonl"),
         (run_path, "run.json"),
-        (lock_path, "dataset.lock.json"),
         (report_path, "report.json"),
     ):
         # predictions.jsonl may be gzipped.
@@ -188,8 +194,22 @@ def check_folder(folder: Path) -> tuple[bool, list[str]]:
         extra = sorted(set(record) - set(PREDICTION_LINE_KEYS))
         # perturbation / consensus / oracle_prediction are optional add-ons,
         # not contract violations (oracle_prediction rides under
-        # oracle_overrides evaluation; W3-D).
-        extra = [k for k in extra if k not in ("perturbation", "consensus", "oracle_prediction")]
+        # oracle_overrides evaluation; W3-D). ordered / ordinal /
+        # ordinal_choices are written by OrdinalTelemetry (ordered=True enum
+        # fields); they are optional — only present on ordinal fields.
+        extra = [
+            k
+            for k in extra
+            if k
+            not in (
+                "perturbation",
+                "consensus",
+                "oracle_prediction",
+                "ordered",
+                "ordinal",
+                "ordinal_choices",
+            )
+        ]
         if missing:
             problems.append(f"{name}: line {index} missing keys {missing}")
         if extra:
@@ -212,6 +232,36 @@ def check_folder(folder: Path) -> tuple[bool, list[str]]:
     for key in RUN_REQUIRED_KEYS:
         if key not in run:
             problems.append(f"{name}: run.json missing top-level key {key!r}")
+
+    # Dataset lock: since #84/#110 the lock lives at the MODEL folder level
+    # as <dataset>.dataset.lock.json (the parent of this combo), and
+    # run.json carries dataset_lock_sha256. Resolve the lock by dataset name
+    # and verify the sha matches — FAIL only if the file is missing or the
+    # sha differs. (The old code required a per-combo dataset.lock.json, which
+    # the bench never writes — every combo failed 'missing dataset.lock.json'.)
+    config = run.get("config", {}) if isinstance(run, dict) else {}
+    dataset_path = config.get("dataset_path", "") or ""
+    dataset_name = dataset_path if "/" not in dataset_path else Path(dataset_path).stem
+    if dataset_name:
+        model_dir = folder.parent
+        lock_path = model_dir / f"{dataset_name}.dataset.lock.json"
+        expected_sha = config.get("dataset_lock_sha256") or run.get("dataset_lock_sha256")
+        if not lock_path.exists():
+            problems.append(
+                f"{name}: missing {lock_path.name} in model folder "
+                f"({model_dir}) — the bench writes <dataset>.dataset.lock.json "
+                "at the model folder level"
+            )
+        elif expected_sha:
+            import hashlib
+
+            actual_sha = hashlib.sha256(lock_path.read_bytes()).hexdigest()
+            if actual_sha != expected_sha:
+                problems.append(
+                    f"{name}: {lock_path.name} sha256 mismatch — "
+                    f"file={actual_sha[:12]} run.json={expected_sha[:12]} "
+                    "(the dataset was rebuilt after this run; rerun the combo)"
+                )
 
     # Results contract v2 (W5): a parallel-track combo must carry the
     # honest timing split. predictions lines ride per-field latency_ms;
@@ -335,7 +385,12 @@ def _type_ok(key: str, value) -> bool:
         "type",
     }
     if value is None:
-        return key in nullable or key in ("perturbation", "consensus")
+        return key in nullable or key in (
+            "perturbation",
+            "consensus",
+            "ordinal",
+            "ordinal_choices",
+        )
     string_keys = {
         "run_id",
         "case_id",
@@ -362,6 +417,15 @@ def _type_ok(key: str, value) -> bool:
         return isinstance(value, str | bool | list)
     if key in ("error", "salvage_prediction", "label"):
         return isinstance(value, str | bool | list | int | float)
+    # ordinal telemetry (ordered=True enum fields): 'ordered' is a bool flag,
+    # 'ordinal_choices' is the list of choice strings, 'ordinal' is the
+    # per-level probability/variance dict.
+    if key == "ordered":
+        return isinstance(value, bool)
+    if key == "ordinal_choices":
+        return isinstance(value, list)
+    if key == "ordinal":
+        return isinstance(value, dict)
     return True  # unknown-but-present optional keys are not type-checked
 
 
@@ -461,36 +525,38 @@ def check_parity(model_dir: Path) -> tuple[bool, list[str]]:
     except (OSError, json.JSONDecodeError) as e:
         problems.append(f"{name}: parity.json unreadable: {e}")
         return False, problems
-    if not parity.get("passed"):
+    status = parity.get("status", "PASS" if parity.get("passed") else "FAIL")
+    # parity-gates: PASS and DRIFT are publishable (OK); only FAIL (a winner
+    # changed, or drift beyond the band) or missing/unreadable parity is a
+    # hard FAIL. DRIFT is OK-with-note — the one-sentence explanation so an
+    # operator sees the batch-shape noise is expected, not a regression.
+    if status == "DRIFT":
+        envelope = parity.get("drift_envelope") or {}
+        band = envelope.get("band", "?")
+        max_drift = max(
+            parity.get("max_abs_drift_nats", 0),
+            parity.get("max_gap_drift_nats", 0),
+            parity.get("max_margin_drift_nats", 0),
+        )
+        sentence = (
+            f"DRIFT: batched drift {max_drift} >= atol {parity['atol']}, "
+            f"winners identical on all cases, inside envelope band {band}; "
+            "near-tie rescore applies"
+        )
+        # DRIFT is OK (publishable) — the note is informational, not a problem.
+        return True, [f"{name}: parity.json status=DRIFT — {sentence}"]
+    if status == "FAIL" or not parity.get("passed"):
         stages = _parity_failed_stages(parity)
-        status = parity.get("status", "FAIL")
-        # P4/I7: the status word + one sentence. DRIFT = batch-shape noise
-        # (winners identical, inside envelope band); FAIL = a winner changed
-        # or drift beyond the band.
-        if status == "DRIFT":
-            envelope = parity.get("drift_envelope") or {}
-            band = envelope.get("band", "?")
-            max_drift = max(
-                parity.get("max_abs_drift_nats", 0),
-                parity.get("max_gap_drift_nats", 0),
-                parity.get("max_margin_drift_nats", 0),
-            )
-            sentence = (
-                f"DRIFT: batched drift {max_drift} >= atol {parity['atol']}, "
-                f"winners identical on all cases, inside envelope band {band}; "
-                "near-tie rescore applies"
-            )
-        else:
-            sentence = (
-                f"FAIL: {'; '.join(stages)} "
-                f"(max_drift={parity['max_abs_drift_nats']}, "
-                f"raw_row_drift={parity['max_raw_row_drift_nats']}, "
-                f"atol={parity['atol']})"
-            )
+        sentence = (
+            f"FAIL: {'; '.join(stages)} "
+            f"(max_drift={parity['max_abs_drift_nats']}, "
+            f"raw_row_drift={parity['max_raw_row_drift_nats']}, "
+            f"atol={parity['atol']})"
+        )
         problems.append(f"{name}: parity.json shows test did not pass — {sentence}")
         return False, problems
-    # A v1 file (no v2 keys) predates the decomposition; a folder
-    # regenerated by the current bench always carries them.
+    # status == PASS — a v1 file (no v2 keys) predates the decomposition; a
+    # folder regenerated by the current bench always carries them.
     missing = [k for k in ("max_raw_row_drift_nats", "max_gap_drift_nats") if k not in parity]
     if missing:
         problems.append(
