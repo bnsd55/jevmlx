@@ -69,6 +69,7 @@ const {
   esc,
   fmtNum,
   fmtDur,
+  fmtAttempt,
   statusPill,
   parityPill,
   abDelta,
@@ -114,6 +115,21 @@ describe("dashboard pure helpers", () => {
     });
     it("renders hours at 3600+", () => {
       assert.equal(fmtDur(7200), "2.0h");
+    });
+  });
+
+  describe("fmtAttempt", () => {
+    it("renders null as em dash (W6-UI-3h)", () => {
+      assert.equal(fmtAttempt(null), "—");
+    });
+    it("renders undefined as em dash", () => {
+      assert.equal(fmtAttempt(undefined), "—");
+    });
+    it("renders a number as string", () => {
+      assert.equal(fmtAttempt(3), "3");
+    });
+    it("renders 0 as '0' (not dash)", () => {
+      assert.equal(fmtAttempt(0), "0");
     });
   });
 

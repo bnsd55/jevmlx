@@ -127,6 +127,7 @@ summary{cursor:pointer;color:var(--dim);font:12px var(--mono)}
 const REFRESH = __REFRESH__;
 let D = null;
 let selCombo = null;
+let selComboDisplayName = null;
 let selQuestion = 0;
 let Q = [];
 let selStep = null;
@@ -161,6 +162,9 @@ function initialRender(){
   root.innerHTML=h;
   booted=true;
   wireEvents();
+  // Patch the just-built shells with the fetched payload so the first paint
+  // carries real values before the first SSE event arrives.
+  patchDashboard(D);
   renderQuestionsPanel();
   renderStepCard();
 }
@@ -171,7 +175,7 @@ function buildTopHTML(t){
   h+='<span class="kv">run <b id="top-run">'+esc(t.out_dir)+'</b></span>';
   h+='<span class="kv">hash <b id="top-hash">'+esc(t.hash)+'</b></span>';
   h+='<span class="kv">machine <b id="top-machine">'+esc(t.machine)+' · mlx '+esc(t.mlx_version)+'</b></span>';
-  h+='<span class="kv">attempt <b id="top-attempt">'+esc(t.attempt_n)+'</b> started <b id="top-started">'+esc(t.attempt_started)+'</b></span>';
+  h+='<span class="kv">attempt <b id="top-attempt">'+fmtAttempt(t.attempt_n)+'</b> started <b id="top-started">'+esc(t.attempt_started)+'</b></span>';
   h+='<span class="kv">awake <b id="top-awake">'+fmtDur(t.awake_s)+'</b> · sleep guard <b id="top-sleep"></b></span>';
   h+='<div class="state" id="top-state"></div>';
   h+='</div>';
@@ -248,12 +252,15 @@ function patchDashboard(newD){
 function setText(id,text){const e=document.getElementById(id);if(e&&e.textContent!==text)e.textContent=text;}
 function setHTML(id,html){const e=document.getElementById(id);if(e)e.innerHTML=html;}
 function setBar(id,pct,color){const e=document.getElementById(id);if(e){const i=e.querySelector("i");if(i){i.style.width=pct+"%";if(color)i.style.background=color;}}}
+/* attempt_n is null when the data layer has no RUNBOOK attempt header —
+   show '—' not '0' or empty. */
+function fmtAttempt(n){return n==null?"—":String(n);}
 
 function patchTop(t){
   setText("top-run",t.out_dir);
   setText("top-hash",t.hash);
   setText("top-machine",t.machine+" · mlx "+t.mlx_version);
-  setText("top-attempt",t.attempt_n);
+  setText("top-attempt",fmtAttempt(t.attempt_n));
   setText("top-started",t.attempt_started);
   setText("top-awake",fmtDur(t.awake_s));
   const se=document.getElementById("top-sleep");
@@ -382,14 +389,15 @@ function patchResults(rows){
     head.innerHTML=hh;
     head.querySelectorAll("th[data-col]").forEach(th=>{th.onclick=()=>{const col=parseInt(th.dataset.col);if(sortKey===col)sortDir*=-1;else{sortKey=col;sortDir=1;}patchResults(D.results);};});
   }
-  // Body: keyed by combo_id — update existing rows, insert new, remove gone.
+  // Body: keyed by combo_id (the out-relative path) — update existing,
+  // insert new, remove gone. combo_id is the contract identity; display_name
+  // is the combo folder name for the table cell / Questions header.
   const body=document.getElementById("r-body");
   if(!body)return;
   const existing={};
   body.querySelectorAll("tr[data-combo]").forEach(tr=>existing[tr.dataset.combo]=tr);
   const seen=new Set();
   const fr=filterSortRows(rows);
-  // Build a map of combo_id -> row HTML for new/updated rows.
   for(const row of fr){
     const key=row.combo_id||(row.model+"|"+row.dataset+"|"+row.scorer+"|"+row.track);
     seen.add(key);
@@ -418,7 +426,10 @@ function patchResults(rows){
       tr.className=rc2;
       tr.dataset.combo=key;
       tr.innerHTML=html;
-      tr.onclick=()=>{selCombo=tr.dataset.combo;selQuestion=0;Q=[];fetchQuestions();};
+      // On click, send combo_id (the out-relative path) verbatim to
+      // /questions.json?combo= (URL-encoded in fetchQuestions). Track the
+      // display_name separately for the Questions header.
+      tr.onclick=()=>{selCombo=tr.dataset.combo;selComboDisplayName=row.display_name||row.combo_id||key;selQuestion=0;Q=[];fetchQuestions();};
       body.appendChild(tr);
     }
   }
@@ -476,7 +487,7 @@ function renderQuestionsPanel(){
   if(!selCombo&&Q.length===0){slot.innerHTML="";return;}
   const list=Q;
   const headers=["time","case · rotation","field","predicted","label","ok","p(pred)","margin","call ms","acc so far"];
-  let h='<div class="panel"><h2>Questions <span class="sub">every decision of the selected combo'+(selCombo?' · '+esc(selCombo):'')+' · '+(list.length?list.length.toLocaleString()+" lines":"none")+'</span></h2>';
+  let h='<div class="panel"><h2>Questions <span class="sub">every decision of the selected combo'+(selCombo?' · '+esc(selComboDisplayName||selCombo):'')+' · '+(list.length?list.length.toLocaleString()+" lines":"none")+'</span></h2>';
   h+='<div class="filters"><input class="search" id="q-search" placeholder="filter: case id, field, label, text…" value="'+esc(qText)+'">';
   h+=chipGroup("show",["all","wrong only","near-tie","order flips"],qChips)+chipGroup("workflow",["all","invoice","security","agent trace","customer service"],qChips)+chipGroup("field",["all"],qChips);
   h+='</div><div class="qwrap"><div class="tw qlist"><table><thead><tr>';
@@ -582,10 +593,11 @@ async function firstPaint(){
     D=await r.json();
     const be=document.getElementById("boot-err");if(be)be.remove();
     initialRender();
-    // Deep-link: ?combo=<id>&q=<n>
+    // Deep-link: ?combo=<id>&q=<n> selects a combo and question on load.
+    // combo_id is the out-relative path; look up display_name from D.results.
     const p=new URLSearchParams(location.search);
     const c=p.get("combo"),qi=p.get("q");
-    if(c){selCombo=c;selQuestion=qi?parseInt(qi):0;await fetchQuestions();}
+    if(c){selCombo=c;const found=(D.results||[]).find(r=>(r.combo_id||"")===c);selComboDisplayName=found?(found.display_name||c):c;selQuestion=qi?parseInt(qi):0;await fetchQuestions();}
     startSSE();
   }catch(e){
     const be=document.getElementById("boot-err");
