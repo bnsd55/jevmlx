@@ -368,6 +368,10 @@ def _combo_dirs(out_dir: Path) -> list[Path]:
             combo_dir = p.parent
             if combo_dir in seen or combo_dir == out_dir:
                 continue
+            # W6-UI round 4b: skip ab-worktree/ (a git worktree, not results)
+            # and skip invariance/ (own section, not model rows).
+            if "ab-worktree" in combo_dir.parts:
+                continue
             seen.add(combo_dir)
             combos.append(combo_dir)
     # W6-UI-3g: discover QUEUED sibling dirs (never-run, no markers) in model
@@ -869,6 +873,40 @@ def _parse_pipeline(out_dir: Path) -> dict:
             "error": _extract_step_error(out_dir, sid) if sid else None,
         }
         steps_out.append(step)
+    # W6-UI round 4b: infer the LIVE step from the newest heartbeat's folder
+    # path. RUNBOOK writes a step only on exit, so a running combo's step is
+    # not in the RUNBOOK yet. Infer the step name from the bench section:
+    #   ab/...           -> 'A/B <branch>'
+    #   bench-rest/...   -> 'rest bench'
+    #   bench-quality/...-> 'quality'
+    #   invariance/...   -> 'invariance'
+    # Show it as RUNNING above the finished RUNBOOK steps (only if no step
+    # with the same id is already in the list as running).
+    combos = _combo_dirs(out_dir)
+    live_combo, live_hb = _find_live_combo(combos)
+    # Only infer a live step if the combo is actually RUNNING (no report.json
+    # and no run_failed.txt). A finished combo with a heartbeat is not live.
+    if live_combo and live_hb and _combo_status(live_combo, out_dir) == "running":
+        live_step_id = _infer_live_step_id(live_combo, out_dir)
+        if live_step_id:
+            # Only add if no step with this id is already running.
+            already = any(
+                s.get("id") == live_step_id and s.get("state") == "running" for s in steps_out
+            )
+            if not already:
+                steps_out.append(
+                    {
+                        "id": live_step_id,
+                        "title": live_step_id,
+                        "state": "running",
+                        "wall_s": None,
+                        "exit": None,
+                        "started": _iso_ts(live_hb.get("ts")) if live_hb.get("ts") else None,
+                        "argv": [],
+                        "stdout_tail": None,
+                        "error": None,
+                    }
+                )
     return {"attempt_n": attempt_n, "attempt_started": attempt_started, "steps": steps_out}
 
 
@@ -1003,17 +1041,74 @@ def _combo_id(combo_dir: Path, out_dir: Path) -> str:
 def _model_from_folder(combo_dir: Path) -> str | None:
     """Derive the model id from the parent folder slug <machine>-<model-slug>.
 
-    The slug uses '--' for '/': 'm5max-128gb-mlx-community--qwen3-8b-4bit' ->
-    'mlx-community/Qwen3-8B-4bit'. Returns None if the folder doesn't match.
+    The slug is '<chip>-<ram>gb-<model-slug>' where the model slug uses '--'
+    for '/': 'm5max-128gb-mlx-community--qwen3-8b-4bit' ->
+    'mlx-community/Qwen3-8B-4bit'. Returns None if the folder doesn't match
+    (e.g. alias folders like 'm5max-128gb-quality' with no '--').
     """
     parent = combo_dir.parent
     slug = parent.name
-    # The slug is <machine>-<model-slug>; the model part starts after the
-    # first '--' (machine tags don't contain '--').
-    if "--" in slug:
-        idx = slug.index("--")
-        model_part = slug[idx + 2 :]
-        return model_part.replace("--", "/")
+    # The model slug starts after the machine prefix (<chip>-<ram>gb-).
+    # Split on '-' and skip the first 2 parts (chip + ramgb).
+    parts = slug.split("-")
+    if len(parts) < 3:
+        return None
+    model_slug = "-".join(parts[2:])
+    # The model slug uses '--' for '/'. If there's no '--', it's not a model
+    # folder (e.g. 'quality' alias).
+    if "--" not in model_slug:
+        return None
+    return model_slug.replace("--", "/")
+
+
+def _model_from_sibling(combo_dir: Path) -> str | None:
+    """Find config.model from a sibling combo's run.json in the same model folder.
+
+    For alias/stub folders (e.g. m5max-128gb-quality) whose own run.json has
+    no config.model, a sibling combo in the same model folder may carry the
+    real model id. Returns None if no sibling has one.
+    """
+    model_dir = combo_dir.parent
+    if not model_dir.is_dir():
+        return None
+    for sibling in sorted(model_dir.iterdir()):
+        if sibling == combo_dir or not sibling.is_dir():
+            continue
+        sibling_run = parse_run_json(sibling)
+        if sibling_run:
+            sib_cfg = (sibling_run.get("config") if sibling_run else {}) or {}
+            if sib_cfg.get("model"):
+                return sib_cfg["model"]
+    return None
+
+
+def _infer_live_step_id(live_combo: Path, out_dir: Path) -> str | None:
+    """Infer the pipeline step name from the live combo's folder path.
+
+    RUNBOOK writes a step only on exit, so a running combo's step is not in
+    the RUNBOOK yet. Infer from the bench section:
+      ab/...           -> 'A/B bench'
+      bench-rest/...   -> 'rest bench'
+      bench-quality/...-> 'quality'
+      invariance/...   -> 'invariance'
+    Returns None if the path doesn't match a known section.
+    """
+    try:
+        rel = live_combo.relative_to(out_dir)
+    except ValueError:
+        return None
+    parts = rel.parts
+    if not parts:
+        return None
+    top = parts[0]
+    if top == "ab":
+        return "A/B bench"
+    if top == "bench-rest":
+        return "rest bench"
+    if top == "bench-quality":
+        return "quality"
+    if top == "invariance":
+        return "invariance"
     return None
 
 
@@ -1123,8 +1218,12 @@ def build_dashboard(out_dir: str | Path) -> dict:
     out_dir = Path(out_dir)
     run = parse_run_json(out_dir)
     env = (run.get("environment") if run else {}) or {}
-    cfg = (run.get("config") if run else {}) or {}
-    mem_cfg = (cfg.get("memory") if cfg else {}) or {}
+    # W6-UI round 4b: 'memory' is a TOP-LEVEL key in run.json (the real M5
+    # shape), not under config. Fall back to config.memory for old fixtures.
+    mem_cfg = (run.get("memory") if run else {}) or {}
+    if not mem_cfg:
+        cfg_tmp = (run.get("config") if run else {}) or {}
+        mem_cfg = (cfg_tmp.get("memory") if cfg_tmp else {}) or {}
     combos = _combo_dirs(out_dir)
     # W6-UI-3g: take environment/hash from the NEWEST run.json by mtime (not
     # the first found). The top-level <out> may have no run.json (m5 writes
@@ -1145,8 +1244,11 @@ def build_dashboard(out_dir: str | Path) -> dict:
             if combo_run and combo_run.get("environment") and mtime > best_run_mtime:
                 best_run_mtime = mtime
                 best_env = combo_run["environment"]
-                combo_cfg = (combo_run.get("config") if combo_run else {}) or {}
-                best_mem_cfg = (combo_cfg.get("memory") if combo_cfg else {}) or {}
+                # 'memory' is top-level (real M5 shape); fall back to config.memory.
+                best_mem_cfg = (combo_run.get("memory") if combo_run else {}) or {}
+                if not best_mem_cfg:
+                    combo_cfg_tmp = (combo_run.get("config") if combo_run else {}) or {}
+                    best_mem_cfg = (combo_cfg_tmp.get("memory") if combo_cfg_tmp else {}) or {}
         if best_env:
             env = best_env
             if not mem_cfg:
@@ -1210,8 +1312,9 @@ def build_dashboard(out_dir: str | Path) -> dict:
     # --- now ---
     now_block = _build_now(now_combo, now_hb, now_cfg, out_dir)
     # --- memory ---
-    # W6-UI-3g: cap from the newest run.json's 'memory' block (top-level,
-    # not under config); stop_gb = the m5 stop rule constant (10 GB).
+    # W6-UI round 4b: cap from the newest run.json's top-level 'memory' block
+    # (metal_cache_limit_bytes, 8589934592 -> 8.0 GB). stop_gb = the m5 stop
+    # rule constant (10 GB).
     newest_run = parse_run_json(now_combo) if now_combo else {}
     newest_mem = (newest_run.get("memory") if newest_run else {}) or {}
     cap_bytes = newest_mem.get("metal_cache_limit_bytes") or mem_cfg.get("metal_cache_limit_bytes")
@@ -1359,19 +1462,101 @@ def _build_health(out_dir, combos, now_combo, now_hb, env, mem_cfg, pipeline) ->
     return rules
 
 
+def _find_sibling_cases_total(
+    out_dir: Path, now_combo: Path | None, dataset_path: str
+) -> int | None:
+    """Find a FINISHED sibling combo with the same dataset_path.
+
+    Returns its counts.cases (the record count — same unit as a finished
+    combo's total). Used to derive cases_total for a running combo whose
+    own run.json has no counts yet. Returns None when no sibling exists.
+    """
+    for c in _combo_dirs(out_dir):
+        if c == now_combo:
+            continue
+        rj = parse_run_json(c)
+        if not rj:
+            continue
+        sib_cfg = (rj.get("config") if rj else {}) or {}
+        if sib_cfg.get("dataset_path") != dataset_path:
+            continue
+        sib_counts = (rj.get("counts") if rj else {}) or {}
+        if sib_counts.get("cases"):
+            return sib_counts["cases"]
+    return None
+
+
+def _derive_run_index(out_dir: Path, now_combo: Path | None) -> tuple[int | None, int | None]:
+    """Derive run_i / run_n from the model folder count under bench-*.
+
+    The m5 bench writes one folder per model under bench-rest/ (or
+    bench-quality/). run_n = the number of model folders; run_i = the
+    1-based position of the current model's folder. Returns (None, None)
+    when not derivable.
+    """
+    if now_combo is None:
+        return None, None
+    # Walk up to find the bench-* dir (parent of the model folder).
+    # now_combo = <out>/bench-<kind>/<model-folder>/<combo>
+    model_folder = now_combo.parent
+    bench_dir = model_folder.parent
+    if not bench_dir.name.startswith("bench-"):
+        return None, None
+    # Collect all model folders that have at least one combo with a run.json.
+    model_folders = sorted(
+        d
+        for d in bench_dir.iterdir()
+        if d.is_dir()
+        and any(
+            (d / c / "run.json").exists()
+            for c in [combo.name for combo in d.iterdir() if combo.is_dir()]
+        )
+    )
+    if not model_folders:
+        return None, None
+    run_n = len(model_folders)
+    try:
+        run_i = model_folders.index(model_folder) + 1
+    except ValueError:
+        return None, run_n
+    return run_i, run_n
+
+
 def _build_now(now_combo, now_hb, now_cfg, out_dir) -> dict:
     """The 'now' panel: current combo progress + ETA."""
-    total = 0
+    total = None  # W6-UI round 4b: None (—) when not derivable, never 0
     done = 0
     pred_lines = 0
     now_run = parse_run_json(now_combo) if now_combo else {}
     now_counts = (now_run.get("counts") if now_run else {}) or {}
     if now_combo:
-        # cases_total = the manifest's case count (authoritative), falling
-        # back to the dataset jsonl line count from config.dataset_path.
-        total = now_counts.get("cases") or 0
-        if not total:
-            # Try the dataset jsonl in the combo/out dir, then config.dataset_path.
+        # W6-UI round 4b: cases_done from the heartbeat is in TICK units
+        # (case × rotation variants), not record units. counts.cases (45)
+        # is records — a different unit. The total ticks is not directly in
+        # run.json until the combo finishes. Strategy:
+        #   1. If this combo is finished (has counts.prediction_lines),
+        #      total = counts.cases (records, the finished unit).
+        #   2. Else, find a finished SIBLING combo with the same
+        #      config.dataset_path and use its counts.cases as the total.
+        #   3. If no sibling, total stays None (—) — never 0.
+        # The progress PERCENT comes from pred_lines vs the sibling's
+        # prediction_lines (a ratio, not a count).
+        done = len(read_jsonl_safe(now_combo / "completed_cases.jsonl"))
+        if now_hb and isinstance(now_hb.get("cases_done"), int):
+            done = max(done, now_hb["cases_done"])
+        pred_lines = now_hb.get("pred_lines", 0) if now_hb else 0
+        if not pred_lines:
+            pred_lines = count_lines(now_combo / "predictions.jsonl")
+        # Derive total: finished combo has counts; running combo needs a sibling.
+        if now_counts.get("cases"):
+            total = now_counts["cases"]
+        elif now_cfg and now_cfg.get("dataset_path"):
+            # Find a finished sibling combo with the same dataset_path.
+            sibling_total = _find_sibling_cases_total(out_dir, now_combo, now_cfg["dataset_path"])
+            if sibling_total:
+                total = sibling_total
+        elif now_combo:
+            # Last resort: dataset jsonl line count.
             ds_path = now_combo / "dataset.jsonl"
             if not ds_path.exists():
                 ds_path = out_dir / "dataset.jsonl"
@@ -1381,12 +1566,6 @@ def _build_now(now_combo, now_hb, now_cfg, out_dir) -> dict:
                     ds_path = Path(dp)
             if ds_path.exists():
                 total = _count_dataset_cases(ds_path)
-        done = len(read_jsonl_safe(now_combo / "completed_cases.jsonl"))
-        if now_hb and isinstance(now_hb.get("cases_done"), int):
-            done = max(done, now_hb["cases_done"])
-        pred_lines = now_hb.get("pred_lines", 0) if now_hb else 0
-        if not pred_lines:
-            pred_lines = count_lines(now_combo / "predictions.jsonl")
     # cases_per_h from the last two heartbeat records: (cases_done delta)
     # / (elapsed_s delta). Heartbeat records carry NO ts — elapsed_s is the
     # wall-clock seconds since the combo started (written by evalrun).
@@ -1426,13 +1605,15 @@ def _build_now(now_combo, now_hb, now_cfg, out_dir) -> dict:
                 hb_age = int(time.time() - hb_path.stat().st_mtime)
             except OSError:
                 pass
+    # W6-UI round 4b: run_i/run_n not in config; derive from model folders.
+    _run_i, _run_n = _derive_run_index(out_dir, now_combo)
     return {
         "model": now_cfg.get("model") or "—",
         "track": now_cfg.get("track") or "—",
         "scorer": _scorer_name(now_cfg) or "—",
         "dataset": _dataset_name(now_cfg) or "—",
-        "run_i": now_cfg.get("run_i"),
-        "run_n": now_cfg.get("run_n"),
+        "run_i": now_cfg.get("run_i") or _run_i,
+        "run_n": now_cfg.get("run_n") or _run_n,
         "cases_done": done,
         "cases_total": total,
         "pred_lines": pred_lines,
@@ -1567,11 +1748,19 @@ def _build_results(out_dir, combos, env) -> list[dict]:
         timing = _read_timing_json(c)
         t = (timing.get("median") or {}).get("per_item_end_to_end_ms")
         ab_delta = _ab_delta(out_dir, c, accuracy)
+        # W6-UI round 4b: model is never None. Use config.model, else
+        # reconstruct the Hub id from the folder slug (-- -> /), else
+        # 'alias folder (no run)' for stub folders like m5max-128gb-quality.
+        model = cfg.get("model") or _model_from_folder(c)
+        if model is None:
+            # Check if ANY sibling combo in the same model folder has a
+            # run.json with config.model (the real model id).
+            model = _model_from_sibling(c) or "alias folder (no run)"
         rows.append(
             {
                 "combo_id": _combo_id(c, out_dir),
                 "display_name": c.name,
-                "model": cfg.get("model") or _model_from_folder(c),
+                "model": model,
                 "dataset": _dataset_name(cfg) or _part_from_folder(c, 2),
                 "scorer": _scorer_name(cfg) or _part_from_folder(c, 1),
                 "track": cfg.get("track") or _part_from_folder(c, 0) or "parallel",

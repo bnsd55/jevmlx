@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+- watch: data round 4b (cases_total unit, run index, cap, live step,
+  alias/ab-worktree/invariance folders). Six data-layer bugs fixed against
+  the real M5 tree shapes (issue #63, 07:24 comment): (1) cases_total never
+  0 — a running combo's total is derived from a finished sibling combo with
+  the same config.dataset_path (counts.cases), or None (—) when no sibling
+  exists; a finished combo uses its own counts.cases. (2) run_i/run_n
+  derived from the model folder count under bench-* (not from a missing
+  config.runs key). (3) cap_gb reads memory.metal_cache_limit_bytes from the
+  TOP-LEVEL 'memory' block in run.json (8589934592 -> 8.0 GB); was looking
+  under config.memory. Backward compat: falls back to config.memory for old
+  fixtures. (4) PIPELINE infers the live step from the newest heartbeat's
+  folder path (ab/ -> 'A/B bench', bench-rest/ -> 'rest bench',
+  bench-quality/ -> 'quality', invariance/ -> 'invariance') and shows it as
+  RUNNING above the finished RUNBOOK steps; only when the combo is actually
+  running (no report.json). (5) model is never None — uses config.model,
+  else reconstructs the Hub id from the folder slug
+  (m5max-128gb-mlx-community--llama-3.1-8b-instruct-4bit ->
+  mlx-community/llama-3.1-8b-instruct-4bit), else looks at a sibling
+  combo's run.json, else shows 'alias folder (no run)'. ab-worktree/ (git
+  worktree) is skipped; invariance/extra* is its own section. (6) one
+  display name per model = config.model (no slug/Hub-id mixing). Tests: 16
+  new in test_watch_round4b (real-shape tree with the verbatim Llama
+  run.json, cap_gb top-level + config fallback, run_i/run_n derivation,
+  sibling cases_total, model never None, ab-worktree skipped, mixed names,
+  live step inference for ab/bench-rest/bench-quality/invariance).
+
 - watch: round 4a (nits, gz predictions, live attempt). Two nits from the
   M5 live report at b46ba81 + two data-layer bugs that need no real shapes:
   (A) rotation=null rendered the literal 'null' in PIPELINE/RESULTS rows —
