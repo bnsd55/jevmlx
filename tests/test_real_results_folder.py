@@ -5,6 +5,11 @@ These are NOT hand-made fixtures — they assert the exact rendered strings
 on the real folder committed in PR #122. If the folder is absent (packaged
 sdist without benchmarks/results), every test skips cleanly.
 
+PR #140 adds two more model folders under benchmarks/results; every test
+here filters _local_rows output to the 7B model
+(mlx-community/Qwen2.5-7B-Instruct-4bit) before asserting, so the
+assertions hold regardless of how many sibling model folders exist.
+
 Run: pytest tests/test_real_results_folder.py -q
 """
 
@@ -19,9 +24,10 @@ from benchmarks.leaderboard import _local_rows
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _REAL_RESULTS = _REPO_ROOT / "benchmarks" / "results"
+_7B_MODEL = "mlx-community/Qwen2.5-7B-Instruct-4bit"
 _7B_FOLDER = _REAL_RESULTS / "m5max-128gb-mlx-community--qwen2.5-7b-instruct-4bit"
 
-# Skip the whole module if the real results folder is not present (packaged
+# Skip the whole module if the real 7B results folder is not present (packaged
 # sdist strips benchmarks/results).
 pytestmark = pytest.mark.skipif(
     not _7B_FOLDER.is_dir(),
@@ -29,9 +35,18 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _rows_for_7b() -> list[dict]:
+    """_local_rows filtered to the 7B model only.
+
+    Sibling model folders (added by #140 and later) are excluded so the
+    assertions hold regardless of how many models are committed.
+    """
+    return [r for r in _local_rows(_REAL_RESULTS) if r["model"] == _7B_MODEL]
+
+
 def test_local_rows_renders_all_three_tracks():
     """The real 7B folder renders 3 rows: naive, labels, slots (in sort order)."""
-    rows = _local_rows(_REAL_RESULTS)
+    rows = _rows_for_7b()
     scorers = [r["scorer"] for r in rows]
     assert scorers == ["naive (generate+parse)", "labels", "slots"], scorers
 
@@ -43,7 +58,7 @@ def test_naive_row_exact_values():
     drift in any field (accuracy, parity, timing, case count, error count)
     is caught.
     """
-    rows = _local_rows(_REAL_RESULTS)
+    rows = _rows_for_7b()
     naive = next(r for r in rows if r["scorer"] == "naive (generate+parse)")
     assert naive["accuracy"] == pytest.approx(0.6767, abs=0.001)
     assert naive["parity_status"] == "—"
@@ -54,7 +69,7 @@ def test_naive_row_exact_values():
 
 def test_labels_row_exact_values():
     """parallel-labels-typesafe: 82.1% accuracy, DRIFT (0.078), 0.6s, 45 (1 error)."""
-    rows = _local_rows(_REAL_RESULTS)
+    rows = _rows_for_7b()
     labels = next(r for r in rows if r["scorer"] == "labels")
     assert labels["accuracy"] == pytest.approx(0.8213, abs=0.001)
     assert labels["parity_status"] == "DRIFT"
@@ -66,7 +81,7 @@ def test_labels_row_exact_values():
 
 def test_slots_row_exact_values():
     """parallel-slots-typesafe: 63.2% accuracy, DRIFT (0.078), 0.6s, 45 (1 error)."""
-    rows = _local_rows(_REAL_RESULTS)
+    rows = _rows_for_7b()
     slots = next(r for r in rows if r["scorer"] == "slots")
     assert slots["accuracy"] == pytest.approx(0.6322, abs=0.001)
     assert slots["parity_status"] == "DRIFT"
@@ -74,6 +89,26 @@ def test_slots_row_exact_values():
     assert slots["time_per_case_s"] == pytest.approx(0.633, abs=0.01)
     assert slots["cases"] == 45
     assert slots["error_count"] == 1
+
+
+def test_each_model_renders_own_three_rows():
+    """When more than one model folder exists under benchmarks/results, each
+    model renders its own 3 rows (naive, labels, slots). Skipped when only
+    one model folder is present (the 7B-only state before #140).
+
+    This is the multi-model guard: a future PR that adds a model folder but
+    breaks its row extraction fails here, not in the single-model tests above.
+    """
+    all_rows = _local_rows(_REAL_RESULTS)
+    models = sorted({r["model"] for r in all_rows})
+    if len(models) <= 1:
+        pytest.skip("only one model folder present (pre-#140 state)")
+    for model in models:
+        model_rows = [r for r in all_rows if r["model"] == model]
+        scorers = [r["scorer"] for r in model_rows]
+        assert scorers == ["naive (generate+parse)", "labels", "slots"], (
+            f"{model}: expected 3 tracks, got {scorers}"
+        )
 
 
 @pytest.mark.slow
