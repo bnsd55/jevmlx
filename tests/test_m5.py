@@ -59,6 +59,7 @@ class TestPlanSteps:
             "timing",
             "bench-rest",
             "summary",
+            "readme",
         ]
 
     def test_doctor_is_gate_and_captures_json(self, out):
@@ -101,11 +102,17 @@ class TestPlanSteps:
     def test_ab_steps_branch_worktree_and_cwd(self, out):
         steps = plan_steps(out, parity_models=[QUALITY_TARGET], ab_branch="w2a-field-local")
         ids = [s.id for s in steps]
-        assert ids[-3:] == ["ab-setup", "ab-bench", "ab-invariance"] or ids[-4:] == [
+        assert ids[-4:] == [
             "ab-setup",
             "ab-bench",
             "ab-invariance",
             "summary",
+        ] or ids[-5:] == [
+            "ab-setup",
+            "ab-bench",
+            "ab-invariance",
+            "summary",
+            "readme",
         ]
         ab_setup = next(s for s in steps if s.id == "ab-setup")
         # B8: argv is a stale-worktree cleanup; git worktree add is the first
@@ -126,7 +133,7 @@ class TestPlanSteps:
 
     def test_summary_step_in_process(self, out):
         steps = plan_steps(out, parity_models=[QUALITY_TARGET])
-        summary = steps[-1]
+        summary = next(s for s in steps if s.id == "summary")
         assert summary.in_process is True
         assert summary.argv == ()
         assert summary.outputs == (out / "SUMMARY.md",)

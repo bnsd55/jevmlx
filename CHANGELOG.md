@@ -34,6 +34,23 @@
   rows. The footnote 'N public example cases' is now derived from the
   results' counts.cases (never a literal 20); README prose lines outside
   the generated block no longer state a number.
+- m5: the runbook now has an always-on `readme` step (appended after
+  `summary`) that regenerates the README leaderboard and verifies freshness:
+  runs `python -m benchmarks.leaderboard --results benchmarks/results
+  --official benchmarks/typesafe/official.json --readme README.md`, then
+  `python -m benchmarks.check_results --check-readme README.md` (fails the
+  step if stale). The step is `in_process` (like summary) with cmd/log
+  lines in RUNBOOK.md. The RUNBOOK footer reminds the operator to include
+  `README.md` in the same commit as `benchmarks/results/<folder>` (the M5
+  agent commits and opens the PR by hand; m5.py does not grow a git/gh
+  flow). This fixes the field failure where #122 failed the results-check
+  CI job on 'README leaderboard block is STALE' because the README regen
+  was a manual afterthought. 2 tests (`tests/test_m5_results_pr.py`): e2e
+  on a real results folder written by `run_eval` + `write_report` +
+  `compute_metrics` (no hand-made fixture, no fake subprocess) — asserts
+  the README block is regenerated + freshness check passes + the real repo
+  README is unchanged; and the `readme` step appears last in `plan_steps`
+  by default.
 - Fix: `finalize_public_result` raised `ValueError: no field carries a
   semantics record` on typesafe cases with an empty schema (`{}`). Root
   cause: the typesafe dataset carries cases whose schema is `{}` (a workflow
