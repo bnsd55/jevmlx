@@ -162,6 +162,70 @@ class TestParseBaselineOutput:
         )
         assert any("wrong type for amount_valid" in e for e in errors)
 
+    def test_boolean_string_true_coerced(self):
+        """'true' (string) is accepted as bool True — a baseline must not
+        lose a semantically-correct case to a type-only mismatch."""
+        strict, salvage, errors = parse_baseline_output(
+            '{"action": "APPROVE", "amount_valid": "true", "tags": []}', SCHEMA
+        )
+        assert errors == []
+        assert strict["amount_valid"] is True
+        assert salvage["amount_valid"] is True
+
+    def test_boolean_string_false_coerced(self):
+        """'False' (string, mixed-case) is accepted as bool False."""
+        strict, salvage, errors = parse_baseline_output(
+            '{"action": "APPROVE", "amount_valid": "False", "tags": []}', SCHEMA
+        )
+        assert errors == []
+        assert strict["amount_valid"] is False
+        assert salvage["amount_valid"] is False
+
+    def test_boolean_int_one_coerced(self):
+        """int 1 is accepted as bool True."""
+        strict, salvage, errors = parse_baseline_output(
+            '{"action": "APPROVE", "amount_valid": 1, "tags": []}', SCHEMA
+        )
+        assert errors == []
+        assert strict["amount_valid"] is True
+        assert salvage["amount_valid"] is True
+
+    def test_boolean_int_zero_coerced(self):
+        """int 0 is accepted as bool False."""
+        strict, salvage, errors = parse_baseline_output(
+            '{"action": "APPROVE", "amount_valid": 0, "tags": []}', SCHEMA
+        )
+        assert errors == []
+        assert strict["amount_valid"] is False
+        assert salvage["amount_valid"] is False
+
+    def test_boolean_yes_still_errors(self):
+        """'yes' is not a recognized boolean spelling and still errors
+        with the same message as before the coercion was added."""
+        strict, salvage, errors = parse_baseline_output(
+            '{"action": "APPROVE", "amount_valid": "yes", "tags": []}', SCHEMA
+        )
+        assert strict["amount_valid"] is None
+        assert salvage["amount_valid"] is None
+        assert any("wrong type for amount_valid" in e for e in errors)
+
+    def test_boolean_none_still_errors(self):
+        """None is not a boolean and still errors."""
+        strict, salvage, errors = parse_baseline_output(
+            '{"action": "APPROVE", "amount_valid": null, "tags": []}', SCHEMA
+        )
+        assert strict["amount_valid"] is None
+        assert salvage["amount_valid"] is None
+        assert any("wrong type for amount_valid" in e for e in errors)
+
+    def test_boolean_string_true_stripped_and_case_insensitive(self):
+        """'  TRUE  ' (stripped, upper-case) is accepted as bool True."""
+        strict, salvage, errors = parse_baseline_output(
+            '{"action": "APPROVE", "amount_valid": "  TRUE  ", "tags": []}', SCHEMA
+        )
+        assert errors == []
+        assert strict["amount_valid"] is True
+
     def test_multi_item_not_in_choices(self):
         _, _, errors = parse_baseline_output(
             '{"action": "APPROVE", "amount_valid": true, "tags": ["fraud", "nope"]}', SCHEMA

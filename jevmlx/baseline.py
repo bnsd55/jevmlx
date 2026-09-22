@@ -103,11 +103,28 @@ def _validate_field(name: str, field, raw) -> tuple[bool, object, str | None]:
     for string-digit enum choices are str-coerced before the membership check,
     so int 2 for choices ('0','1','2','3') is accepted as '2' (a baseline must
     not lose a semantically-correct case to a type-only mismatch); wrong values
-    like str(2.5)=='2.5' or a non-choice string still error.
+    like str(2.5)=='2.5' or a non-choice string still error. Boolean fields
+    accept the strings 'true'/'false' (case-insensitive, stripped) and the ints
+    0/1 as bool; 'yes'/'no'/other strings still error.
     """
     if field.field_type == "boolean":
         if isinstance(raw, bool):
             return True, raw, None
+        # A naive baseline must not lose a semantically-correct case to a
+        # type-only mismatch (PR #133 principle extended to booleans). Accept
+        # the strings 'true'/'false' (case-insensitive, stripped) and the ints
+        # 0/1 as bool; anything else still errors with the same message.
+        if isinstance(raw, str):
+            token = raw.strip().lower()
+            if token == "true":
+                return True, True, None
+            if token == "false":
+                return True, False, None
+        elif isinstance(raw, int) and not isinstance(raw, bool):
+            if raw == 1:
+                return True, True, None
+            if raw == 0:
+                return True, False, None
         return False, None, f"wrong type for {name}: expected boolean, got {type(raw).__name__}"
     if field.field_type == "multi":
         if not isinstance(raw, list):

@@ -80,6 +80,24 @@
 
 - tests: pin issue105 slow test to the 1.5B. test_prior_corrected_labels_order_invariant_on_15b imported conftest.MODEL_ID (which defaults to the 0.5B) and passed it to decide(), so the test NAME promised the 1.5B but silently ran whatever MODEL_ID env was set — anyone running -m slow without the env var got the 0.5B, which flips the scam case to 'low' (3/6, failing the <= 1 flip gate) and looks like a regression. Fix: a module constant ISSUE105_MODEL = mlx-community/Qwen2.5-1.5B-Instruct-4bit is passed to decide() directly, never conftest.MODEL_ID; the docstring documents the pin and the run command. Audit of other slow tests (test_engine, test_smoke, test_adapters, test_api, test_w4b_parity): all assert mechanical/deterministic properties (valid values, normalized probs, chunked==full, adapter-split identity, parity drift==0) that hold on any model — no model-specific thresholds. Only the issue105 flip gate is model-specific.
 
+- baseline: accept boolean strings and 0/1 for boolean fields. The naive
+  baseline parser (`jevmlx/baseline.py:_validate_field`) rejected a string
+  `'true'`/`'false'` or int `0`/`1` where the schema expects a bool — failing
+  the `isinstance(raw, bool)` guard, so the case counted as an error instead
+  of being scored. The Llama-3.1-8B naive_local-slots-typesafe run lost 109
+  cases this way (booleans emitted as JSON strings `'true'`/`'false'`); Gemma-
+  3-12B lost 84. Fix: the boolean branch now accepts the strings `'true'`/
+  `'false'` (case-insensitive, stripped) and ints `0`/`1` as bool, coercing
+  to `True`/`False`; `'yes'`/`'no'` and other strings, `None`, and other ints
+  still error with the same `'wrong type'` message. Same principle as the
+  numeric-scalar coercion for string-digit enums (PR #133): a baseline must
+  not lose a semantically-correct case to a type-only mismatch. Naive-only:
+  the engine's own `_validate_json` (telemetry, not scoring) is unchanged; the
+  scored parallel/slots paths use the token scorer. 8 tests (`'true'`->True,
+  `'False'`->False, `1`->True, `0`->False, `'yes'` errors, `null` errors,
+  `'  TRUE  '` stripped+case-insensitive, plus the pre-existing
+  `'yes'` wrong-type test kept).
+
 - baseline: accept numeric scalars for string-digit enum choices. The naive
   baseline parser (`jevmlx/baseline.py:_validate_field`) rejected an integer
   where the schema expects a string from `('0','1','2','3')` — e.g.
