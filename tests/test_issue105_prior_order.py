@@ -17,10 +17,16 @@ from __future__ import annotations
 from typing import Literal
 
 import pytest
-from conftest import MODEL_ID
 from pydantic import BaseModel, Field
 
 import jevmlx
+
+# Issue #105: the order-invariance thresholds in this file were measured on
+# the 1.5B. The test NAME says _on_15b, so the test must PIN the 1.5B
+# explicitly — never silently inherit conftest.MODEL_ID (which defaults to
+# the 0.5B and flips the scam case to 'low', failing the <= 1 flip gate).
+# Anyone running -m slow without MODEL_ID set still gets the 1.5B here.
+ISSUE105_MODEL = "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
 
 # The 6 cases from the issue (paraphrased — same semantic content).
 CASES: dict[str, str] = {
@@ -88,7 +94,7 @@ def _run_grid(scoring: str, prior_correction: bool) -> dict[str, dict[str, str]]
             d = jevmlx.decide(
                 _model_cls(order),
                 ctx,
-                model=MODEL_ID,
+                model=ISSUE105_MODEL,
                 scoring=scoring,
                 prior_correction=prior_correction,
             )
@@ -120,7 +126,7 @@ def _slot_distribution(results: dict[str, dict[str, str]]) -> dict[int, int]:
 @pytest.mark.slow
 def test_issue105_reproduce_table(capsys):
     """Reproduce the issue #105 4-row table on the current main."""
-    print(f"\nmodel: {MODEL_ID}")
+    print(f"\nmodel: {ISSUE105_MODEL}")
     print(f"jevmlx: {jevmlx.__version__}\n")
 
     for scoring, prior in [
@@ -203,6 +209,15 @@ def test_prior_is_order_invariant_on_fake_engine(monkeypatch):
 def test_prior_corrected_labels_order_invariant_on_15b():
     """Issue #105 slow: with prior_correction=True and labels scoring, the
     canonical-prior fix reduces order-dependent flips on the 1.5B.
+
+    Pinned to ``ISSUE105_MODEL`` (mlx-community/Qwen2.5-1.5B-Instruct-4bit),
+    NOT conftest.MODEL_ID — the ``<= 1`` flip threshold was measured on the
+    1.5B. The 0.5B default flips the scam case to 'low' (3/6) and fails this
+    gate; that is a model-capacity difference, not a regression. Run with::
+
+        MODEL_ID=mlx-community/Qwen2.5-1.5B-Instruct-4bit \
+            .venv/bin/python -m pytest tests/test_issue105_prior_order.py \
+            -m slow -p no:cacheprovider -o "addopts="
 
     Before the fix: 2/6 cases flipped (the prior itself was order-dependent).
     After: at most 1/6 (residual evidence-pass position sensitivity on a

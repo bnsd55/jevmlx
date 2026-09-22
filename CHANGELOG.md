@@ -78,6 +78,8 @@
   allowlist). 2 tests (error row carries raw_text, valid row does not;
   truncation to 4000 chars).
 
+- tests: pin issue105 slow test to the 1.5B. test_prior_corrected_labels_order_invariant_on_15b imported conftest.MODEL_ID (which defaults to the 0.5B) and passed it to decide(), so the test NAME promised the 1.5B but silently ran whatever MODEL_ID env was set — anyone running -m slow without the env var got the 0.5B, which flips the scam case to 'low' (3/6, failing the <= 1 flip gate) and looks like a regression. Fix: a module constant ISSUE105_MODEL = mlx-community/Qwen2.5-1.5B-Instruct-4bit is passed to decide() directly, never conftest.MODEL_ID; the docstring documents the pin and the run command. Audit of other slow tests (test_engine, test_smoke, test_adapters, test_api, test_w4b_parity): all assert mechanical/deterministic properties (valid values, normalized probs, chunked==full, adapter-split identity, parity drift==0) that hold on any model — no model-specific thresholds. Only the issue105 flip gate is model-specific.
+
 - baseline: accept numeric scalars for string-digit enum choices. The naive
   baseline parser (`jevmlx/baseline.py:_validate_field`) rejected an integer
   where the schema expects a string from `('0','1','2','3')` — e.g.
