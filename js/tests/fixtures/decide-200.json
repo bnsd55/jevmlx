@@ -33,7 +33,7 @@
     "schema_match": true,
     "confidence_model": "slots",
     "prompt_sha256": "abc",
-    "prompt_version": "jevmlx-parallel-v9",
+    "prompt_version": "jevmlx-parallel-v10",
     "probability_status": "constrained-path probability at T=1; uncalibrated as decision confidence",
     "prior_correction": false,
     "constraints_applied": false,

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- re-land: field-local prompts (#25) as prompt v10, for a REAL A/B this
+  time. The original #25 merge shipped on an A/B that did not run its code
+  (proved on issue #63) and was reverted by #154 after the first real run
+  on main dropped labels typesafe 82.1 → 71.6. This branch re-applies the
+  same change on top of #155's m5 readme fix, with goldens and serve
+  fixtures regenerated for v10. HOLD: merge only after the A/B runs with
+  the fixed m5 A/B setup, compares BOTH scorers, and labels typesafe does
+  not drop.
+
 - metrics: every headline metric now counts CANONICAL answer lines only.
   evalrun writes one line per (case, field, permutation); rotation lines
   (`permutation="rotN:<field>"`) are order probes. field_accuracy,
@@ -144,6 +153,20 @@
   `quality` alias). NOT a required check — main protection stays
   test+build.
 
+- W2-A field-local prompts: the global schema block is
+  replaced by per-field prompt blocks. The engine renders one complete chat
+  prompt per field (system + nonce-delimited context + that field's block +
+  lead-in), the plan compiler takes the exact token-ID LCP across all
+  per-field prompts as the prefill, and each row carries its field's
+  post-LCP prompt tail + candidate remainder. Context moves ABOVE the field
+  block (GPT Q2: final contract nearest generation). Every displayed string
+  is json.dumps-escaped. Multi fields render one block per option. New
+  telemetry: prefill_tokens, suffix_tokens_total. PROMPT_VERSION v10. No
+  fallback path — render_field_prompt is mandatory on compile_*_plan; the
+  old lead_in_ids / global-schema prompt path is deleted. Plan cache key
+  includes a context hash (prompt tails are context-dependent). PARITY_ATOL
+  unchanged at 5e-2 (W2-A's longer rows increase Metal batch-shape drift to
+  ~0.027 nats). Rebased onto main 8ac3348.
 - evalrun: error-rate circuit breaker per combo. When `fields_error / fields_total` exceeds `--max-error-rate` (default 0.10, 0 disables) AND at least 20 fields have been scored, the combo stops: remaining cases are skipped, `run.json`'s existing `circuit_breaker` key carries `{tripped, reason, fields_error, fields_total, first_error}`, and the combo exits non-zero so the M5 runbook's fail-fast logic marks it FAILED and continues with the next combo. `check_results` reports a tripped combo as FAIL with the reason. Fixes the silent-failure path where the M5 rest bench ran for hours after 116/365 (Llama) and 90/365 (Gemma) error lines.
 - watch: data round 4b (cases_total unit, run index, cap, live step,
   alias/ab-worktree/invariance folders). Six data-layer bugs fixed against

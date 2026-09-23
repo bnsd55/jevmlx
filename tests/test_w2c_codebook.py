@@ -18,6 +18,7 @@ import time
 import pytest
 
 from jevmlx.schema import SchemaCompileError, StructuredSchema, _alias_code, _search_codebook
+from tests.conftest import make_test_renderer
 
 
 class CollidingLetterTokenizer:
@@ -109,8 +110,8 @@ def test_determinism_same_codes():
     schema = StructuredSchema(
         {"risk": {"type": "enum", "description": "d", "choices": ["LOW", "MEDIUM", "HIGH"]}}
     )
-    plan1 = schema.compile_slot_plan(tok)
-    plan2 = schema.compile_slot_plan(tok)
+    plan1 = schema.compile_slot_plan(tok, make_test_renderer(tok, schema, "slots"))
+    plan2 = schema.compile_slot_plan(tok, make_test_renderer(tok, schema, "slots"))
     codes1 = plan1["fields"]["risk"]["codebook"]
     codes2 = plan2["fields"]["risk"]["codebook"]
     assert codes1 == codes2, f"non-deterministic codes: {codes1} vs {codes2}"
@@ -142,7 +143,7 @@ def test_telemetry_in_plan():
     schema = StructuredSchema(
         {"risk": {"type": "enum", "description": "d", "choices": ["LOW", "HIGH"]}}
     )
-    plan = schema.compile_slot_plan(tok)
+    plan = schema.compile_slot_plan(tok, make_test_renderer(tok, schema, "slots"))
     fp = plan["fields"]["risk"]
     assert "codebook" in fp
     assert "single_branch" in fp
@@ -159,7 +160,7 @@ def test_codes_not_index_derived_when_searched():
     schema = StructuredSchema(
         {"risk": {"type": "enum", "description": "d", "choices": ["LOW", "HIGH"]}}
     )
-    plan = schema.compile_slot_plan(tok)
+    plan = schema.compile_slot_plan(tok, make_test_renderer(tok, schema, "slots"))
     codes = plan["fields"]["risk"]["codebook"]
     index_codes = [_alias_code(i) for i in range(2)]
     assert codes != index_codes, f"codes match index fallback: {codes}"
@@ -172,7 +173,7 @@ def test_26_choice_field_compiles_under_1_second():
     choices = [f"choice_{i}" for i in range(26)]
     schema = StructuredSchema({"big": {"type": "enum", "description": "d", "choices": choices}})
     start = time.monotonic()
-    plan = schema.compile_slot_plan(tok)
+    plan = schema.compile_slot_plan(tok, make_test_renderer(tok, schema, "slots"))
     elapsed = time.monotonic() - start
     assert elapsed < 1.0, f"26-choice compile took {elapsed:.2f}s (greedy should be <1s)"
     assert len(plan["fields"]["big"]["codebook"]) == 26
