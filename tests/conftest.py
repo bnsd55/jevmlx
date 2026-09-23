@@ -14,6 +14,10 @@ main itself, so the constant ships at 5e-2 pending a remeasure.
 W3-E: the constant now LIVES in jevmlx.engine as INSTABILITY_BAND (the
 near-tie rescore band uses the same measurement) and is re-exported here so
 tests and engine share exactly one number.
+
+W2-A's per-field prompt tails (40-100 tokens/row vs 4 for the old lead_in)
+increase Metal batch-shape tiling drift; measured ~0.027 nats on the action
+row — inside the existing 5e-2 band, so the constant is unchanged.
 The FakeModel path stays exact (deterministic zeros).
 
 W5b-2: shared fakes live HERE, once. One tokenizer per tokenization family,
@@ -425,7 +429,7 @@ def make_engine_result(
         "schema_match": True,
         "confidence_model": "slots",
         "prompt_sha256": "abc",
-        "prompt_version": "jevmlx-parallel-v9",
+        "prompt_version": "jevmlx-parallel-v10",
         "probability_status": (
             "constrained-path probability at T=1; uncalibrated as decision confidence"
         ),
@@ -641,3 +645,20 @@ def test_make_field_telemetry_shapes_match_engine():
     assert setcons_mod._YNModel is YNLogitModel
     assert count_mod._BiasedModel is CountCodeModel
     assert parity_mod._StableModel is YNLogitModel
+
+
+# Real-model log_score parity tolerance (nats). See module docstring.
+PARITY_ATOL = 5e-2
+
+
+def make_test_renderer(tokenizer, schema, scoring="labels"):
+    """Build a render_field_prompt for tests that compile plans directly.
+
+    Tests that only check token-level structure (remainders, codebook, codes)
+    still need a render_field_prompt now that W2-A made it mandatory. This
+    helper creates one with an empty context — the prompt tails are
+    irrelevant to those tests; they only inspect shared_ids/remainders/etc.
+    """
+    from jevmlx.engine import make_field_prompt_renderer
+
+    return make_field_prompt_renderer(tokenizer, "", schema, scoring)

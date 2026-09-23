@@ -1005,7 +1005,12 @@ def _run_eval_command(args) -> None:
             engine, scoring=args.scoring, prior_correction=args.prior_correction
         )
         chat_template = getattr(engine.tokenizer, "chat_template", None)
-        plan_provider = lambda schema: schema.compile_labels_plan(engine.tokenizer)  # noqa: E731
+        from jevmlx.engine import make_field_prompt_renderer
+
+        def plan_provider(schema):
+            return schema.compile_labels_plan(
+                engine.tokenizer, make_field_prompt_renderer(engine.tokenizer, "", schema, "labels")
+            )
     elif args.track == "naive_local":
         load_engine, _ = _engine()
         print(f"Loading {args.model} ...", flush=True)

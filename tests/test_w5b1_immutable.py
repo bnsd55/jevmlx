@@ -10,6 +10,7 @@ rule: "No backward compatibility" — old names are deleted, not aliased).
 from __future__ import annotations
 
 import pytest
+from conftest import make_test_renderer
 
 from jevmlx.schema import FieldDefinition, StructuredSchema
 
@@ -146,7 +147,7 @@ class _Tok:
 
 
 def test_compiled_plan_is_readonly(schema):
-    plan = schema.compile_slot_plan(_Tok())
+    plan = schema.compile_slot_plan(_Tok(), make_test_renderer(_Tok(), schema, "slots"))
     with pytest.raises(TypeError):
         plan["fields"]["flags"]["shared_ids"] = [1]  # type: ignore[index]
     with pytest.raises(TypeError):
@@ -154,20 +155,20 @@ def test_compiled_plan_is_readonly(schema):
     # Frozen sequences: no append/assignment (tuple: AttributeError is fine
     # — the surface is read-only either way).
     with pytest.raises((TypeError, AttributeError)):
-        plan["lead_in_ids"].append(1)  # type: ignore[attr-defined]
+        plan["lcp_ids"].append(1)  # type: ignore[attr-defined]
 
 
 def test_plan_cache_returns_same_frozen_object(schema):
     """Cache identity holds AND the returned object is the frozen one —
     no per-read re-freezing that would hand out fresh mutable copies."""
     tok = _Tok()
-    p1 = schema.compile_slot_plan(tok)
-    p2 = schema.compile_slot_plan(tok)
+    p1 = schema.compile_slot_plan(tok, make_test_renderer(tok, schema, "slots"))
+    p2 = schema.compile_slot_plan(tok, make_test_renderer(tok, schema, "slots"))
     assert p1 is p2
 
 
 def test_labels_plan_is_readonly(schema):
-    plan = schema.compile_labels_plan(_Tok())
+    plan = schema.compile_labels_plan(_Tok(), make_test_renderer(_Tok(), schema, "labels"))
     with pytest.raises(TypeError):
         plan["fields"]["risk_tier"]["shared_ids"] = []  # type: ignore[index]
 

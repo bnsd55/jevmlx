@@ -2,10 +2,10 @@
   "status": 200,
   "headers": {
     "Server": "BaseHTTP/0.6 Python/3.12.9",
-    "Date": "Wed, 23 Sep 2026 16:21:27 GMT",
+    "Date": "Tue, 22 Sep 2026 19:12:00 GMT",
     "Content-Type": "application/json",
-    "Content-Length": "1670",
-    "X-Request-Id": "jev-5ecc59d16e8f"
+    "Content-Length": "1671",
+    "X-Request-Id": "jev-09969f2371fd"
   },
   "body": {
     "elapsed_ms": 1.0,
@@ -33,7 +33,7 @@
     "schema_match": true,
     "confidence_model": "slots",
     "prompt_sha256": "abc",
-    "prompt_version": "jevmlx-parallel-v9",
+    "prompt_version": "jevmlx-parallel-v10",
     "probability_status": "constrained-path probability at T=1; uncalibrated as decision confidence",
     "prior_correction": false,
     "constraints_applied": false,
@@ -87,7 +87,7 @@
     },
     "num_fields": 1,
     "queue_depth": 0,
-    "queue_wait_ms": 0.02,
-    "request_id": "jev-5ecc59d16e8f"
+    "queue_wait_ms": 0.03,
+    "request_id": "jev-09969f2371fd"
   }
 }

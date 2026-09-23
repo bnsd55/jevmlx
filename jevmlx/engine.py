@@ -50,7 +50,10 @@ logger = logging.getLogger(__name__)
 # the displayed aliases — finding 1), bounded codebook search (finding 2),
 # one canonical JSON serializer (ensure_ascii=False everywhere — finding
 # 39), and the nonce context delimiter (finding 44).
-PROMPT_VERSION = "jevmlx-parallel-v9"
+# W2-A (v9 -> v10): field-local prompts — per-field prompt blocks replace
+# the global schema block; render_field_prompt is mandatory on
+# compile_*_plan; plan cache key includes a context hash.
+PROMPT_VERSION = "jevmlx-parallel-v10"
 
 
 # W2-E step 3: the count row's answer is trusted over the per-option rule
@@ -104,6 +107,9 @@ def _probe_system_role(tokenizer, profile: PromptProfile) -> PromptProfile:
         {"role": "system", "content": "probe"},
         {"role": "user", "content": "probe"},
     ]
+    # Fake/test tokenizers may not implement apply_chat_template.
+    if not hasattr(tokenizer, "apply_chat_template"):
+        return profile
     try:
         tokenizer.apply_chat_template(
             probe, add_generation_prompt=True, tokenize=True, **profile.template_kwargs
@@ -111,6 +117,14 @@ def _probe_system_role(tokenizer, profile: PromptProfile) -> PromptProfile:
     except TemplateError:
         return PromptProfile(template_kwargs=profile.template_kwargs, supports_system=False)
     return profile
+
+
+def _resolve_profile(tokenizer) -> PromptProfile:
+    """Resolve the PromptProfile from a tokenizer alone (W2-A): derive the
+    model id from the tokenizer's name_or_path, build the base profile, and
+    probe system-role support. Used by make_field_prompt_renderer which has
+    no Engine object (utility callers: lint, cli, evalrun)."""
+    return _probe_system_role(tokenizer, _profile_for(_tokenizer_model_id(tokenizer)))
 
 
 @dataclass(frozen=True)
@@ -474,14 +488,72 @@ def _chat_ids(
     if system_content and not profile.supports_system:
         merged = f"{system_content}\n\n{user_content}"
         messages = [{"role": "user", "content": merged}]
-    return tokenizer.apply_chat_template(
+    # Fake/test tokenizers may not implement apply_chat_template; fall back
+    # to plain encode of the concatenated message contents (W2-A tests).
+    if not hasattr(tokenizer, "apply_chat_template"):
+        text = "\n".join(m["content"] for m in messages)
+        return tokenizer.encode(text, add_special_tokens=False)
+    ids = tokenizer.apply_chat_template(
         messages, add_generation_prompt=True, tokenize=True, **profile.template_kwargs
     )
+    # Normalize: transformers returns BatchEncoding (has .input_ids); the
+    # raw `tokenizers` library returns an Encoding object. Both must become a
+    # plain list of ints — the plan compiler and json serialization expect
+    # list[int], not an opaque container.
+    if hasattr(ids, "input_ids"):
+        ids = ids.input_ids
+    return [int(i) for i in ids]
 
 
 def _prompt_sha256(prompt_ids: list[int]) -> str:
     """sha256 of the full prompt token ids, JSON-serialized as a list."""
     return hashlib.sha256(json.dumps(list(prompt_ids)).encode("utf-8")).hexdigest()
+
+
+def make_field_prompt_renderer(
+    tokenizer, context: str, schema, scoring: str = "slots", profile=None
+):
+    """Build a render_field_prompt callback for the plan compilers (W2-A).
+
+    Returns a callable ``(fname, option_idx=None) -> list[int]`` that renders
+    the complete chat prompt for one field (or one multi option): system +
+    nonce-delimited context + the field's prompt block + lead-in. Used by
+    run_parallel_generation (the engine) and by utility callers (lint, cli,
+    evalrun) that need a plan but have no context of their own — they pass
+    an empty context.
+    """
+    if profile is None:
+        profile = _resolve_profile(tokenizer)
+    tag = _context_nonce(context)
+    context_open = f"<<<CONTEXT:{tag}"
+    context_close = f"CONTEXT:{tag}>>>"
+
+    # For slots mode, the W2-C searched codebook is fetched lazily on first
+    # render (avoids re-running the codebook search when the plan is already
+    # cached and the renderer is never invoked).
+    _field_aliases: dict[str, list[str]] | None = None
+
+    def _get_aliases():
+        nonlocal _field_aliases
+        if _field_aliases is None:
+            _field_aliases = schema._searched_aliases(tokenizer) if scoring == "slots" else {}
+        return _field_aliases
+
+    def render_field_prompt(fname: str, option_idx: int | None = None) -> list[int]:
+        fdef = schema.fields[fname]
+        aliases = _get_aliases().get(fname) if scoring == "slots" else None
+        if fdef.field_type == "multi" and option_idx is not None:
+            block = schema.render_multi_option_block(fname, fdef, option_idx)
+        else:
+            block = schema.render_field_block(fname, fdef, aliases, scoring)
+        user_content = (
+            "Classify the following fields.\n\n"
+            f"{context_open}\n{context}\n{context_close}\n\n{block}\n\n"
+            "Return the answer as a JSON object."
+        )
+        return _chat_ids(tokenizer, user_content, PROMPT_V2_SYSTEM, profile)
+
+    return render_field_prompt
 
 
 def _stop_token_ids(tokenizer) -> set:
@@ -1430,7 +1502,13 @@ def _get_or_compute_prior(
     # ordering's prior is valid for any ordering of the evidence schema.
     schema = schema.canonicalized_for_prior()
     tokenizer = engine.tokenizer
-    plan_hash = schema.plan_hash(tokenizer, scoring)
+    # W2-A: field-local prompts — the plan hash and cache key are
+    # context-dependent (prompt tails change with the context).
+    render_field_prompt = make_field_prompt_renderer(
+        tokenizer, neutral_context, schema, scoring, profile=engine.profile
+    )
+    _ctx_hash = hashlib.sha256(neutral_context.encode("utf-8")).hexdigest()[:16]
+    plan_hash = schema.plan_hash(tokenizer, scoring, render_field_prompt, cache_key=_ctx_hash)
     if neutral_prompt_sha256 is None:
         # W5-D finding 33: hash the EXACT neutral prompt token ids (the same
         # material _prefill renders) — descriptions, glosses, and field
@@ -2316,7 +2394,9 @@ class PrefillResult(NamedTuple):
     cache: list  # per-layer prefill KV cache (unbatched)
 
 
-def _build_schema_rows(schema: StructuredSchema, tokenizer, scoring: str) -> dict:
+def _build_schema_rows(
+    schema: StructuredSchema, tokenizer, scoring: str, render_field_prompt=None, cache_key: str = ""
+) -> dict:
     """Build the shared candidate row set for a schema (W3-F stage 1).
 
     The rows depend only on (schema, tokenizer, scoring) — NOT on the
@@ -2324,13 +2404,22 @@ def _build_schema_rows(schema: StructuredSchema, tokenizer, scoring: str) -> dic
     Returns rows, row_field, row_branch, row_option, row_count, tries,
     row_decision, lead_in, field_plans, pad_id. The compile wall time is
     the ledger's ``plan`` span (W5b-14) — no timing field here.
+
+    W2-A: render_field_prompt and cache_key are passed through to the plan
+    compiler (field-local prompts are context-dependent). When
+    render_field_prompt is None an empty-context renderer is used (the row
+    structure — shared_ids, remainders — is context-invariant; only the
+    prompt_tail_ids change with context, and those are not read here).
     """
     if scoring not in ("slots", "labels"):
         raise ValueError(f"scoring must be 'slots' or 'labels', got {scoring!r}")
+    if render_field_prompt is None:
+        render_field_prompt = make_field_prompt_renderer(tokenizer, "", schema, scoring)
+
     plan = (
-        schema.compile_slot_plan(tokenizer)
+        schema.compile_slot_plan(tokenizer, render_field_prompt, cache_key=cache_key)
         if scoring == "slots"
-        else schema.compile_labels_plan(tokenizer)
+        else schema.compile_labels_plan(tokenizer, render_field_prompt, cache_key=cache_key)
     )
 
     rows: list[list[int]] = []
@@ -2339,17 +2428,27 @@ def _build_schema_rows(schema: StructuredSchema, tokenizer, scoring: str) -> dic
     row_option: dict[int, int] = {}
     row_count: dict[int, int] = {}
     tries: dict[str, list[dict]] = {}
-    lead_in = plan["lead_in_ids"]
+    # W2-A: the plan has lcp_ids (the prefill) and per-field prompt_tail_ids
+    # (the post-LCP tail each row carries). There is no schema-wide lead_in —
+    # each field's rows start with that field's prompt tail.
     field_plans = plan["fields"]
     pad_id = tokenizer.pad_token_id or 0
     for fname in schema.fields:
         p = field_plans[fname]
+        tail = p["prompt_tail_ids"]
         if "options" in p:
-            # multi: one boolean row per option. suffix_ids_list entries are
-            # stored WITHOUT the schema-wide lead-in (one rule for every row
-            # type), so the lead-in is prepended exactly once here.
+            # multi: one boolean row per option. prompt_tail_ids is a list
+            # of tails (one per option); suffix_ids_list entries are stored
+            # WITHOUT the schema-wide lead-in, so the tail is prepended once.
             for oi, suffix_ids in enumerate(p["suffix_ids_list"]):
-                rows.append(list(lead_in) + list(suffix_ids))
+                opt_tail = (
+                    tail[oi]
+                    if isinstance(tail, (list, tuple))
+                    and tail
+                    and isinstance(tail[0], (list, tuple))
+                    else tail
+                )
+                rows.append(list(opt_tail) + list(suffix_ids))
                 row_field.append(fname)
                 row_option[len(rows) - 1] = oi
             # W2-E step 3: the count row — always present for a multi field
@@ -2358,15 +2457,23 @@ def _build_schema_rows(schema: StructuredSchema, tokenizer, scoring: str) -> dic
             count_plan = p["count"]
             field_trie = build_trie(count_plan["remainders"])
             tries[count_key(fname)] = field_trie
+            # The count row uses the first option's tail (or the scalar tail)
+            # — the prompt text before the count row's JSON key is the same
+            # field-local prompt.
+            count_tail = (
+                tail[0]
+                if isinstance(tail, (list, tuple)) and tail and isinstance(tail[0], (list, tuple))
+                else tail
+            )
             for bi, node in enumerate(field_trie):
-                rows.append(list(lead_in) + list(count_plan["shared_ids"]) + list(node["path"]))
+                rows.append(list(count_tail) + list(count_plan["shared_ids"]) + list(node["path"]))
                 row_field.append(fname)
                 row_count[len(rows) - 1] = bi
             continue
         field_trie = build_trie(p["remainders"])
         tries[fname] = field_trie
         for bi, node in enumerate(field_trie):
-            rows.append(list(lead_in) + list(p["shared_ids"]) + list(node["path"]))
+            rows.append(list(tail) + list(p["shared_ids"]) + list(node["path"]))
             row_field.append(fname)
             row_branch[len(rows) - 1] = bi
 
@@ -2377,22 +2484,33 @@ def _build_schema_rows(schema: StructuredSchema, tokenizer, scoring: str) -> dic
     row_decision: list[tuple[int, list[int]]] = []
     for ridx in range(len(rows)):
         p = field_plans[row_field[ridx]]
+        tail = p["prompt_tail_ids"]
         if ridx in row_option:
             # multi option row: RAW Y/N logits at the option row's last
             # position (the row ends right before the Y/N divergence),
             # in remainder order ["Y", "N"].
-            position = len(lead_in) + len(p["suffix_ids_list"][row_option[ridx]]) - 1
-            allowed = [t[0] for t in p["remainders"][row_option[ridx]]]
+            oi = row_option[ridx]
+            if isinstance(tail, (list, tuple)) and tail and isinstance(tail[0], (list, tuple)):
+                tail_len = len(tail[oi])
+            else:
+                tail_len = len(tail)
+            position = tail_len + len(p["suffix_ids_list"][oi]) - 1
+            allowed = [t[0] for t in p["remainders"][oi]]
         elif ridx in row_count:
             # W2-E step 3 count row: a scalar-enum-style trie row over the
             # count plan (tries live under the '<field>#count' key).
             cp = p["count"]
             node = tries[count_key(row_field[ridx])][row_count[ridx]]
-            position = len(lead_in) + len(cp["shared_ids"]) + len(node["path"]) - 1
+            count_tail = (
+                tail[0]
+                if isinstance(tail, (list, tuple)) and tail and isinstance(tail[0], (list, tuple))
+                else tail
+            )
+            position = len(count_tail) + len(cp["shared_ids"]) + len(node["path"]) - 1
             allowed = list(node["children"])
         else:
             node = tries[row_field[ridx]][row_branch[ridx]]
-            position = len(lead_in) + len(p["shared_ids"]) + len(node["path"]) - 1
+            position = len(tail) + len(p["shared_ids"]) + len(node["path"]) - 1
             allowed = list(node["children"])
         row_decision.append((position, allowed))
 
@@ -2404,7 +2522,7 @@ def _build_schema_rows(schema: StructuredSchema, tokenizer, scoring: str) -> dic
         "row_count": row_count,
         "tries": tries,
         "row_decision": row_decision,
-        "lead_in": lead_in,
+        "lcp_ids": plan["lcp_ids"],
         "field_plans": field_plans,
         "pad_id": pad_id,
     }
@@ -2600,9 +2718,17 @@ def run_parallel_generation(
     # wall time (plan/prefill/scoring/assembly are its children). The
     # memory guard below stays INSIDE it (it is part of the wall).
     with ledger.span("request"):
-        # 1. Batch plan + rows per field (context-independent — W3-F stage split).
+        # 1. Batch plan + rows per field. W2-A: the plan is context-dependent
+        #    (field-local prompt tails change with the context), so the
+        #    render_field_prompt and context hash are passed to _build_schema_rows.
         with ledger.span("plan"):
-            built = _build_schema_rows(schema, tokenizer, scoring)
+            render_field_prompt = make_field_prompt_renderer(
+                tokenizer, context, schema, scoring, profile=engine.profile
+            )
+            _ctx_hash = hashlib.sha256(context.encode("utf-8")).hexdigest()[:16]
+            built = _build_schema_rows(
+                schema, tokenizer, scoring, render_field_prompt, cache_key=_ctx_hash
+            )
         rows = built["rows"]
 
         # W5-D finding 32: the peak counter is process-lifetime state — without
@@ -2613,11 +2739,14 @@ def run_parallel_generation(
         active_start = int(mx.get_active_memory())
         mx.reset_peak_memory()
 
-        # 2. Prefill once (prompt v2: system paragraph + user schema block and
-        #    delimited context) — W3-F stage split.
-        pf = _prefill(model, tokenizer, context, schema, ledger, scoring, engine.profile)
-        base_ids = pf.base_ids
-        cache = pf.cache
+        # 2. Prefill once. W2-A: the prefill is the exact token-ID LCP of all
+        #    per-field chat prompts (system + context + field block), computed
+        #    by the plan compiler. Each row carries its field's post-LCP tail.
+        with ledger.span("prefill"):
+            base_ids = list(built["lcp_ids"])
+            cache = make_prompt_cache(model)
+            model(mx.array(base_ids)[None], cache=cache)
+            _eval_cache_state(cache)
 
         # 3. Memory guard: rows are broadcast copies of the prefill cache. The
         #    estimate includes the [rows, width, vocab] output logits for one chunk
@@ -3914,6 +4043,16 @@ def finalize_public_result(
         # probabilities should be read.
         "prompt_sha256": _prompt_sha256(base_ids),
         "prompt_version": PROMPT_VERSION,
+        # W2-A telemetry: prefill length (LCP of per-field prompts) and
+        # total suffix tokens (sum of row lengths). Together they measure
+        # the field-local prompt's memory/latency tradeoff vs the old global
+        # schema block (prefill drops by ~S, suffix grows by ~S_r per row).
+        "prefill_tokens": len(base_ids),
+        "suffix_tokens_total": sum(len(r) for r in rows),
+        # W2-A: time to compile the plan (tokenize R field prompts, LCP,
+        # codebook search). With per-context cache key, a new context
+        # recompiles; a repeated context hits the cache (~0 ms).
+        "plan_compile_ms": timing_keys["plan_compile_ms"],
         "probability_status": probability_status,
         "prior_correction": prior_correction,
         "constraints_applied": bool(constraints),
@@ -4067,7 +4206,10 @@ def _assemble(
     built = dict(built)
     built["scoring"] = scoring
     dispatch = dispatch_rows(built, scored)
-    lead_in = built["lead_in"]
+    # W2-A: no schema-wide lead_in — each field's rows carry their own
+    # prompt_tail_ids. The lead_in parameter to _selective_second_pass is
+    # unused (review 3: conditioned rows use their own shared prefix).
+    lead_in: list[int] = []
 
     # W5c-9: the pass's DECISION band from the persisted drift envelope —
     # INSTABILITY_BAND + E_bound(M). M is the MERGED pass width (pass_m_rows),
@@ -4290,7 +4432,11 @@ def run_parallel_generation_batched(
             prior = _get_or_compute_prior(engine, schema, scoring, max_rows, NEUTRAL_CONTEXT)
         prior_ms = request_ledger.derived_flat()["prior_ms"]
 
-    # 1. Shared row set (context-independent).
+    # 1. Shared row set. W2-A: the plan is context-dependent, but the
+    #    batched path compiles once with an empty-context renderer (the row
+    #    structure — shared_ids, remainders, suffix_ids — is context-invariant;
+    #    only prompt_tail_ids change with context, and the batched path uses
+    #    per-context prefills).
     with request_ledger.span("plan"):
         built = _build_schema_rows(schema, tokenizer, scoring)
     rows = built["rows"]

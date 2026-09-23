@@ -204,7 +204,11 @@ def test_conditioned_rows_use_header_not_schema_lead_in(row_capture):
         # the FIRST-pass family never opens a conditioned row).
         assert text.count("Given: ") == 1
         assert text.count('{"cb"') == 1
-        lead_in_ids = eng._build_schema_rows(schema, tok, "slots")["lead_in"]
+        # W2-A: no schema-wide lead_in — conditioned rows use their own header.
+        # The lead_in check is now vacuous (lead_in is always []), but keep
+        # the structure for documentation.
+        built = eng._build_schema_rows(schema, tok, "slots")
+        lead_in_ids = built.get("lcp_ids", [])
         assert not text.startswith(_decode(lead_in_ids)) if lead_in_ids else True
     # The row is a prefix of the full candidate family tokenization.
     full = tok.encode('Given: {"pa": "a"}\n{"cb": "OLDVALUE"}', add_special_tokens=False)

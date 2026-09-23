@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 
 import pytest
+from conftest import make_test_renderer
 
 from jevmlx.schema import StructuredSchema, _search_codebook
 
@@ -78,7 +79,7 @@ def test_prompt_shows_the_searched_codebook():
     schema = StructuredSchema(
         {"direction": {"type": "enum", "description": "d", "choices": ["LEFT", "RIGHT"]}}
     )
-    plan = schema.compile_slot_plan(tok)
+    plan = schema.compile_slot_plan(tok, make_test_renderer(tok, schema, "slots"))
     assert list(plan["fields"]["direction"]["codebook"]) == ["0", "1"]
     block = schema.to_schema_str("slots", tokenizer=tok)
     assert '0) "LEFT"' in block and '1) "RIGHT"' in block
@@ -105,7 +106,7 @@ def test_prompt_and_scorer_alias_sets_identical():
         }
     )
     block = schema.to_schema_str("slots", tokenizer=tok)
-    plan = schema.compile_slot_plan(tok)
+    plan = schema.compile_slot_plan(tok, make_test_renderer(tok, schema, "slots"))
     for name in ("direction", "flag"):
         for alias in plan["fields"][name]["aliases"]:
             assert f"{alias})" in block, f"{name}: alias {alias} not displayed"
@@ -133,7 +134,7 @@ def test_backtracked_set_scores_cleanly():
     schema = StructuredSchema(
         {"route": {"type": "enum", "description": "d", "choices": ["one", "two", "three"]}}
     )
-    plan = schema.compile_slot_plan(tok)  # must not raise
+    plan = schema.compile_slot_plan(tok, make_test_renderer(tok, schema, "slots"))  # must not raise
     assert list(plan["fields"]["route"]["codebook"]) == ["B", "C", "D"]
     # Distinguishability: no remainder is a token-prefix of another.
     remainders = plan["fields"]["route"]["remainders"]
@@ -177,9 +178,9 @@ def test_non_ascii_label_shown_and_scored_identically():
     # not an escape sequence: decode the char-level fake tokenizer's ids
     # for the candidate the plan compiled (the labels plan stores the
     # remainder token ids of each complete row).
-    labels_plan = schema.compile_labels_plan(tok)
+    labels_plan = schema.compile_labels_plan(tok, make_test_renderer(tok, schema, "labels"))
     row_ids = (
-        list(labels_plan["lead_in_ids"])
+        list(labels_plan["fields"]["tone"]["prompt_tail_ids"])
         + list(labels_plan["fields"]["tone"]["shared_ids"])
         + list(labels_plan["fields"]["tone"]["remainders"][0])
     )
@@ -236,7 +237,7 @@ def test_nonce_is_deterministic_and_context_derived():
     assert _context_nonce("abc") == "C" + hashlib.sha256(b"abc").hexdigest()[:16]
 
 
-def test_prompt_version_v9():
+def test_prompt_version_v10():
     from jevmlx.engine import PROMPT_VERSION
 
-    assert PROMPT_VERSION == "jevmlx-parallel-v9"
+    assert PROMPT_VERSION == "jevmlx-parallel-v10"

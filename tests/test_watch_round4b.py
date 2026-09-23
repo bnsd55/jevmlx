@@ -27,7 +27,7 @@ LLAMA_RUN_JSON = {
         "model": "mlx-community/Llama-3.1-8B-Instruct-4bit",
         "model_revision": "90215b22ec18e72f623dde2ea7af4097025160e2",
         "permutations": "rotations",
-        "prompt_version": "jevmlx-parallel-v9",
+        "prompt_version": "jevmlx-parallel-v10",
         "quantization": {"bits": 4, "group_size": 64},
         "scoring": "labels",
         "split": "all",
