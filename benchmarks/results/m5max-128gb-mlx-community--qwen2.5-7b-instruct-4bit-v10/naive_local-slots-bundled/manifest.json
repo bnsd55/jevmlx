@@ -1,0 +1,35 @@
+{
+  "code_hash": {
+    "jevmlx_evalrun": "40a28631bb7baeae68516a05334a27abba111eac6049757065bafc37bb7dec11"
+  },
+  "config": {
+    "model": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+    "permutations": "none",
+    "prompt_version": null,
+    "split": "all",
+    "temperature": 1.0,
+    "track": "naive_local"
+  },
+  "created_utc": "2026-09-23T14:53:05+00:00",
+  "dataset_lock_sha256": "68e81a3c82982193b741c00c409d3783f75fac2fa358a985c989522ada10f5dc",
+  "machine": {
+    "chip": "Apple M5 Max",
+    "macos_version": "26.6.2",
+    "mlx_lm_version": "0.31.3",
+    "mlx_version": "0.32.2"
+  },
+  "manifest_version": 1,
+  "model_id": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+  "model_revision": null,
+  "prompt_sha256": null,
+  "prompt_version": null,
+  "run_id": "20260923T145305Z-fc2430",
+  "sessions": [
+    {
+      "segment": 0,
+      "started_utc": "2026-09-23T14:53:05+00:00"
+    }
+  ],
+  "tokenizer_chat_template_sha256": "cd8e9439f0570856fd70470bf8889ebd8b5d1107207f67a5efb46e342330527f",
+  "tokenizer_revision": null
+}

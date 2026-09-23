@@ -1,0 +1,30 @@
+{
+  "calls": 24,
+  "median": {
+    "cache_broadcast_ms": 1.53,
+    "computed_prompt_token_positions": 670.5,
+    "computed_suffix_token_positions": 277.5,
+    "failed_attempts": 0.0,
+    "latency_ms": 256.19,
+    "lm_head_gather_ms": 0.275,
+    "logical_suffix_token_positions": 238.5,
+    "naive_branch_prompt_tokens": 1417.5,
+    "num_fields": 3.0,
+    "padded_token_positions": 277.5,
+    "peak_active_bytes": 4960941853.0,
+    "peak_incremental_bytes": 673434389.0,
+    "per_item_end_to_end_ms": 254.85,
+    "plan_compile_ms": 1.305,
+    "prefill_ms": 131.375,
+    "prior_ms": 0.0,
+    "rerun_fields_count": 0.0,
+    "rescored_fields_count": 0.0,
+    "retry_wasted_ms": 0.0,
+    "second_pass_ms": 0.0,
+    "shared_prefix_tokens": 393.0,
+    "suffix_eval_ms": 126.8,
+    "total_ms": 256.19
+  },
+  "segment": 0,
+  "segment_id": "20260923T120736Z-68be90"
+}

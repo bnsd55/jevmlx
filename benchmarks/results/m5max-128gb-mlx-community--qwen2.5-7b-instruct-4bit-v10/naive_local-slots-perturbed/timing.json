@@ -1,0 +1,12 @@
+{
+  "calls": 96,
+  "median": {
+    "generated_tokens": 23.0,
+    "latency_ms": 468.635,
+    "passes": 23.0,
+    "per_item_end_to_end_ms": 468.635,
+    "total_ms": 468.635
+  },
+  "segment": 0,
+  "segment_id": "20260923T145738Z-b7c7a5"
+}

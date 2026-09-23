@@ -1,0 +1,3 @@
+{"active_memory_bytes": 4287507464, "cache_memory_bytes": 8554973452, "cases_done": 25, "combo": "naive_local-slots-perturbed", "elapsed_s": 11, "fields_error": 0, "fields_total": 75, "peak_memory_bytes": 5030622340, "pred_lines": 75}
+{"active_memory_bytes": 4287507464, "cache_memory_bytes": 8576567564, "cases_done": 50, "combo": "naive_local-slots-perturbed", "elapsed_s": 23, "fields_error": 0, "fields_total": 150, "peak_memory_bytes": 5030638724, "pred_lines": 150}
+{"active_memory_bytes": 4287507464, "cache_memory_bytes": 8590231798, "cases_done": 75, "combo": "naive_local-slots-perturbed", "elapsed_s": 35, "fields_error": 0, "fields_total": 225, "peak_memory_bytes": 5030638724, "pred_lines": 225}
