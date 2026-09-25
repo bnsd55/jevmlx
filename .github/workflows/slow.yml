@@ -33,7 +33,7 @@ jobs:
       - name: Cache pinned 0.5B model weights
         # Pre-download the 0.5B so repeated runs do not re-download. The key
         # is the model id; a bump invalidates the cache and re-downloads.
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/huggingface/hub
           key: slow-model-qwen25-0.5b-instruct-4bit
