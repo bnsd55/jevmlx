@@ -58,6 +58,10 @@ markers = [
     "network: reaches the Hugging Face Hub (deselect with -m 'not network')",
 ]
 
+[tool.hatch.build.targets.sdist]
+# The README banner is repo artwork, not part of the source distribution.
+exclude = ["docs/assets"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["jevmlx"]
 

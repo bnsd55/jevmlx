@@ -1,4 +1,4 @@
-# jevmlx
+<p align="center"><img src="docs/assets/jevmlx-banner.jpg" alt="jevmlx: typed decisions from a local MLX model in one forward pass" width="760"></p>
 
 [![CI](https://github.com/bnsd55/jevmlx/actions/workflows/ci.yml/badge.svg)](https://github.com/bnsd55/jevmlx/actions/workflows/ci.yml) [![Build](https://github.com/bnsd55/jevmlx/actions/workflows/build.yml/badge.svg)](https://github.com/bnsd55/jevmlx/actions/workflows/build.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE) [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](pyproject.toml)
 
@@ -104,7 +104,7 @@ Tradeoff: one request per field (slower than one pass), and only the server's to
 
 ## Serve over HTTP
 
-`jevmlx serve` loads a model once and serves decisions on a local port. One Metal GPU, one serial worker, a bounded admission queue in front.
+`jevmlx serve` loads a model once and serves decisions on a local port. One Metal GPU, one serial worker, a bounded admission queue in front. The Metal buffer cache is capped (default 2 GB, or `--metal-cache-gb` / `JEVMLX_METAL_CACHE_GB`) and cleared when the queue goes idle, so long daemon runs do not hoard freed buffers.
 
 ```bash
 jevmlx serve --model fast --port 8000
@@ -115,7 +115,7 @@ jevmlx serve --model fast --port 8000
 | `POST` | `/decide` | `{"schema": {...}, "context": "...", "temperature": 1.0}` -> per-field result dict |
 | `POST` | `/v1/systemone` | `{"state": str\|object, "questions": {id: {type, instructions, criteria}}}` -> `{model, answers, usage}` (maps to one schema, same queue as /decide) |
 | `GET` | `/v1/models` | `{"data": [{"id": <model id>, "owned_by": "jevmlx"}]}` |
-| `GET` | `/health` | Process liveness (always 200). Carries `queue_depth`, `queue_capacity`, `worker_alive` |
+| `GET` | `/health` | Process liveness (always 200). Carries `queue_depth`, `queue_capacity`, `worker_alive`, `cache_memory_bytes` |
 | `GET` | `/ready` | `503` until model load + warm-up complete AND worker alive, then `200` |
 
 Backpressure: **429 + `Retry-After`** when the queue is full (`--queue-size`, default 16); **413** when a request exceeds `--max-rows` (default 2048) or `--max-prompt-tokens` (default 8192), before any model work. The client's `X-Request-Id` is echoed; `queue_depth` and `queue_wait_ms` ride every response.
@@ -135,7 +135,7 @@ Backpressure: **429 + `Retry-After`** when the queue is full (`--queue-size`, de
 
 ## What the numbers mean
 
-[BENCHMARKING.md](BENCHMARKING.md) documents the eval methodology: accuracy against the TypeSafe public consensus, the majority baseline, and exact-record agreement; parity (batched vs. single-call within `PARITY_ATOL`); and the drift band (log-score and probability-margin drift between runs). The leaderboard below cites official TypeSafe accuracies; local rows are measured by contributors on the public examples.
+[BENCHMARKING.md](BENCHMARKING.md) documents the eval methodology: accuracy against the TypeSafe public consensus, the majority baseline, and exact-record agreement; parity (batched vs. single-call within `PARITY_ATOL`); and run-to-run drift (log-score and probability-margin movement between runs — `DRIFT` marks a comparison whose winners diverge or where a near-tie escaped the rescore gate). The leaderboard below cites official TypeSafe accuracies; local rows are measured by contributors on the public examples.
 
 A **TypeScript client** (`@jevmlx/client`) lives in [`js/`](js/) — zero runtime deps, mirrors the server's JSON shapes exactly (types derived from fixture responses dumped by the server). Install from the GitHub path (no npm publish yet): `npm install github:bnsd55/jevmlx#main`. See [`js/README.md`](js/README.md) for the full API.
 
