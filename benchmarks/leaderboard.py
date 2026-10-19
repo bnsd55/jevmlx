@@ -255,6 +255,12 @@ def _local_rows(results_root: Path) -> list[dict]:
             parity = json.loads(parity_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
+        # F9: a payload that does not record its scorer is rejected — the
+        # pre-F9 artifact mixed slots raw rows with labels final decisions
+        # and proves parity for neither. No silent default: the model is
+        # not publishable until the per-scorer artifacts exist.
+        if "scoring" not in parity:
+            continue
         parity_status = parity.get("status", "PASS")
         if parity_status not in ("PASS", "DRIFT"):
             continue

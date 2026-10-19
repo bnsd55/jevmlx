@@ -354,6 +354,7 @@ class TestParityGate:
                 {
                     "model": "mlx-community/Qwen2.5-7B-Instruct-4bit",
                     "prompt_version": "jevmlx-parallel-v8",
+                    "scoring": "labels",
                     "test": "test_w1a_scoring_parity_batch_vs_chunked_real_model",
                     "passed": True,
                     "status": "PASS",
@@ -379,6 +380,7 @@ class TestParityGate:
             json.dumps(
                 {
                     "model": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+                    "scoring": "labels",
                     "test": "test_w1a_scoring_parity_batch_vs_chunked_real_model",
                     "passed": False,
                     "status": "DRIFT",
@@ -416,6 +418,7 @@ class TestParityGate:
             json.dumps(
                 {
                     "model": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+                    "scoring": "labels",
                     "test": "test_w1a_scoring_parity_batch_vs_chunked_real_model",
                     "passed": False,
                     "max_abs_drift_nats": 0.15,
@@ -442,6 +445,7 @@ class TestParityGate:
         (tmp_path / "parity.json").write_text(
             json.dumps(
                 {
+                    "scoring": "labels",
                     "passed": False,
                     "max_abs_drift_nats": 0.01,
                     "max_raw_row_drift_nats": 0.2,
@@ -465,6 +469,7 @@ class TestParityGate:
             json.dumps(
                 {
                     "model": "m",
+                    "scoring": "labels",
                     "test": "w1a",
                     "passed": True,
                     "max_drift_nats": 0.02,
@@ -487,6 +492,7 @@ class TestParityGate:
             json.dumps(
                 {
                     "model": "m",
+                    "scoring": "labels",
                     "test": "w1a",
                     "passed": True,
                     "max_abs_drift_nats": 0.02,
@@ -520,6 +526,7 @@ class TestParityGate:
             json.dumps(
                 {
                     "model": "m",
+                    "scoring": "labels",
                     "test": "w1a",
                     "passed": False,
                     "status": "DRIFT",
@@ -550,6 +557,7 @@ class TestParityGate:
             json.dumps(
                 {
                     "model": "m",
+                    "scoring": "labels",
                     "test": "w1a",
                     "passed": False,
                     "status": "FAIL",
@@ -577,6 +585,7 @@ class TestParityGate:
             json.dumps(
                 {
                     "model": "m",
+                    "scoring": "labels",
                     "test": "w1a",
                     "passed": True,
                     "status": "PASS",
@@ -628,6 +637,7 @@ class TestParityGate:
             json.dumps(
                 {
                     "model": "qwen7b",
+                    "scoring": "labels",
                     "test": "w1a",
                     "passed": True,
                     "max_drift_nats": 0.02,
@@ -696,7 +706,15 @@ def test_leaderboard_cases_from_run_json_counts(tmp_path):
     combo = model_dir / "parallel-trie-typesafe"
     combo.mkdir(parents=True)
     (model_dir / "parity.json").write_text(
-        json.dumps({"passed": True, "status": "PASS", "max_abs_drift_nats": 0.01, "atol": 0.05})
+        json.dumps(
+            {
+                "scoring": "labels",
+                "passed": True,
+                "status": "PASS",
+                "max_abs_drift_nats": 0.01,
+                "atol": 0.05,
+            }
+        )
     )
     (combo / "report.json").write_text(
         json.dumps({"metrics": {"agreement": {"agreement_common_subset": 0.9, "n_cases": 44}}})
