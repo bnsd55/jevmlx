@@ -272,6 +272,7 @@ def test_T1_boolean_map_change_reports_returned_value():
     assert ft["value"] is True
     assert ft["probability"] == pytest.approx(0.1)  # P(true), not the old 0.9
     assert out.parsed_json["flag"]["prob"] == pytest.approx(0.1)
+    assert ft["log_score_margin"] == pytest.approx(math.log(0.1) - math.log(0.9))
     assert ft["probability_margin"] == pytest.approx(0.1 - 0.9)  # negative: forced
     assert ft["tie"] is False  # |log 0.1 - log 0.9| = 2.2 nats, far outside the band
     # Competitors of the returned value: the top OTHER choices.
@@ -322,6 +323,7 @@ def test_T3_enum_map_change_reports_returned_value():
     ft = out.field_telemetry["subtype"]
     assert ft["probability"] == pytest.approx(0.2)  # P(refund)
     assert out.parsed_json["subtype"]["prob"] == pytest.approx(0.2)
+    assert ft["log_score_margin"] == pytest.approx(math.log(0.2) - math.log(0.5))
     assert ft["probability_margin"] == pytest.approx(0.2 - 0.5)  # best OTHER is bug
     assert ft["tie"] is False
     assert [a["choice"] for a in ft["alternatives"]] == ["bug", "dispute"]

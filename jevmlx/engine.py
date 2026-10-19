@@ -907,10 +907,12 @@ class ScalarDecision:
     margin_nats: float  # top1-top2 log-score margin (post prior-correction)
     tie: bool  # top1-top2 still inside INSTABILITY_BAND after any rescore
     # P9: the DECISION numbers about the RETURNED value (the ONE helper,
-    # shared with the constraint MAP): P(returned) - max P(other choice) —
+    # shared with the constraint MAP): the returned value's log-score gap
+    # to its best competitor, P(returned) - max P(other choice) — both
     # negative when a constraint forced a lower-ranked value — and the
     # competitors list ([{choice, probability}], the distribution's top 3
     # when the returned value is the favorite, else the top 3 OTHER).
+    log_score_margin: float
     probability_margin: float
     alternatives: list[dict]
     rescored: bool  # a batch=1 canonical rescore replaced the batched result
@@ -1083,6 +1085,7 @@ def finalize_scalar_evidence(
         # P9: the returned value's gap to its best competitor (identical on
         # the argmax path; the MAP path reuses the helper after a change).
         tie=decision_record["tie"],
+        log_score_margin=decision_record["log_score_margin"],
         probability_margin=decision_record["probability_margin"],
         alternatives=decision_record["alternatives"],
         rescored=rescored,
@@ -1859,6 +1862,9 @@ def _decision_record(
 
       probability        P(returned value) — softmax at the caller's T
       score              log P(returned value) — the T=1 log-score
+      log_score_margin   log score(returned) - max log score(other choice) —
+                         negative when a constraint forced a lower-ranked
+                         value (the argmax path's top1-top2)
       probability_margin P(returned) - max P(other choice) — negative when
                          a constraint forced a lower-ranked value
       tie                the returned value sits inside INSTABILITY_BAND of
@@ -1894,6 +1900,7 @@ def _decision_record(
         best_other_ls = max(ls_other for _c, ls_other in others)
         best_other_key = next(c for c, ls_other in others if ls_other == best_other_ls)
         probability_margin = probs[key] - probs[best_other_key]
+        log_score_margin = ls - best_other_ls
         is_tie = abs(ls - best_other_ls) < INSTABILITY_BAND
         if key == ranked[0][0]:
             alternatives = [{"choice": c, "probability": probs[c]} for c, _l in ranked[:3]]
@@ -1901,11 +1908,15 @@ def _decision_record(
             alternatives = [{"choice": c, "probability": probs[c]} for c, _l in others[:3]]
     else:
         probability_margin = 0.0
+        log_score_margin = 0.0
         is_tie = False
-        alternatives = []
+        # The distribution's top 3 of a one-choice field is the field's own
+        # value (the winner-first contract; no competitors exist).
+        alternatives = [{"choice": key, "probability": probs[key]}]
     return {
         "probability": probs[key],
         "score": ls,
+        "log_score_margin": log_score_margin,
         "probability_margin": probability_margin,
         "tie": is_tie,
         "alternatives": alternatives,
@@ -2202,6 +2213,11 @@ def _selective_second_pass(
             field_telemetry[fname]["log_scores"] = dict(decision.log_scores)
             field_telemetry[fname]["top_choices"] = decision.top_choices[:5]
             field_telemetry[fname]["tie"] = decision.tie
+            # P9: the decision part rides every re-decided field too (the
+            # SAME ScalarDecision the finalize path emitted it from).
+            field_telemetry[fname]["log_score_margin"] = decision.log_score_margin
+            field_telemetry[fname]["probability_margin"] = decision.probability_margin
+            field_telemetry[fname]["alternatives"] = decision.alternatives
             field_telemetry[fname]["rescored"] = False
             field_telemetry[fname]["legal_mass"] = decision.legal_mass
             field_telemetry[fname]["legal_mass_logs"] = dict(decision.legal_mass_logs)
@@ -2963,6 +2979,10 @@ def _cardinality_one_outcome(
     # P9: the log_scores key through the ONE value→key lookup — a boolean
     # value scores under "true"/"false" (str(True) is "True", never a key).
     key = _decision_score_key(val)
+    # P9/R1: the decision part rides the schema-determined entry too — the
+    # ONE helper over the degenerate one-choice distribution (P=1, margins
+    # 0, no competitors beyond the value itself).
+    record = _decision_record({key: 0.0}, val, 1.0)
     telemetry = {
         "value": val,
         "type": fdef.field_type,
@@ -2970,6 +2990,9 @@ def _cardinality_one_outcome(
         "cardinality": fdef.cardinality,
         "log_scores": {key: 0.0},
         "top_choices": [{"choice": key, "probability": 1.0}],
+        "log_score_margin": record["log_score_margin"],
+        "probability_margin": record["probability_margin"],
+        "alternatives": record["alternatives"],
         "rows": 0,
         "legal_mass": 1.0,
         # W5b-13: cardinality-1 fields are schema-determined — no model
@@ -3117,9 +3140,11 @@ def score_scalar_field(
         # INSTABILITY_BAND after the batch=1 rescore.
         "tie": decision.tie,
         # P9: the DECISION numbers about the RETURNED value — P(returned)
-        # minus max P(other choice) (negative after a constraint forces a
+        # minus max P(other choice), the returned value's log-score gap to
+        # its best competitor (both negative after a constraint forces a
         # lower-ranked value) and the returned value's competitors. The
         # distribution keys above stay untouched by reconciliation.
+        "log_score_margin": decision.log_score_margin,
         "probability_margin": decision.probability_margin,
         "alternatives": decision.alternatives,
         "rescored": rescored,
@@ -3170,12 +3195,17 @@ def _count_telemetry(
     count_log_probs = _log_softmax(count_scores)
     count_probs = [math.exp(lp) for lp in count_log_probs]
     count_display = list(count_codes)
+    log_scores = {code: lp for code, lp in zip(count_display, count_log_probs, strict=True)}
+    # P9: the decision part rides the count entry too (R1: EVERY log_scores
+    # entry carries it) — the count value is the row's argmax, so these are
+    # the winner-first numbers, at T=1 (the row's probabilities are T=1).
+    record = _decision_record(log_scores, count_choice, 1.0)
     return {
         "value": count_choice,
         "type": "enum",
         "probability": max(count_probs),
         "cardinality": len(count_display),
-        "log_scores": {code: lp for code, lp in zip(count_display, count_log_probs, strict=True)},
+        "log_scores": log_scores,
         "top_choices": sorted(
             (
                 {"choice": c, "probability": pr}
@@ -3184,6 +3214,9 @@ def _count_telemetry(
             key=lambda x: x["probability"],
             reverse=True,
         ),
+        "log_score_margin": record["log_score_margin"],
+        "probability_margin": record["probability_margin"],
+        "alternatives": record["alternatives"],
         "margin_nats": count_margin,
         "legal_mass": math.exp(count_legal_mass_logs[count_display.index(count_choice)]),
         "min_option_legal_mass": math.exp(min(count_legal_mass_logs)),
@@ -3866,6 +3899,7 @@ def reconcile_case_constraints(
                 if log_scores:
                     record = _decision_record(log_scores, val, temperature)
                     field_telemetry[fname]["probability"] = record["probability"]
+                    field_telemetry[fname]["log_score_margin"] = record["log_score_margin"]
                     field_telemetry[fname]["probability_margin"] = record["probability_margin"]
                     field_telemetry[fname]["tie"] = record["tie"]
                     field_telemetry[fname]["alternatives"] = record["alternatives"]

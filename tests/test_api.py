@@ -816,6 +816,7 @@ def test_T2_score_is_the_returned_value_log_score(monkeypatch):
             {"choice": "LOW", "probability": p_low},
             {"choice": "HIGH", "probability": p_high},
         ],
+        log_score_margin=math.log(p_high) - math.log(p_low),  # negative: forced
         probability_margin=p_high - p_low,  # negative: forced
         alternatives=[{"choice": "LOW", "probability": p_low}],
         semantics=make_field_semantics(constraint_changed=True),
@@ -838,6 +839,7 @@ def test_T2_score_is_the_returned_value_log_score(monkeypatch):
     assert fr.value == "HIGH"
     assert fr.score == pytest.approx(math.log(p_high))  # log P(returned), not argmax
     assert fr.probability == pytest.approx(p_high)
+    assert fr.log_score_margin == pytest.approx(math.log(p_high) - math.log(p_low))
     assert fr.probability_margin == pytest.approx(p_high - p_low)  # negative
     # Competitors of the RETURNED value: the top OTHER choice, not the
     # distribution's winner-first top 3 (which would start with HIGH... no —
