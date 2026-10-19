@@ -4,13 +4,17 @@ Two calibrators, one module:
 
 - Temperature: one scalar T fitted on labeled cases minimizes the mean NLL
   of the true choice under softmax(scores / T). For enum/boolean fields.
-- Pooled logistic: a single (a, b) pair fitted on raw multi option
-  log-odds (yes_logit - no_logit from ``option_logit_pairs``) against
-  yes/no labels — calibrated_log_odds = a * log_odds + b, an option is
-  selected when calibrated_log_odds > 0. One pool across ALL multi fields
-  and options: multi options are homogeneous binary decisions, so they
-  share one calibrator. No scipy, no numpy — stdlib math only
-  (gradient-descent on the logistic NLL).
+- Pooled logistic: a single (a, b) pair fitted on multi option log-odds
+  z against yes/no labels — calibrated_log_odds = a * z + b, an option is
+  selected when calibrated_log_odds > 0. z is the quantity the ENGINE
+  applies the calibrator to (P8): the corrected log-odds
+  (yes - no) - (prior_yes - prior_no); collected with
+  ``prior_correction=False`` (the CLI's prior_mode='off') z IS the raw
+  log-odds, so bundles fitted before corrected-z collection still apply to
+  uncorrected runs. One pool across ALL multi fields and options: multi
+  options are homogeneous binary decisions, so they share one calibrator.
+  No scipy, no numpy — stdlib math only (gradient-descent on the logistic
+  NLL).
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 Sample = tuple[list[float], int]  # (per-choice scores at T=1, labeled choice index)
-MultiSample = tuple[float, int]  # (raw log-odds yes-no, label 1=yes 0=no)
+MultiSample = tuple[float, int]  # (option log-odds z, label 1=yes 0=no)
 
 
 def collect(engine, cases: Sequence[dict]) -> list[Sample]:
@@ -135,14 +139,24 @@ def load_cases(path: str) -> list:
     return cases
 
 
-def collect_multi(engine, cases: Sequence[dict]) -> list[MultiSample]:
-    """Raw multi option log-odds + yes/no labels for the pooled logistic fit.
+def collect_multi(
+    engine, cases: Sequence[dict], *, prior_correction: bool = False
+) -> list[MultiSample]:
+    """Multi option log-odds z + yes/no labels for the pooled logistic fit.
 
     Same cases shape as :func:`collect`; runs the engine once per case and,
-    for every labeled multi field, takes ``option_logit_pairs`` — the raw
-    [yes, no] logits per option (bug 8, T=1, caller-temperature-agnostic) —
-    folds each to log-odds log P(yes) - log P(no), and pairs it with the
-    label (1 = option in the labeled set, 0 = not).
+    for every labeled multi field, folds each option's RAW [yes, no] logits
+    (``option_logit_pairs``, bug 8, T=1, caller-temperature-agnostic) to the
+    decision quantity z the engine applies the calibrator to (P8):
+
+        z = (yes - no) - (prior_yes - prior_no)
+
+    where the prior difference comes from the telemetry's
+    ``prior_option_pairs`` (present only when ``prior_correction=True`` —
+    the same neutral pass the engine would correct with). With
+    ``prior_correction=False`` z IS the raw log-odds (prior_mode='off').
+    Fit and decide must use the same prior mode — the engine rejects a
+    bundle whose prior_mode does not match the request.
 
     Raises ValueError naming the field when a labeled value is not one of
     the field's choices (or not a list/set of them).
@@ -153,7 +167,13 @@ def collect_multi(engine, cases: Sequence[dict]) -> list[MultiSample]:
     samples: list[MultiSample] = []
     for case in cases:
         schema = StructuredSchema(case["schema"])
-        result = run_parallel_generation(engine, case["context"], schema, temperature=1.0)
+        result = run_parallel_generation(
+            engine,
+            case["context"],
+            schema,
+            temperature=1.0,
+            prior_correction=prior_correction,
+        )
         for fname, label in case["labels"].items():
             fdef = schema[fname]
             if fdef.field_type != "multi":
@@ -173,8 +193,12 @@ def collect_multi(engine, cases: Sequence[dict]) -> list[MultiSample]:
                     f"case label {fname}={sorted(unknown)!r} not in choices {fdef.choices}"
                 )
             pairs = result["field_telemetry"][fname]["option_logit_pairs"]
+            priors = result["field_telemetry"][fname].get("prior_option_pairs") or {}
             for option, (yes_logit, no_logit) in pairs.items():
                 log_odds = yes_logit - no_logit
+                pp = priors.get(option)
+                if pp is not None:
+                    log_odds -= pp[0] - pp[1]
                 samples.append((log_odds, 1 if option in labeled_options else 0))
     return samples
 

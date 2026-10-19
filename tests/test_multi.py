@@ -10,7 +10,7 @@ from conftest import make_engine
 from pydantic import BaseModel, Field
 
 from jevmlx.api import schema_from_model
-from jevmlx.engine import _fold_multi
+from jevmlx.engine import solve_multi_set
 from jevmlx.schema import FieldDefinition, StructuredSchema
 
 
@@ -92,36 +92,72 @@ def test_schema_from_model_non_literal_list_raises():
         schema_from_model(Bad)
 
 
-def test_fold_multi():
-    # Fixed 0.5 rule: p_yes >= 0.5 selects; margin is the closest option's
-    # distance to 0.5, over ALL options (accepted or not).
-    selected, prob, margin = _fold_multi({"a": 0.9, "b": 0.6, "c": 0.2})
-    assert selected == ["a", "b"]
-    assert prob is None  # no field-level probability is claimed
-    assert margin == pytest.approx(0.1)  # b sits 0.1 above the threshold
+def test_solve_multi_set_threshold_boundary():
+    """P8: the uncalibrated threshold rule over the (z, p) decision record —
+    p >= 0.5 (z >= 0) selects; the margin is the closest option's distance
+    to 0.5, over ALL options (accepted or not)."""
+    decision = {"a": (0.9, 0.7109), "b": (0.4, 0.5987), "c": (-1.4, 0.1978)}
+    telemetry, _count_tel, selected = solve_multi_set(
+        decision=decision,
+        options=["a", "b", "c"],
+        count_codes=["0", "1", "2", "3", "4"],
+        count_scores=[0.0] * 5,
+        count_legal_mass_logs=[0.0] * 5,
+        calibrated=False,
+    )
+    assert selected == ["a", "b"]  # z >= 0
+    assert telemetry["margin"] == pytest.approx(0.0987, rel=1e-3)  # b: 0.5987 - 0.5
 
-    # A rejected option can be the closest: c sits just under threshold.
-    selected, prob, margin = _fold_multi({"a": 0.99, "b": 0.55, "c": 0.48})
-    assert selected == ["a", "b"]
-    assert margin == pytest.approx(0.02)  # 0.5 - 0.48
+    # A rejected option can be the closest to the threshold.
+    decision = {"a": (2.0, 0.8808), "b": (0.2, 0.5498), "c": (0.08, 0.52)}
+    telemetry, _count_tel, selected = solve_multi_set(
+        decision=decision,
+        options=["a", "b", "c"],
+        count_codes=["0", "1", "2", "3", "4"],
+        count_scores=[0.0] * 5,
+        count_legal_mass_logs=[0.0] * 5,
+        calibrated=False,
+    )
+    assert selected == ["a", "b", "c"]
+    assert telemetry["margin"] == pytest.approx(0.02, rel=1e-2)  # c: 0.52 - 0.5
 
     # Empty selection: margin from the strongest rejected option.
-    selected, prob, margin = _fold_multi({"a": 0.2, "b": 0.4, "c": 0.49})
+    decision = {"a": (-1.4, 0.1978), "b": (-0.4, 0.4013), "c": (-0.04, 0.49)}
+    telemetry, _count_tel, selected = solve_multi_set(
+        decision=decision,
+        options=["a", "b", "c"],
+        count_codes=["0", "1", "2", "3", "4"],
+        count_scores=[0.0] * 5,
+        count_legal_mass_logs=[0.0] * 5,
+        calibrated=False,
+    )
     assert selected == []
-    assert margin == pytest.approx(0.01)
+    assert telemetry["margin"] == pytest.approx(0.01, rel=1e-2)
 
-    # W2-E step 2 (nit): the threshold parameter is gone — the rule is the
-    # fixed 0.5 cut, so there is no "higher threshold" path to exercise.
-    # Boundary p_yes == 0.5 selects.
-    selected, _prob, margin = _fold_multi({"a": 0.5, "b": 0.49})
+    # Boundary z == 0 (p == 0.5) selects on the uncalibrated rule.
+    decision = {"a": (0.0, 0.5), "b": (-0.08, 0.48)}
+    telemetry, _count_tel, selected = solve_multi_set(
+        decision=decision,
+        options=["a", "b"],
+        count_codes=["0", "1", "2", "3", "4"],
+        count_scores=[0.0] * 5,
+        count_legal_mass_logs=[0.0] * 5,
+        calibrated=False,
+    )
     assert selected == ["a"]
-    assert margin == pytest.approx(0.0)  # a sits exactly on the 0.5 cut
+    assert telemetry["margin"] == pytest.approx(0.0)
 
     # No options at all: nothing selected, zero margin (vacuous).
-    selected, prob, margin = _fold_multi({})
+    telemetry, _count_tel, selected = solve_multi_set(
+        decision={},
+        options=[],
+        count_codes=["0", "1", "2", "3", "4"],
+        count_scores=[0.0] * 5,
+        count_legal_mass_logs=[0.0] * 5,
+        calibrated=False,
+    )
     assert selected == []
-    assert prob is None
-    assert margin == 0.0
+    assert telemetry["margin"] == 0.0
 
 
 def test_multi_prompt_describes_options_and_yes_no_contract():
