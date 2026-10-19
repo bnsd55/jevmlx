@@ -27,6 +27,7 @@ from pydantic import BaseModel
 
 from jevmlx.calibrate import CalibrationBundle
 from jevmlx.engine import (
+    _decision_score_key,
     load_engine,
     run_parallel_generation,
     run_parallel_generation_batched,
@@ -450,19 +451,43 @@ def _build_field_results(
         log_scores: dict[str, float] | None = telemetry.get("log_scores")
         if log_scores:
             ranked = sorted(log_scores.items(), key=lambda kv: -kv[1])
-            score = ranked[0][1]
+            # P9: the score of the RETURNED value — through the ONE
+            # value→key lookup (booleans score under "true"/"false"), not
+            # the independent argmax. On the normal path the returned value
+            # IS the argmax and this is the same number main reported.
+            score = log_scores[_decision_score_key(telemetry["value"])]
             log_score_margin = ranked[0][1] - ranked[1][1] if len(ranked) > 1 else 0.0
-            # Probability margin: top1-top2 of the post-temperature
-            # distribution, from the same ranking as the log scores.
-            probs_sorted = [entry["probability"] for entry in telemetry.get("top_choices", [])]
-            probability_margin = probs_sorted[0] - probs_sorted[1] if len(probs_sorted) > 1 else 0.0
+            # Probability margin: P(returned) - max P(other choice) — the
+            # engine's DECISION number (P9), recomputed after any
+            # reconciliation; negative when a constraint forced a
+            # lower-ranked value. Telemetry entries without it (older
+            # shapes) fall back to the distribution's top1-top2.
+            probability_margin = telemetry.get("probability_margin")
+            if probability_margin is None:
+                probs_sorted = [entry["probability"] for entry in telemetry.get("top_choices", [])]
+                probability_margin = (
+                    probs_sorted[0] - probs_sorted[1] if len(probs_sorted) > 1 else 0.0
+                )
             threshold_distance = None
-            # Top 3 by probability, from top_choices (same ranking as log
-            # scores; probabilities are monotone in the log scores).
-            alternatives = tuple(
-                (entry["choice"], entry["probability"])
-                for entry in telemetry.get("top_choices", [])[:3]
-            )
+            # The returned value's competitors: the engine's DECISION
+            # alternatives when present (P9 — the top OTHER choices after a
+            # forced change), else the distribution's top 3 (the
+            # established winner-first contract).
+            alts = telemetry.get("alternatives")
+            if alts:
+                alternatives = tuple(
+                    (
+                        (entry["choice"], entry["probability"])
+                        if isinstance(entry, dict)
+                        else tuple(entry)
+                    )
+                    for entry in alts[:3]
+                )
+            else:
+                alternatives = tuple(
+                    (entry["choice"], entry["probability"])
+                    for entry in telemetry.get("top_choices", [])[:3]
+                )
         else:
             per_option = telemetry.get("per_option") or {}
             # Multi: no field-level probability is claimed; score stays 0.0
