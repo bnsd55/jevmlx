@@ -39,7 +39,6 @@ inside jevmlx.engine, never imported here), so this runs on ubuntu-latest.
 
 from __future__ import annotations
 
-import gzip
 import io
 import json
 import math
@@ -108,12 +107,15 @@ REQUIRED_CI_KEYS = (
 
 
 def _read_predictions_lines(path: Path) -> list[dict]:
-    """Load predictions.jsonl, transparently handling a gzipped file."""
-    if path.suffix == ".gz":
-        with gzip.open(path, "rt", encoding="utf-8") as f:
-            return [json.loads(line) for line in f if line.strip()]
-    with open(path, encoding="utf-8") as f:
-        return [json.loads(line) for line in f if line.strip()]
+    """Load predictions.jsonl via the shared loader (evalmetrics).
+
+    One loader for metrics AND the checker: the legacy ``_error`` expansion
+    (P3) applies identically to recomputed metrics and to the contract
+    checks, and gzip is handled in one place.
+    """
+    from jevmlx.evalmetrics import load_predictions
+
+    return load_predictions(path)
 
 
 def _is_number(value) -> bool:
@@ -660,6 +662,27 @@ def _error_lines_in_folder(folder: Path) -> list[tuple[int, str]]:
         if isinstance(err, str) and err:
             errors.append((index, err))
     return errors
+
+
+def _failed_cases_in_folder(folder: Path) -> int:
+    """Distinct case_ids with at least one error line in predictions.jsonl.
+
+    The leaderboard 'cases' column reports FAILED CASES, not error lines:
+    a legacy case failure expands to one line per labelled field (P3), so
+    line counts overstate the failure count. Naive field-level errors stay
+    one line per failed field, usually one distinct case each.
+    """
+    try:
+        records = _read_predictions_lines(
+            folder / "predictions.jsonl.gz"
+            if (folder / "predictions.jsonl.gz").exists()
+            else folder / "predictions.jsonl"
+        )
+    except (OSError, json.JSONDecodeError):
+        return 0
+    return len(
+        {r.get("case_id") for r in records if isinstance(r.get("error"), str) and r["error"]}
+    )
 
 
 def check_root(root: Path) -> list[tuple[Path, bool, list[str]]]:

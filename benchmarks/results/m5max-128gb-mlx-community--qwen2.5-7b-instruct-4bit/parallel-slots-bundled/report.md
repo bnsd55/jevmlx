@@ -19,13 +19,13 @@
 
 | metric | value |
 | --- | --- |
-| accuracy | 0.6111 [0.5255, 0.6852] (case_cluster_bootstrap) |
+| accuracy | 0.6528 [0.5278, 0.7639] (case_cluster_bootstrap) |
 | majority baseline (mean over fields) | 0.5139 |
-| exact record | 0.0000 |
-| case_exact_match | 0.0000 |
-| brier | 0.7613 [0.6812, 0.8429] (case_cluster_bootstrap) |
-| correctness_auroc | 0.5930 |
-| ece_5bin_equal_mass | 0.2387 |
+| exact record | 0.3333 |
+| case_exact_match | 0.3333 |
+| brier | 0.7249 [0.5658, 0.8944] (case_cluster_bootstrap) |
+| correctness_auroc | 0.5864 |
+| ece_5bin_equal_mass | 0.2020 |
 | tie_rate | 0.0000 |
 | any_flip_rate[action] | 0.4000 |
 | any_flip_rate[category] | 0.2333 |
@@ -33,18 +33,18 @@
 | any_flip_rate[needs_human] | 0.0333 |
 | any_flip_rate[priority] | 0.6000 |
 | any_flip_rate[risk] | 0.5000 |
-| balanced_accuracy[action] | 0.4352 |
-| balanced_accuracy[category] | 0.8021 |
-| balanced_accuracy[fraud] | 0.5093 |
-| balanced_accuracy[needs_human] | 0.7238 |
-| balanced_accuracy[priority] | 0.5397 |
-| balanced_accuracy[risk] | 0.4062 |
-| macro_f1[action] | 0.4329 |
-| macro_f1[category] | 0.8081 |
-| macro_f1[fraud] | 0.4704 |
-| macro_f1[needs_human] | 0.7188 |
-| macro_f1[priority] | 0.4973 |
-| macro_f1[risk] | 0.3634 |
+| balanced_accuracy[action] | 0.5278 |
+| balanced_accuracy[category] | 0.9375 |
+| balanced_accuracy[fraud] | 0.5000 |
+| balanced_accuracy[needs_human] | 0.7571 |
+| balanced_accuracy[priority] | 0.3016 |
+| balanced_accuracy[risk] | 0.5000 |
+| macro_f1[action] | 0.5222 |
+| macro_f1[category] | 0.9286 |
+| macro_f1[fraud] | 0.4286 |
+| macro_f1[needs_human] | 0.7483 |
+| macro_f1[priority] | 0.3016 |
+| macro_f1[risk] | 0.2917 |
 | mean_tvd[action] | 0.3603 |
 | mean_tvd[category] | 0.2597 |
 | mean_tvd[fraud] | 0.0719 |
@@ -57,7 +57,7 @@
 | order_flip_rate[needs_human] | 0.0333 |
 | order_flip_rate[priority] | 0.6000 |
 | order_flip_rate[risk] | 0.5000 |
-| valid_accuracy | 0.6111 |
+| valid_accuracy | 0.6528 |
 
 ## Per-field accuracy
 
