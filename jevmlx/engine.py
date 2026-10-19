@@ -875,18 +875,6 @@ class ScalarEvidence:
     source_shape: str = "batch"  # "batch" | "batch1" | "dependency" | "oracle"
 
 
-# W3-E (GPT-REVIEW Q4 'Near-tie nondeterminism', bug 13): the measured
-# batch-shape instability band on Metal (see the W3-C measurement in
-# tests/conftest.py — worst 0.0293 nats on main itself, identical with the
-# W3-C branch). Log-score gaps inside this band are batch-shape noise, not
-# model signal: a field whose top candidates sit within the band is RESCORED
-# at batch=1 (the canonical shape) and that result is taken. conftest.py
-# imports this constant so tests and engine share one number. W5c-9: this is
-# the PARITY contract (0.05 on d_gap) AND the canonical-path default band;
-# the batched pass widens it with the persisted drift envelope.
-INSTABILITY_BAND = 5e-2
-
-
 @dataclass(frozen=True)
 class OrdinalTelemetry:
     """W6-B1: ordinal (ordered-enum) telemetry, derived from the finalized
@@ -1003,21 +991,6 @@ def _field_semantics(
     }
 
 
-def _near_tie_margin(probs: list[float]) -> float:
-    """Top-two probability margin — the shared near-tie quantity.
-
-    Both the engine's rescore gate (finalize_scalar_evidence) and parity's
-    _field_margin key on the SAME concept: is the top-2 gap small enough
-    that batch-shape noise could flip the winner? This helper returns p1 - p2
-    (probability space), the same quantity parity checks against the 0.05
-    near-tie constant. A single-choice field returns inf.
-    """
-    if len(probs) < 2:
-        return float("inf")
-    sorted_p = sorted(probs, reverse=True)
-    return sorted_p[0] - sorted_p[1]
-
-
 def finalize_scalar_evidence(
     evidence: ScalarEvidence,
     *,
@@ -1071,20 +1044,18 @@ def finalize_scalar_evidence(
     band = rescore_band_nats
     rescored = False
     if n > 1 and evidence.source_shape == "batch" and rescore is not None:
-        # D5 fix (c): the gate decides on the FINAL post-prior probability
-        # margin (p1 - p2 after prior correction + softmax), NOT the raw
-        # log-score gap. Parity's near-tie detection (_field_margin) checks
-        # the same final probabilities; a field that is a final near-tie must
-        # always get the batch=1 rescore, even when the raw margin was above
-        # the band (the prior correction can narrow the gap). One definition
-        # of 'near-tie margin' shared by engine and parity: p1 - p2 <
-        # INSTABILITY_BAND (0.05). The rescore_band_nats (drift envelope) is
-        # NOT used for the gate decision — only the fixed 0.05 probability
-        # margin that parity checks. The prior correction is cheap (no model
-        # call).
+        # The gate decides on ONE quantity m: the top-two gap of the
+        # PRIOR-CORRECTED log-scores at T=1 (nats). The same m the tie flag
+        # reports and parity's _field_margin reads (margin_nats). The band is
+        # the pass's rescore_band_nats (INSTABILITY_BAND widened by the drift
+        # envelope's E_bound) — a NATS quantity, as documented. The prior
+        # correction is cheap (no model call). Temperature is applied only
+        # to the reported probabilities — it never gates: it cannot change
+        # the winner, and the batch-shape noise the band bounds was measured
+        # on raw score gaps.
         pre_scores = _apply_prior(raw_scores, choices, prior_entry)
-        pre_probs = softmax(pre_scores, temperature=temperature)
-        if _near_tie_margin(pre_probs) < INSTABILITY_BAND:
+        pre_order = sorted(range(n), key=pre_scores.__getitem__, reverse=True)
+        if pre_scores[pre_order[0]] - pre_scores[pre_order[1]] <= band:
             rescored_evidence = rescore(rescore_idxs or [])
             raw_scores = list(rescored_evidence.log_scores_raw)
             legal_logs = list(rescored_evidence.legal_mass_logs)
@@ -1099,8 +1070,10 @@ def finalize_scalar_evidence(
     probs_list = softmax(scores, temperature=temperature)
     order = sorted(range(n), key=probs_list.__getitem__, reverse=True)
     w_idx = order[0]
-    # W3-E tie flag: top1-top2 still inside INSTABILITY_BAND after any
-    # canonical rescore — the model genuinely cannot separate them.
+    # W3-E tie flag: the SAME corrected log-score gap m the rescore gate
+    # keyed on, after any canonical rescore — but against the FIXED
+    # INSTABILITY_BAND (no envelope): the model genuinely cannot separate
+    # the top two. Temperature never enters (log-space gap).
     is_tie = n > 1 and (scores[order[0]] - scores[order[1]]) < INSTABILITY_BAND
     w_prob = probs_list[w_idx]
 
@@ -2253,21 +2226,28 @@ def _rescore_rows_batch1(
     vocab_size: int,
     pad_id: int,
     ledger: "Ledger",
+    row_count: dict[int, int] | None = None,
 ) -> dict:
     """Rescore one field's rows at batch=1 (W3-E, the canonical shape).
 
     The suffix pass normally runs rows together; Metal batched matmuls tile
-    differently per batch shape and logit gaps inside INSTABILITY_BAND are
+    differently per batch shape and logit gaps inside the decision band are
     noise. This re-runs ONLY this field's rows through the SHARED
     _score_rows helper (auto_max_rows=1: one row per forward pass, the
     canonical shape) on a fresh broadcast of the same prefill cache, then
     dispatches each row's logits into the shapes the batched pass fills:
     branch rows -> node_logits keyed by branch-node index; multi option
-    rows -> option_pair ([yes_logit, no_logit]). One copy of the scoring
-    loop (review F3, PR #27).
+    rows -> option_pair ([yes_logit, no_logit]); count rows (P4: row_count
+    given) -> count_node_logits keyed by count-branch index. One copy of
+    the scoring loop (review F3, PR #27).
     """
     if not idxs:
-        return {"node_logits": {}, "node_legal_mass_log": {}, "option_pair": {}}
+        return {
+            "node_logits": {},
+            "node_legal_mass_log": {},
+            "option_pair": {},
+            "count_node_logits": {},
+        }
     sub_rows = [rows[ridx] for ridx in idxs]
     sub_decisions = [row_decision[ridx] for ridx in idxs]
     scored = _score_rows(
@@ -2283,6 +2263,7 @@ def _rescore_rows_batch1(
     node_logits: dict[int, dict[int, list[float]]] = {}
     node_legal_mass_log: dict[int, Any] = {}
     option_pair: dict[int, list[float]] = {}
+    count_node_logits: dict[int, dict[int, list[float]]] = {}
     # _score_rows re-indexes the rows it receives (bucket sort runs over
     # range(len(rows))), so its returned keys are POSITIONS in idxs, not the
     # caller's global row indexes — map back through idxs.
@@ -2293,6 +2274,11 @@ def _rescore_rows_batch1(
             # Multi option row: RAW [yes_logit, no_logit] + flat legal mass.
             option_pair[ridx] = values
             node_legal_mass_log[ridx] = mass_log
+        elif row_count is not None and ridx in row_count:
+            # Count row: per-node logits keyed by the count-branch index.
+            bi = row_count[ridx]
+            count_node_logits[ridx] = {bi: values}
+            node_legal_mass_log[ridx] = {bi: mass_log}
         else:
             # Branch row: per-node logits in node["children"] order.
             bi = row_branch[ridx]
@@ -2302,6 +2288,7 @@ def _rescore_rows_batch1(
         "node_logits": node_logits,
         "node_legal_mass_log": node_legal_mass_log,
         "option_pair": option_pair,
+        "count_node_logits": count_node_logits,
     }
 
 
@@ -2541,9 +2528,10 @@ def run_parallel_generation(
 
     The prefill KV cache is broadcast across rows; batches larger than the
     chunking heuristic allows run in chunks over the same prefill cache.
-    Logits from batched Metal matmuls vary slightly with batch shape; equal-
-    scoring choices (top1-top2 < 1e-6 in log-score space) are resolved by
-    schema order and flagged with ``tie: true`` in field telemetry.
+    Logits from batched Metal matmuls vary slightly with batch shape; a
+    field whose corrected top-two log-score gap sits inside the decision
+    band is re-measured at batch=1 (the canonical shape) and flagged with
+    ``tie: true`` when the gap is still inside INSTABILITY_BAND.
 
     ``temperature`` is a post-hoc temperature applied to the per-choice
     logits (softmax(logits / temperature)) — it is not a token-level sampling
@@ -3312,6 +3300,8 @@ def _rescore_multi_options(
     built: dict,
     dispatch: DispatchResult,
     idxs: tuple[int, ...],
+    options: list[str],
+    prior_pairs: dict[str, list[float]] | None,
     vocab_size: int,
     pad_id: int,
     ledger: "Ledger",
@@ -3319,22 +3309,34 @@ def _rescore_multi_options(
 ) -> tuple[list[int], bool]:
     """W3-E band rescore for a multi field's near-threshold options.
 
-    A Y/N decision near p=0.5 is the same near-tie as a scalar enum — a
-    |yes - no| inside the decision band is batch-shape noise. Rescore those
-    options' rows at batch=1 and replace their raw pairs (and legal-mass
-    entries, in the row's own shape) IN the dispatch object so prior +
-    softmax + selection all see the canonical result. Returns (rescored
-    option indexes, whether any rescore ran).
+    A Y/N decision near its threshold is the same near-tie as a scalar enum
+    — the option's DECISION quantity is the corrected yes/no log-odds
+    (yes - no after prior correction; log-softmax renormalisation keeps the
+    difference). A |corrected log-odds| inside the decision band is
+    batch-shape noise: rescore those options' rows at batch=1 and replace
+    their raw pairs (and legal-mass entries, in the row's own shape) IN the
+    dispatch object so prior + softmax + selection all see the canonical
+    result. Returns (rescored option indexes, whether any rescore ran).
 
-    W5c-9: the band is the pass's DECISION band (INSTABILITY_BAND +
-    E_bound(M) from the persisted drift envelope) when provided; None =>
-    the historical constant (envelope-less paths).
+    P4: the gate keys on the CORRECTED log-odds — the quantity selection
+    actually consumes — never the raw pair (the prior can narrow a wide raw
+    gap into a near-tie, and the raw gap can sit inside the band while the
+    corrected one is decisive). The band is the pass's DECISION band
+    (drift_band[0] = INSTABILITY_BAND + E_bound(M)); None-envelope paths
+    carry the historical constant.
     """
     band = drift_band[0]
+
+    def _corrected_log_odds(oi: int, ridx: int) -> float:
+        pair = dispatch.option_pair[ridx]
+        gap = pair[0] - pair[1]
+        pp = prior_pairs.get(options[oi]) if prior_pairs is not None else None
+        if pp is not None:
+            gap -= pp[0] - pp[1]
+        return gap
+
     rescored_oids = [
-        oi
-        for oi, ridx in enumerate(idxs)
-        if abs(dispatch.option_pair[ridx][0] - dispatch.option_pair[ridx][1]) < band
+        oi for oi, ridx in enumerate(idxs) if abs(_corrected_log_odds(oi, ridx)) <= band
     ]
     if not rescored_oids:
         return [], False
@@ -3364,6 +3366,101 @@ def _rescore_multi_options(
     return rescored_oids, True
 
 
+def _count_scores_raw(
+    built: dict,
+    dispatch: DispatchResult,
+    fr: FieldRows,
+    p: dict,
+) -> tuple[list[float], list[float]]:
+    """Raw count-row bucket scores for ONE multi field (P4: shared by the
+    rescore gate and _score_count_row): score_trie over the count trie (it
+    may have multiple branch nodes) from the dispatch's batched count
+    logits. Returns (count_scores_raw, count_legal_mass_logs) at T=1, log
+    space, in p['count']['codes'] order."""
+    count_trie = built["tries"][count_key(fr.fname)]
+    count_logits_by_branch: dict[int, list[float]] = {}
+    for ridx in fr.count_idxs:
+        count_logits_by_branch.update(dispatch.count_node_logits[ridx])
+    count_branch_index = {id(node): bi for bi, node in enumerate(count_trie)}
+
+    def count_logits_at_node(
+        node: dict, _lookup=count_logits_by_branch, _index=count_branch_index
+    ) -> list[float]:
+        return _lookup[_index[id(node)]]
+
+    return score_trie(count_trie, len(p["count"]["codes"]), count_logits_at_node)
+
+
+def _corrected_count_scores(
+    raw_scores: list[float], p: dict, prior: dict | None, fname: str
+) -> list[float]:
+    """Prior-corrected count bucket scores (P4: the ONE correction — the
+    same subtraction _score_count_row applies; the neutral pass caches
+    count rows under '<field>#count' as a scalar-type prior)."""
+    prior_count_entry = prior.get(count_key(fname)) if prior is not None else None
+    return [
+        s - prior_count_entry["log_scores"][code]
+        if prior_count_entry is not None and code in prior_count_entry["log_scores"]
+        else s
+        for s, code in zip(raw_scores, p["count"]["codes"], strict=True)
+    ]
+
+
+def _rescore_count_row(
+    model,
+    cache,
+    built: dict,
+    dispatch: DispatchResult,
+    fr: FieldRows,
+    p: dict,
+    prior: dict | None,
+    vocab_size: int,
+    pad_id: int,
+    ledger: "Ledger",
+    drift_band: tuple[float, float | None],
+) -> bool:
+    """P4: the count row's near-tie rescore — the same rule as the scalar
+    enum and the multi options, on the count row's own quantity m: the
+    top-two gap of the PRIOR-CORRECTED bucket log-scores at T=1. A gap
+    inside the decision band (drift_band[0]) is batch-shape noise: rescore
+    the count rows at batch=1 and replace them in the dispatch so the
+    trusted-count decision sees the canonical shape. Returns whether a
+    rescore ran. The band never decides WHICH bucket wins — only whether
+    the evidence is re-measured canonically."""
+    ridxs = list(fr.count_idxs)
+    if not ridxs:
+        return False
+    raw_scores, _mass = _count_scores_raw(built, dispatch, fr, p)
+    corrected = _corrected_count_scores(raw_scores, p, prior, fr.fname)
+    if len(corrected) < 2:
+        return False
+    top_two = sorted(corrected, reverse=True)
+    if top_two[0] - top_two[1] > drift_band[0]:
+        return False
+    rescored_raw = _rescore_rows_batch1(
+        model,
+        cache,
+        built["rows"],
+        ridxs,
+        built["row_decision"],
+        built["row_branch"],
+        built["row_option"],
+        vocab_size,
+        pad_id,
+        ledger,
+        row_count=built["row_count"],
+    )
+    for ridx in ridxs:
+        dispatch.count_node_logits[ridx].update(rescored_raw["count_node_logits"][ridx])
+        mass = rescored_raw["node_legal_mass_log"][ridx]
+        existing = dispatch.node_legal_mass_log[ridx]
+        if isinstance(existing, dict):
+            existing.update(mass)
+        else:
+            dispatch.node_legal_mass_log[ridx] = mass
+    return True
+
+
 def _score_count_row(
     built: dict,
     dispatch: DispatchResult,
@@ -3378,28 +3475,8 @@ def _score_count_row(
     under '<field>#count' as a scalar-type prior. Returns (count_scores,
     count_legal_mass_logs) at T=1, log space.
     """
-    fname = fr.fname
-    count_trie = built["tries"][count_key(fname)]
-    count_logits_by_branch: dict[int, list[float]] = {}
-    for ridx in fr.count_idxs:
-        count_logits_by_branch.update(dispatch.count_node_logits[ridx])
-    count_branch_index = {id(node): bi for bi, node in enumerate(count_trie)}
-
-    def count_logits_at_node(
-        node: dict, _lookup=count_logits_by_branch, _index=count_branch_index
-    ) -> list[float]:
-        return _lookup[_index[id(node)]]
-
-    count_scores_raw, count_legal_mass_logs = score_trie(
-        count_trie, len(p["count"]["codes"]), count_logits_at_node
-    )
-    prior_count_entry = prior.get(count_key(fname)) if prior is not None else None
-    count_scores = [
-        s - prior_count_entry["log_scores"][code]
-        if prior_count_entry is not None and code in prior_count_entry["log_scores"]
-        else s
-        for s, code in zip(count_scores_raw, p["count"]["codes"], strict=True)
-    ]
+    count_scores_raw, count_legal_mass_logs = _count_scores_raw(built, dispatch, fr, p)
+    count_scores = _corrected_count_scores(count_scores_raw, p, prior, fr.fname)
     return count_scores, list(count_legal_mass_logs)
 
 
@@ -3457,8 +3534,9 @@ def _multi_telemetry(
             p["options"][oi]: dispatch.node_legal_mass_log.get(ridx, 0.0)
             for oi, ridx in enumerate(idxs)
         },
-        # W3-E: set when any option's Y/N decision sat inside the band and
-        # was rescored at batch=1.
+        # W3-E: set when any option's Y/N decision (corrected log-odds) or
+        # the field's count row (corrected bucket gap) sat inside the band
+        # and was rescored at batch=1.
         "rescored": multi_rescored,
     }
     telemetry.update(solved_telemetry)
@@ -3489,9 +3567,11 @@ def score_multi_field(
     """Stage 3 (W5b-10 C1): finalize ONE multi field.
 
     Per-option Y/N rows scored independently (one-vs-rest), the W3-E band
-    rescore for near-threshold options, per-option prior correction, the
-    selection + count + set-constraint reconciliation (solve_multi_set),
-    and the count row's own scalar-type telemetry entry ('<field>#count').
+    rescore for near-threshold options (gated on |corrected log-odds|), the
+    count row's own near-tie rescore (same corrected-margin rule, P4),
+    per-option prior correction, the selection + count + set-constraint
+    reconciliation (solve_multi_set), and the count row's own scalar-type
+    telemetry entry ('<field>#count').
     """
     fname = fr.fname
     idxs = fr.option_idxs
@@ -3504,20 +3584,23 @@ def score_multi_field(
     # positional (choices order), so row oi IS options[oi] — no map needed;
     # results and telemetry stay option-keyed directly.
     #
-    # W3-E near-tie rescore for multi (review F3): a Y/N decision near
-    # p=0.5 is the same near-tie as a scalar enum — a |yes - no| inside
-    # INSTABILITY_BAND is batch-shape noise. Rescore those options' rows at
-    # batch=1 and replace their raw pairs BEFORE the scoring loop, so prior
-    # + softmax + selection all see the canonical result.
+    # W3-E near-tie rescore for multi (review F3): a Y/N decision near its
+    # threshold is the same near-tie as a scalar enum — the option's
+    # corrected log-odds inside the decision band is batch-shape noise.
+    # Rescore those options' rows at batch=1 and replace their raw pairs
+    # BEFORE the scoring loop, so prior + softmax + selection all see the
+    # canonical result.
     rescored_oids, multi_rescored = _rescore_multi_options(
         model,
         cache,
         built,
         dispatch,
         idxs,
-        vocab_size,
-        pad_id,
-        ledger,
+        options=list(p["options"]),
+        prior_pairs=prior_pairs,
+        vocab_size=vocab_size,
+        pad_id=pad_id,
+        ledger=ledger,
         drift_band=drift_band,
     )
     for oi, ridx in enumerate(idxs):
@@ -3534,6 +3617,27 @@ def score_multi_field(
             pair = [v - (m + math.log(total)) for v in pair]
         (p_yes, _p_no) = softmax(pair, temperature=temperature)
         probs_yes[option_name] = p_yes
+
+    # P4: the count row's own near-tie gate — the same corrected log-score
+    # margin m as the scalar enum (top-two bucket gap vs the decision
+    # band). A rescore replaces the batched count logits in the dispatch
+    # BEFORE _score_count_row reads them, so the trusted-count decision is
+    # canonical too. The field's rescored flag covers any of its rows
+    # (option pairs or the count row) that were re-measured.
+    count_rescored = _rescore_count_row(
+        model,
+        cache,
+        built,
+        dispatch,
+        fr,
+        p,
+        prior,
+        vocab_size,
+        pad_id,
+        ledger,
+        drift_band=drift_band,
+    )
+    multi_rescored = multi_rescored or count_rescored
 
     count_scores, count_legal_mass_logs = _score_count_row(built, dispatch, fr, p, prior)
 
@@ -3902,7 +4006,8 @@ def finalize_public_result(
         # and retried — recorded separately, never counted as passes.
         "failed_attempts": scored.failed_attempts,
         # W3-E: fields whose batched result was replaced by the batch=1
-        # canonical rescore (top candidates inside INSTABILITY_BAND).
+        # canonical rescore (corrected top-two log-score gap inside the
+        # decision band).
         "rescored_fields": list(state.rescored_fields),
         "schema_match": True,  # keys/enums guaranteed by construction
         # The per-choice probabilities are the constrained path probability
