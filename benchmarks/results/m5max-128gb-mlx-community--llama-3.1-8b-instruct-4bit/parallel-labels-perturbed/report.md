@@ -19,32 +19,32 @@
 
 | metric | value |
 | --- | --- |
-| accuracy | 0.7245 [0.6811, 0.7662] (case_cluster_bootstrap) |
+| accuracy | 0.7153 [0.6667, 0.7639] (case_cluster_bootstrap) |
 | majority baseline (mean over fields) | 0.5139 |
-| exact record | 0.2396 |
-| case_exact_match | 0.2396 |
-| brier | 0.4736 [0.4223, 0.5262] (case_cluster_bootstrap) |
-| correctness_auroc | 0.7069 |
-| ece_5bin_equal_mass | 0.0559 |
-| tie_rate | 0.0023 |
+| exact record | 0.3333 |
+| case_exact_match | 0.3333 |
+| brier | 0.4768 [0.4252, 0.5300] (case_cluster_bootstrap) |
+| correctness_auroc | 0.7131 |
+| ece_5bin_equal_mass | 0.0592 |
+| tie_rate | 0.0035 |
 | any_flip_rate[action] | 0.2083 |
 | any_flip_rate[category] | 0.0625 |
 | any_flip_rate[fraud] | 0.0375 |
 | any_flip_rate[needs_human] | 0.0167 |
 | any_flip_rate[priority] | 0.0458 |
 | any_flip_rate[risk] | 0.0333 |
-| balanced_accuracy[action] | 0.5815 |
-| balanced_accuracy[category] | 0.8568 |
-| balanced_accuracy[fraud] | 0.9560 |
-| balanced_accuracy[needs_human] | 0.5833 |
-| balanced_accuracy[priority] | 0.7401 |
-| balanced_accuracy[risk] | 0.4917 |
-| macro_f1[action] | 0.5770 |
-| macro_f1[category] | 0.8617 |
-| macro_f1[fraud] | 0.9187 |
-| macro_f1[needs_human] | 0.4586 |
-| macro_f1[priority] | 0.7859 |
-| macro_f1[risk] | 0.5132 |
+| balanced_accuracy[action] | 0.5347 |
+| balanced_accuracy[category] | 0.8385 |
+| balanced_accuracy[fraud] | 0.9722 |
+| balanced_accuracy[needs_human] | 0.5714 |
+| balanced_accuracy[priority] | 0.7262 |
+| balanced_accuracy[risk] | 0.5000 |
+| macro_f1[action] | 0.5132 |
+| macro_f1[category] | 0.8485 |
+| macro_f1[fraud] | 0.9473 |
+| macro_f1[needs_human] | 0.4375 |
+| macro_f1[priority] | 0.7620 |
+| macro_f1[risk] | 0.5119 |
 | mean_tvd[action] | 0.1426 |
 | mean_tvd[category] | 0.0535 |
 | mean_tvd[fraud] | 0.0173 |
@@ -58,7 +58,7 @@
 | order_flip_rate[priority] | 0.0458 |
 | order_flip_rate[risk] | 0.0333 |
 | perturbation_flip_rate | 0.0880 |
-| valid_accuracy | 0.7245 |
+| valid_accuracy | 0.7153 |
 
 ## Per-field accuracy
 

@@ -14,6 +14,7 @@ mean_tvd_across_permutations, order_flip_rate).
 
 from __future__ import annotations
 
+import gzip
 import json
 import math
 import random
@@ -44,12 +45,75 @@ __all__ = [
 
 
 def load_predictions(path: str | Path) -> list[dict]:
-    """Read a predictions.jsonl file (one JSON object per non-blank line)."""
-    records = []
-    for line in Path(path).read_text().splitlines():
-        if line.strip():
-            records.append(json.loads(line))
-    return records
+    """Read a predictions.jsonl file (one JSON object per non-blank line).
+
+    ``.gz`` paths are decompressed transparently. Legacy combo folders
+    (pre-P2) journal a case-level failure as ONE ``field="_error"`` line
+    with no label, which would drop the failed case from every accuracy
+    denominator. Such lines are expanded at read time to one failure line
+    per labelled field of the case (error-inclusive denominator, P3). The
+    labelled field list comes from the same file: cases in a group share
+    the schema, so the group's canonical labelled lines name the fields.
+
+    # SHORTCUT: legacy single-line _error format; remove when the M5 rerun
+    # (P7) replaces these folders with the per-field failure format.
+    """
+    p = Path(path)
+    if p.suffix == ".gz":
+        with gzip.open(p, "rt", encoding="utf-8") as f:
+            text = f.read()
+    else:
+        text = p.read_text(encoding="utf-8")
+    records = [json.loads(line) for line in text.splitlines() if line.strip()]
+    return _expand_legacy_error_lines(records)
+
+
+def _expand_legacy_error_lines(records: list[dict]) -> list[dict]:
+    """Expand legacy single-line case failures to per-labelled-field lines.
+
+    A legacy case failure is one line with ``field="_error"`` and an error
+    text, carrying no label — the metrics would silently drop the failed
+    case from the denominator. The expansion emits one failure line per
+    labelled field of the case (fields = the failed case's group's labelled
+    canonical fields in the same file; a group shares one schema), each
+    counting as WRONG. The true label values are unknown offline (the
+    dataset would need a fetch), so ``label`` stays None: the line enters
+    every accuracy/agreement/exact-match denominator but is skipped by the
+    per-class metrics (balanced accuracy, macro F1, majority baseline),
+    which need the real class.
+
+    # SHORTCUT: legacy single-line _error format; remove when the M5 rerun
+    # (P7) replaces these folders with the per-field failure format.
+    """
+    if not any(r.get("field") == "_error" and r.get("error") for r in records):
+        return records
+    group_fields: dict[str, list[str]] = {}
+    for r in records:
+        if r.get("field") == "_error" or r.get("label") is None:
+            continue
+        if r.get("permutation") not in (None, "canonical"):
+            continue
+        group = str(r.get("group_id") or r.get("case_id"))
+        fields = group_fields.setdefault(group, [])
+        if r["field"] not in fields:
+            fields.append(r["field"])
+    out: list[dict] = []
+    for r in records:
+        if r.get("field") == "_error" and r.get("error"):
+            group = str(r.get("group_id") or r.get("case_id"))
+            fields = group_fields.get(group, [])
+            if fields:
+                for fname in fields:
+                    expanded = dict(r)
+                    expanded["field"] = fname
+                    expanded["label"] = None
+                    expanded["prediction"] = None
+                    expanded["valid"] = False
+                    expanded["correct"] = False
+                    out.append(expanded)
+                continue  # the _error marker line is replaced, not kept
+        out.append(r)
+    return out
 
 
 def _valid_correct(record: dict) -> bool:
@@ -170,6 +234,8 @@ def majority_class_baseline(records: list[dict]) -> dict[str, float]:
     """
     by_field: dict[str, list[dict]] = defaultdict(list)
     for record in _labelled(_canonical_lines(records)):
+        if record.get("label") is None:
+            continue  # a legacy-expanded failure has no observable class
         by_field[record["field"]].append(record)
     baseline: dict[str, float] = {}
     for field, field_records in by_field.items():
