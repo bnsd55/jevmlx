@@ -304,10 +304,12 @@ def _local_rows(results_root: Path) -> list[dict]:
                 if run_counts_cases is not None
                 else (n_cases if n_cases is not None else n_fields)
             )
-            # Count error lines (scoring failures) for the row note.
-            from benchmarks.check_results import _error_lines_in_folder
+            # Count FAILED CASES (distinct case_ids with an error line) for
+            # the row note — not error lines: a legacy case failure expands
+            # to one line per labelled field (P3), so line counts overstate.
+            from benchmarks.check_results import _failed_cases_in_folder
 
-            error_count = len(_error_lines_in_folder(combo))
+            error_count = _failed_cases_in_folder(combo)
             # W6-B1: for non-TypeSafe datasets (jabr), the per-workflow
             # breakdown comes from per_workflow_accuracy (general metric),
             # and the overall accuracy from metrics["accuracy"].

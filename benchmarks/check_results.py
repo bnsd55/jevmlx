@@ -664,6 +664,27 @@ def _error_lines_in_folder(folder: Path) -> list[tuple[int, str]]:
     return errors
 
 
+def _failed_cases_in_folder(folder: Path) -> int:
+    """Distinct case_ids with at least one error line in predictions.jsonl.
+
+    The leaderboard 'cases' column reports FAILED CASES, not error lines:
+    a legacy case failure expands to one line per labelled field (P3), so
+    line counts overstate the failure count. Naive field-level errors stay
+    one line per failed field, usually one distinct case each.
+    """
+    try:
+        records = _read_predictions_lines(
+            folder / "predictions.jsonl.gz"
+            if (folder / "predictions.jsonl.gz").exists()
+            else folder / "predictions.jsonl"
+        )
+    except (OSError, json.JSONDecodeError):
+        return 0
+    return len(
+        {r.get("case_id") for r in records if isinstance(r.get("error"), str) and r["error"]}
+    )
+
+
 def check_root(root: Path) -> list[tuple[Path, bool, list[str]]]:
     """Validate every combo folder under root. Returns per-folder results."""
     folders = _find_combo_folders(root)

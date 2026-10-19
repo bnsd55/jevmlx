@@ -80,7 +80,7 @@ def test_labels_row_exact_values():
     assert labels["parity_max_drift"] == pytest.approx(0.078, abs=0.001)
     assert labels["time_per_case_s"] == pytest.approx(0.586, abs=0.01)
     assert labels["cases"] == 45
-    assert labels["error_count"] == 3
+    assert labels["error_count"] == 1  # ONE failed case; the legacy expansion made 3 lines
 
 
 def test_slots_row_exact_values():
@@ -96,7 +96,7 @@ def test_slots_row_exact_values():
     assert slots["parity_max_drift"] == pytest.approx(0.078, abs=0.001)
     assert slots["time_per_case_s"] == pytest.approx(0.633, abs=0.01)
     assert slots["cases"] == 45
-    assert slots["error_count"] == 3
+    assert slots["error_count"] == 1  # ONE failed case; the legacy expansion made 3 lines
 
 
 def test_each_model_renders_own_three_rows():
@@ -134,9 +134,11 @@ def test_all_combos_pass_check_results():
 
 @pytest.mark.slow
 def test_error_summary_matches_expected_counts():
-    """The errors summary: naive_local-slots-typesafe has 7 error lines;
-    parallel-{labels,slots}-typesafe each have 1. The bundled/perturbed
-    combos have 0.
+    """Error-LINE counts read through the loader: naive_local-slots-typesafe
+    has 7 field-level error lines; parallel-{labels,slots}-typesafe have 3
+    each (the ONE legacy case failure expands to one line per labelled
+    field). Failed-CASE counts stay 1 — see the leaderboard cases column.
+    The bundled/perturbed combos have 0.
 
     Marked slow: same decompression cost as test_all_combos_pass_check_results.
     """
