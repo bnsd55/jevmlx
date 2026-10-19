@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- deps: declare jinja2 (engine.py imports jinja2.exceptions.TemplateError; it
+  was only present as a transitive dep of mlx-lm) and bound mlx-lm to the
+  tested range `>=0.31.3,<0.33`. mlx-lm #1778 (first in 0.32.0) made cache
+  `state` return the FULL state — KVCache from (keys, values) to
+  (keys, values, offset) — which broke driftprobe's fixed 2-field unpack
+  ("too many values to unpack") on any fresh dependency resolve. driftprobe
+  now reads keys and values by index (offset keeps its own attribute
+  comparison), compatible with both arities; the full offline suite passes
+  on mlx-lm 0.31.3 and 0.32.2. To move past <0.33: rerun the offline suite
+  on the new minor and extend the bound only when green.
+
 - ci: the slow model-test workflow is manual-dispatch only. The shared macOS
   runner GPU is not stable enough for model tests (Metal command-buffer
   timeouts, NaN logits observed), so the workflow no longer triggers on push
