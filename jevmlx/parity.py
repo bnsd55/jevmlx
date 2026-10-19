@@ -170,18 +170,32 @@ def check_scoring_parity(
 
 
 def _field_margin(tel: dict) -> float:
-    """Top-two probability margin from a field's telemetry (W5c-1 review §4).
+    """The field's near-tie margin m (P4) — the SAME quantity the engine's
+    rescore gate keys on: the top-two gap of the prior-corrected log-scores
+    at T=1. Scalar and count telemetry carry those scores as ``log_scores``
+    (a log-softmax keeps the gap). Multi fields have no field-level log P —
+    their per-option decision quantity is |corrected yes/no log-odds|, so
+    the margin is the minimum over options (the option closest to its
+    threshold side). A field with one choice (or no scores) has margin inf.
 
-    Delegates to the engine's _near_tie_margin helper — one definition of
-    'near-tie margin' shared by the rescore gate (finalize_scalar_evidence)
-    and parity. A field with one choice has margin inf.
+    One definition of 'near-tie margin' shared by the rescore gate
+    (finalize_scalar_evidence / _rescore_multi_options / _rescore_count_row)
+    and parity: a field parity treats as a near-tie (m < atol =
+    INSTABILITY_BAND) is always one the engine rescored (the gate compares
+    the same m to rescore_band_nats >= atol).
     """
-    from jevmlx.engine import _near_tie_margin
-
-    tc = tel.get("top_choices") or []
-    if len(tc) < 2:
+    log_scores = tel.get("log_scores")
+    if log_scores and len(log_scores) > 1:
+        ordered = sorted(log_scores.values(), reverse=True)
+        return ordered[0] - ordered[1]
+    pairs = tel.get("option_logit_pairs") or {}
+    if not pairs:
         return float("inf")
-    return _near_tie_margin([float(c["probability"]) for c in tc])
+    priors = tel.get("prior_option_pairs") or {}
+    return min(
+        abs((pair[0] - pair[1]) - (priors[opt][0] - priors[opt][1] if opt in priors else 0.0))
+        for opt, pair in pairs.items()
+    )
 
 
 def _environment_metadata(engine: Any) -> dict[str, Any]:
@@ -227,8 +241,9 @@ def _rescore_gate_safety_assertion(
     (single-context ``run_parallel_generation``) and batched evidence
     (``run_parallel_generation_batched`` at max contexts), then records:
 
-    - ``batch_one_margin``: top-two probability margin at batch=1
-    - ``batched_margin``: top-two probability margin at batch=N
+    - ``batch_one_margin``: the field's near-tie margin m (the corrected
+      top-two log-score gap; multi: min |corrected log-odds|) at batch=1
+    - ``batched_margin``: the same m at batch=N
     - ``reference_near_tie``: batch_one_margin < 0.05 (the field sat
       inside the near-tie band at the reference shape)
     - ``production_rescored``: did the batched path rescore this field?

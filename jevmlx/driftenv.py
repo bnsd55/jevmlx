@@ -151,20 +151,6 @@ except OSError:
     pass
 
 
-def _load_shipped_edges() -> tuple[int, ...]:
-    """Read the shipped bucket_edges.json (the package's source of truth).
-
-    A malformed/missing file is a packaging bug, not a runtime fallback:
-    raise so it surfaces in CI, never silently to the band.
-    """
-    path = Path(__file__).resolve().parent / "data" / "bucket_edges.json"
-    data = json.loads(path.read_text(encoding="utf-8"))
-    edges = sorted(int(e) for e in data["edges"] if isinstance(e, (int, float)) and e > 0)
-    if len(edges) < 2 or len(edges) != len(set(edges)):
-        raise DriftEnvelopeError(f"malformed bucket_edges.json: {edges}")
-    return tuple(edges)
-
-
 def bucket_labels() -> list[str]:
     """The ordered bucket labels for the shipped edge set."""
     return [f"M<={e}" for e in BUCKET_EDGES] + [f"M>{BUCKET_EDGES[-1]}"]

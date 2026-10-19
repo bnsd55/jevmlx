@@ -107,9 +107,11 @@ trie scoring  (score_trie: P(choice) = Π branch softmax factors, T applied
   │    once downstream; legal-mass LOGS per branch from the full-vocab
   │    logsumexp — log space end to end)
   ▼
-near-tie rescore  (scalar top candidates and multi Y/N pairs inside
-  │    INSTABILITY_BAND (5e-2 nats) rescored at the canonical batch=1 shape,
-  │    multi branch at option_pair, scalar at scores; rescored_fields telemetry)
+near-tie rescore  (scalar top-two corrected log-score gap, multi option
+  │    |corrected yes/no log-odds|, and the count row's corrected bucket
+  │    gap — inside the decision band rescored at the canonical batch=1
+  │    shape (band = INSTABILITY_BAND + E_bound(M)); temperature never
+  │    gates; rescored_fields telemetry)
   ▼
 multi selection  (calibrated log-odds a*(yes-no)+b > 0, else P(yes) >= 0.5;
   │    count row <field>#count reconciles the set to top-k by calibrated
@@ -237,7 +239,7 @@ Batched-only keys (`run_parallel_generation_batched`, every result): `group_wall
 | `margin` | Multi only: min \|P(yes) - cut\| over the final set in probability units (engine-side name; the API exposes it as `threshold_distance`; an option forced in against its P(yes) shows 0). |
 | `top_choices` | Top (choice, probability) pairs, most probable first (top 5). |
 | `rows` | Rows the field consumed (0 for cardinality-1 fields). |
-| `tie` / `rescored` | Scalar: whether the top-2 gap is inside the rescore band (W5c-9: `INSTABILITY_BAND + E_bound(M)` from the drift envelope — `INSTABILITY_BAND` itself when no envelope rides; subsumes exact-equality ties), and whether the batch=1 rescore replaced the batched result. Multi: `rescored` when any option's Y/N pair was rescored. |
+| `tie` / `rescored` | Scalar: whether the corrected top-two log-score gap is inside `INSTABILITY_BAND` after any rescore (subsumes exact-equality ties), and whether the batch=1 rescore replaced the batched result. Multi: `rescored` when any option's corrected log-odds or the count row's corrected bucket gap was inside the band and rescored. |
 | `rescore_band_nats` / `drift_envelope_nats` | W5c-9: the decision band this field's rescore trigger used (`INSTABILITY_BAND + E_bound`, rounded up to the 1/64-nat lattice) and the envelope bound E_bound itself. `drift_envelope_nats` is None when no envelope rode (constant-band paths). NOT the parity atol — the parity contract stays 0.05 on d_gap (ARCHITECTURE design decision 10). |
 | `evidence_source` | Scalar only (W5-B, PR #45): which scoring path produced the final evidence — `batch` (batched pass), `batch1` (canonical rescore replaced it), `dependency` (second pass), `oracle` (forced re-score). Rides on scalar entries and on second-pass re-decides. |
 | `semantics` | W5b-13: the per-field semantics record (coerced to frozen `api.FieldSemantics` at the public boundary): `score_source` (`batched`/`rescored_batch1`/`dependency`/`oracle`), `temperature` actually applied (None for count rows and calibrated multi selections), `calibrator_id` (bundle identity when a fitted calibrator set the selection), `prior_mode` (`off`/`neutral_v1`), `constraint_changed` (a reconciler overrode the raw winner — an actual selection change, not merely a binding constraint), `dependency_rescored`. REQUIRED on every entry — `_build_field_results` raises without it. |
@@ -683,7 +685,14 @@ conversion: same shape with empty `sources` plus `fetched_at`.
    (`jevmlx/driftenv.py`: records keyed by model/revision/quantization/
    mlx-version/chip/dtype + a shape bucket of M; written by
    `benchmarks/driftprobe.py`, by `parity_report`, and by the load-time
-   16-row canary when nothing is recorded). Too low a band costs a wrong
+   16-row canary when nothing is recorded). The gate quantity is ONE m
+   everywhere (P4): the prior-corrected top-two log-score gap at T=1 for
+   scalar fields and count rows, |corrected yes/no log-odds| for multi
+   options — rescore iff the evidence is batched and m <= band;
+   temperature is applied only to reported probabilities and never gates.
+   Parity's near-tie detection reads the same m (from the telemetry's
+   corrected `log_scores` / option pairs), so a field parity treats as a
+   near-tie is always one the engine rescored. Too low a band costs a wrong
    winner (a reference near tie escaping the canonical batch=1 shape — the
    measured `code_security/is_vulnerability` escape); too high costs only
    throughput. The band protects DECISIONS; parity protects HONEST
