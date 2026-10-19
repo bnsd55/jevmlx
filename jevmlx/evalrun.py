@@ -35,6 +35,7 @@ from collections.abc import Callable
 from typing import Any
 
 from jevmlx.baseline import baseline_decide, parse_baseline_output
+from jevmlx.evalmetrics import values_equal
 from jevmlx.evalreport import environment
 from jevmlx.models import DEFAULT_SCORING
 from jevmlx.schema import StructuredSchema, _thaw_plan
@@ -130,7 +131,9 @@ def _full_line_skeleton(
     Every key in PREDICTION_LINE_KEYS is present (None for irrelevant),
     so error/marker lines pass the frozen-contract check in check_results.
     Written to errors.jsonl (NOT predictions.jsonl) so they do not survive
-    resume (R2).
+    resume (R2) — except case-level VALIDATION failures, which are permanent
+    results and are journaled with ONE line per labelled field (P2: the
+    failure must count every labelled field of the case as wrong).
     """
     return {
         "run_id": run_id,
@@ -903,26 +906,51 @@ def run_eval(
                         os.fsync(_mf.fileno())
                     continue
                 try:
-                    results = decide_fn(
-                        schema_dict, case["context"], constraints=case.get("constraints")
-                    )
-                except TypeError:
-                    results = decide_fn(schema_dict, case["context"])
+                    try:
+                        results = decide_fn(
+                            schema_dict, case["context"], constraints=case.get("constraints")
+                        )
+                    except TypeError:
+                        # Older 2-arg decide_fns; a failure raised by the
+                        # retry is still a case-level result (P2), not an
+                        # escape from the error path.
+                        results = decide_fn(schema_dict, case["context"])
                 except Exception as exc:  # noqa: BLE001 — circuit breaker
                     sig = failure_signature(exc)
                     # P2/P3: write the error line (full shape) for BOTH infra
-                    # and non-infra — the failure IS the result.
-                    variant_lines.append(
-                        _full_line_skeleton(
-                            _run_id_for_run,
-                            case,
-                            tag,
-                            track,
-                            model,
-                            field="_error",
-                            error=f"{type(exc).__name__}:{exc}",
-                        )
-                    )
+                    # and non-infra — the failure IS the result. P2: the
+                    # error-inclusive denominator — a case-level failure
+                    # must count every LABELLED field of the case as wrong,
+                    # so emit one failure line per labelled field (the
+                    # case's own labels name the fields). A case with no
+                    # labels keeps the single _error marker line.
+                    _labels = case.get("labels") or {}
+                    _error_text = f"{type(exc).__name__}:{exc}"
+                    if _labels:
+                        variant_lines = [
+                            _full_line_skeleton(
+                                _run_id_for_run,
+                                case,
+                                tag,
+                                track,
+                                model,
+                                field=fname,
+                                error=_error_text,
+                            )
+                            for fname in _labels
+                        ]
+                    else:
+                        variant_lines = [
+                            _full_line_skeleton(
+                                _run_id_for_run,
+                                case,
+                                tag,
+                                track,
+                                model,
+                                field="_error",
+                                error=_error_text,
+                            )
+                        ]
                     lines.extend(variant_lines)
                     # R2: infra failures go to errors.jsonl, NOT predictions.jsonl
                     # (they must not survive resume). Validation errors (sig
@@ -1046,9 +1074,11 @@ def run_eval(
                         "label": label,
                         "prediction": prediction,
                         "valid": bool(res.get("valid", prediction is not None)),
+                        # P2: multi-select compares SETS — the same choices
+                        # in a different order are the same answer.
                         "correct": None
                         if label is None
-                        else (prediction is not None and prediction == label),
+                        else (prediction is not None and values_equal(label, prediction)),
                         "log_scores": res.get("log_scores"),
                         "probability": res.get("probability"),
                         "per_option": res.get("per_option"),

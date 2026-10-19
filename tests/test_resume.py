@@ -986,10 +986,13 @@ class TestReviewRound4:
         # case-1 is NOT in completed_case_keys.
         keys = completed_case_keys(out)
         assert "case-1::canonical" not in keys
-        # The _error line is in errors.jsonl, NOT predictions.jsonl.
+        # The failure is journaled in errors.jsonl, NOT predictions.jsonl.
+        # P2: one line per LABELLED field (error-inclusive denominator), so
+        # the line carries the real field name, not the _error marker.
         assert (out / "errors.jsonl").exists()
         errors_content = (out / "errors.jsonl").read_text()
-        assert "_error" in errors_content
+        assert '"field": "verdict"' in errors_content
+        assert "RuntimeError:metal allocation failed" in errors_content
         # predictions.jsonl has NO _error line.
         pred_content = (out / "predictions.jsonl").read_text()
         assert "_error" not in pred_content
