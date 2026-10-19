@@ -11,6 +11,7 @@ declares no set constraints.
 """
 
 import pytest
+from conftest import CountCodeModel as _CountCodeModel
 from conftest import YNLogitModel as _YNModel
 from conftest import _Mod97Tokenizer as _CountTokenizer
 from conftest import make_engine
@@ -536,3 +537,129 @@ class TestW5CReviewF8F17:
                     }
                 }
             )
+
+
+# ------------- P10 (F7 part 2): case-level exclusivity in the solver -------
+
+
+def _excl_schema():
+    return StructuredSchema(
+        {"flags": {"type": "multi", "description": "d", "choices": ["x", "y", "z"]}}
+    )
+
+
+def test_T1_case_exclusivity_enforced_in_selection():
+    """P10 T1 (the F6-report probe): a case-level exclusivity [x, y] on a
+    multi field is enforced by the joint set solver — the model wants
+    x, y, z (uniform P(yes) > 0.5), the result keeps the higher-of-x/y by z
+    (a tie here: schema order) plus z. Main returns [x, y, z] unchecked."""
+    from jevmlx.engine import run_parallel_generation
+
+    constraints = [{"type": "exclusivity", "field": "flags", "options": ["x", "y"]}]
+    result = run_parallel_generation(
+        make_engine(_YNModel(), _CountTokenizer()),
+        "ctx",
+        _excl_schema(),
+        constraints=constraints,
+    )
+    assert result["parsed_json"]["flags"]["value"] == ["x", "z"]
+    telemetry = result["field_telemetry"]["flags"]
+    assert telemetry["reconciled_by"] == "constraints"
+    # The exclusivity group rides the solver's constraint list (provenance).
+    assert {"type": "at_most_one", "options": ["x", "y"]} in telemetry["set_constraints"]
+    assert telemetry["threshold_proposal"] == ["x", "y", "z"]
+    assert telemetry["semantics"]["constraint_changed"] is True
+    # Per-option numbers stay DISTRIBUTION numbers (P9 rule).
+    assert all(p > 0.5 for p in telemetry["per_option"].values())
+
+
+def test_T2_exclusivity_and_trusted_count_jointly():
+    """P10 T2: a trusted count k=2 AND exclusivity [x, y] are ONE solver
+    call — the result honors both ({x, z}: two options, at most one of the
+    group). Rule when they conflict: schema exclusivity is HARD, the count
+    is evidence and DROPS (existing precedence) — tested by the infeasible
+    variant below. Main ignores the exclusivity and returns [x, y]."""
+    from jevmlx.engine import run_parallel_generation
+
+    constraints = [{"type": "exclusivity", "field": "flags", "options": ["x", "y"]}]
+    model = _CountCodeModel({"2": 3.0}, yes_logit=1.0, no_logit=-1.0)
+    result = run_parallel_generation(
+        make_engine(model, _CountTokenizer()), "ctx", _excl_schema(), constraints=constraints
+    )
+    assert result["parsed_json"]["flags"]["value"] == ["x", "z"]
+    telemetry = result["field_telemetry"]["flags"]
+    assert telemetry["count_choice"] == "2"
+    assert "dropped_reason" not in telemetry
+    assert telemetry["reconciled_by"] == "count"
+
+
+def test_T2b_exclusivity_beats_infeasible_trusted_count():
+    """P10 T2 (the conflict rule): count k=2 over [x, y] with exclusivity
+    [x, y] is jointly infeasible — schema exclusivity is HARD, the trusted
+    count drops (dropped_reason recorded) and the joint solver still
+    enforces the exclusivity on the threshold proposal. Main: no drop, no
+    enforcement — [x, y]."""
+    from jevmlx.engine import run_parallel_generation
+
+    schema = StructuredSchema(
+        {"flags": {"type": "multi", "description": "d", "choices": ["x", "y"]}}
+    )
+    constraints = [{"type": "exclusivity", "field": "flags", "options": ["x", "y"]}]
+    model = _CountCodeModel({"2": 3.0}, yes_logit=1.0, no_logit=-1.0)
+    result = run_parallel_generation(
+        make_engine(model, _CountTokenizer()), "ctx", schema, constraints=constraints
+    )
+    assert result["parsed_json"]["flags"]["value"] == ["x"]
+    telemetry = result["field_telemetry"]["flags"]
+    assert telemetry["count_choice"] == "2"
+    # The drop is recorded on the count row's OWN (internal) telemetry.
+    count_tel = result["internal_telemetry"]["flags#count"]
+    assert count_tel["dropped_reason"] == "infeasible_with_set_constraints"
+    assert telemetry["reconciled_by"] == "constraints"
+
+
+def test_T3_no_exclusivity_selection_identical():
+    """P10 T3: the same field with NO case constraints — the threshold
+    proposal stands untouched, no set-constraint telemetry keys (the
+    main-identical invariant)."""
+    from jevmlx.engine import run_parallel_generation
+
+    result = run_parallel_generation(
+        make_engine(_YNModel(), _CountTokenizer()), "ctx", _excl_schema()
+    )
+    assert result["parsed_json"]["flags"]["value"] == ["x", "y", "z"]
+    telemetry = result["field_telemetry"]["flags"]
+    assert "set_constraints" not in telemetry
+    assert telemetry["reconciled_by"] == "per_option"
+
+
+def test_T4_eval_exclusivity_violation_rate_zero():
+    """P10 T4: the engine's constrained output satisfies the exclusivity —
+    constraint_violation_rate reports 0 for a run whose UNCONSTRAINED
+    selection ([x, y, z]) would violate it. Main's output violates — the
+    metric reports a nonzero rate."""
+    from jevmlx.engine import run_parallel_generation
+    from jevmlx.evalmetrics import constraint_violation_rate
+
+    constraints = [{"type": "exclusivity", "field": "flags", "options": ["x", "y"]}]
+    result = run_parallel_generation(
+        make_engine(_YNModel(), _CountTokenizer()),
+        "ctx",
+        _excl_schema(),
+        constraints=constraints,
+    )
+    value = result["parsed_json"]["flags"]["value"]
+    assert len([o for o in value if o in ("x", "y")]) <= 1
+    records = [
+        {
+            "case_id": "c1",
+            "field": "flags",
+            "type": "multi",
+            "prediction": value,
+            "label": ["x"],
+            "constraints": constraints,
+        }
+    ]
+    rate = constraint_violation_rate(records, _excl_schema())
+    assert rate["overall"] == 0.0
+    assert rate["by_type"]["exclusivity"] == 0.0

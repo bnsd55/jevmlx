@@ -1770,7 +1770,9 @@ def _constrained_map(
                 # produced no log_scores): the current value is the only
                 # candidate. Multi fields cannot be case-constrained
                 # (compile rejects that) — they can only appear via
-                # exclusivity, which never reaches MAP.
+                # exclusivity, which the multi joint set solver enforces
+                # (P10: solve_multi_set, via score_multi_field's
+                # exclusivity_groups; never the scalar MAP).
                 current = field_values.get(fname, {}).get("value")
                 fdef = schema.fields.get(fname)
                 if fdef is not None and fdef.field_type == "boolean" and current is not None:
@@ -3683,6 +3685,7 @@ def score_multi_field(
     pad_id: int,
     ledger: "Ledger",
     drift_band: tuple[float, float | None],
+    exclusivity_groups: tuple[frozenset, ...] = (),
 ) -> FieldOutcome:
     """Stage 3 (W5b-10 C1): finalize ONE multi field.
 
@@ -3691,8 +3694,10 @@ def score_multi_field(
     count row's own near-tie rescore (same corrected-margin rule, P4), the
     ONE per-option decision coordinate (P8: corrected log-odds z, calibrated
     a*z + b; p = sigmoid(z) — selection and every reported number use it),
-    the selection + count + set-constraint reconciliation (solve_multi_set),
-    and the count row's own scalar-type telemetry entry ('<field>#count').
+    the selection + count + set-constraint reconciliation (solve_multi_set —
+    P10: including the case-level exclusivity groups for this field, passed
+    as at-most-one set constraints), and the count row's own scalar-type
+    telemetry entry ('<field>#count').
     """
     fname = fr.fname
     idxs = fr.option_idxs
@@ -3777,7 +3782,15 @@ def score_multi_field(
         count_scores=count_scores,
         count_legal_mass_logs=list(count_legal_mass_logs),
         calibrated=multi_calibrated,
-        set_constraints=fdef.set_constraints,
+        # P10: case-level exclusivity groups join the schema's set
+        # constraints in the SAME joint solver — at most one of the group
+        # may be selected. Schema constraints and exclusivity are HARD;
+        # the trusted count is evidence and drops when jointly infeasible
+        # (the existing precedence, now covering exclusivity).
+        set_constraints=[
+            *fdef.set_constraints,
+            *({"type": "at_most_one", "options": sorted(group)} for group in exclusivity_groups),
+        ],
     )
 
     ranked = sorted(probs_yes.items(), key=lambda kv: -kv[1])
@@ -4197,6 +4210,7 @@ def _score_all_fields(
     pad_id: int,
     ledger: "Ledger",
     drift_band: tuple[float, float | None],
+    compiled_constraints: "CompiledConstraints | None" = None,
 ) -> tuple[AssembledState, list[str]]:
     """Stage 2 (W5b-10 C1): first-pass scoring of EVERY field.
 
@@ -4207,6 +4221,15 @@ def _score_all_fields(
     """
     layout = field_rows_of(built)
     field_plans = built["field_plans"]
+    # P10: case-level exclusivity groups are enforced in the multi joint set
+    # solver (solve_multi_set), not the scalar MAP — the MAP's components
+    # only cover implies/excludes fields. Each multi field gets the groups
+    # compiled for IT, translated to the solver's at-most-one shape.
+    exclusivity_by_field: dict[str, list[frozenset]] = {}
+    if compiled_constraints is not None:
+        for c in compiled_constraints.exclusivities:
+            fname = compiled_constraints.field_names[c.field_idx]
+            exclusivity_by_field.setdefault(fname, []).append(c.options)
     parsed_json: dict[str, Any] = {}
     field_telemetry: dict[str, Any] = {}
     internal_telemetry: dict[str, Any] = {}
@@ -4231,6 +4254,7 @@ def _score_all_fields(
                 pad_id=pad_id,
                 ledger=ledger,
                 drift_band=drift_band,
+                exclusivity_groups=tuple(exclusivity_by_field.get(fname, ())),
             )
             if outcome.rescored:
                 rescored_fields.append(fname)
@@ -4367,6 +4391,7 @@ def _assemble(
             pad_id=pad_id,
             ledger=ledger,
             drift_band=drift_band,
+            compiled_constraints=compiled_constraints,
         )
 
     # W3-D: constrained MAP. W5-B (review 43): PRIOR MODE STOPS HERE — the
