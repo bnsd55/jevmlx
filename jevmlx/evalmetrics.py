@@ -929,11 +929,7 @@ def typesafe_agreement(records: list[dict]) -> dict:
     distinct case_ids among the labelled lines. Canonical lines only (P2):
     ``n_fields``/``n_cases`` count canonical answers, never rotation probes.
     """
-    lines = [
-        r
-        for r in _typesafe_lines(records)
-        if _is_canonical(r) and _labelled([r])
-    ]
+    lines = [r for r in _typesafe_lines(records) if _is_canonical(r) and _labelled([r])]
     if not lines:
         return {}
     by_workflow: dict[str, list[dict]] = defaultdict(list)
