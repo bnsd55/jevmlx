@@ -367,6 +367,24 @@ def make_field_telemetry(
         }
     entry.setdefault("semantics", make_field_semantics())
     entry.update(overrides)
+    # P9: every log_scores entry carries the DECISION numbers api reads
+    # (log_score_margin, probability_margin, alternatives) — derived from
+    # the FINAL entry (post-overrides) unless the caller passed them, so
+    # fakes stay consistent with their own top_choices. Mirrors what the
+    # engine's _decision_record emits for a returned value that IS the
+    # argmax (every default fake's shape); forced fields pass the keys
+    # explicitly.
+    if entry.get("log_scores"):
+        tc = entry.get("top_choices") or []
+        entry.setdefault(
+            "probability_margin",
+            tc[0]["probability"] - tc[1]["probability"] if len(tc) > 1 else 0.0,
+        )
+        ranked_ls = sorted(entry["log_scores"].values(), reverse=True)
+        entry.setdefault(
+            "log_score_margin", ranked_ls[0] - ranked_ls[1] if len(ranked_ls) > 1 else 0.0
+        )
+        entry.setdefault("alternatives", list(tc)[:3])
     return entry
 
 

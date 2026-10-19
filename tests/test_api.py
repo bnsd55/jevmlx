@@ -9,6 +9,7 @@ from conftest import (
     FakeTokenizer,
     make_engine,
     make_engine_result,
+    make_field_semantics,
     make_field_telemetry,
 )
 from pydantic import BaseModel, Field
@@ -790,3 +791,59 @@ def test_abstain_requires_optional_fields_before_inference(monkeypatch):
     monkeypatch.setattr("jevmlx.api.run_parallel_generation_batched", _boom)
     with pytest.raises(TypeError, match="risk_tier.*Optional"):
         jevmlx.decide(StrictModel, "ctx", model="fake/model", abstain_below_margin=0.1)
+
+
+# ------------- P9 (F7 part 1): the record reports the value it returns ----
+
+
+def test_T2_score_is_the_returned_value_log_score(monkeypatch):
+    """P9 T2: a constraint-forced field's FieldResult.score is log P of the
+    RETURNED value — not the independent argmax's. The telemetry shape is
+    what the fixed engine emits after a MAP change (value HIGH forced while
+    the model's winner is LOW; probability = P(HIGH); distribution keys
+    untouched). Main reports score = ranked[0][1] = log P(LOW)."""
+    import math
+
+    import jevmlx.api as api
+
+    p_low, p_high = 0.9, 0.1
+    forced = make_field_telemetry(
+        value="HIGH",
+        choices=["LOW", "HIGH"],
+        probability=p_high,
+        log_scores={"LOW": math.log(p_low), "HIGH": math.log(p_high)},
+        top_choices=[
+            {"choice": "LOW", "probability": p_low},
+            {"choice": "HIGH", "probability": p_high},
+        ],
+        log_score_margin=math.log(p_high) - math.log(p_low),  # negative: forced
+        probability_margin=p_high - p_low,  # negative: forced
+        alternatives=[{"choice": "LOW", "probability": p_low}],
+        semantics=make_field_semantics(constraint_changed=True),
+    )
+    monkeypatch.setattr(
+        api,
+        "run_parallel_generation",
+        lambda *a, **k: make_engine_result(
+            fields={"risk_tier": forced},
+            parsed={"risk_tier": {"value": "HIGH", "prob": p_high}},
+        ),
+    )
+    monkeypatch.setattr(api, "load_engine", lambda model_id: ("engine", "tokenizer"))
+
+    class Model(BaseModel):
+        risk_tier: Literal["LOW", "HIGH"] = Field(description="Risk tier")
+
+    d = jevmlx.decide(Model, "ctx", model="fake/model")
+    fr = d.fields["risk_tier"]
+    assert fr.value == "HIGH"
+    assert fr.score == pytest.approx(math.log(p_high))  # log P(returned), not argmax
+    assert fr.probability == pytest.approx(p_high)
+    assert fr.log_score_margin == pytest.approx(math.log(p_high) - math.log(p_low))
+    assert fr.probability_margin == pytest.approx(p_high - p_low)  # negative
+    # Competitors of the RETURNED value: the top OTHER choice, not the
+    # distribution's winner-first top 3 (which would start with HIGH... no —
+    # with LOW here, but must exclude HIGH, the returned value).
+    assert [a[0] for a in fr.alternatives] == ["LOW"]
+    assert fr.alternatives[0][1] == pytest.approx(p_low)
+    assert fr.semantics.constraint_changed is True

@@ -1493,3 +1493,29 @@ def test_count_rescore_gate_corrected_and_dispatch_replacement():
     )
     assert ran is True
     assert dispatch.count_node_logits[ridx] == {bi: [0.0, 0.0, 0.0, 0.0, 0.0]}
+
+
+def test_T4_normal_path_emits_decision_part():
+    """P9 T4 (api half): a field the MAP never touches still carries the
+    DECISION numbers — probability_margin = P(returned) - max P(other) and
+    the winner-first top-3 alternatives — computed by the ONE helper the
+    MAP path reuses. Main's telemetry has neither key (KeyError)."""
+    model = FakeModel()
+    tokenizer = FakeTokenizer()
+    schema = StructuredSchema(
+        {"action": {"type": "enum", "description": "d", "choices": ["A", "B"]}}
+    )
+    result = run_parallel_generation(make_engine(model, tokenizer), "ctx", schema, scoring="slots")
+    telemetry = result["field_telemetry"]["action"]
+    # Uniform fake logits: P(A) = P(B) = 0.5, margin 0, tie inside the band.
+    assert telemetry["probability_margin"] == pytest.approx(0.0)
+    assert telemetry["tie"] is True
+    assert telemetry["alternatives"] == [
+        {"choice": "A", "probability": pytest.approx(0.5)},
+        {"choice": "B", "probability": pytest.approx(0.5)},
+    ]
+    # Distribution keys untouched by the decision part.
+    assert telemetry["top_choices"] == [
+        {"choice": "A", "probability": pytest.approx(0.5)},
+        {"choice": "B", "probability": pytest.approx(0.5)},
+    ]

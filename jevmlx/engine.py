@@ -906,6 +906,15 @@ class ScalarDecision:
     top_choices: list[dict]  # sorted [{choice, probability}], best first
     margin_nats: float  # top1-top2 log-score margin (post prior-correction)
     tie: bool  # top1-top2 still inside INSTABILITY_BAND after any rescore
+    # P9: the DECISION numbers about the RETURNED value (the ONE helper,
+    # shared with the constraint MAP): the returned value's log-score gap
+    # to its best competitor, P(returned) - max P(other choice) — both
+    # negative when a constraint forced a lower-ranked value — and the
+    # competitors list ([{choice, probability}], the distribution's top 3
+    # when the returned value is the favorite, else the top 3 OTHER).
+    log_score_margin: float
+    probability_margin: float
+    alternatives: list[dict]
     rescored: bool  # a batch=1 canonical rescore replaced the batched result
     legal_mass: float  # exp(legal_mass_logs[winner])
     legal_mass_logs: dict[str, float]  # per-choice raw legal-mass logs
@@ -1047,12 +1056,17 @@ def finalize_scalar_evidence(
     probs_list = softmax(scores, temperature=temperature)
     order = sorted(range(n), key=probs_list.__getitem__, reverse=True)
     w_idx = order[0]
-    # W3-E tie flag: the SAME corrected log-score gap m the rescore gate
-    # keyed on, after any canonical rescore — but against the FIXED
-    # INSTABILITY_BAND (no envelope): the model genuinely cannot separate
-    # the top two. Temperature never enters (log-space gap).
-    is_tie = n > 1 and (scores[order[0]] - scores[order[1]]) < INSTABILITY_BAND
-    w_prob = probs_list[w_idx]
+    # P9: the DECISION numbers come from the ONE helper — the same records
+    # the constraint MAP recomputes when it overrides the value. On the
+    # normal path the returned value IS the argmax, so probability/tie are
+    # the numbers this path always reported; probability_margin and
+    # alternatives are new telemetry (additive).
+    decision_record = _decision_record(
+        {c: lp for c, lp in zip(choices, scores, strict=True)},
+        choices[w_idx],
+        temperature,
+    )
+    w_prob = decision_record["probability"]
 
     decision = ScalarDecision(
         value=choices[w_idx],
@@ -1064,7 +1078,16 @@ def finalize_scalar_evidence(
             reverse=True,
         ),
         margin_nats=scores[order[0]] - scores[order[1]] if n > 1 else float("inf"),
-        tie=is_tie,
+        # W3-E tie flag: the SAME corrected log-score gap m the rescore
+        # gate keyed on, after any canonical rescore — but against the
+        # FIXED INSTABILITY_BAND (no envelope): the model genuinely cannot
+        # separate the top two. Temperature never enters (log-space gap).
+        # P9: the returned value's gap to its best competitor (identical on
+        # the argmax path; the MAP path reuses the helper after a change).
+        tie=decision_record["tie"],
+        log_score_margin=decision_record["log_score_margin"],
+        probability_margin=decision_record["probability_margin"],
+        alternatives=decision_record["alternatives"],
         rescored=rescored,
         legal_mass=math.exp(legal_logs[w_idx]),
         legal_mass_logs={c: lm for c, lm in zip(choices, legal_logs, strict=True)},
@@ -1816,6 +1839,90 @@ def _value_score_key(value: object) -> str:
     return str(value)
 
 
+def _decision_score_key(value: object) -> str:
+    """The log_scores key for a RETURNED value (P9 — the ONE value→key
+    lookup for decision reporting): booleans score under the string keys
+    "true"/"false" but decide as Python bools, and str(True) is "True"
+    — never a key. Everything else is str(value)."""
+    if isinstance(value, bool):
+        return _bool_score_key(value)
+    return _value_score_key(value)
+
+
+def _decision_record(
+    log_scores: dict[str, float], value: object, temperature: float
+) -> dict[str, Any]:
+    """P9: the DECISION numbers about the RETURNED value, from the field's
+    distribution (T=1 log-scores keyed by choice).
+
+    The ONE copy: the normal finalize path and the constraint-MAP path both
+    call it. Reconciliation changes WHICH value is returned, never the
+    distribution — log_scores / top_choices / ordinal stay distribution
+    numbers and are NOT touched here. The decision part:
+
+      probability        P(returned value) — softmax at the caller's T
+      score              log P(returned value) — the T=1 log-score
+      log_score_margin   log score(returned) - max log score(other choice) —
+                         negative when a constraint forced a lower-ranked
+                         value (the argmax path's top1-top2)
+      probability_margin P(returned) - max P(other choice) — negative when
+                         a constraint forced a lower-ranked value
+      tie                the returned value sits inside INSTABILITY_BAND of
+                         its best competitor (|gap| in nats; the argmax
+                         path's top-2 gap is the returned-side case)
+      alternatives       the returned value's competitors: the distribution's
+                         top 3 when the returned value IS the favorite (the
+                         established winner-first scalar contract), else the
+                         top 3 choices OTHER than the returned value (a
+                         forced value's own entry is not a competitor)
+
+    Raises KeyError naming the missing key when the returned value is not
+    in the distribution — a contract violation, never a silent stale
+    number (that miss is exactly the F7 bug).
+    """
+    key = _decision_score_key(value)
+    if key not in log_scores:
+        raise KeyError(
+            f"returned value {value!r} (score key {key!r}) is not in the "
+            f"field's distribution {sorted(log_scores)} — cannot report "
+            "decision numbers for a value the model never scored"
+        )
+    ranked = sorted(log_scores.items(), key=lambda kv: -kv[1])
+    ls = log_scores[key]
+    # Temperature applied once, here: softmax(log_scores / T) — the same
+    # probabilities the normal path reports (ranking is invariant).
+    scaled = {c: lp / temperature for c, lp in log_scores.items()}
+    m = max(scaled.values())
+    total = sum(math.exp(v - m) for v in scaled.values())
+    probs = {c: math.exp(v - m) / total for c, v in scaled.items()}
+    others = [(c, ls_other) for c, ls_other in ranked if c != key]
+    if others:
+        best_other_ls = max(ls_other for _c, ls_other in others)
+        best_other_key = next(c for c, ls_other in others if ls_other == best_other_ls)
+        probability_margin = probs[key] - probs[best_other_key]
+        log_score_margin = ls - best_other_ls
+        is_tie = abs(ls - best_other_ls) < INSTABILITY_BAND
+        if key == ranked[0][0]:
+            alternatives = [{"choice": c, "probability": probs[c]} for c, _l in ranked[:3]]
+        else:
+            alternatives = [{"choice": c, "probability": probs[c]} for c, _l in others[:3]]
+    else:
+        probability_margin = 0.0
+        log_score_margin = 0.0
+        is_tie = False
+        # The distribution's top 3 of a one-choice field is the field's own
+        # value (the winner-first contract; no competitors exist).
+        alternatives = [{"choice": key, "probability": probs[key]}]
+    return {
+        "probability": probs[key],
+        "score": ls,
+        "log_score_margin": log_score_margin,
+        "probability_margin": probability_margin,
+        "tie": is_tie,
+        "alternatives": alternatives,
+    }
+
+
 def _score_key_value(fname: str, key: str, schema: StructuredSchema) -> object:
     """The typed value for a score key (W5-B rev 11).
 
@@ -1896,12 +2003,9 @@ def _selective_second_pass(
             return float("-inf")
         scores = ft.get("log_scores") or {}
         chosen = assignments.get(parent)
-        # Score lookup by the scored representation of the typed value.
-        key = (
-            _bool_score_key(chosen)
-            if isinstance(chosen, bool)
-            else (str(chosen) if chosen is not None else None)
-        )
+        # Score lookup by the scored representation of the typed value
+        # (P9: the ONE value→key lookup).
+        key = _decision_score_key(chosen) if chosen is not None else None
         if key is None or key not in scores:
             return float("-inf")
         chosen_score = scores[key]
@@ -2109,6 +2213,11 @@ def _selective_second_pass(
             field_telemetry[fname]["log_scores"] = dict(decision.log_scores)
             field_telemetry[fname]["top_choices"] = decision.top_choices[:5]
             field_telemetry[fname]["tie"] = decision.tie
+            # P9: the decision part rides every re-decided field too (the
+            # SAME ScalarDecision the finalize path emitted it from).
+            field_telemetry[fname]["log_score_margin"] = decision.log_score_margin
+            field_telemetry[fname]["probability_margin"] = decision.probability_margin
+            field_telemetry[fname]["alternatives"] = decision.alternatives
             field_telemetry[fname]["rescored"] = False
             field_telemetry[fname]["legal_mass"] = decision.legal_mass
             field_telemetry[fname]["legal_mass_logs"] = dict(decision.legal_mass_logs)
@@ -2867,7 +2976,13 @@ def _cardinality_one_outcome(
     val = p["alias_map"][choices_list[0]] if scoring == "slots" else choices_list[0]
     if fdef.field_type == "boolean":
         val = val == "true" if isinstance(val, str) else val
-    key = val if isinstance(val, str) else str(val)
+    # P9: the log_scores key through the ONE value→key lookup — a boolean
+    # value scores under "true"/"false" (str(True) is "True", never a key).
+    key = _decision_score_key(val)
+    # P9/R1: the decision part rides the schema-determined entry too — the
+    # ONE helper over the degenerate one-choice distribution (P=1, margins
+    # 0, no competitors beyond the value itself).
+    record = _decision_record({key: 0.0}, val, 1.0)
     telemetry = {
         "value": val,
         "type": fdef.field_type,
@@ -2875,6 +2990,9 @@ def _cardinality_one_outcome(
         "cardinality": fdef.cardinality,
         "log_scores": {key: 0.0},
         "top_choices": [{"choice": key, "probability": 1.0}],
+        "log_score_margin": record["log_score_margin"],
+        "probability_margin": record["probability_margin"],
+        "alternatives": record["alternatives"],
         "rows": 0,
         "legal_mass": 1.0,
         # W5b-13: cardinality-1 fields are schema-determined — no model
@@ -3021,6 +3139,14 @@ def score_scalar_field(
         # W3-E: True only when the top candidates are STILL within
         # INSTABILITY_BAND after the batch=1 rescore.
         "tie": decision.tie,
+        # P9: the DECISION numbers about the RETURNED value — P(returned)
+        # minus max P(other choice), the returned value's log-score gap to
+        # its best competitor (both negative after a constraint forces a
+        # lower-ranked value) and the returned value's competitors. The
+        # distribution keys above stay untouched by reconciliation.
+        "log_score_margin": decision.log_score_margin,
+        "probability_margin": decision.probability_margin,
+        "alternatives": decision.alternatives,
         "rescored": rescored,
         # W5c-9: the decision band this field's rescore gate used —
         # INSTABILITY_BAND + E_bound(M) from the persisted drift envelope —
@@ -3069,12 +3195,17 @@ def _count_telemetry(
     count_log_probs = _log_softmax(count_scores)
     count_probs = [math.exp(lp) for lp in count_log_probs]
     count_display = list(count_codes)
+    log_scores = {code: lp for code, lp in zip(count_display, count_log_probs, strict=True)}
+    # P9: the decision part rides the count entry too (R1: EVERY log_scores
+    # entry carries it) — the count value is the row's argmax, so these are
+    # the winner-first numbers, at T=1 (the row's probabilities are T=1).
+    record = _decision_record(log_scores, count_choice, 1.0)
     return {
         "value": count_choice,
         "type": "enum",
         "probability": max(count_probs),
         "cardinality": len(count_display),
-        "log_scores": {code: lp for code, lp in zip(count_display, count_log_probs, strict=True)},
+        "log_scores": log_scores,
         "top_choices": sorted(
             (
                 {"choice": c, "probability": pr}
@@ -3083,6 +3214,9 @@ def _count_telemetry(
             key=lambda x: x["probability"],
             reverse=True,
         ),
+        "log_score_margin": record["log_score_margin"],
+        "probability_margin": record["probability_margin"],
+        "alternatives": record["alternatives"],
         "margin_nats": count_margin,
         "legal_mass": math.exp(count_legal_mass_logs[count_display.index(count_choice)]),
         "min_option_legal_mass": math.exp(min(count_legal_mass_logs)),
@@ -3711,14 +3845,20 @@ def reconcile_case_constraints(
     constraints,
     schema: StructuredSchema,
     compiled_constraints: CompiledConstraints,
+    *,
+    temperature: float = 1.0,
 ) -> AssembledState:
     """Stage 4 (W5b-10 C1): constrained MAP over the first-pass decisions.
 
     Consumes the request's CompiledConstraints (W5b-11 — compiled once by
     compile_constraints) and re-picks the joint assignment maximizing
     summed per-field log scores subject to the case-level constraints.
-    Telemetry is updated in place for changed fields (value + probability
-    from the winning score key).
+    Telemetry is updated in place for changed fields: the value AND its
+    DECISION numbers (P9 — recomputed through the ONE _decision_record
+    helper from the UNCHANGED distribution, so the record reports the value
+    it actually returns: P(returned), its log score, its margin to the best
+    other choice — negative when a constraint forced a lower-ranked value —
+    its tie flag and its competitors).
 
     Returns the updated AssembledState carrying the SAME rescored_fields
     plus the reconciled names (parsed_json / field_telemetry are the SAME
@@ -3748,11 +3888,22 @@ def reconcile_case_constraints(
             if val != old_val:
                 parsed_json[fname]["value"] = val
                 # Update the field telemetry to reflect the reconciled value.
+                # P9: the field must report the value it returns — the
+                # DECISION numbers are recomputed from the UNCHANGED
+                # distribution through the ONE helper (P(returned), its log
+                # score, its margin — negative when the constraint forced a
+                # lower-ranked value — tie, competitors). The distribution
+                # keys (log_scores / top_choices / ordinal) stay untouched.
                 field_telemetry[fname]["value"] = val
-                if fname in field_log_scores and str(val) in field_log_scores[fname]:
-                    field_telemetry[fname]["probability"] = math.exp(
-                        field_log_scores[fname][str(val)]
-                    )
+                log_scores = field_telemetry[fname].get("log_scores")
+                if log_scores:
+                    record = _decision_record(log_scores, val, temperature)
+                    field_telemetry[fname]["probability"] = record["probability"]
+                    field_telemetry[fname]["log_score_margin"] = record["log_score_margin"]
+                    field_telemetry[fname]["probability_margin"] = record["probability_margin"]
+                    field_telemetry[fname]["tie"] = record["tie"]
+                    field_telemetry[fname]["alternatives"] = record["alternatives"]
+                    parsed_json[fname]["prob"] = record["probability"]
                 # W5b-13: the MAP overrode the raw winner — the field's
                 # semantics record says so (F2: must exist — index directly).
                 field_telemetry[fname]["semantics"]["constraint_changed"] = True
@@ -4223,7 +4374,9 @@ def _assemble(
     # pass; its field finalization is the last step the prior cache consumes.
     if constraints and not _prior_mode:
         with ledger.span("reconciliation"):
-            state = reconcile_case_constraints(state, constraints, schema, compiled_constraints)
+            state = reconcile_case_constraints(
+                state, constraints, schema, compiled_constraints, temperature=temperature
+            )
 
     # W3-D part 2: the selective parent-conditioned second pass. Review 43:
     # never in prior mode (the prior cache must hold only first-pass

@@ -119,6 +119,13 @@ def _telemetry(ordinal: dict | None = None) -> dict:
             {"choice": "1", "probability": 0.8},
             {"choice": "0", "probability": 0.2},
         ],
+        # P9: the decision part every log_scores entry carries.
+        "log_score_margin": math.log(0.8) - math.log(0.2),
+        "probability_margin": 0.6,
+        "alternatives": [
+            {"choice": "1", "probability": 0.8},
+            {"choice": "0", "probability": 0.2},
+        ],
         "rows": 2,
         "tie": False,
         "rescored": False,
