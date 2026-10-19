@@ -308,3 +308,203 @@ def test_openai_multi_calibrated_selection_and_no_threshold_key():
         )
     assert telemetry_off["calibrated"] is None
     assert telemetry_off["value"] == ["x", "y", "z"]  # 0.9 >= 0.5 uncalibrated
+
+
+# ------------------------------------------- P8: one decision coordinate --
+
+
+def _built_multi(model, tokenizer, choices):
+    """A real built plan + batched dispatch + prefill cache for one multi
+    field, for decision-coordinate tests (the same machinery parity's raw
+    stage uses)."""
+    from jevmlx.engine import (
+        _build_schema_rows,
+        _prefill,
+        _score_rows,
+        dispatch_rows,
+        field_rows_of,
+    )
+    from jevmlx.timing import Ledger
+
+    schema = StructuredSchema({"flags": {"type": "multi", "description": "d", "choices": choices}})
+    engine = make_engine(model, tokenizer)
+    built = _build_schema_rows(schema, engine.tokenizer, "slots")
+    pf = _prefill(engine.model, engine.tokenizer, "ctx", schema, Ledger(), "slots", engine.profile)
+    scored = _score_rows(
+        engine.model,
+        pf.cache,
+        built["rows"],
+        built["row_decision"],
+        engine.vocab_size,
+        built["pad_id"],
+        max(1, len(built["rows"])),
+        Ledger(),
+    )
+    dispatch = dispatch_rows(built, scored)
+    return engine, schema, built, dispatch, field_rows_of(built)["flags"], pf.cache
+
+
+def _run_multi_field(
+    engine, schema, built, dispatch, fr, cache, *, prior=None, calib=None, temperature=1.0
+):
+    """score_multi_field over the hand-built dispatch (the signature is
+    stable on main — the P8 failures there are behavioral, not import
+    errors)."""
+    from jevmlx.engine import score_multi_field
+    from jevmlx.timing import Ledger
+
+    return score_multi_field(
+        engine.model,
+        cache,
+        built,
+        dispatch,
+        fr,
+        schema.fields["flags"],
+        built["field_plans"]["flags"],
+        prior=prior,
+        calib=calib,
+        scoring="slots",
+        temperature=temperature,
+        vocab_size=engine.vocab_size,
+        pad_id=built["pad_id"],
+        ledger=Ledger(),
+        drift_band=(0.125, None),
+    )
+
+
+def test_T1_calibrated_selection_uses_corrected_log_odds():
+    """P8 T1 (the P6 probe, mid-level): the corrected evidence says NO but
+    the raw pair says YES — with a calibrator the option must NOT be
+    selected. Raw [1.0, -1.0] (log-odds 2.0), prior [2.0, -1.0] (difference
+    3.0): z = 2.0 - 3.0 = -1.0 < 0. Main's calibrated branch keys on the
+    RAW pair (c = 2.0 > 0) and selects the option — the F6 bug."""
+    engine, schema, built, dispatch, fr, cache = _built_multi(
+        _BiasedMultiModel(vocab_size=128), FakeTokenizer(), ["A", "B"]
+    )
+    ridx_a, ridx_b = fr.option_idxs
+    dispatch.option_pair[ridx_a] = [1.0, -1.0]  # raw says YES (2.0)
+    dispatch.option_pair[ridx_b] = [-2.0, 0.0]  # decisively no under any rule
+    prior = {"flags": {"option_pairs": {"A": [2.0, -1.0]}}}  # prior diff 3.0
+    calib = CalibrationBundle.from_payload({"multi": {"a": 1.0, "b": 0.0}})
+    outcome = _run_multi_field(engine, schema, built, dispatch, fr, cache, prior=prior, calib=calib)
+    telemetry = outcome.telemetry
+    assert outcome.parsed["value"] == []  # corrected z = -1.0: NOT selected
+    assert telemetry["per_option"]["A"] == pytest.approx(1.0 / (1.0 + math.exp(1.0)))
+    assert telemetry["prior_corrected"] is True
+
+
+def test_T2_reported_probability_is_the_selection_number():
+    """P8 T2: for EVERY option the reported P(yes) is the exact number the
+    selection consumed — calibrated p = sigmoid(a*z + b) on the CORRECTED
+    log-odds. Main reports the uncalibrated corrected softmax there (a raw
+    a=2.0/b=0.5 calibrator never reaches the reported number)."""
+    engine, schema, built, dispatch, fr, cache = _built_multi(
+        _BiasedMultiModel(vocab_size=128), FakeTokenizer(), ["A", "B"]
+    )
+    ridx_a, ridx_b = fr.option_idxs
+    dispatch.option_pair[ridx_a] = [1.0, 0.0]  # raw log-odds 1.0
+    dispatch.option_pair[ridx_b] = [0.2, 0.0]  # raw log-odds 0.2
+    prior = {"flags": {"option_pairs": {"A": [0.5, 0.0]}}}  # z_A = 0.5
+    calib = CalibrationBundle.from_payload({"multi": {"a": 2.0, "b": 0.5}})
+    outcome = _run_multi_field(engine, schema, built, dispatch, fr, cache, prior=prior, calib=calib)
+    telemetry = outcome.telemetry
+    z_a, z_b = 0.5, 0.2  # corrected log-odds
+    expected = {
+        "A": 1.0 / (1.0 + math.exp(-(2.0 * z_a + 0.5))),
+        "B": 1.0 / (1.0 + math.exp(-(2.0 * z_b + 0.5))),
+    }
+    for option, p_yes in expected.items():
+        assert telemetry["per_option"][option] == pytest.approx(p_yes, rel=1e-9)
+        # Selection used the same number: p > 0.5 exactly on the selected side.
+        selected = option in outcome.parsed["value"]
+        assert selected == (p_yes > 0.5)
+    assert telemetry["calibrated_log_odds"] == {"A": 2.0 * z_a + 0.5, "B": 2.0 * z_b + 0.5}
+
+    # Uncalibrated: the reported p is sigmoid(z / T) — the exact number the
+    # z >= 0 threshold used (identical to main's corrected softmax).
+    engine2, schema2, built2, dispatch2, fr2, cache2 = _built_multi(
+        _BiasedMultiModel(vocab_size=128), FakeTokenizer(), ["A", "B"]
+    )
+    ridx_a2, ridx_b2 = fr2.option_idxs
+    dispatch2.option_pair[ridx_a2] = [1.0, 0.0]
+    dispatch2.option_pair[ridx_b2] = [0.2, 0.0]
+    outcome2 = _run_multi_field(
+        engine2,
+        schema2,
+        built2,
+        dispatch2,
+        fr2,
+        cache2,
+        prior={"flags": {"option_pairs": {"A": [0.5, 0.0]}}},
+        temperature=5.0,
+    )
+    telemetry2 = outcome2.telemetry
+    assert telemetry2["per_option"]["A"] == pytest.approx(1.0 / (1.0 + math.exp(-0.1)))
+    assert telemetry2["per_option"]["B"] == pytest.approx(1.0 / (1.0 + math.exp(-0.04)))
+    assert outcome2.parsed["value"] == ["A", "B"]  # both z > 0
+
+
+def test_T3_joint_solver_scores_the_same_coordinate():
+    """P8 T3: the trusted-count joint solver must score options in the SAME
+    corrected coordinate as the threshold path. Raw ordering: A (1.0) > B
+    (0.9); the prior flips the corrected ordering: z_A = 1.0 - 3.0 = -2.0,
+    z_B = 0.9. A trusted count of exactly 1 must select top-1 by z = B.
+    Main scores the solver by the RAW pair and selects A."""
+    engine, schema, built, dispatch, fr, cache = _built_multi(
+        _BiasedMultiModel(vocab_size=128), FakeTokenizer(), ["A", "B"]
+    )
+    ridx_a, ridx_b = fr.option_idxs
+    dispatch.option_pair[ridx_a] = [1.0, 0.0]
+    dispatch.option_pair[ridx_b] = [0.9, 0.0]
+    # Trusted count: bucket '1' wins its row by 3.0 nats (> COUNT_MARGIN_MIN).
+    c_ridx = fr.count_idxs[0]
+    c_bi = next(iter(dispatch.count_node_logits[c_ridx]))
+    dispatch.count_node_logits[c_ridx] = {c_bi: [0.0, 3.0, 0.0, 0.0, 0.0]}
+    prior = {"flags": {"option_pairs": {"A": [3.0, 0.0]}}}
+    outcome = _run_multi_field(engine, schema, built, dispatch, fr, cache, prior=prior)
+    telemetry = outcome.telemetry
+    assert telemetry["count_choice"] == "1"
+    assert telemetry["reconciled_by"] == "count"
+    assert outcome.parsed["value"] == ["B"]  # top-1 by corrected z, not raw
+
+
+def test_T4_no_prior_prior_corrected_false():
+    """P8 T4: with no prior at all the multi telemetry carries
+    prior_corrected = False (main: the key is ABSENT)."""
+    engine, schema, built, dispatch, fr, cache = _built_multi(
+        _BiasedMultiModel(vocab_size=128), FakeTokenizer(), ["A", "B"]
+    )
+    ridx_a, ridx_b = fr.option_idxs
+    dispatch.option_pair[ridx_a] = [1.0, 0.0]
+    dispatch.option_pair[ridx_b] = [0.2, 0.0]
+    outcome = _run_multi_field(engine, schema, built, dispatch, fr, cache)
+    assert outcome.telemetry["prior_corrected"] is False
+    assert "prior_option_pairs" not in outcome.telemetry
+
+
+def test_T5_collect_multi_corrected_z_matches_engine():
+    """P8 T5 (calibration fit): collect_multi(prior_correction=True) folds
+    each option's z to the SAME corrected log-odds the engine applies the
+    (a, b) to — raw difference minus the prior difference from the
+    telemetry's prior_option_pairs. Fitting on a different quantity than
+    the engine applies is the F6 root cause."""
+    from jevmlx.calibrate import collect_multi
+
+    engine = make_engine(
+        _BiasedMultiModel(yes_logit=1.0, no_logit=-1.0, vocab_size=128), FakeTokenizer()
+    )
+    cases = [
+        {
+            "schema": {"flags": {"type": "multi", "description": "d", "choices": ["x", "y"]}},
+            "context": "ctx",
+            "labels": {"flags": ["x"]},
+        }
+    ]
+    samples_off = collect_multi(engine, cases, prior_correction=False)
+    assert samples_off == [(2.0, 1), (2.0, 0)]  # raw log-odds: 1.0 - (-1.0)
+    samples_on = collect_multi(engine, cases, prior_correction=True)
+    # The neutral prior here is the SAME evidence (deterministic fake): the
+    # corrected z is ~0 for both options.
+    assert samples_on[0][0] == pytest.approx(0.0, abs=1e-9)
+    assert samples_on[1][0] == pytest.approx(0.0, abs=1e-9)
+    assert [y for _, y in samples_on] == [1, 0]

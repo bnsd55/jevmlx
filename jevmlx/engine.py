@@ -749,29 +749,6 @@ def _load_calibration(
     return bundle, effective_temperature
 
 
-def _fold_multi(probs_true: dict[str, float]) -> tuple[list[str], float | None, float]:
-    """Fold per-option P(yes) into a multi field's decision.
-
-    Returns (selected options, field probability, margin): an option is
-    selected when its p_yes >= 0.5 (the fixed uncalibrated rule). No
-    field-level probability is claimed (an exact-set probability would need
-    a separate calibrator); the margin is min over ALL options of the
-    per-option distance from its threshold side (W5-C finding 20: floored
-    at 0 — an option on its decided side always contributes its distance;
-    a forced-against-side option contributes 0 after reconciliation, which
-    recomputes this same formula over the final set).
-    """
-    selected = [option for option, p_yes in probs_true.items() if p_yes >= 0.5]
-    margin = min(
-        (
-            max(0.0, p_yes - 0.5) if p_yes >= 0.5 else max(0.0, 0.5 - p_yes)
-            for p_yes in probs_true.values()
-        ),
-        default=0.0,
-    )
-    return selected, None, margin
-
-
 @dataclass(frozen=True)
 class DispatchResult:
     """Per-row logits dispatched into their row shapes (W5b-10 C1).
@@ -2523,8 +2500,10 @@ def run_parallel_generation(
     when its P(yes) >= 0.5; with ``calibration`` (a JSON file path or a dict
     with {"multi": {"a": ..., "b": ...}} — the shape ``jevmlx calibrate
     --out`` writes) selection is calibrated_log_odds > 0 with
-    calibrated_log_odds = a * (yes_logit - no_logit) + b (W2-E step 2: no
-    threshold path exists anywhere).
+    calibrated_log_odds = a * corrected_log_odds + b, where
+    corrected_log_odds = (yes - no) - (prior_yes - prior_no) (W2-E step 2,
+    P8: the same z the reported P(yes) = sigmoid(calibrated_log_odds) comes
+    from; no threshold path exists anywhere).
 
     The prefill KV cache is broadcast across rows; batches larger than the
     chunking heuristic allows run in chunks over the same prefill cache.
@@ -3112,59 +3091,54 @@ def _count_telemetry(
 
 def solve_multi_set(
     *,
-    probs_yes: dict[str, float],
-    raw_pairs: dict[str, list[float]],
+    decision: dict[str, tuple[float, float]],
     options: list[str],
     count_codes: list[str],
     count_scores: list[float],
     count_legal_mass_logs: list[float],
-    multi_ab: dict | None,
+    calibrated: bool,
     set_constraints: tuple[Mapping[str, Any], ...] = (),
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Stage 3b (W5b-10 C1): ONE multi field's selection + reconciliation.
 
-    Threshold rule (calibrated log-odds when a calibrator ran, else the
-    fixed P(yes) >= 0.5), W2-E step 3 count reconciliation through
+    ``decision`` maps option -> (z, p) — the ONE per-option decision
+    coordinate (P8): z is the corrected log-odds as the selection consumes
+    it (calibrated: a*z + b; uncalibrated: the corrected log-odds itself),
+    p = sigmoid(z) — the exact probability the threshold compares. Selection
+    (threshold, trusted count, joint set solver) and every reported number
+    use that one record; raw pairs never enter this function.
+
+    Threshold rule (calibrated z > 0 when a calibrator ran, else the fixed
+    P(yes) >= 0.5 — i.e. z >= 0), W2-E step 3 count reconciliation through
     COUNT_MARGIN_MIN, then W2-SETCONS hard set constraints LAST (the solver
     corrects a violating proposal). Mutates nothing: every output is fresh.
 
     Returns (telemetry_update, count_telemetry, selection) where
     selection is the final list of chosen options.
     """
-    # W2-E step 2 selection: with calibration, calibrated log-odds
-    # (a * (yes - no) + b) > 0 picks the option. The margin stays in
-    # PROBABILITY units on both paths (F1: the abstention gate compares it
-    # to a [0, 1) cut) — min |sigmoid(c) - 0.5|; the raw calibrated
-    # log-odds ride telemetry as calibrated_log_odds. Without calibration
-    # the fixed P(yes) >= 0.5 rule stands.
-    # W2-E step 2 selection: with calibration, calibrated log-odds
-    # (a * (yes - no) + b) > 0 picks the option. The margin stays in
-    # PROBABILITY units on both paths (F1: the abstention gate compares it
-    # to a [0, 1) cut). W5-C finding 20: the margin is min over ALL options
-    # of the per-option distance from its threshold side, floored at 0 —
-    # recomputed after every reconciler below. Without calibration the
-    # fixed P(yes) >= 0.5 rule stands (_fold_multi carries the same
-    # margin contract).
-    if multi_ab is not None:
-        a_coef, b_coef = multi_ab
-        calibrated = {
-            option: a_coef * (pair[0] - pair[1]) + b_coef for option, pair in raw_pairs.items()
-        }
-        probs_yes = {option: 1.0 / (1.0 + math.exp(-c)) for option, c in calibrated.items()}
-        selected = [option for option, c in calibrated.items() if c > 0]
-        selected_set = set(selected)
-        margin = min(
-            (
-                max(0.0, probs_yes[o] - 0.5) if o in selected_set else max(0.0, 0.5 - probs_yes[o])
-                for o in probs_yes
-            ),
-            default=0.0,
-        )
-        calibrated_log_odds: dict[str, float] | None = calibrated
+    # W2-E step 2 selection: the decision quantity z picks the side —
+    # calibrated: z > 0 (the fitted boundary); uncalibrated: P(yes) >= 0.5,
+    # i.e. z >= 0 (the fixed rule). The margin stays in PROBABILITY units
+    # on both paths (F1: the abstention gate compares it to a [0, 1) cut).
+    # W5-C finding 20: the margin is min over ALL options of the per-option
+    # distance from its threshold side, floored at 0 — recomputed after
+    # every reconciler below.
+    probs_yes = {option: p for option, (_z, p) in decision.items()}
+    if calibrated:
+        selected = [option for option, (z, _p) in decision.items() if z > 0]
     else:
-        selected, _prob, margin = _fold_multi(probs_yes)
-        selected_set = set(selected)
-        calibrated_log_odds = None
+        selected = [option for option, (z, _p) in decision.items() if z >= 0]
+    selected_set = set(selected)
+    margin = min(
+        (
+            max(0.0, probs_yes[o] - 0.5) if o in selected_set else max(0.0, 0.5 - probs_yes[o])
+            for o in probs_yes
+        ),
+        default=0.0,
+    )
+    calibrated_log_odds: dict[str, float] | None = (
+        {option: z for option, (z, _p) in decision.items()} if calibrated else None
+    )
 
     # W2-E step 3 reconciliation: the count row ALWAYS ran (no flag), scored
     # through score_trie like a scalar enum (the count trie may have
@@ -3223,15 +3197,12 @@ def solve_multi_set(
             reconciled_by = "count"
     # W2-SETCONS + W5-C finding 18: one optimization over the schema's set
     # constraints AND the trusted-count constraint. The solver selects the
-    # score-maximizing set satisfying both (calibrated log-odds when a
-    # calibrator ran, else RAW yes/no log-odds — monotone in P(yes) either
+    # score-maximizing set satisfying both, scored in the SAME decision
+    # coordinate the threshold used (z — monotone in the reported p either
     # way, so a non-binding constraint set reproduces the proposal).
     joint_constraints = [*set_constraints, *trusted_count_constraints]
     if joint_constraints:
-        if calibrated_log_odds is not None:
-            option_scores = dict(calibrated_log_odds)
-        else:
-            option_scores = {option: float(pair[0] - pair[1]) for option, pair in raw_pairs.items()}
+        option_scores = {option: z for option, (z, _p) in decision.items()}
         selected, setcons_rule = select_constrained_set(
             list(options), option_scores, joint_constraints, selected_set
         )
@@ -3292,6 +3263,17 @@ def _log_softmax(scores: list[float]) -> list[float]:
     m = max(scores)
     total = sum(math.exp(v - m) for v in scores)
     return [v - (m + math.log(total)) for v in scores]
+
+
+def _sigmoid(x: float) -> float:
+    """Numerically stable logistic function (the ONE copy).
+
+    1/(1+exp(-x)) overflows for large negative x (exp of a large positive);
+    branching on the sign keeps every input finite."""
+    if x >= 0:
+        return 1.0 / (1.0 + math.exp(-x))
+    e = math.exp(x)
+    return e / (1.0 + e)
 
 
 def _rescore_multi_options(
@@ -3491,6 +3473,7 @@ def _multi_telemetry(
     multi_rescored: bool,
     prior_entry: dict | None,
     prior_pairs: dict | None,
+    prior_applied: bool,
     selected: list[str],
 ) -> dict[str, Any]:
     """A multi field's telemetry entry (W2-E/W2-SETCONS/W5-D/W5-C keys)."""
@@ -3540,9 +3523,12 @@ def _multi_telemetry(
         "rescored": multi_rescored,
     }
     telemetry.update(solved_telemetry)
-    if prior_entry is not None:
+    if prior_pairs is not None:
         telemetry["prior_option_pairs"] = {k: list(v) for k, v in prior_pairs.items()}
-        telemetry["prior_corrected"] = True
+    # P8: True only when a prior was ACTUALLY subtracted from this field's
+    # decision — a present-but-unmatched prior entry is provenance, not
+    # correction.
+    telemetry["prior_corrected"] = prior_applied
     return telemetry
 
 
@@ -3568,18 +3554,20 @@ def score_multi_field(
 
     Per-option Y/N rows scored independently (one-vs-rest), the W3-E band
     rescore for near-threshold options (gated on |corrected log-odds|), the
-    count row's own near-tie rescore (same corrected-margin rule, P4),
-    per-option prior correction, the selection + count + set-constraint
-    reconciliation (solve_multi_set), and the count row's own scalar-type
-    telemetry entry ('<field>#count').
+    count row's own near-tie rescore (same corrected-margin rule, P4), the
+    ONE per-option decision coordinate (P8: corrected log-odds z, calibrated
+    a*z + b; p = sigmoid(z) — selection and every reported number use it),
+    the selection + count + set-constraint reconciliation (solve_multi_set),
+    and the count row's own scalar-type telemetry entry ('<field>#count').
     """
     fname = fr.fname
     idxs = fr.option_idxs
 
     probs_yes: dict[str, float] = {}
-    raw_pairs: dict[str, list[float]] = {}
+    decision: dict[str, tuple[float, float]] = {}
     prior_entry = prior.get(fname) if prior is not None else None
     prior_pairs = prior_entry["option_pairs"] if prior_entry else None
+    prior_applied = False
     # W2-E row codes: rows are keyed '<field>/<code>', but codes are
     # positional (choices order), so row oi IS options[oi] — no map needed;
     # results and telemetry stay option-keyed directly.
@@ -3603,19 +3591,26 @@ def score_multi_field(
         ledger=ledger,
         drift_band=drift_band,
     )
+    # P8 (review F6): ONE decision coordinate per option. z = corrected
+    # log-odds — the raw yes/no logit difference with the prior difference
+    # subtracted; a calibrator scales it (a*z + b). p = sigmoid(z_dec) —
+    # the SAME number selection consumes and telemetry reports (uncalibrated
+    # p = sigmoid(z/T): softmax(corrected pair, T)[yes] is exactly that, so
+    # the uncalibrated numbers are unchanged). Raw pairs ride telemetry as
+    # provenance only — they never decide anything here.
+    multi_calibrated = calib is not None and calib.has_multi
+    multi_ab = (calib.multi_a, calib.multi_b) if multi_calibrated else None
     for oi, ridx in enumerate(idxs):
         pair = list(dispatch.option_pair[ridx])
         option_name = p["options"][oi]
-        raw_pairs[option_name] = pair
-        if prior_pairs is not None and option_name in prior_pairs:
-            # Per-option additive prior in log space on the Y/N pair
-            # (P(yes) semantics), then renormalise (log-softmax shape).
-            pp = prior_pairs[option_name]
-            pair = [pv - qv for pv, qv in zip(pair, pp, strict=True)]
-            m = max(pair)
-            total = sum(math.exp(v - m) for v in pair)
-            pair = [v - (m + math.log(total)) for v in pair]
-        (p_yes, _p_no) = softmax(pair, temperature=temperature)
+        z = pair[0] - pair[1]
+        pp = prior_pairs.get(option_name) if prior_pairs is not None else None
+        if pp is not None:
+            z -= pp[0] - pp[1]
+            prior_applied = True
+        z_dec = multi_ab[0] * z + multi_ab[1] if multi_ab is not None else z
+        p_yes = _sigmoid(z_dec if multi_calibrated else z / temperature)
+        decision[option_name] = (z_dec, p_yes)
         probs_yes[option_name] = p_yes
 
     # P4: the count row's own near-tie gate — the same corrected log-score
@@ -3642,13 +3637,12 @@ def score_multi_field(
     count_scores, count_legal_mass_logs = _score_count_row(built, dispatch, fr, p, prior)
 
     solved_telemetry, count_telemetry, selected = solve_multi_set(
-        probs_yes=probs_yes,
-        raw_pairs=raw_pairs,
+        decision=decision,
         options=list(p["options"]),
         count_codes=list(p["count"]["codes"]),
         count_scores=count_scores,
         count_legal_mass_logs=list(count_legal_mass_logs),
-        multi_ab=(calib.multi_a, calib.multi_b) if calib is not None and calib.has_multi else None,
+        calibrated=multi_calibrated,
         set_constraints=fdef.set_constraints,
     )
 
@@ -3664,6 +3658,7 @@ def score_multi_field(
         multi_rescored,
         prior_entry,
         prior_pairs,
+        prior_applied,
         selected,
     )
     # W5b-13 F4: constraint_changed compares the FINAL selected set to the
@@ -3674,17 +3669,16 @@ def score_multi_field(
     constraint_changed = set(selected) != set(solved_telemetry["threshold_proposal"])
     # W5b-13: multi semantics. score_source mirrors the scalar vocabulary —
     # 'rescored_batch1' when any option's Y/N pair was band-rescored. The
-    # caller temperature was applied to the P(yes) softmax, BUT the
-    # calibrated selection (a*(yes-no)+b, calib.has_multi) ignores it — the
-    # record's temperature is None in that case so nobody reads a T that
-    # did not set the decision.
-    multi_temperature = None if (calib is not None and calib.has_multi) else temperature
+    # calibrated selection (a*z + b on the corrected log-odds) ignores the
+    # caller temperature — the record's temperature is None in that case so
+    # nobody reads a T that did not set the decision.
+    multi_temperature = None if multi_calibrated else temperature
     telemetry["semantics"] = _field_semantics(
         score_source="rescored_batch1" if multi_rescored else "batched",
         temperature=multi_temperature,
         calib=calib,
-        calibrated_applied=calib is not None and calib.has_multi,
-        prior_corrected=prior_entry is not None,
+        calibrated_applied=multi_calibrated,
+        prior_corrected=prior_applied,
         constraint_changed=constraint_changed,
     )
     # The count row rides the parent multi's prior mode and score path; its
@@ -3699,7 +3693,7 @@ def score_multi_field(
             temperature=None,
             calib=None,
             calibrated_applied=False,
-            prior_corrected=prior_entry is not None,
+            prior_corrected=prior_applied,
             constraint_changed=solved_telemetry.get("reconciled_by") == "count"
             and count_telemetry.get("dropped_reason") is None,
         )
