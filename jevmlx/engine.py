@@ -981,6 +981,7 @@ def finalize_scalar_evidence(
     evidence: ScalarEvidence,
     *,
     prior_entry: dict | None,
+    fname: str = "",
     temperature: float,
     rescore: "Callable[[list[int]], ScalarEvidence] | None" = None,
     rescore_idxs: list[int] | None = None,
@@ -1039,7 +1040,7 @@ def finalize_scalar_evidence(
         # to the reported probabilities — it never gates: it cannot change
         # the winner, and the batch-shape noise the band bounds was measured
         # on raw score gaps.
-        pre_scores = _apply_prior(raw_scores, choices, prior_entry)
+        pre_scores = _apply_prior(raw_scores, choices, prior_entry, fname)
         pre_order = sorted(range(n), key=pre_scores.__getitem__, reverse=True)
         if pre_scores[pre_order[0]] - pre_scores[pre_order[1]] <= band:
             rescored_evidence = rescore(rescore_idxs or [])
@@ -1049,7 +1050,7 @@ def finalize_scalar_evidence(
 
     # Prior correction (V2): subtract the neutral-context prior per choice,
     # then log-softmax renormalise — the ONE _apply_prior implementation.
-    scores = _apply_prior(raw_scores, choices, prior_entry)
+    scores = _apply_prior(raw_scores, choices, prior_entry, fname)
 
     # Confidence temperature applied once to the final per-choice scores
     # (softmax(scores / T)): ranking is invariant; calibrate.py fits this T.
@@ -1392,16 +1393,17 @@ def _get_or_compute_prior(
     identical choices but different descriptions produce different prompt
     hashes and never share a prior.
 
-    Issue #105: the prior is computed on a CANONICAL (sorted-choices) schema
-    so it is order-invariant by construction. Two orderings of the same
-    choice SET share one prior (applied by choice NAME via _apply_prior);
-    the prior captures the model's bias toward choice names, not positions.
+    P12 (F8): the prior is measured under EXACTLY the presentation the
+    evidence used — the SAME schema object (same choice order, same alias
+    per choice, same prompt layout); only the context is neutral. The
+    cache key captures that presentation (the neutral prompt sha + plan
+    hash), so each rotation / field order gets its own prior, computed
+    once, cached. This REPLACES the issue #105 canonical-prior approach:
+    sorting choices for the prior pass measured "dog under a different
+    alias" than the evidence scored, so the subtraction did not cancel
+    position bias. Measuring under the evidence presentation cancels it
+    exactly, per presentation.
     """
-    # Issue #105: canonicalize enum choice order before computing the prior
-    # so all orderings of the same choice set share one prior entry. The
-    # prior is applied by choice name (not position), so the canonical
-    # ordering's prior is valid for any ordering of the evidence schema.
-    schema = schema.canonicalized_for_prior()
     tokenizer = engine.tokenizer
     plan_hash = schema.plan_hash(tokenizer, scoring)
     if neutral_prompt_sha256 is None:
@@ -2191,6 +2193,7 @@ def _selective_second_pass(
             decision, _rescored = finalize_scalar_evidence(
                 evidence,
                 prior_entry=prior_entry,
+                fname=fname,
                 temperature=temperature,
                 rescore=None,
                 ordered=fdef.ordered,
@@ -2283,7 +2286,10 @@ def _selective_second_pass(
 
 
 def _apply_prior(
-    raw_scores: list[float], real_choices: list[str], prior_entry: dict | None
+    raw_scores: list[float],
+    real_choices: list[str],
+    prior_entry: dict | None,
+    fname: str,
 ) -> list[float]:
     """Prior correction (V2): subtract the neutral-context prior per choice,
     then renormalise (log-softmax) over the choices. Used by the main scalar
@@ -2292,11 +2298,24 @@ def _apply_prior(
 
     ``prior_entry`` is the field's entry from the prior cache ({"log_scores":
     {real choice: log-prob}}); ``real_choices`` order matches raw_scores.
+    P12: the prior is measured under the evidence presentation, so every
+    real choice HAS a prior score — a missing choice means the prior came
+    from a different presentation/schema, and silently correcting by 0.0
+    would ship uncorrected evidence as corrected. Raise naming the field
+    and the choice.
     """
     if prior_entry is None:
         return list(raw_scores)
     prior_scores = prior_entry["log_scores"]
-    scores = [s - prior_scores.get(c, 0.0) for s, c in zip(raw_scores, real_choices, strict=True)]
+    for c in real_choices:
+        if c not in prior_scores:
+            raise ValueError(
+                f"field {fname!r}: the prior is missing choice {c!r} — the "
+                "cached prior was not measured under this field's "
+                "presentation (stale cache or schema/prior mismatch); "
+                "refusing to correct by an implicit 0.0"
+            )
+    scores = [s - prior_scores[c] for s, c in zip(raw_scores, real_choices, strict=True)]
     m = max(scores)
     total = sum(math.exp(s - m) for s in scores)
     # log-softmax renormalisation keeps scores as proper log-probs.
@@ -3089,6 +3108,7 @@ def score_scalar_field(
     decision, rescored = finalize_scalar_evidence(
         evidence,
         prior_entry=prior_entry,
+        fname=fname,
         temperature=temperature,
         rescore=rescore_fn,
         rescore_idxs=idxs,
@@ -3514,14 +3534,23 @@ def _corrected_count_scores(
 ) -> list[float]:
     """Prior-corrected count bucket scores (P4: the ONE correction — the
     same subtraction _score_count_row applies; the neutral pass caches
-    count rows under '<field>#count' as a scalar-type prior)."""
+    count rows under '<field>#count' as a scalar-type prior). P12: a
+    missing count code means the prior came from a different presentation
+    — raise naming the field and the code, never a silent 0.0."""
     prior_count_entry = prior.get(count_key(fname)) if prior is not None else None
-    return [
-        s - prior_count_entry["log_scores"][code]
-        if prior_count_entry is not None and code in prior_count_entry["log_scores"]
-        else s
-        for s, code in zip(raw_scores, p["count"]["codes"], strict=True)
-    ]
+    if prior_count_entry is None:
+        return list(raw_scores)
+    prior_scores = prior_count_entry["log_scores"]
+    codes = p["count"]["codes"]
+    for code in codes:
+        if code not in prior_scores:
+            raise ValueError(
+                f"field {fname!r}: the prior is missing count code {code!r} — "
+                "the cached prior was not measured under this field's "
+                "presentation (stale cache or schema/prior mismatch); "
+                "refusing to correct by an implicit 0.0"
+            )
+    return [s - prior_scores[code] for s, code in zip(raw_scores, codes, strict=True)]
 
 
 def _rescore_count_row(
