@@ -36,8 +36,9 @@ Sources of the envelope, in order of authority:
    recorded value). The canary MEASURES; it never installs a constant —
    on failure the load RAISES (no silent under-cover).
 
-E_bound = max over all recorded buckets AT OR ABOVE the pass's bucket
-(the plateau is monotone in M up to the flat region), rounded UP to the
+E_bound comes from the NEAREST (tightest) recorded bucket AT OR ABOVE the
+pass's bucket — a higher bucket's plateau bounds any smaller M, so the
+nearest covering record is the least wasteful bound — rounded UP to the
 next 1/64 nat — the drift lattice IS the fp16 ULP ladder
 (0.015625/0.03125/0.0625/0.125), so the band lives on the same grid it
 protects. A pass with M ABOVE the largest recorded bucket uses the
