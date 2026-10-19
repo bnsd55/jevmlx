@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- metrics: every headline metric now counts CANONICAL answer lines only.
+  evalrun writes one line per (case, field, permutation); rotation lines
+  (`permutation="rotN:<field>"`) are order probes. field_accuracy,
+  agreement_common_subset, by_workflow, case_exact_match, Wilson/bootstrap
+  CIs, paired comparisons, calibration, balanced accuracy, macro F1, Brier,
+  log loss, tie rate, risk-coverage and the constraint metrics filter to
+  canonical lines INSIDE the metric functions (not at call sites), so raw
+  predictions.jsonl is always safe to pass. Rotation lines feed only the
+  order-sensitivity metrics (any_flip_rate, mean_tvd_across_permutations,
+  order_flip_rate, perturbation_flip_rate). This removes the ~3x rotation
+  inflation that dominated the published headline accuracy (e.g. 0.8213
+  over 14,847 lines vs 0.7342 over the 365 canonical lines).
+
+- metrics: error-inclusive denominator. A case-level failure now emits one
+  error line per labelled field of the case (fields derived from the case's
+  own labels) instead of a single `_error` marker line, so a wholesale
+  failure counts every labelled field as WRONG in accuracy, exact match and
+  agreement denominators. A case with no labels keeps the `_error` marker.
+
+- metrics: multi-select correctness compares SETS, not lists —
+  `["a", "b"]` and `["b", "a"]` are the same answer (values_equal,
+  shared by evalrun's per-line `correct` and the metric comparisons).
+
+- build: gitignore `.venv-*/` so a worktree-local venv with a non-default
+  name is excluded from sdists (an included venv symlink made
+  `uv build` fail with "unsafe symbolic-link target ... is absolute").
+
 - deps: declare jinja2 (engine.py imports jinja2.exceptions.TemplateError; it
   was only present as a transitive dep of mlx-lm) and bound mlx-lm to the
   tested range `>=0.31.3,<0.33`. mlx-lm #1778 (first in 0.32.0) made cache

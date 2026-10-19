@@ -3,6 +3,13 @@
 Pure Python + math, no third-party dependencies. Every metric treats an
 invalid prediction as wrong (unconditional field accuracy); ``correct`` is
 respected when present (null label -> excluded from accuracy denominators).
+
+Canonical-only contract (P2): evalrun writes one line per
+(case, field, permutation) — rotation lines (``permutation="rotN:<field>``)
+are order probes. Every headline metric filters to canonical lines INSIDE
+the metric function, so callers can pass raw predictions.jsonl; permutation
+lines feed only the order-sensitivity metrics (any_flip_rate,
+mean_tvd_across_permutations, order_flip_rate).
 """
 
 from __future__ import annotations
@@ -32,6 +39,7 @@ __all__ = [
     "mcnemar_exact",
     "paired_bootstrap_difference",
     "valid_accuracy",
+    "values_equal",
 ]
 
 
@@ -56,6 +64,38 @@ def _labelled(records: list[dict]) -> list[dict]:
     return [r for r in records if r.get("label") is not None or r.get("correct") is not None]
 
 
+def _is_canonical(record: dict) -> bool:
+    """True for a canonical answer line: ``permutation`` None or "canonical"."""
+    return record.get("permutation") in (None, "canonical")
+
+
+def _canonical_lines(records: list[dict]) -> list[dict]:
+    """Canonical answer lines only — the headline metrics' input contract.
+
+    evalrun writes one line per (case, field, permutation): rotation rows
+    (``permutation="rotN:<field>"``) are order PROBES and feed only the
+    order-sensitivity metrics. Filtering lives INSIDE the headline metrics,
+    not at call sites, so raw predictions.jsonl is always safe to pass.
+    """
+    return [r for r in records if _is_canonical(r)]
+
+
+def values_equal(label, prediction) -> bool:
+    """Correctness comparison for a (label, prediction) pair.
+
+    Multi-select values (lists) compare as SETS — ["a", "b"] and
+    ["b", "a"] are the same answer. Other values compare directly.
+    """
+    if isinstance(label, list) and isinstance(prediction, list):
+        try:
+            return set(label) == set(prediction)
+        except TypeError:  # unhashable elements: compare as canonical JSON
+            return sorted(json.dumps(v, sort_keys=True) for v in label) == sorted(
+                json.dumps(v, sort_keys=True) for v in prediction
+            )
+    return label == prediction
+
+
 def _mean(values: list[float]) -> float | None:
     return sum(values) / len(values) if values else None
 
@@ -74,17 +114,24 @@ def _finite(*values: float) -> bool:
 
 
 def field_accuracy(records: list[dict]) -> float | None:
-    """Unconditional field accuracy: correct / labelled, invalid counts wrong."""
-    labelled = _labelled(records)
+    """Unconditional field accuracy: correct / labelled, invalid counts wrong.
+
+    Canonical lines only: rotation rows (order probes) never enter the
+    headline accuracy (P2).
+    """
+    labelled = _labelled(_canonical_lines(records))
     if not labelled:
         return None
     return sum(1 for r in labelled if _valid_correct(r)) / len(labelled)
 
 
 def case_exact_match(records: list[dict]) -> float | None:
-    """Share of cases where every labelled field is correct (invalid = wrong)."""
+    """Share of cases where every labelled field is correct (invalid = wrong).
+
+    Canonical lines only (P2).
+    """
     by_case: dict[str, list[dict]] = defaultdict(list)
-    for record in records:
+    for record in _canonical_lines(records):
         by_case[record["case_id"]].append(record)
     if not by_case:
         return None
@@ -100,9 +147,10 @@ def macro_by(records: list[dict], key: str) -> dict[str, float]:
     """Macro (per-group unweighted mean) field accuracy grouped by ``key``.
 
     Records whose ``key`` is None are skipped (a null workflow is no group).
+    Canonical lines only (P2).
     """
     grouped: dict[str, list[dict]] = defaultdict(list)
-    for record in records:
+    for record in _canonical_lines(records):
         if record.get(key) is None:
             continue
         grouped[str(record[key])].append(record)
@@ -115,18 +163,17 @@ def macro_by(records: list[dict], key: str) -> dict[str, float]:
 
 
 def majority_class_baseline(records: list[dict]) -> dict[str, float]:
-    """Per-field accuracy of always predicting the modal labelled value."""
+    """Per-field accuracy of always predicting the modal labelled value.
+
+    Canonical lines only (P2); multi labels compare as sets, so element
+    order never splits one value into two classes.
+    """
     by_field: dict[str, list[dict]] = defaultdict(list)
-    for record in _labelled(records):
+    for record in _labelled(_canonical_lines(records)):
         by_field[record["field"]].append(record)
     baseline: dict[str, float] = {}
     for field, field_records in by_field.items():
-        counts = Counter(
-            json.dumps(r["label"], sort_keys=True)
-            if isinstance(r["label"], (list, dict))
-            else r["label"]
-            for r in field_records
-        )
+        counts = Counter(_canonical_form(r["label"]) for r in field_records)
         baseline[field] = counts.most_common(1)[0][1] / len(field_records)
     return dict(sorted(baseline.items()))
 
@@ -135,9 +182,13 @@ def majority_class_baseline(records: list[dict]) -> dict[str, float]:
 
 
 def brier_score(records: list[dict]) -> float | None:
-    """Multiclass Brier: mean over fields of sum over choices of (p - y)^2."""
+    """Multiclass Brier: mean over fields of sum over choices of (p - y)^2.
+
+    Canonical lines only (P2): a rotation's distribution is an order probe,
+    not an independent trial.
+    """
     scores = []
-    for record in records:
+    for record in _canonical_lines(records):
         distribution = _record_distribution(record)
         if distribution is None:
             continue
@@ -152,9 +203,9 @@ def brier_score(records: list[dict]) -> float | None:
 
 
 def log_loss(records: list[dict]) -> float | None:
-    """Multiclass true-label log loss (natural log)."""
+    """Multiclass true-label log loss (natural log). Canonical lines only."""
     losses = []
-    for record in records:
+    for record in _canonical_lines(records):
         distribution = _record_distribution(record)
         if distribution is None:
             continue
@@ -184,12 +235,12 @@ def _record_distribution(record: dict) -> dict[str, float] | None:
 def correctness_auroc(records: list[dict]) -> float | None:
     """AUROC of confidence predicting correctness (rank-statistic, no numpy).
 
-    Labelled records only; pairs with equal confidence count 0.5. Returns
-    None without both classes.
+    Labelled canonical lines only (P2); pairs with equal confidence count
+    0.5. Returns None without both classes.
     """
     scored = [
         (float(r["probability"]), _valid_correct(r))
-        for r in _labelled(records)
+        for r in _labelled(_canonical_lines(records))
         if r.get("probability") is not None and _finite(r["probability"])
     ]
     positive = sum(1 for _, correct in scored if correct)
@@ -212,10 +263,11 @@ def ece_equal_mass(records: list[dict], bins: int = 5) -> float | None:
     """Descriptive ECE over ``bins`` equal-mass confidence bins.
 
     Empty-sample safety: returns None when there is nothing to measure.
+    Canonical lines only (P2).
     """
     scored = [
         (float(r["probability"]), 1.0 if _valid_correct(r) else 0.0)
-        for r in _labelled(records)
+        for r in _labelled(_canonical_lines(records))
         if r.get("probability") is not None and _finite(r["probability"])
     ]
     if not scored:
@@ -236,9 +288,13 @@ def ece_equal_mass(records: list[dict], bins: int = 5) -> float | None:
 
 
 def multi_jaccard(records: list[dict]) -> float | None:
-    """Mean Jaccard similarity of multi predictions (invalid => 0.0)."""
+    """Mean Jaccard similarity of multi predictions (invalid => 0.0).
+
+    Canonical lines only (P2); already set-based, so element order is
+    irrelevant by construction.
+    """
     scores = []
-    for record in records:
+    for record in _canonical_lines(records):
         if record.get("type") != "multi":
             continue
         if record.get("label") is None:
@@ -259,9 +315,9 @@ def multi_jaccard(records: list[dict]) -> float | None:
 def _prediction_label_pair(record: dict) -> tuple[str, str] | None:
     """(label, prediction) as comparable strings, or None when not scoreable.
 
-    Lists (multi fields) are compared as sorted JSON — order-insensitive, so
-    ``["a", "b"]`` and ``["b", "a"]`` are the same value. Non-str labels are
-    stringified to a stable JSON form.
+    Lists (multi fields) are compared as sets via ``_canonical_form`` —
+    order-insensitive, so ``["a", "b"]`` and ``["b", "a"]`` are the same
+    value. Non-str labels are stringified to a stable JSON form.
     """
     label = record.get("label")
     prediction = record.get("prediction")
@@ -269,11 +325,7 @@ def _prediction_label_pair(record: dict) -> tuple[str, str] | None:
         return None
     if not record.get("valid", prediction is not None) or prediction is None:
         prediction = "<invalid>"
-    if isinstance(label, list | dict):
-        label = json.dumps(label, sort_keys=True)
-    if isinstance(prediction, list | dict):
-        prediction = json.dumps(prediction, sort_keys=True)
-    return str(label), str(prediction)
+    return _canonical_form(label), _canonical_form(prediction)
 
 
 def balanced_accuracy(records: list[dict]) -> dict[str, float | None]:
@@ -282,11 +334,12 @@ def balanced_accuracy(records: list[dict]) -> dict[str, float | None]:
     Recall is computed per class among that class's labelled records; classes
     with no labelled records are skipped, and a field whose every class lacks
     support yields None. Predictions are counted for the predicted class
-    (invalid predictions never contribute to any class's recall).
+    (invalid predictions never contribute to any class's recall). Canonical
+    lines only (P2).
     """
     by_field: dict[str, Counter] = defaultdict(Counter)
     support: dict[str, Counter] = defaultdict(Counter)
-    for record in records:
+    for record in _canonical_lines(records):
         pair = _prediction_label_pair(record)
         if pair is None:
             continue
@@ -311,12 +364,13 @@ def macro_f1(records: list[dict]) -> dict[str, float | None]:
 
     For each class: precision = TP / predicted, recall = TP / labelled, F1 =
     2PR/(P+R) (0 when both are 0). The class mean ignores classes with no
-    labelled records; a field with none yields None.
+    labelled records; a field with none yields None. Canonical lines only
+    (P2).
     """
     tp: dict[str, Counter] = defaultdict(Counter)
     predicted: dict[str, Counter] = defaultdict(Counter)
     labelled_n: dict[str, Counter] = defaultdict(Counter)
-    for record in records:
+    for record in _canonical_lines(records):
         pair = _prediction_label_pair(record)
         if pair is None:
             continue
@@ -476,7 +530,7 @@ def perturbation_flip_rate(records: list[dict]) -> float | None:
     originals: dict[tuple[str, str], object] = {}
     variants: dict[tuple[str, str], list[tuple[str, object]]] = defaultdict(list)
     for record in records:
-        if record.get("permutation") not in (None, "canonical"):
+        if not _is_canonical(record):
             continue  # rotation/fieldperm rows are order probes, not perturbations
         kind = record.get("perturbation") or (record.get("meta") or {}).get("perturbation")
         key = (record.get("group_id") or record["case_id"], record["field"])
@@ -508,7 +562,7 @@ def any_flip_rate(records: list[dict]) -> dict[str, float]:
     permuted: dict[str, list[dict]] = defaultdict(list)
     for record in records:
         key = (record["case_id"], record["field"])
-        if (record.get("permutation") or "canonical") == "canonical":
+        if _is_canonical(record):
             canonical[key] = record.get("prediction")
         else:
             permuted[record["field"]].append(record)
@@ -520,8 +574,8 @@ def any_flip_rate(records: list[dict]) -> dict[str, float]:
         flipped = sum(
             1
             for r in comparable
-            if json.dumps(r.get("prediction"), sort_keys=True)
-            != json.dumps(canonical[(r["case_id"], field)], sort_keys=True)
+            if _canonical_form(r.get("prediction"))
+            != _canonical_form(canonical[(r["case_id"], field)])
         )
         flips[field] = flipped / len(comparable)
     return dict(sorted(flips.items()))
@@ -560,8 +614,15 @@ def mean_tvd_across_permutations(records: list[dict]) -> dict[str, float]:
 
 
 def tie_rate(records: list[dict]) -> float | None:
-    """Share of scored records whose top-two log_scores are exactly equal."""
-    scored = [r for r in records if isinstance(r.get("log_scores"), dict) and r["log_scores"]]
+    """Share of scored records whose top-two log_scores are exactly equal.
+
+    Canonical lines only (P2).
+    """
+    scored = [
+        r
+        for r in _canonical_lines(records)
+        if isinstance(r.get("log_scores"), dict) and r["log_scores"]
+    ]
     if not scored:
         return None
     ties = 0
@@ -580,12 +641,13 @@ def risk_coverage_curve(records: list[dict], points: int = 10) -> list[dict]:
 
     Records are sorted by confidence descending (tie-break: stable order);
     at each coverage the prefix risk is computed. Uncovered records count as
-    neither right nor wrong — they are simply not yet included.
+    neither right nor wrong — they are simply not yet included. Canonical
+    lines only (P2).
     """
     scored = sorted(
         (
             (float(r["probability"]), 1.0 if _valid_correct(r) else 0.0)
-            for r in _labelled(records)
+            for r in _labelled(_canonical_lines(records))
             if r.get("probability") is not None and _finite(r["probability"])
         ),
         key=lambda pair: -pair[0],
@@ -658,8 +720,10 @@ def cluster_bootstrap_ci(
 
     Returns None when there are too few cases (< 2) or the metric is None on
     the full set. A metric that is None on some resamples is skipped (the
-    interval reflects the cases where it is defined).
+    interval reflects the cases where it is defined). Canonical lines only
+    (P2): rotation rows are order probes, never resampled trials.
     """
+    records = _canonical_lines(records)
     by_case: dict[str, list[dict]] = defaultdict(list)
     for record in records:
         by_case[record.get("case_id", "")].append(record)
@@ -738,8 +802,11 @@ def paired_bootstrap_difference(
     (paired by case_id). Resamples whole cases ``draws`` times and computes
     the accuracy difference in each resample. Returns the point estimate
     (accuracy_a - accuracy_b), the percentile CI, and the exact McNemar
-    test on the discordance counts.
+    test on the discordance counts. Canonical lines only on both sides
+    (P2): a rotation row is not an independent trial of its condition.
     """
+    records_a = _canonical_lines(records_a)
+    records_b = _canonical_lines(records_b)
     by_case_a: dict[str, list[dict]] = defaultdict(list)
     for r in _labelled(records_a):
         by_case_a[r["case_id"]].append(r)
@@ -803,9 +870,9 @@ def valid_accuracy(records: list[dict]) -> float | None:
     invalid-prediction rate — if they're equal, every prediction was valid.
     This is NOT a duplicate of field_accuracy: field_accuracy counts invalid
     as wrong (denominator = all labelled); valid_accuracy excludes them
-    (denominator = labelled AND valid).
+    (denominator = labelled AND valid). Canonical lines only (P2).
     """
-    valid_labelled = [r for r in _labelled(records) if r.get("valid", True)]
+    valid_labelled = [r for r in _labelled(_canonical_lines(records)) if r.get("valid", True)]
     if not valid_labelled:
         return None
     return sum(1 for r in valid_labelled if _valid_correct(r)) / len(valid_labelled)
@@ -859,9 +926,10 @@ def typesafe_agreement(records: list[dict]) -> dict:
     flagged ambiguous (meta.ambiguous from the fetcher), the subset closest
     to TypeSafe's own presentation; it is None when every field is flagged.
     Records with no label are excluded from all rates; ``n_cases`` counts
-    distinct case_ids among the labelled lines.
+    distinct case_ids among the labelled lines. Canonical lines only (P2):
+    ``n_fields``/``n_cases`` count canonical answers, never rotation probes.
     """
-    lines = [r for r in _typesafe_lines(records) if _labelled([r])]
+    lines = [r for r in _typesafe_lines(records) if _is_canonical(r) and _labelled([r])]
     if not lines:
         return {}
     by_workflow: dict[str, list[dict]] = defaultdict(list)
@@ -887,11 +955,12 @@ def tvd_vs_consensus(records: list[dict]) -> dict:
     Our distribution is the same one the calibration metrics use (softmax
     over ``log_scores`` at T=1, or ``per_option`` for multi); the reference
     is the fetcher's ``consensus`` distribution carried on the line. Lines
-    without either side are skipped. Returns ``{"overall": float,
-    "by_workflow": {...}}`` (both absent when no line qualifies).
+    without either side are skipped. Canonical lines only (P2). Returns
+    ``{"overall": float, "by_workflow": {...}}`` (both absent when no line
+    qualifies).
     """
     scored: list[tuple[str, float]] = []
-    for record in _typesafe_lines(records):
+    for record in _typesafe_lines(_canonical_lines(records)):
         reference = record.get("consensus")
         if not isinstance(reference, dict) or not reference:
             continue
@@ -977,6 +1046,7 @@ def constraint_violation_rate(records: list[dict], schema=None) -> dict | None:
     """
     from jevmlx.constraints import ConstraintError, compile_constraints
 
+    records = _canonical_lines(records)  # P2: rotation rows are order probes
     preds = _case_predictions(records)
     constraints_by_case = _case_constraints(records)
     if not constraints_by_case:
@@ -1023,8 +1093,9 @@ def constraint_violation_rate(records: list[dict], schema=None) -> dict | None:
 
 def child_accuracy_given_parent_correct(records: list[dict]) -> dict | None:
     """For each implies/requires_parent constraint, child field accuracy
-    among cases where the parent was predicted correctly. Returns None when
-    no such constraints exist."""
+    among cases where the parent was predicted correctly. Canonical lines
+    only (P2). Returns None when no such constraints exist."""
+    records = _canonical_lines(records)
     preds = _case_predictions(records)
     labels = _case_labels(records)
     constraints_by_case = _case_constraints(records)
@@ -1046,7 +1117,7 @@ def child_accuracy_given_parent_correct(records: list[dict]) -> dict | None:
             child_label = case_labels.get(child)
             if parent_pred is None or parent_label is None:
                 continue
-            if parent_pred != parent_label:
+            if not values_equal(parent_label, parent_pred):
                 continue  # parent wrong: skip
             if child_pred is None or child_label is None:
                 continue
@@ -1066,10 +1137,12 @@ def oracle_parent_gap(records: list[dict]) -> dict | None:
 
     Records carry ``oracle_prediction`` (the child's value when the true parent
     is teacher-forced in eval). The gap = oracle_acc - predicted_acc; a positive
-    gap means conditioning on the true parent helps the child.
+    gap means conditioning on the true parent helps the child. Canonical
+    lines only (P2).
 
     Returns None when no records carry ``oracle_prediction``.
     """
+    records = _canonical_lines(records)
     preds = _case_predictions(records)
     labels = _case_labels(records)
     # Collect oracle predictions: case_id -> {field: oracle_pred}.
@@ -1102,8 +1175,8 @@ def oracle_parent_gap(records: list[dict]) -> dict | None:
             child_oracle = case_oracle.get(child)
             if child_pred is None or child_label is None or child_oracle is None:
                 continue
-            pred_correct = child_pred == child_label
-            oracle_correct = child_oracle == child_label
+            pred_correct = values_equal(child_label, child_pred)
+            oracle_correct = values_equal(child_label, child_oracle)
             pairs[(parent, child)].append((oracle_correct, pred_correct))
     if not pairs:
         return None
@@ -1121,9 +1194,10 @@ def oracle_parent_gap(records: list[dict]) -> dict | None:
 def exact_record_accuracy(records: list[dict], schema=None) -> float | None:
     """Fraction of cases where EVERY labelled field is correct AND no
     constraint is violated. Stricter than case_exact_match (which ignores
-    constraints). Returns None when no cases carry labels."""
+    constraints). Canonical lines only (P2). Returns None when no cases
+    carry labels."""
     by_case: dict[str, list[dict]] = defaultdict(list)
-    for r in records:
+    for r in _canonical_lines(records):
         if r.get("label") is not None or r.get("correct") is not None:
             by_case[r["case_id"]].append(r)
     if not by_case:
@@ -1178,13 +1252,13 @@ def compute_metrics(records: list[dict], schema=None) -> dict:
     if accuracy is not None:
         metrics["accuracy"] = accuracy
     # W6-B6b: per-field accuracy with Wilson intervals (independent-case
-    # Bernoulli per field). F4: filter to CANONICAL lines only — permutation
-    # rows (choice rotations) would inflate n by ~3x and narrow the interval
-    # ~1.7x. The report's per-field table shows the interval or 'n too small'.
+    # Bernoulli per field). Canonical lines only — permutation rows (choice
+    # rotations) would inflate n by ~3x and narrow the interval ~1.7x, and
+    # are order probes, not independent trials (P2: filter shared with the
+    # metric functions via _canonical_lines). The report's per-field table
+    # shows the interval or 'n too small'.
     by_field: dict[str, list[dict]] = defaultdict(list)
-    for record in _labelled(records):
-        if record.get("permutation") not in (None, "canonical"):
-            continue  # rotation/fieldperm rows are order probes, not independent trials
+    for record in _labelled(_canonical_lines(records)):
         by_field[record.get("field", "")].append(record)
     per_field_ci: list[dict] = []
     for field in sorted(by_field):
