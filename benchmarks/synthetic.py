@@ -357,7 +357,7 @@ def build_dependent(seed: int = SEED) -> list[dict]:
 # ---------------------------------------------------- 5. dependent2 (EV1)
 
 # A richer dependent-schema set exercising all four failure modes from
-# review Q1 'Where independence actually hurts': hierarchy, hard coupling,
+# The review's 'where independence actually hurts' cases: hierarchy, hard coupling,
 # shared latent choice, and multi with exclusivity. Each case carries
 # declarative constraint metadata in the schema so evalmetrics can compute
 # constraint_violation_rate, child_accuracy_given_parent_correct, etc.
@@ -526,7 +526,7 @@ def build_dependent2(seed: int = SEED) -> list[dict]:
                 },
             )
         )
-        # F1: constraints live at the CASE level (case['constraints']), not
+        # Constraints live at the CASE level (case['constraints']), not
         # inside case['schema'] — StructuredSchema.__init__ iterates every key
         # of the schema dict as a field, so a 'constraints' key there would
         # be parsed as a field named 'constraints' with a list spec.

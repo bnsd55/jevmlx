@@ -1,4 +1,4 @@
-"""W6-2 prep: slope probe + adapter parity, standalone benchmark commands.
+"""Standalone prep probes: memory slope + adapter parity.
 
 Two commands (no engine wiring):
 
@@ -104,7 +104,7 @@ def probe_adapters(
     ``jevmlx.parity.bundled_preset_specs``): build the schema rows, and
     compare at ONE decision position of a row:
     ``model(row)[:, pos]`` (full-width head — what the engine does today)
-    vs ``adapter.lm_head(adapter.backbone(row)[:, pos])`` (the W6 flow).
+    vs ``adapter.lm_head(adapter.backbone(row)[:, pos])`` (the engine's flow).
     Records max abs diff over all cases and wall time of both head
     strategies (per case and total).
 
@@ -194,7 +194,7 @@ def build_parser() -> argparse.ArgumentParser:
     tests/test_m5_e2e.py TestPlannedArgvParses)."""
     parser = argparse.ArgumentParser(
         prog="python -m benchmarks.probe",
-        description="W6-2 prep: memory slope probe + adapter parity probe.",
+        description="memory slope probe + adapter parity probe.",
     )
     parser.add_argument("--model", default="quality", help="model id or alias (quality/fast/test)")
     parser.add_argument(

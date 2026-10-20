@@ -165,7 +165,7 @@ def test_summarize_two_report_files(tmp_path, capsys):
     root = Path(tmp_path)
     combo_a = root / "m5max-128gb--model-a" / "parallel-trie-bundled"
     combo_b = root / "m5max-128gb--model-a" / "parallel-labels-typesafe"
-    # W4-B: the model folder needs a passing parity.json for the numbers to
+    # The model folder needs a passing parity.json for the numbers to
     # stand (the parity gate itself is covered by
     # test_summarize_two_report_files_parity_gate below).
     model_dir = root / "m5max-128gb--model-a"
@@ -214,7 +214,7 @@ def test_summarize_two_report_files(tmp_path, capsys):
 
 
 def test_summarize_two_report_files_parity_gate(tmp_path):
-    """W4-B: without a passing parity.json the accuracy numbers are gated
+    """Without a passing parity.json the accuracy numbers are gated
     (parity_failed replaces the accuracy column); with one, they stand."""
     root = Path(tmp_path)
     model_dir = root / "m5max-128gb--model-a"
@@ -280,7 +280,7 @@ def test_summarize_writes_folder_readme(tmp_path):
 
 def test_summarize_header_cell_count_matches_rows(tmp_path):
     """parity-gates (B): SUMMARY.md header and separator have the SAME cell
-    count as every data row (P7 added majority_baseline and exact_record to
+    count as every data row (majority_baseline and exact_record were added to
     rows but not the header, so 'case exact' showed the majority value)."""
     root = Path(tmp_path)
     model_dir = root / "m5max-128gb--model-a"
@@ -324,7 +324,7 @@ def test_summarize_header_cell_count_matches_rows(tmp_path):
     assert "0.3" in text
 
 
-# --- multi-model bench (I9) ------------------------------------------------
+# --- multi-model bench ------------------------------------------------
 
 
 def _patch_bench_core(monkeypatch, tmp_path, failing_models=()):
@@ -429,12 +429,12 @@ def test_failing_model_does_not_stop_the_next(tmp_path, monkeypatch, capsys):
     )
 
     assert run_calls == ["org/good"]  # only the healthy model ran
-    # The failing model's combo holds an I6 load_failed run.json and shows
+    # The failing model's combo holds a load_failed run.json and shows
     # in the summary as a failure row (not silently skipped).
     bad_combo = out / "fake-8gb-org--bad" / "parallel-slots-bundled"
     assert (bad_combo / "run.json").is_file()
     bad_run = json.loads((bad_combo / "run.json").read_text(encoding="utf-8"))
-    # The fake's failure point is _run_one (post-load), so I6 classifies it
+    # The fake's failure point is _run_one (post-load), so the runner classifies it
     # run_failed. A load-time failure is the test_load_failure_row case.
     assert bad_run["status"] == "run_failed"
     assert (bad_combo / "report.json").exists() is False
@@ -474,10 +474,10 @@ def test_parse_models_file(tmp_path):
 
     f = tmp_path / "models.txt"
     f.write_text(
-        "# Ben's T1..T5 list\n"
+        "# a numbered plan list\n"
         "mlx-community/Qwen2.5-0.5B-Instruct-4bit\n"
         "\n"
-        "  # T2 below\n"
+        "  # item 2 below\n"
         "mlx-community/Llama-3.2-1B-Instruct-4bit # inline comment\n",
         encoding="utf-8",
     )
@@ -500,7 +500,7 @@ def test_bench_main_models_file_wiring(tmp_path, monkeypatch):
     """--models-file (alone, mutually exclusive with --model) reaches
     run_bench_models with the file's model list.
 
-    B1: --model and --models-file are now mutually exclusive (exactly one
+    --model and --models-file are now mutually exclusive (exactly one
     required). The old behavior (both allowed, --models-file overrode
     --model) is gone; this test passes --models-file alone."""
     from jevmlx import bench
@@ -681,7 +681,7 @@ def test_every_combo_failing_exits_nonzero(tmp_path, monkeypatch):
 
 
 def test_resume_does_not_skip_combos(tmp_path, monkeypatch, capsys):
-    """W5c-7 review: _combo_complete is gone — bench always passes resume=True.
+    """_combo_complete is gone — bench always passes resume=True.
     A second invocation calls _run_one again (resume), not skips it.
     """
     from jevmlx import bench
@@ -896,7 +896,7 @@ def test_parity_note_names_stage_and_drift(tmp_path):
 
 
 def test_bench_main_accepts_public_dataset_names_dry_run(tmp_path, monkeypatch, capsys):
-    """F2 (review 3): the CLI accepts the 9 public names (3 bare + 6
+    """The CLI accepts the 9 public names (3 bare + 6
     view-suffixed) — THROUGH main()/argparse, with --dry-run. A bare name
     expands to both views in the printed plan (the same expansion the run
     path uses); an unknown name still errors."""
@@ -970,7 +970,7 @@ def test_normalize_dataset_names_expands_bare_public():
     ]
 
 
-# --- W5c-13 (#79): per-combo Metal cache clear + memory telemetry ----------
+# --- per-combo Metal cache clear + memory telemetry ----------
 
 
 def test_w5c13_clear_metal_cache_called_once_per_combo_and_memory_block_written(
@@ -1028,7 +1028,7 @@ def test_w5c13_clear_metal_cache_called_once_per_combo_and_memory_block_written(
     monkeypatch.setattr(bench, "_print_pr_instructions", lambda f, r: None)
 
     # Stub _run_one: write a minimal run.json + return a result dict. The
-    # W5c-13 memory augmentation reads run.json back and adds the 'memory' key.
+    # Memory augmentation reads run.json back and adds the 'memory' key.
     def _fake_run_one(model, track, scorer, jsonl, combo_dir, **kw):
         run = {"run_id": "x", "environment": {}, "config": {}, "counts": {}}
         (combo_dir / "run.json").write_text(json.dumps(run), encoding="utf-8")
@@ -1091,7 +1091,7 @@ def test_w5c13_augment_run_json_missing_file_is_noop(tmp_path):
     assert not (Path(tmp_path) / "run.json").exists()
 
 
-# --- W5c-14 (#79): cap the Metal buffer cache (--metal-cache-gb) ------------
+# --- cap the Metal buffer cache (--metal-cache-gb) ------------
 
 
 def test_w5c14_set_cache_limit_called_once_with_configured_bytes(tmp_path, monkeypatch):
@@ -1179,7 +1179,7 @@ def test_w5c14_set_cache_limit_returns_none_on_failure(monkeypatch, capsys):
     assert set_cache_limit(8.0) is None
 
 
-# --- W5c-17: dataset lock sha256 in run.json --------------------------------
+# --- dataset lock sha256 in run.json --------------------------------
 
 
 def test_build_bundled_writes_lock_at_registered_name(tmp_path, monkeypatch):
@@ -1272,11 +1272,11 @@ def test_run_one_threads_registered_lock_into_run_json(tmp_path, monkeypatch):
     )
 
 
-# --- B11-naive: SUMMARY latency is call-level, calls column visible --------
+# --- SUMMARY latency is call-level, calls column visible --------
 
 
 def test_summarize_latency_from_timing_json_call_level(tmp_path, capsys):
-    """B11-naive: 'p50 latency (ms)' is the per_item_end_to_end_ms median
+    """'p50 latency (ms)' is the per_item_end_to_end_ms median
     from timing.json, NOT the per-line latency_ms. 'calls' column shows the
     call count so rotations are visible."""
     from benchmarks.summarize_results import _run_extras
@@ -1326,7 +1326,7 @@ def test_summarize_latency_from_timing_json_call_level(tmp_path, capsys):
 
 
 def test_summarize_latency_dash_when_no_timing_json(tmp_path, capsys):
-    """B11-naive: when timing.json is missing, latency is a dash (—) and
+    """When timing.json is missing, latency is a dash (—) and
     calls is a dash."""
     combo = tmp_path / "m5max-128gb--model-a" / "parallel-trie-typesafe"
     combo.mkdir(parents=True)
@@ -1353,7 +1353,7 @@ def test_summarize_latency_dash_when_no_timing_json(tmp_path, capsys):
     assert "—" in text
 
 
-# ----------------------------------------------------------- B6: dataset locks
+# ----------------------------------------------------------- dataset locks
 
 
 def _tiny_cases_jsonl(path):
@@ -1388,7 +1388,7 @@ def _write_fake_lock(lock_path, jsonl_path, *, kind="synthetic", **extra):
 
 
 class TestEveryDatasetWritesLock:
-    """B6: every builder that build_datasets registers must write
+    """Every builder that build_datasets registers must write
     <name>.dataset.lock.json. The field failure was typesafe + perturbed
     writing the wrong name (or none), so run.json's dataset_lock_sha256
     raised OSError at eval time — after the model loaded.
@@ -1511,7 +1511,7 @@ class TestEveryDatasetWritesLock:
         cache.mkdir()
         monkeypatch.setattr(bench, "BENCH_CACHE", cache)
 
-        # A broken builder: writes the jsonl, forgets the lock (the B6 bug).
+        # A broken builder: writes the jsonl, forgets the lock (the bug this test guards).
         def _broken_build_typesafe():
             _tiny_cases_jsonl(cache / "typesafe.jsonl")
             # NO lock written — the bug.
@@ -1588,7 +1588,7 @@ class TestEveryDatasetWritesLock:
 
 
 class TestFailedComboReruns:
-    """B6: a combo whose run.json says run_failed/load_failed must rerun
+    """A combo whose run.json says run_failed/load_failed must rerun
     (fresh), not resume from partial predictions."""
 
     def test_combo_previously_failed_detects_run_failed(self, tmp_path):

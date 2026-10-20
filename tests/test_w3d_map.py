@@ -1,4 +1,4 @@
-"""W3-D tests: constrained MAP (GPT-REVIEW Q1 'Cheapest fix: constrained MAP').
+"""Constrained MAP tests.
 
 Verifies:
 - A 3-field component where the independent argmax violates an implies
@@ -54,7 +54,7 @@ def test_implies_map_flips_low_margin_child():
         }
     ]
 
-    # W5b-11: the MAP unit evaluates COMPILED constraints — compile once.
+    # The MAP unit evaluates COMPILED constraints — compile once.
     schema = StructuredSchema(
         {
             "intent": {"type": "enum", "description": "d", "choices": ["billing", "technical"]},
@@ -99,7 +99,7 @@ def test_excludes_constraint():
         "approved": {"value": "true"},
         "rejection_reason": {"value": "policy"},  # violates excludes
     }
-    # W5b-11: compiled constraints carry TYPED domains — boolean fields
+    # Compiled constraints carry TYPED domains — boolean fields
     # compile to [True, False], so the constraint value is the Python bool
     # (the old string-key path silently accepted "true").
     constraints = [
@@ -127,7 +127,7 @@ def test_excludes_constraint():
     # rejection_reason=eligibility (-1.5) = -1.6 but eligibility also violates.
     # The only valid assignments: approved=false + any reason, or approved=true
     # + reason="". Since "" is not a candidate, only approved=false + reason.
-    # W5b-11: the MAP decides TYPED values (the boolean field reconciles to
+    # The MAP decides TYPED values (the boolean field reconciles to
     # Python False, not the score key "false").
     assert reconciled["approved"] is False
     assert reconciled["rejection_reason"] == "policy"  # best reason
@@ -201,7 +201,7 @@ def test_reconciled_fields_in_telemetry():
     assert reconciled["subtype"] == "refund"
 
 
-# ------------------------- P9 (F7 part 1): the record reports what it returns
+# ------------------------- the record reports what it returns
 
 
 def _state(parsed, telemetry):
@@ -236,7 +236,7 @@ def _scalar_tel(value, probability, log_scores, **extra):
 
 
 def test_T1_boolean_map_change_reports_returned_value():
-    """P9 T1 (the F7 probe): model winners are (allow, false); the implies
+    """Model winners are (allow, false); the implies
     constraint forces flag=True. The record must report the RETURNED value:
     probability = P(true), a negative probability_margin, the top OTHER
     choice as alternatives — while the distribution keys stay untouched.
@@ -289,7 +289,7 @@ def test_T1_boolean_map_change_reports_returned_value():
 
 
 def test_T3_enum_map_change_reports_returned_value():
-    """P9 T3: same checks for a plain enum (the str(val) lookup path) —
+    """Same checks for a plain enum (the str(val) lookup path) —
     subtype bug -> refund under intent=billing."""
     constraints = [
         {
@@ -335,7 +335,7 @@ def test_T3_enum_map_change_reports_returned_value():
 
 
 def test_T4_unchanged_field_telemetry_identical():
-    """P9 T4 (MAP half): a field the MAP did NOT change is untouched — no
+    """A field the MAP did NOT change is untouched — no
     decision numbers injected, every key identical (the normal-path numbers
     already came from the ONE helper at finalize time)."""
     constraints = [

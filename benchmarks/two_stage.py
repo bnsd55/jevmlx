@@ -1,4 +1,4 @@
-"""B11: two-stage vs one-stage choice measurement for 255-option enums.
+"""Two-stage vs one-stage choice measurement for 255-option enums.
 
 Question: for a 255-option enum (high_cardinality_255 preset, field
 ``customs_category``), is coarse→fine two-stage choice (stage 1: pick a
@@ -254,7 +254,7 @@ def _build_markdown_table(
 ) -> str:
     """Build the two_stage.md markdown table."""
     lines = [
-        "# B11: Two-Stage vs One-Stage Choice (255-option enum)",
+        "# Two-Stage vs One-Stage Choice (255-option enum)",
         "",
         f"Machine: `{machine}` | Model: `{model}` | N: {n}",
         "",
@@ -285,7 +285,7 @@ def _build_markdown_table(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="B11 two-stage vs one-stage measurement")
+    parser = argparse.ArgumentParser(description="two-stage vs one-stage measurement")
     parser.add_argument("--model", default="fast", help="Model alias or Hub id")
     parser.add_argument("--n", type=int, default=12, help="Number of cases (default 12)")
     parser.add_argument("--temperature", type=float, default=1.0, help="Temperature")
@@ -299,7 +299,7 @@ def main() -> int:
     cases = _build_cases(preset, args.n)
     groups = partition_options(choices, args.group_size)
 
-    print("=== B11 two-stage measurement ===")
+    print("=== two-stage measurement ===")
     print(f"Model: {args.model}, N: {len(cases)}, choices: {len(choices)}, groups: {len(groups)}")
     print()
 

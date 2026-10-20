@@ -1,4 +1,4 @@
-"""W2-E step 2: pooled logistic calibration for multi fields.
+"""Pooled logistic calibration for multi fields.
 
 - fit_logistic on a synthetic separable set recovers sign and ordering.
 - Decision path without calibration: fixed P(yes) >= 0.5 rule (as before).
@@ -69,7 +69,7 @@ def test_fit_logistic_flipped_labels_give_negative_slope():
 
 
 def test_fit_logistic_separable_pool_stays_bounded():
-    """F2: on a perfectly separable pool the unregularized MLE diverges, so
+    """On a perfectly separable pool the unregularized MLE diverges, so
     the default l2=1e-3 must keep (a, b) finite and bounded while the
     calibrated sign still separates the classes."""
     rng = random.Random(7)
@@ -132,7 +132,7 @@ def test_engine_with_calibration_bundle_selects_by_sign():
     )
     assert drop["parsed_json"]["flags"]["value"] == []
     assert drop["field_telemetry"]["flags"]["calibrated"] == {"a": 1.0, "b": -3.0}
-    # Margin in probability units (F1): calibrated c = -1 per option ->
+    # Margin in probability units: calibrated c = -1 per option ->
     # |sigmoid(-1) - 0.5|; raw log-odds ride calibrated_log_odds.
     assert drop["field_telemetry"]["flags"]["margin"] == pytest.approx(
         abs(1.0 / (1.0 + math.exp(1.0)) - 0.5)
@@ -145,11 +145,11 @@ def test_engine_with_calibration_bundle_selects_by_sign():
 
 
 def test_engine_calibration_from_file(tmp_path):
-    """F3: run_parallel_generation ALSO takes the bundle only — the file is
+    """run_parallel_generation ALSO takes the bundle only — the file is
     loaded at the boundary (CalibrationBundle.load), then passed in."""
     model = _BiasedMultiModel(yes_logit=1.0, no_logit=-1.0)
     path = tmp_path / "calib.json"
-    # W5-C finding 22: ONE bundle shape — the same one the CLI writes.
+    # ONE bundle shape — the same one the CLI writes.
     path.write_text(
         json.dumps(
             {
@@ -175,7 +175,7 @@ def test_engine_calibration_from_file(tmp_path):
 
 
 def test_engine_calibration_payload_validation():
-    """F3: the engine takes CalibrationBundle | None ONLY.
+    """The engine takes CalibrationBundle | None ONLY.
 
     A path is loaded at the public boundary (api._resolve_calibration) —
     the engine-level run_parallel_generation raises TypeError for a str.
@@ -283,7 +283,7 @@ def test_openai_multi_calibrated_selection_and_no_threshold_key():
             "flags",
             field,
             5.0,
-            # W5-C finding 22: the typed CalibrationBundle (the ONE shape
+            # The typed CalibrationBundle (the ONE shape
             # from_payload parses; fields the CLI does not set stay None).
             CalibrationBundle.from_payload(
                 {
@@ -310,7 +310,7 @@ def test_openai_multi_calibrated_selection_and_no_threshold_key():
     assert telemetry_off["value"] == ["x", "y", "z"]  # 0.9 >= 0.5 uncalibrated
 
 
-# ------------------------------------------- P8: one decision coordinate --
+# ------------------------------------------- one decision coordinate --
 
 
 def _built_multi(model, tokenizer, choices):
@@ -348,7 +348,7 @@ def _run_multi_field(
     engine, schema, built, dispatch, fr, cache, *, prior=None, calib=None, temperature=1.0
 ):
     """score_multi_field over the hand-built dispatch (the signature is
-    stable on main — the P8 failures there are behavioral, not import
+    stable on main — the failures there are behavioral, not import
     errors)."""
     from jevmlx.engine import score_multi_field
     from jevmlx.timing import Ledger
@@ -373,11 +373,11 @@ def _run_multi_field(
 
 
 def test_T1_calibrated_selection_uses_corrected_log_odds():
-    """P8 T1 (the P6 probe, mid-level): the corrected evidence says NO but
+    """The corrected evidence says NO but
     the raw pair says YES — with a calibrator the option must NOT be
     selected. Raw [1.0, -1.0] (log-odds 2.0), prior [2.0, -1.0] (difference
     3.0): z = 2.0 - 3.0 = -1.0 < 0. Main's calibrated branch keys on the
-    RAW pair (c = 2.0 > 0) and selects the option — the F6 bug."""
+    RAW pair (c = 2.0 > 0) and selects the option — the raw-pair bug."""
     engine, schema, built, dispatch, fr, cache = _built_multi(
         _BiasedMultiModel(vocab_size=128), FakeTokenizer(), ["A", "B"]
     )
@@ -394,7 +394,7 @@ def test_T1_calibrated_selection_uses_corrected_log_odds():
 
 
 def test_T2_reported_probability_is_the_selection_number():
-    """P8 T2: for EVERY option the reported P(yes) is the exact number the
+    """For EVERY option the reported P(yes) is the exact number the
     selection consumed — calibrated p = sigmoid(a*z + b) on the CORRECTED
     log-odds. Main reports the uncalibrated corrected softmax there (a raw
     a=2.0/b=0.5 calibrator never reaches the reported number)."""
@@ -445,7 +445,7 @@ def test_T2_reported_probability_is_the_selection_number():
 
 
 def test_T3_joint_solver_scores_the_same_coordinate():
-    """P8 T3: the trusted-count joint solver must score options in the SAME
+    """The trusted-count joint solver must score options in the SAME
     corrected coordinate as the threshold path. Raw ordering: A (1.0) > B
     (0.9); the prior flips the corrected ordering: z_A = 1.0 - 3.0 = -2.0,
     z_B = 0.9. A trusted count of exactly 1 must select top-1 by z = B.
@@ -469,7 +469,7 @@ def test_T3_joint_solver_scores_the_same_coordinate():
 
 
 def test_T4_no_prior_prior_corrected_false():
-    """P8 T4: with no prior at all the multi telemetry carries
+    """With no prior at all the multi telemetry carries
     prior_corrected = False (main: the key is ABSENT)."""
     engine, schema, built, dispatch, fr, cache = _built_multi(
         _BiasedMultiModel(vocab_size=128), FakeTokenizer(), ["A", "B"]
@@ -483,11 +483,11 @@ def test_T4_no_prior_prior_corrected_false():
 
 
 def test_T5_collect_multi_corrected_z_matches_engine():
-    """P8 T5 (calibration fit): collect_multi(prior_correction=True) folds
+    """Calibration fit: collect_multi(prior_correction=True) folds
     each option's z to the SAME corrected log-odds the engine applies the
     (a, b) to — raw difference minus the prior difference from the
     telemetry's prior_option_pairs. Fitting on a different quantity than
-    the engine applies is the F6 root cause."""
+    the engine applies is the root cause of the raw-pair bug."""
     from jevmlx.calibrate import collect_multi
 
     engine = make_engine(

@@ -1,4 +1,4 @@
-"""W6-UI-3b: control-room dashboard page tests.
+"""Control-room dashboard page tests.
 
 The page is a static HTML file (inline CSS + vanilla JS) that fetches
 /dashboard.json and /questions.json and renders client-side. These tests
@@ -63,11 +63,11 @@ class TestHtmlPanels:
             assert text in HTML, f"missing legend text: {text}"
 
     def test_no_meta_refresh(self):
-        """W6-UI-3f: the page must NOT reload via meta refresh — SSE drives updates."""
+        """The page must NOT reload via meta refresh — SSE drives updates."""
         assert 'http-equiv="refresh"' not in HTML
 
     def test_no_root_innerhtml_wipe(self):
-        """W6-UI-3f: #root.innerHTML is assigned only on first paint, never on patch."""
+        """#root.innerHTML is assigned only on first paint, never on patch."""
         # The only 'root.innerHTML=' assignment is in initialRender (first paint).
         # patchDashboard must never touch root.innerHTML.
         assert HTML.count("root.innerHTML=h") == 1
@@ -76,7 +76,7 @@ class TestHtmlPanels:
         assert "setInterval" not in HTML
 
     def test_sse_eventsource_present(self):
-        """W6-UI-3f: the page connects via EventSource for live updates."""
+        """The page connects via EventSource for live updates."""
         assert "EventSource('/events')" in HTML or 'EventSource("/events")' in HTML
 
     def test_no_external_deps(self):
@@ -92,7 +92,7 @@ class TestHtmlPanels:
         assert "__REFRESH__" not in html
 
     def test_first_paint_patches_shells(self):
-        """W6-UI-3h: initialRender must call patchDashboard(D) after building
+        """initialRender must call patchDashboard(D) after building
         shells so the first paint carries real values before any SSE event."""
         # The initialRender function must call patchDashboard(D) after setting
         # booted=true — this is what fills NOW/MEMORY/HEALTH/AGGREGATES nodes.
@@ -103,7 +103,7 @@ class TestHtmlPanels:
         assert idx_patch > idx_booted, "patchDashboard(D) must come after booted=true"
 
     def test_combo_id_sent_verbatim_on_click(self):
-        """W6-UI-3h: the click handler sends results[i].combo_id (the
+        """The click handler sends results[i].combo_id (the
         out-relative path) verbatim to /questions.json?combo=, not the
         model|dataset|scorer|track pipe-string."""
         # The row key must be row.combo_id (with a defensive fallback).
@@ -114,12 +114,12 @@ class TestHtmlPanels:
         assert "selComboDisplayName=row.display_name||row.combo_id||key" in HTML
 
     def test_attempt_null_renders_dash(self):
-        """W6-UI-3h: attempt_n=null shows '—' not '0' or empty."""
+        """attempt_n=null shows '—' not '0' or empty."""
         assert 'function fmtAttempt(n){return n==null?"—":String(n);}' in HTML
         assert "fmtAttempt(t.attempt_n)" in HTML
 
     def test_fmt_nullable_present(self):
-        """W6-UI round 4: fmtNullable helper renders null/undefined as —."""
+        """fmtNullable renders null/undefined as —."""
         assert "function fmtNullable" in HTML
         # rotation must use fmtNullable, not raw concatenation.
         assert "fmtNullable(r.rotation)" in HTML
@@ -129,11 +129,11 @@ class TestHtmlPanels:
         assert "+c.rotation+" not in HTML
 
     def test_fmt_num_guards_nan(self):
-        """W6-UI round 4: fmtNum guards NaN/Infinity (cases/h with <2 hb)."""
+        """fmtNum guards NaN/Infinity (cases/h with <2 hb)."""
         assert "!isFinite(v)" in HTML
 
     def test_no_raw_null_concatenations(self):
-        """W6-UI round 4: sweep — no raw concatenation of nullable fields."""
+        """Sweep — no raw concatenation of nullable fields."""
         # These were the spots that rendered 'null' as a literal string.
         assert "+t.machine+" not in HTML
         assert "+m.cap_gb+" not in HTML

@@ -1,4 +1,4 @@
-"""B5: every benchmark script that calls load_engine has an executed
+"""Every benchmark script that calls load_engine has an executed
 fake-engine test.
 
 Root cause of the M5 field failure: benchmarks/probe.py unpacked

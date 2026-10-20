@@ -1,5 +1,5 @@
 /**
- * B12 TypeScript client tests (node:test, no network).
+ * TypeScript client tests (node:test, no network).
  *
  * The global fetch is swapped with a capture function that records the
  * outgoing URL/method/headers/body and returns a canned Response. Fixture

@@ -1,9 +1,9 @@
-"""Fetch the three PUBLIC gold datasets (W6-B5) as jevmlx eval JSONL.
+"""Fetch the three PUBLIC gold datasets as jevmlx eval JSONL.
 
 - AG News (``fancyzhx/ag_news``): 4-class topic classification — enum.
 - BoolQ (``google/boolq``): reading-comprehension yes/no — boolean (noul).
 - SST-5 (``SetFit/sst5``): ordinal sentiment, 5 levels — ordered enum
-  (the B1 derivation: the ORDER lives in the choices list and the level
+  (the ORDER lives in the choices list and the level
   texts in the description; no new engine field type).
 
 Every dataset is PINNED by its repo commit sha (``DEFAULT_REVISION`` per
@@ -60,7 +60,7 @@ class PublicDataset:
     """One public dataset's fetch + sampling config (name + repo + pin).
 
     ``expected_sha256`` maps each file to its KNOWN-GOOD digest at the
-    pinned revision (F5): the download is verified against it and the
+    pinned revision: the download is verified against it and the
     value is re-checked on cache reuse. ``row_id`` takes (row, split,
     index) — split-aware and duplicate-free (F10).
     """
@@ -177,7 +177,7 @@ def _sst5_schema() -> dict:
 # available for future few-shot work but is not sampled by the bench).
 EVAL_SPLITS = {"ag_news": "test", "boolq": "validation", "sst5": "test"}
 
-# F5: the KNOWN-GOOD sha256 of every pinned file (verified on download and
+# The KNOWN-GOOD sha256 of every pinned file (verified on download and
 # re-checked on cache reuse). A mismatch fails closed — these are the bytes
 # the locks are computed against.
 EXPECTED_SHA256 = {
@@ -315,7 +315,7 @@ def build_case(
 
 
 def _download(ds: PublicDataset, split: str) -> Path:
-    """Download the pinned file and VERIFY it (F5): the digest must equal the
+    """Download the pinned file and VERIFY it: the digest must equal the
     hardcoded expectation for the pinned revision; any mismatch is a hard
     OSError (never sampled, never locked)."""
     from huggingface_hub import hf_hub_download
@@ -331,7 +331,7 @@ def _download(ds: PublicDataset, split: str) -> Path:
             )
         )
     except Exception as exc:  # noqa: BLE001 — one clear message for any cause
-        # F6: OSError (not SystemExit) so build_datasets' offline skip works.
+        # OSError (not SystemExit) so build_datasets' offline skip works.
         raise OSError(
             f"{ds.repo_id}@{ds.revision} [{file_path}]: download failed "
             f"({exc.__class__.__name__}). The fetch needs the PINNED revision "
@@ -370,7 +370,7 @@ def _balanced_positions(
 ) -> list[int]:
     """Class-balanced diagnostic positions: per_class rows per class, chosen
     by lowest deterministic slot of the RECORDED source_row_id (the same id
-    the case stores — N2: the split rides along, no placeholder)."""
+    the case stores — the split rides along, no placeholder)."""
     by_class: dict[object, list[int]] = {}
     for pos, row in enumerate(rows):
         by_class.setdefault(ds.label_of(row), []).append(pos)
@@ -395,7 +395,7 @@ def _natural_positions(
     total: int = NATURAL_ROWS,
     log=print,
 ) -> list[int]:
-    """F8: natural view = the dataset's own prevalence, drawn from rows the
+    """Natural view = the dataset's own prevalence, drawn from rows the
     balanced view did NOT take (disjoint), by lowest deterministic slot of
     the recorded source_row_id."""
     remaining = [pos for pos in range(len(rows)) if pos not in exclude]
@@ -418,7 +418,7 @@ def fetch_dataset(
     """Both views for one dataset; return ({view: records}, file sha256 map).
 
     The split file is downloaded and parsed ONCE; the balanced view is
-    sampled first, the natural view draws DISJOINT remaining rows (F8).
+    sampled first, the natural view draws DISJOINT remaining rows.
     """
     per_class = BALANCED_ROWS_PER_CLASS if per_class is None else per_class
     natural_total = NATURAL_ROWS if natural_total is None else natural_total

@@ -1,4 +1,4 @@
-"""W6-B1: ordered-enum telemetry (engine, API, metrics).
+"""Ordered-enum telemetry (engine, API, metrics).
 
 Unit tests on finalize_scalar_evidence (the ONE finalizer), the public
 FieldResult.ordinal record, and the ordinal metrics — no live model.
@@ -35,7 +35,7 @@ def _evidence(probs: list[float]) -> ScalarEvidence:
 
 
 def test_spec_p02_p08_expected_index_and_variance():
-    """The W6-B1 spec check: p=[.2, .8] on 2 levels gives expected_index
+    """Spec check: p=[.2, .8] on 2 levels gives expected_index
     0.8 and variance 0.16."""
     decision, rescored = finalize_scalar_evidence(
         _evidence([0.2, 0.8]),
@@ -119,7 +119,7 @@ def _telemetry(ordinal: dict | None = None) -> dict:
             {"choice": "1", "probability": 0.8},
             {"choice": "0", "probability": 0.2},
         ],
-        # P9: the decision part every log_scores entry carries.
+        # The decision part every log_scores entry carries.
         "log_score_margin": math.log(0.8) - math.log(0.2),
         "probability_margin": 0.6,
         "alternatives": [
@@ -422,11 +422,11 @@ def test_evalrun_prediction_lines_carry_ordinal_keys(tmp_path):
     assert "ordinal" not in flag_lines[0] and "ordinal_choices" not in flag_lines[0]
 
 
-# ---- review fixes F2/F3 -------------------------------------------------------
+# ---- dict-schema strictness + one-choice records ------------------------------
 
 
 def test_dict_schema_rejects_non_bool_ordered():
-    """F2: the dict-schema path is as strict as the Pydantic path — a
+    """The dict-schema path is as strict as the Pydantic path — a
     truthy non-bool ordered raises TypeError, never silently orders."""
     with pytest.raises(TypeError, match="ordered must be a bool"):
         StructuredSchema(
@@ -439,7 +439,7 @@ def test_dict_schema_rejects_non_bool_ordered():
 
 
 def test_cardinality_one_ordered_enum_emits_degenerate_record():
-    """F3: an ordered enum with ONE choice still emits the ordinal record
+    """An ordered enum with ONE choice still emits the ordinal record
     (the degenerate scale) — the key's presence is guaranteed."""
     from conftest import make_engine
     from test_engine_fake import BiasedFakeModel
@@ -461,7 +461,7 @@ def test_cardinality_one_ordered_enum_emits_degenerate_record():
 
 
 def test_ordinal_lines_strict_pairing():
-    """F3: ordinal_choices without ordinal is a contract violation — raise,
+    """ordinal_choices without ordinal is a contract violation — raise,
     never a silently-skipped row."""
     from jevmlx.evalmetrics import _ordinal_lines
 
@@ -472,7 +472,7 @@ def test_ordinal_lines_strict_pairing():
     assert _ordinal_lines([{"field": "t", "label": "a", "prediction": "b"}]) == []
 
 
-# ---- F5 round 2: hard records on non-parallel tracks -------------------------
+# ---- hard records on non-parallel tracks -------------------------
 
 
 def test_attach_ordinal_derives_hard_record_for_predicted_level():

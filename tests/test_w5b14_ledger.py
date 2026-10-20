@@ -1,4 +1,4 @@
-"""W5b-14 tests: the engine's ledger adoption.
+"""The engine's ledger adoption tests.
 
 - ONE Ledger per request; every stage records spans on it (no optional
   ledger, no dual path — ScoreRowsResult carries no timing fields).
@@ -110,10 +110,11 @@ class TestNoDualFields:
 
 
 class TestReviewFixes:
-    """The 2026-09-19 review: F3/F4/F5/F6 regressions covered."""
+    """Review regressions covered: per-context prefill, the second-pass span,
+    forced Metal retries, unpadded merges."""
 
     def test_each_batched_context_has_own_prefill_ms(self):
-        """GAP A / F4: per-context ledgers — every result's prefill_ms is
+        """Per-context ledgers — every result's prefill_ms is
         ITS OWN prefill span, NOT the batch-wide sum (they differ when the
         prompts differ in length)."""
         schema = _schema()
@@ -130,7 +131,7 @@ class TestReviewFixes:
         assert all(0 < r["prefill_ms"] < total for r in results)
 
     def test_second_pass_ms_is_dependency_interval(self):
-        """F3: second_pass_ms == the dependency span (not the old
+        """second_pass_ms == the dependency span (not the old
         telemetry accumulator — they would diverge if the dependency pass
         re-used a cached prior)."""
         schema = StructuredSchema(
@@ -155,7 +156,7 @@ class TestReviewFixes:
         assert res["second_pass_ms"] <= res["elapsed_ms"] + 1e-6
 
     def test_forced_metal_retry_under_group_wall(self):
-        """F5 / GAP B: a Metal allocation failure that retries must not
+        """A Metal allocation failure that retries must not
         break the parents' __exit__ (one forced [metal::malloc] failure)."""
 
         from conftest import FakeModel
@@ -181,11 +182,11 @@ class TestReviewFixes:
         assert len(results) == 2
         for res in results:
             assert res["group_wall_ms"] > 0.0
-            # N4: the batched path passes failed_attempts through.
+            # The batched path passes failed_attempts through.
             assert res["failed_attempts"] >= 1
 
     def test_degenerate_schema_no_crash(self):
-        """N2 repro: an R==0 (single-choice) schema through the batched
+        """An R==0 (single-choice) schema through the batched
         path must produce results with group views — the old branch never
         stored results[idx] and opened a nested group_wall."""
         schema = StructuredSchema(
@@ -202,7 +203,7 @@ class TestReviewFixes:
             assert res["contexts_per_pass"] == 2
 
     def test_per_item_e2e_excludes_other_groups(self):
-        """N6: per_item_end_to_end_ms = own prefill + amortized group share
+        """per_item_end_to_end_ms = own prefill + amortized group share
         + own assembly (sum of intervals) — a context in group k never
         carries another group's wall time. With 4 contexts forced into 2
         groups (tiny budget), no e2e may exceed its own prefill + its
@@ -221,9 +222,9 @@ class TestReviewFixes:
             assert res["per_item_end_to_end_ms"] <= res["prefill_ms"] + res["group_wall_ms"] + 0.5
 
     def test_batched_prior_ms_shared_nonzero(self):
-        """N1: prior_correction=True in the batched path reports the shared
+        """prior_correction=True in the batched path reports the shared
         prior pass on EVERY result (prior_ms > 0), and total_ms includes it
-        (finding 26)."""
+        (the request ledger)."""
         schema = _schema()
         results = run_parallel_generation_batched(
             make_engine(model=FakeModel(vocab_size=64)),
@@ -236,7 +237,7 @@ class TestReviewFixes:
             assert res["total_ms"] == pytest.approx(res["elapsed_ms"] + res["prior_ms"], abs=0.05)
 
     def test_unpadded_chunks_eval_their_cache(self):
-        """F6: _eval_cache_state runs UNCONDITIONALLY — an unpadded merge
+        """_eval_cache_state runs UNCONDITIONALLY — an unpadded merge
         still evaluates (cache_merge spans the whole broadcast region)."""
         # Structural: the call sits outside the max_padding guard.
         import inspect

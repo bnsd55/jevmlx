@@ -1,4 +1,4 @@
-"""Fetch the jabr classifier-benchmark as jevmlx eval JSONL (W6-B1).
+"""Fetch the jabr classifier-benchmark as jevmlx eval JSONL.
 
 Source: https://github.com/jabr/classifier-benchmark — a public-domain
 (CC0) benchmark of 8 classification tasks / 78 cases for "System One"-style
@@ -49,7 +49,7 @@ SOURCE_FILE = "bench/cases.py"
 LICENSE = "CC0 1.0 Universal (public domain; redistribution allowed)"
 REDISTRIBUTION_ALLOWED = True
 
-# F5: the KNOWN-GOOD sha256 of bench/cases.py at the pinned revision.
+# The KNOWN-GOOD sha256 of bench/cases.py at the pinned revision.
 # Verified on 2026-09-20 against the raw.githubusercontent.com bytes.
 EXPECTED_SHA256 = "fd096adc2fa1d678add69e9769a4e8b6bdf108f41c54d58ea0b7c7e04925835d"
 
@@ -260,7 +260,7 @@ def _input_hash(schema: dict, text: str) -> str:
 
 
 def _download() -> tuple[str, str]:
-    """Download the pinned file and VERIFY it (F5).
+    """Download the pinned file and VERIFY it.
 
     Returns (source_text, sha256). Any mismatch is a hard OSError (never
     parsed, never locked). Network failure is also OSError (not SystemExit)

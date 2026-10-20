@@ -1,6 +1,6 @@
-"""W4-B: scoring parity check — one implementation, two consumers.
+"""Scoring parity check — one implementation, two consumers.
 
-The W1-A slow test (batch=1 vs batch=N vs chunked scoring agreement) and
+The slow parity test (batch=1 vs batch=N vs chunked scoring agreement) and
 the bench's ``parity.json`` producer must share EXACTLY one
 implementation, or the recorded parity and the tested parity drift apart.
 This module is that implementation:
@@ -42,8 +42,8 @@ actually rescored). FAIL = a winner differs, or an escaped near-tie. The
 drift numbers (raw / gap / margin / logp, in nats AND in fp16 ulps of the
 measured logit magnitude) ride the payload as diagnostics and never gate.
 Readers reject a scored payload still carrying status DRIFT
-(pre-contract) with a regenerate hint; pre-F9 payloads without a scoring
-key keep the UNVERIFIED (pre-F9) display.
+(pre-contract) with a regenerate hint; payloads recorded before per-scorer parity, without a scoring
+key keep the UNVERIFIED (no scorer recorded) display.
 """
 
 from __future__ import annotations
@@ -76,7 +76,7 @@ PARITY_TEST_NAME = "test_w1a_scoring_parity_batch_vs_chunked_real_model"
 
 def bundled_preset_specs() -> list[tuple[str, dict]]:
     """(preset_id, preset) for every bundled preset, loaded from the
-    package. W5-D finding 41: the WHOLE preset dict is returned (schema +
+    package. The WHOLE preset dict is returned (schema +
     context + description), not just spec["schema"] — the parity run must
     score the preset's REAL context, not generic filler. ``id`` inside the
     JSON wins when present; else the stem. The single-context consumers
@@ -93,7 +93,7 @@ def bundled_preset_specs() -> list[tuple[str, dict]]:
 
 
 def _corrected_option_odds(tel: dict) -> dict[str, float] | None:
-    """Per-option corrected log-odds (P8) — the multi decision coordinate.
+    """Per-option corrected log-odds — the multi decision coordinate.
 
     z = raw (yes - no) minus the prior difference when a prior pair exists,
     the SAME number the multi selection consumes. None when the telemetry
@@ -112,7 +112,7 @@ def _corrected_option_odds(tel: dict) -> dict[str, float] | None:
 def _multi_and_count_drift(
     fname: str, full_tel: dict, again_tel: dict, full_int: dict, again_int: dict
 ) -> float:
-    """Multi + count-row drift for one field (F9): the per-option corrected
+    """Multi + count-row drift for one field: the per-option corrected
     log-odds drift and the count row's log-score drift, the same quantities
     the engine's rescore gate keys on. Returns 0.0 when neither side has
     the telemetry (not a multi field).
@@ -196,7 +196,7 @@ def check_scoring_parity(
                 again_tel = again["field_telemetry"].get(fname, {})
                 ls_full = tel.get("log_scores")
                 if ls_full is None:
-                    # F9: multi fields contribute their per-option corrected
+                    # Multi fields contribute their per-option corrected
                     # log-odds drift — never measured before, so a batch
                     # drift on a multi option passed parity silently.
                     multi_drift = _multi_and_count_drift(
@@ -228,7 +228,7 @@ def check_scoring_parity(
 
 
 def _field_margin(tel: dict) -> float:
-    """The field's near-tie margin m (P4) — the SAME quantity the engine's
+    """The field's near-tie margin m — the SAME quantity the engine's
     rescore gate keys on: the top-two gap of the prior-corrected log-scores
     at T=1. Scalar and count telemetry carry those scores as ``log_scores``
     (a log-softmax keeps the gap). Multi fields have no field-level log P —
@@ -257,7 +257,7 @@ def _field_margin(tel: dict) -> float:
 
 
 def _environment_metadata(engine: Any) -> dict[str, Any]:
-    """Machine + library + model metadata for parity.json (W5c-1 review §3).
+    """Machine + library + model metadata for parity.json.
 
     Best-effort: every field degrades to None when the source is
     unavailable (the parity check runs on the LOADED engine, so mlx is
@@ -293,7 +293,7 @@ def _rescore_gate_safety_assertion(
     engine: Any,
     cases: list[tuple[str, dict]] | None,
 ) -> dict[str, Any]:
-    """Per-field rescore-gate safety check (W5c-1 review §2 item 4).
+    """Per-field rescore-gate safety check.
 
     For every field in every case, computes batch-one evidence
     (single-context ``run_parallel_generation``) and batched evidence
@@ -368,7 +368,7 @@ def parity_report(
 
     Takes the loaded :class:`jevmlx.engine.Engine`.
 
-    W5c-1: runs BOTH parity checks into ONE payload —
+    Runs BOTH parity checks into ONE payload —
     :func:`check_scoring_parity` (batch vs chunked, single-context) AND
     :func:`check_batched_parity` (batched-vs-independent matrix with the
     raw pre-rescore row-logit gate). ``check_results.check_parity``
@@ -392,27 +392,27 @@ def parity_report(
     result = check_scoring_parity(engine, cases, max_rows_options, scoring=scoring)
     batched = check_batched_parity(engine, cases, scoring=scoring)
     winners_identical = bool(result["winners_identical"] and batched["winners_identical"])
-    # Single-context W1-A drift (the invariant that predates the matrix).
+    # Single-context drift (the invariant that predates the matrix).
     max_abs_drift = result["max_abs_drift_nats"]
     # Batched final log-score drift (across the 1/2/4-context matrix).
     max_batched_drift = batched["max_abs_drift_nats"]
-    # The decomposition (review section 2): d_raw = diagnostic; d_gap and
+    # The decomposition: d_raw = diagnostic; d_gap and
     # margin drift = the gate.
     max_raw_drift = batched["max_raw_row_drift_nats"]
     max_gap_drift = batched["max_gap_drift_nats"]
     max_logp_drift = batched["max_logp_drift_nats"]
     max_margin_drift = batched["max_margin_drift_nats"]
     max_merged_rows = batched.get("max_merged_rows", 0)
-    # Rescore-gate safety assertion (review section 2, item 4): did any
+    # Rescore-gate safety assertion: did any
     # field sit inside the 0.05 near-tie band at batch=1 but escape the
     # rescore under batching? That is the actual failure mode the raw gate
     # is a proxy for.
     rescore_flag = _rescore_gate_safety_assertion(engine, cases)
     escaped = rescore_flag["escaped_near_tie"]
-    # W5c-9: the batched matrix's measured d_gap PERSISTS as a drift-envelope
+    # The batched matrix's measured d_gap PERSISTS as a drift-envelope
     # record (user cache + probes folder) — the measured envelope the engine
-    # band reads. The PARITY GATE below stays at the FIXED 0.05: recording
-    # the envelope never redefines parity; it bounds the rescore band.
+    # band reads. The PARITY GATE below checks DECISIONS (issue #184):
+    # recording the envelope never redefines parity; it bounds the rescore band.
     recorded = _record_envelope_from_report(engine, model_id, max_gap_drift, max_merged_rows)
     # The decision-based contract (owner-approved, issue #184): the gate
     # checks DECISIONS, not raw numbers — winners identical (both checks)
@@ -434,15 +434,15 @@ def parity_report(
 
     return {
         "model": model_id,
-        # F9: the scorer this payload covers. One payload per scorer — the
-        # pre-F9 payload mixed slots raw rows with labels final decisions
+        # The scorer this payload covers. One payload per scorer — the
+        # the pre-per-scorer payload shape mixed slots raw rows with labels final decisions
         # and proved parity for neither. Readers reject a payload without
         # this key (no silent default).
         "scoring": scoring or DEFAULT_SCORING,
         "prompt_version": PROMPT_VERSION,
         "max_abs_drift_nats": round(max_abs_drift, 6),
         "max_raw_row_drift_nats": round(max_raw_drift, 6),
-        # W5c-1 review: the gated decomposition.
+        # The drift decomposition.
         "max_gap_drift_nats": round(max_gap_drift, 6),
         "max_logp_drift_nats": round(max_logp_drift, 6),
         "max_margin_drift_nats": round(max_margin_drift, 6),
@@ -455,14 +455,14 @@ def parity_report(
         "max_logp_drift_ulps": _ulps(max_logp_drift),
         "max_margin_drift_ulps": _ulps(max_margin_drift),
         "winners_identical": winners_identical,
-        # W5c-9: the drift-envelope resolution this report persisted (bound,
-        # source) — informational; the gate above is untouched. D6: the
+        # The drift-envelope resolution this report persisted (bound,
+        # source) — informational; the gate above is untouched. The
         # band field is gone — it was round_up(0.05 + this run's own max
         # gap drift), self-referential and untestable.
         "drift_envelope": recorded,
-        # Rescore-gate safety assertion (review item 4).
+        # Rescore-gate safety assertion.
         "rescore_gate": rescore_flag,
-        # Environment metadata (review item 3).
+        # Environment metadata.
         "environment": _environment_metadata(engine),
         "passed": passed,
         # The REPORTING status: exactly PASS or FAIL (see above).
@@ -490,7 +490,7 @@ def write_parity_json(
     from jevmlx.models import DEFAULT_SCORING
 
     payload = parity_report(engine, model_id, cases, scoring=scoring)
-    # F9: one artifact per scorer. The default scorer keeps the canonical
+    # One artifact per scorer. The default scorer keeps the canonical
     # name (the README compat gate reads parity.json); any other scorer
     # gets its own file.
     name = (
@@ -509,14 +509,14 @@ def write_parity_json(
 def _record_envelope_from_report(
     engine: Any, model_id: str, max_gap_drift: float, merged_rows: int
 ) -> dict:
-    """Persist the report's measured d_gap as a drift-envelope record (W5c-9).
+    """Persist the report's measured d_gap as a drift-envelope record.
 
     The batched matrix measured pairwise-gap drift at the 4-context merged
     shape (M = 4 * rows — the M>16 bucket for every bundled schema). The
     record lands in the user cache (keyed by the envelope tuple) and the
     model's probes folder. Best-effort: a failure NEVER fails parity — the
     envelope is an optimization for the engine's rescore band, not a gate
-    input. D6: the returned summary no longer carries the ``band`` field —
+    input. The returned summary carries no ``band`` field —
     it was derived from THIS run's own max drift (self-referential); the
     engine resolves its rescore band from the persisted RECORDS instead.
     """
@@ -572,8 +572,8 @@ def _make_schema(case_id: str, schema_dict: dict) -> Any:
 
 
 def _case_context(case_id: str, preset: dict) -> str:
-    """The preset's REAL context (W5-D finding 41: bundled_preset_specs now
-    returns the whole preset, so the recorded cases use the recorded
+    """The preset's REAL context (bundled_preset_specs returns
+    the whole preset, so the recorded cases use the recorded
     evidence). When absent (bare schema dicts in tests) a stable filler
     keeps the run deterministic."""
     return (
@@ -594,22 +594,22 @@ def check_batched_parity(
     prior_correction: bool = False,
     scoring: str | None = None,
 ) -> dict[str, Any]:
-    """Batched-vs-independent parity matrix (W5-D findings 40/42).
+    """Batched-vs-independent parity matrix.
 
-    The W1-A gate only ever exercised run_parallel_generation — every
+    The single-context gate only ever exercised run_parallel_generation — every
     decide_many bug passed it. This matrix runs each case at 1/2/4
     contexts, equal and MIXED prompt lengths, and compares:
 
-    - RAW row logits before near-tie rescore (finding 42): one scoring
+    - RAW row logits before near-tie rescore: one scoring
       pass per context through the shared _score_rows at identical chunk
       shapes — batched results re-keyed per context — against the
       independent path's rows. Final decisions are compared separately so
-      a batch-1 rescore cannot mask raw batch drift. F9: the rows are the
+      a batch-1 rescore cannot mask raw batch drift. The rows are the
       payload scorer's rows (``scoring``, default the engine default) —
       they were hardcoded "slots", so a labels payload proved nothing
       about its own rows.
     - Final decisions (parsed values + log_scores) batched vs independent,
-      at the SAME scorer. F9: multi fields contribute their per-option
+      at the SAME scorer. Multi fields contribute their per-option
       corrected log-odds drift and count rows their log-score drift, with
       the same atol contract as scalar fields.
     - prior on/off (prior_correction=True computes the shared prior and
@@ -632,13 +632,13 @@ def check_batched_parity(
     if cases is None:
         cases = bundled_preset_specs()
 
-    # F9: the payload scorer everywhere — raw rows AND final decisions.
+    # The payload scorer everywhere — raw rows AND final decisions.
     # Never a hardcoded scorer inside parity.
     from jevmlx.models import DEFAULT_SCORING
 
     scoring = scoring or DEFAULT_SCORING
 
-    # W5c-1 review section 2: raw logits carry an arbitrary additive
+    # Raw logits carry an arbitrary additive
     # offset, so uncentered d_raw is a DIAGNOSTIC, not a correctness gate.
     # The gate is the pairwise GAP drift (d_gap) and the final candidate
     # log-score drift — both at the FIXED 0.05 contract (no widening). A
@@ -648,7 +648,7 @@ def check_batched_parity(
     n_ctx = max(context_counts)
 
     def _decomp(ref_vals, bat_vals):
-        """Per-row raw-logit decomposition (review section 2)."""
+        """Per-row raw-logit decomposition."""
         d_raw = max(abs(a - b) for a, b in zip(ref_vals, bat_vals, strict=True))
         d_gap = 0.0
         for i in range(len(ref_vals)):
@@ -670,7 +670,7 @@ def check_batched_parity(
     max_logp_drift = 0.0
     max_margin_drift = 0.0
     max_abs_logit = 0.0  # the raw decision-logit magnitude (drift ulps, #184)
-    max_merged_rows = 0  # W5c-9 C4: the largest merged pass M the matrix ran
+    max_merged_rows = 0  # the largest merged pass M the matrix ran
     per_case: dict[str, dict[str, Any]] = {}
 
     built_cache: dict[str, Any] = {}
@@ -680,11 +680,11 @@ def check_batched_parity(
         built = _build_schema_rows(schema, engine.tokenizer, scoring)
         built_cache[case_id] = built
 
-        # --- RAW row logits (finding 42): score the SAME rows for one
+        # --- RAW row logits: score the SAME rows for one
         # context three ways — alone (the independent reference), and as
         # rows 2..n of a batched group — before any near-tie rescore.
-        # W5c-1 review: decompose into d_raw (diagnostic) / d_gap (gate) /
-        # d_logp (diagnostic) + margin drift (gate).
+        # Decompose into d_raw / d_gap / d_logp + margin drift — all
+        # diagnostics (issue #184: the gate compares decisions).
         raw_drift = gap_drift = logp_drift = margin_drift = 0.0
         raw_logit_magnitude = 0.0
         if built["rows"]:
@@ -724,7 +724,7 @@ def check_batched_parity(
                 Ledger(),
                 cache_slots=cache_slots,
             )
-            # F9: EVERY context copy is compared against the batch=1
+            # EVERY context copy is compared against the batch=1
             # reference — not only the first copy (rows R..n_ctx*R of the
             # merged pass were never looked at).
             n_rows = len(built["rows"])
@@ -778,7 +778,7 @@ def check_batched_parity(
                     bat_tel = bat["field_telemetry"].get(fname, {})
                     ls_ind = tel.get("log_scores")
                     if ls_ind is None:
-                        # F9: multi per-option corrected log-odds drift + the
+                        # Multi per-option corrected log-odds drift + the
                         # count row's log-score drift — same atol contract.
                         multi_drift = _multi_and_count_drift(
                             fname,
@@ -800,7 +800,7 @@ def check_batched_parity(
         per_case[case_id] = {
             "max_abs_drift_nats": case_drift,
             "max_raw_row_drift_nats": raw_drift,
-            # W5c-1 review: the gated decomposition (d_gap + margin drift)
+            # The drift decomposition (gap + margin drift)
             # and the diagnostics (d_raw + d_logp).
             "max_gap_drift_nats": gap_drift,
             "max_logp_drift_nats": logp_drift,
@@ -812,7 +812,7 @@ def check_batched_parity(
         "winners_identical": winners_identical,
         "max_abs_drift_nats": max_abs_drift,
         "max_raw_row_drift_nats": max_raw_drift,
-        # W5c-1 review section 2: the drift decomposition — d_raw is a
+        # The drift decomposition — d_raw is a
         # diagnostic (raw logits carry an arbitrary additive offset); under
         # the decision-based contract (issue #184) NOTHING here gates.
         # max_abs_logit feeds the fp16-ulp diagnostics of the payload.
@@ -820,7 +820,7 @@ def check_batched_parity(
         "max_gap_drift_nats": max_gap_drift,
         "max_logp_drift_nats": max_logp_drift,
         "max_margin_drift_nats": max_margin_drift,
-        # W5c-9 C4: the largest merged pass M the matrix ran (n_ctx * R
+        # The largest merged pass M the matrix ran (n_ctx * R
         # per case) — the bucket the persisted envelope record belongs to.
         "max_merged_rows": max_merged_rows,
         "per_case": per_case,

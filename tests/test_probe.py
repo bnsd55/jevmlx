@@ -1,4 +1,4 @@
-"""W6-2 prep tests: benchmarks/probe.py — fake-model tests for the
+"""benchmarks/probe.py tests — fake-model tests for the
 table/JSON builders (real probes run in the M5 runbook behind --probe)."""
 
 from benchmarks.probe import adapters_table_lines, probe_slope, slope_table_lines

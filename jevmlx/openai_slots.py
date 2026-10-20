@@ -44,10 +44,10 @@ _TOP_LOGPROBS = 20
 def _user_content(schema: StructuredSchema, context: str, tokenizer) -> str:
     """The prompt-v2 user turn: alias schema block + nonce-delimited context.
 
-    Schema block rendered from the COMPILED slot plan (W5-A finding 1) —
+    Schema block rendered from the COMPILED slot plan —
     identical text to the native slots mode's prefill prompt (the system
     paragraph travels in the system message; here and natively). The
-    delimiter is the W5-A nonce (finding 44), same as the engine.
+    delimiter is the engine's sha256-derived nonce fence.
     """
     schema_str = schema.to_alias_schema_str(tokenizer)
     return f"Classify the following fields.\n\n{schema_str}\n\n{_context_block(context)}"
@@ -244,12 +244,12 @@ def _decide_multi_field(
         probs, truncated = _yes_no_probabilities(top_entries or [])
         per_option[option] = probs["yes"]
         truncated_any = truncated_any or truncated
-    # W2-E step 2: same dual contract as the native engine. With calibration
+    # Same dual contract as the native engine. With calibration
     # ({"multi": {"a", "b"}}) the option's P(yes) is folded to log-odds
     # (log p - log(1-p)), calibrated a*log_odds + b, and selected when > 0;
     # without it the fixed P(yes) >= 0.5 rule stands. The raw probabilities
     # stay in per_option either way.
-    # W5-C finding 22: calibration is a typed CalibrationBundle.
+    # Calibration is a typed CalibrationBundle.
     multi_ab = (
         (calibration.multi_a, calibration.multi_b)
         if calibration is not None and calibration.has_multi
@@ -304,7 +304,7 @@ def decide_openai(
     options by calibrated log-odds > 0, exactly like the native engine.
     Raises ChatCompletionsError on non-2xx responses.
     """
-    # F3 boundary (W5-C-fix): the openai path resolves the calibration HERE
+    # Boundary: the openai path resolves the calibration HERE
     # (path -> CalibrationBundle.load) and hands _decide_multi_field a
     # constructed bundle only. No dict payload — a second shape is a dual
     # path.

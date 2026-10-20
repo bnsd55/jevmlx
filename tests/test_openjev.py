@@ -1,4 +1,4 @@
-"""W6-B2: OpenJev authored144/perturbations108 datasets + optrev/criterion
+"""OpenJev authored144/perturbations108 datasets + optrev/criterion
 perturbations.
 
 Tests the converter (fixture-based, no network), the sha256 fail-closed

@@ -46,7 +46,7 @@ _IMPLIES = [
     }
 ]
 
-# W5b-11: the constraint metrics compile against a real schema — the domain
+# The constraint metrics compile against a real schema — the domain
 # membership checks need the field choices.
 _SCHEMA = StructuredSchema(
     {
@@ -82,7 +82,7 @@ def test_dependent2_has_200_cases():
 
 def test_dependent2_has_all_constraint_types():
     records = build_dependent2()
-    # Constraints are at the CASE level (F1: not inside schema).
+    # Constraints are at the CASE level (never inside schema).
     constraints = records[0].get("constraints")
     assert isinstance(constraints, list)
     types = {c["type"] for c in constraints}
@@ -122,7 +122,7 @@ def test_dependent2_labels_satisfy_constraints():
 
 
 def test_dependent2_schema_compiles_without_error():
-    """F1: constraints must NOT be inside schema — StructuredSchema.__init__
+    """Constraints must NOT be inside schema — StructuredSchema.__init__
     iterates every key as a field. A dependent case must compile clean."""
     from jevmlx.schema import StructuredSchema
 
@@ -306,7 +306,7 @@ def test_report_renders_dependent_metrics():
     }
     rows = _metric_rows(run)
     names = [r[0] for r in rows]
-    # P7: exact_record_accuracy is now rendered as 'exact record' (first-class).
+    # exact_record_accuracy is rendered as 'exact record' (first-class).
     assert "exact record" in names
     assert "constraint_violation_rate[overall]" in names
     assert "child_accuracy_given_parent_correct[intent→subtype]" in names

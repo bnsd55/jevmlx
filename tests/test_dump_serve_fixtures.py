@@ -1,4 +1,4 @@
-"""B12: dump sample /decide and /v1/systemone responses to JSON fixtures.
+"""Dump sample /decide and /v1/systemone responses to JSON fixtures.
 
 The TypeScript client tests parse these EXACT bytes (one source of truth:
 the server's real output, not a hand-written shape). Run with:

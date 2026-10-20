@@ -1,4 +1,4 @@
-"""W6-UI-3f: SSE live-update handler tests.
+"""SSE live-update handler tests.
 
 The SSE handler (_handle_sse) watches mtimes of RUNBOOK.md + every
 heartbeat.jsonl / run.json / predictions.jsonl under <out>, and emits

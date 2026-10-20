@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Timing report for the parallel constrained decision engine.
 
-GPT-REVIEW 'PR 3: Report these separately': one tool that runs decide() on a
+One tool that runs decide() on a
 model for the bundled presets, N repetitions, and reports the engine's
 timing split — prior_ms, prefill_ms, plan_compile_ms, cache_broadcast_ms,
 suffix_eval_ms, lm_head_gather_ms, second_pass_ms, total_ms,

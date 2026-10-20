@@ -1,4 +1,4 @@
-"""Allow `python -m jevmlx` to invoke the CLI (W6-UI: bench --ui subprocess)."""
+"""Allow `python -m jevmlx` to invoke the CLI (the bench --ui subprocess)."""
 
 from jevmlx.cli import main
 

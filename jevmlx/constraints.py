@@ -1,4 +1,4 @@
-"""Case-level constraint checking (EV1 / W3-D).
+"""Case-level constraint checking (the dependency-aware diagnostics).
 
 Single source of truth for constraint semantics — imported by both
 :mod:`jevmlx.engine` (constrained MAP) and :mod:`jevmlx.evalmetrics`
@@ -29,7 +29,7 @@ __all__ = [
 
 
 class ConstraintError(ValueError):
-    """A case-level constraint is invalid against the schema (W5-B review 12).
+    """A case-level constraint is invalid against the schema.
 
     Raised BEFORE any model work: unknown types, unknown fields, values
     outside the field's domain and multi-field case constraints all fail
@@ -78,7 +78,7 @@ def check_constraint(constraint: dict, assignment: dict[str, object]) -> bool:
             field_val = [field_val] if field_val else []
         selected = set(field_val) & options
         return len(selected) <= 1  # at most one from the exclusivity group
-    # W5-B (review 12): no 'unknown means satisfied' fallback. Unvalidated
+    # No 'unknown means satisfied' fallback. Unvalidated
     # constraint types are a caller bug — validate_constraints_for_schema
     # rejects them before any model work; reaching here with an unknown type
     # means the caller bypassed validation.
@@ -124,7 +124,7 @@ def validate_constraints(constraints: list[dict]) -> list[dict]:
 
 
 def validate_constraints_for_schema(constraints: list[dict], schema) -> list[dict]:
-    """Compile case-level constraints against a StructuredSchema (W5-B rev 12).
+    """Compile case-level constraints against a StructuredSchema.
 
     Everything that could silently no-op or blow up mid-engine fails HERE,
     before any model work:
@@ -220,7 +220,7 @@ def _scalar_domain(fdef) -> list[object]:
 
 
 # --------------------------------------------------------------------------
-# W5b-11 (GPT-REVIEW-2 C6): compiled constraint objects.
+# Compiled constraint objects.
 #
 # validate_constraints_for_schema walks the dict list on EVERY engine call
 # and _constrained_map does STRING-key lookups per candidate combination.
@@ -366,7 +366,7 @@ class CompiledConstraints:
 def compile_constraints(constraints: list[dict], schema) -> CompiledConstraints:
     """Compile case-level constraints ONCE against a StructuredSchema.
 
-    The ONLY validation entry (W5b-11): shape validation, schema-field
+    The ONLY validation entry: shape validation, schema-field
     existence, domain membership, multi-field support rules — everything
     validate_constraints_for_schema checked — plus index compilation. All
     failures raise ConstraintError here, before any model work.

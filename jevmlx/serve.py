@@ -6,7 +6,7 @@ POST /decide  {"schema": {...}, "context": "...", "temperature": 1.0}
 GET  /health  process liveness + worker-alive + queue telemetry
 GET  /ready   503 until model load + warm-up complete, then 200
 
-W6-B7 (GPT-REVIEW-3): bounded admission queue, 429 backpressure with
+Features (from the serve review): bounded admission queue, 429 backpressure with
 Retry-After, /health vs /ready split, echoed/generated request ids, queue
 depth + wait telemetry, client-disconnect cancellation, and hard
 admission limits (max expanded rows, max prompt tokens) rejected with 413.
@@ -42,7 +42,7 @@ def _cache_memory_bytes() -> int:
 
 
 # ---------------------------------------------------------------------------
-# Admission limits (W6-B7 item 7)
+# Admission limits
 # ---------------------------------------------------------------------------
 
 #: Default max expanded rows across all schema fields. A schema that expands
@@ -57,7 +57,7 @@ DEFAULT_MAX_PROMPT_TOKENS = 8192
 DEFAULT_QUEUE_SIZE = 16
 
 #: Fixed Retry-After (seconds) returned with every 429. A documented constant,
-#: not a derived value (B7 review M3: depth-in-requests is not seconds).
+#: not a derived value (queue depth counts requests, not seconds).
 RETRY_AFTER_SECONDS = 2
 
 
@@ -72,7 +72,7 @@ class AdmissionError(Exception):
 
 
 class _NotReadyError(Exception):
-    """Raised by the placeholder decide_fn during warm-up (N2: 503, not 200)."""
+    """Raised by the placeholder decide_fn during warm-up (the server answers 503, not 200)."""
 
 
 # ---------------------------------------------------------------------------
@@ -124,14 +124,14 @@ class _ServerStats:
 
 
 # ---------------------------------------------------------------------------
-# Admission queue + serial worker (B7 items 1, 2, 6)
+# Admission queue + serial worker
 # ---------------------------------------------------------------------------
 
 
 class _AdmissionQueue:
     """A bounded admission queue feeding a single serial worker.
 
-    B1 strict (round 4/F1): the bound is enforced by a ``_live_queued``
+    The bound is enforced by a ``_live_queued``
     counter + lock. Per-request state (``request['queued']``) decides whether
     ``mark_cancelled`` applies — a client that disconnects while IN FLIGHT
     (already popped) does NOT decrement the counter (only queued entries do).
@@ -174,8 +174,8 @@ class _AdmissionQueue:
     def submit(self, request: dict) -> bool:
         """Try to enqueue. Returns True if accepted, False if full (429).
 
-        F1: sets ``request['queued'] = True`` under the lock so mark_cancelled
-        can check per-request state (not a global counter inference). N3:
+        Sets ``request['queued'] = True`` under the lock so mark_cancelled
+        can check per-request state (not a global counter inference).
         ``queued_at`` is stamped here; the worker records ``queue_wait_ms``
         when it picks the request up.
         """
@@ -189,9 +189,9 @@ class _AdmissionQueue:
         return True
 
     def mark_cancelled(self, request: dict) -> bool:
-        """B1 strict: mark a queued entry cancelled and free its slot.
+        """Mark a queued entry cancelled and free its slot.
 
-        F1: acts ONLY when ``request['queued']`` is True (per-request state,
+        Acts ONLY when ``request['queued']`` is True (per-request state,
         not a global counter). An in-flight request (already popped, queued
         cleared) does NOT decrement — no over-admission from in-flight
         disconnects. Returns True if the entry was still queued (and is now
@@ -208,7 +208,7 @@ class _AdmissionQueue:
     def _run(self) -> None:
         # M5: the worker loop is wrapped in try/except BaseException — any
         # uncaught exception marks the worker dead so /ready goes 503.
-        # F2: a BaseException from decide_fn sets request['error'] before
+        # A BaseException from decide_fn sets request['error'] before
         # re-raising so the handler sends 500 (not 200 with empty result).
         try:
             while True:
@@ -216,11 +216,11 @@ class _AdmissionQueue:
                 if request is None:
                     return
                 cancel = request["cancel_event"]
-                # N3: measure queue wait until the worker picks it up.
+                # Measure queue wait until the worker picks it up.
                 queued_at = request.get("queued_at")
                 if queued_at is not None:
                     request["queue_wait_ms"] = round((time.perf_counter() - queued_at) * 1000.0, 2)
-                # F1: clear the queued flag under the lock (per-request state).
+                # Clear the queued flag under the lock (per-request state).
                 # If mark_cancelled already cleared it, the request is cancelled.
                 with self._lock:
                     was_queued = request.get("queued", False)
@@ -240,7 +240,7 @@ class _AdmissionQueue:
                     request["error"] = None
                 except Exception as e:  # noqa: BLE001 — M5: worker survives
                     request["error"] = e
-                except BaseException as e:  # noqa: BLE001 — F2: 500 not 200
+                except BaseException as e:  # noqa: BLE001 — a 500, never a 200
                     request["error"] = e
                     request["result_event"].set()
                     if self._stats:
@@ -274,7 +274,7 @@ class _AdmissionQueue:
 # Request id
 # ---------------------------------------------------------------------------
 
-# B7 review minor: cap the echoed request id to avoid header-injection /
+# Cap the echoed request id to avoid header-injection /
 # unbounded-length abuse.
 _MAX_REQUEST_ID_LEN = 128
 
@@ -294,7 +294,7 @@ def _request_id(headers) -> str:
 
 
 # ---------------------------------------------------------------------------
-# B3: /v1/systemone request adapter
+# /v1/systemone request adapter
 # ---------------------------------------------------------------------------
 
 
@@ -450,7 +450,7 @@ def make_handler(
     — there is no dual-path fallback (M2 round 3: the old chars/4 default is
     gone; tokenize_fn is required, never defaulted).
 
-    N1: the projected-memory limit is DROPPED entirely. The engine already
+    The projected-memory limit is DROPPED entirely. The engine already
     chunks rows to its measured width-bin budget. Admission is rows + prompt
     tokens only.
     """
@@ -465,12 +465,12 @@ def make_handler(
         count_rows_fn = _count_rows
 
     def _admit(schema_dict: dict, context: str) -> None:
-        """Hard admission limits (B7 item 7). Raises AdmissionError (413) or
+        """Hard admission limits. Raises AdmissionError (413) or
         ValueError (400) on a bad schema."""
-        # B3: a malformed schema raises ValueError here — caught by the
+        # A malformed schema raises ValueError here — caught by the
         # caller and returned as 400 (the base contract), not a dropped
         # connection.
-        # N1: O(schema) arithmetic, NOT _build_schema_rows.
+        # O(schema) arithmetic, NOT _build_schema_rows.
         rows = count_rows_fn(schema_dict)
         if rows > max_rows:
             raise AdmissionError(
@@ -490,7 +490,7 @@ def make_handler(
 
     class Handler(BaseHTTPRequestHandler):
         # HTTP/1.0: no keep-alive, no pipelining — simpler disconnect
-        # semantics (B7 review M7). One request per connection.
+        # semantics. One request per connection.
 
         protocol_version = "HTTP/1.0"
 
@@ -551,7 +551,7 @@ def make_handler(
                     },
                 )
             elif self.path == "/v1/models":
-                # B3: advertise only our resolved model id.
+                # Advertise only our resolved model id.
                 self._send(
                     200,
                     {"data": [{"id": model_id, "owned_by": "jevmlx"}]},
@@ -572,7 +572,7 @@ def make_handler(
             """Shared path: admit, queue, wait for the serial worker, handle
             errors. Returns (status_code, response_body). Both /decide and
             /v1/systemone call this so backpressure is identical."""
-            # N2: 503 before touching the queue during warm-up.
+            # 503 before touching the queue during warm-up.
             if not stats.ready:
                 return 503, {"error": "server is warming up", "ready": False}
             # Hard admission limits (413).
@@ -687,7 +687,7 @@ def make_handler(
             if self.path != "/decide":
                 self._send(404, {"error": "not found"})
                 return
-            # N2: during warm-up, return 503 BEFORE touching the admission
+            # During warm-up, return 503 BEFORE touching the admission
             # queue.
             if not stats.ready:
                 self._send(503, {"error": "server is warming up", "ready": False})
@@ -702,7 +702,7 @@ def make_handler(
                 self._send(400, {"error": f"bad request: {e}"})
                 return
 
-            # N7: validate types — schema must be a dict, context must be a
+            # Validate types — schema must be a dict, context must be a
             # str.
             if not isinstance(schema_dict, dict):
                 self._send(400, {"error": "schema must be a JSON object"})
@@ -729,7 +729,7 @@ def make_handler(
         def _client_gone(self) -> bool:
             """Detect a disconnected client via select (no byte stealing).
 
-            B7 review M7: the old non-blocking read(1) stole a byte from a
+            The old non-blocking read(1) stole a byte from a
             pipelining client. With HTTP/1.0 there's no pipelining, but we
             still use select to check the socket for an error/EOF without
             consuming data.
@@ -751,7 +751,7 @@ def make_handler(
 
 
 # ---------------------------------------------------------------------------
-# O(schema) row counting (N1: NOT _build_schema_rows)
+# O(schema) row counting (NOT _build_schema_rows)
 # ---------------------------------------------------------------------------
 
 
@@ -798,12 +798,12 @@ def serve(
 ) -> None:
     """Load the model once, then serve decisions until interrupted.
 
-    B7 review M6: the port binds BEFORE warm-up so /ready is reachable
+    The port binds BEFORE warm-up so /ready is reachable
     during the warm-up window (a 503 is a real response, not a connection
     refusal). Warm-up runs in the main thread; /ready flips to 200 when it
     completes.
 
-    N2: during warm-up the bound server returns 503 for /decide (not 200
+    During warm-up the bound server returns 503 for /decide (not 200
     with empty fields). Only ONE AdmissionQueue exists — it is created
     after warm-up, not during the placeholder phase.
 
@@ -842,13 +842,13 @@ def serve(
 
     stats = _ServerStats()
 
-    # N2 round 3: create the ONE AdmissionQueue BEFORE the placeholder so
+    # Create the ONE AdmissionQueue BEFORE the placeholder so
     # both the placeholder and the real handler share it (no second worker
     # thread). The placeholder's do_POST short-circuits to 503 before
     # touching the queue, so no slot is consumed during warm-up.
     admission_queue = _AdmissionQueue(maxsize=queue_size, stats=stats)
 
-    # M6 + N2: bind the socket first so /ready is reachable during warm-up.
+    # Bind the socket first so /ready is reachable during warm-up.
     # The placeholder handler returns 503 for /decide until mark_ready().
     def _not_ready_decide(*args, **kwargs):
         raise _NotReadyError("server is warming up")
@@ -885,7 +885,7 @@ def serve(
     def tokenize_fn(text: str) -> list[int]:
         return engine.tokenizer.encode(text, add_special_tokens=False)
 
-    # N1: O(schema) arithmetic via _count_rows, NOT _build_schema_rows.
+    # O(schema) arithmetic via _count_rows, NOT _build_schema_rows.
     count_rows_fn = _count_rows
 
     # Replace the placeholder handler with the real one (SAME admission_queue).

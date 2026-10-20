@@ -1,4 +1,4 @@
-"""W6-1 tests: jevmlx/adapters.py — fake models for every attribute layout,
+"""jevmlx/adapters.py tests — fake models for every attribute layout,
 plus one slow real-model equivalence test.
 
 The fakes mirror the REAL mlx_lm attribute layouts the adapters navigate:
@@ -190,7 +190,7 @@ def test_unsupported_model_type_raises():
 
 
 def test_unknown_type_raises_even_with_standard_layout():
-    """No structural fallback, full stop (review F1): a model whose type is
+    """No structural fallback, full stop: a model whose type is
     unknown raises UnsupportedModelError even though its attribute layout
     matches _StandardAdapter — adding a family means adding a registry
     entry + a test, never attribute-shape guessing."""
@@ -201,7 +201,7 @@ def test_unknown_type_raises_even_with_standard_layout():
 
 
 def test_missing_model_type_raises():
-    """The single source of truth is model.model_type (review F2): an
+    """The single source of truth is model.model_type: an
     object without it raises instead of being probed through args/config
     dicts."""
 

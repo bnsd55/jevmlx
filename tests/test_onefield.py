@@ -1,4 +1,4 @@
-"""W6-B5: choose / judge / rate one-field convenience helpers + CLI verbs.
+"""choose / judge / rate one-field convenience helpers + CLI verbs.
 
 The wrappers synthesize a one-field schema and return the single
 FieldResult (not a full Decision). No engine change — they reuse the

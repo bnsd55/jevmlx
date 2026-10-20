@@ -1,4 +1,4 @@
-"""Tests for benchmarks.public.fetch (W6-B5: AG News / BoolQ / SST-5).
+"""Tests for benchmarks.public.fetch (AG News / BoolQ / SST-5).
 
 Network-free: the fetch paths run against fixture parquet/jsonl files
 monkeypatched in place of hf_hub_download. The one pin test asserts the
@@ -92,7 +92,7 @@ def sst5_rows() -> list[dict]:
 def hubless(monkeypatch, tmp_path, ag_news_rows, boolq_rows, sst5_rows):
     """Point _download at fixture files; capture the requested (repo, rev).
 
-    F5: the fake download must also satisfy the sha256 pin check — the
+    The fake download must also satisfy the sha256 pin check — the
     expected digests are monkeypatched to the FIXTURE bytes.
     """
     requested: list[tuple[str, str, str]] = []
@@ -203,7 +203,7 @@ def test_sample_balanced_takes_equal_rows_per_class(ag_news_rows):
 
 
 def test_sample_balanced_logs_short_classes(ag_news_rows, capsys):
-    """F9: a class shorter than per_class is LOUD, never silent."""
+    """A class shorter than per_class is LOUD, never silent."""
     ds = DATASETS["ag_news"]
     short = ag_news_rows[:6]  # only class 0 and 1 present (w1,s1,w2,s2... )
     _balanced_positions(ds, [_row_text(ds, r) for r in short], short, per_class=50)
@@ -212,7 +212,7 @@ def test_sample_balanced_logs_short_classes(ag_news_rows, capsys):
 
 
 def test_natural_view_excludes_balanced_rows(sst5_rows):
-    """F8: the two views are DISJOINT — natural draws only from rows the
+    """The two views are DISJOINT — natural draws only from rows the
     balanced view did not take (calibration never fits on reported rows)."""
     ds = DATASETS["sst5"]
     texts = [_row_text(ds, r) for r in sst5_rows]
@@ -225,7 +225,7 @@ def test_natural_view_excludes_balanced_rows(sst5_rows):
 
 
 def test_fetch_dataset_views_are_disjoint_and_carry_real_text(hubless):
-    """F1 + F8: the CACHED cases file carries the REAL text (the engine
+    """The CACHED cases file carries the REAL text (the engine
     classifies it); the views never share a row."""
     views, _sha = fetch_dataset(DATASETS["sst5"], "test")
     b_ids = {r["meta"]["source_row_id"] for r in views["balanced"]}
@@ -278,7 +278,7 @@ def test_selected_input_hash_binds_schema_and_text():
     assert a != b and a != c and len(a) == 64
 
 
-# ---- F5: the download pin is VERIFIED, not just recorded --------------------
+# ---- the download pin is VERIFIED, not just recorded --------------------
 
 
 def test_download_verifies_sha256_and_fails_closed(monkeypatch, tmp_path, sst5_rows):
@@ -307,7 +307,7 @@ def test_download_verifies_sha256_and_fails_closed(monkeypatch, tmp_path, sst5_r
 
 
 def test_expected_sha256_covers_every_pinned_eval_file():
-    """F5: every dataset's eval-split file has a hardcoded known-good sha256."""
+    """Every dataset's eval-split file has a hardcoded known-good sha256."""
     for ds in DATASETS.values():
         split = EVAL_SPLITS[ds.name]
         file_path = ds.files[split]
@@ -316,7 +316,7 @@ def test_expected_sha256_covers_every_pinned_eval_file():
 
 
 def test_download_failure_is_oserror_not_systemexit(monkeypatch):
-    """F6: build_datasets catches OSError for the offline skip; a download
+    """build_datasets catches OSError for the offline skip; a download
     failure must be one."""
     ds = DATASETS["sst5"]
 
@@ -434,7 +434,7 @@ def test_two_views_are_separate_files_with_separate_locks(hubless, tmp_path):
 
 
 def test_cached_cases_carry_real_text_but_docs_do_not(hubless, tmp_path, ag_news_rows):
-    """F1, restated: the CACHED cases file is where the text lives (the
+    """The CACHED cases file is where the text lives (the
     engine classifies case['context'] directly); the LOCK (an artifact)
     stores ids + hashes only."""
     rc = main(
@@ -471,12 +471,12 @@ def test_dataset_pins_are_commit_shas_and_licenses_recorded():
         assert "NOT cleared" in ds.license or "share-alike" in ds.license
 
 
-# ---- F2 + F3: bench wiring, tested OFFLINE with the hubless fixture ---------
+# ---- bench wiring, tested OFFLINE with the hubless fixture ---------
 
 
 def test_bench_wires_the_three_names(hubless, monkeypatch, tmp_path):
     """jevmlx.bench builds ag_news/boolq/sst5 views with the same lock shape
-    (cases_sha256-verified reuse) as typed_decisions — offline (F3)."""
+    (cases_sha256-verified reuse) as typed_decisions — offline."""
     import jevmlx.bench as bench
 
     monkeypatch.setattr(bench, "BENCH_CACHE", tmp_path)
@@ -491,7 +491,7 @@ def test_bench_wires_the_three_names(hubless, monkeypatch, tmp_path):
 
 
 def test_bench_pin_problem_detects_drift(hubless, monkeypatch, tmp_path):
-    """F5 on reuse: a lock whose recorded file sha256 differs from the pin
+    """On reuse: a lock whose recorded file sha256 differs from the pin
     forces a rebuild; a matching lock passes."""
     import jevmlx.bench as bench
 
@@ -511,7 +511,7 @@ def test_bench_pin_problem_detects_drift(hubless, monkeypatch, tmp_path):
 
 
 def test_bench_bare_names_expand_to_both_views(hubless, monkeypatch, tmp_path):
-    """F2: '--datasets ag_news' must produce combos for BOTH views (the
+    """'--datasets ag_news' must produce combos for BOTH views (the
     bare name itself is not a dataset key)."""
     import jevmlx.bench as bench
 
@@ -544,7 +544,7 @@ def test_bench_bare_names_expand_to_both_views(hubless, monkeypatch, tmp_path):
 
 
 def test_bench_combos_run_end_to_end_with_fake_engine(hubless, monkeypatch, tmp_path):
-    """F2 end to end: run_bench with --datasets boolq produces prediction
+    """End to end: run_bench with --datasets boolq produces prediction
     rows for both views (offline; only the eval EXECUTION is faked — the
     dataset expansion, combo building and summarization stay real)."""
     import jevmlx.bench as bench

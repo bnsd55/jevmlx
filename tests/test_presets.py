@@ -1,4 +1,4 @@
-"""B10: content_moderation and inbound_email preset tests.
+"""content_moderation and inbound_email preset tests.
 
 Exercises schema validity and the CLI 'decide --preset' path with the
 fake engine (no real model load), matching the pattern in test_smoke.py

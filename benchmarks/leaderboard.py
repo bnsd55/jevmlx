@@ -52,7 +52,7 @@ _WORKFLOW_COLS = [
     ("invoice_processing", "Invoices"),
 ]
 
-# W6-B1: jabr per-task accuracy columns (8 tasks). These are SEPARATE from
+# jabr per-task accuracy columns (8 tasks). These are SEPARATE from
 # the TypeSafe workflow columns above — the two never share a row group.
 _JABR_TASK_COLS = [
     ("support_department", "Support dept"),
@@ -83,7 +83,7 @@ _HEADER = (
 )
 _SEP = "|---|---|---|---|---|---|---|---|---|---|---|---|---|"
 
-# W6-B1: jabr has its OWN table (different columns: 8 task accuracies).
+# jabr has its OWN table (different columns: 8 task accuracies).
 # The TypeSafe table and the jabr table are separate markdown blocks so
 # their columns never collide.
 _JABR_HEADER = (
@@ -111,7 +111,7 @@ def _fmt_pct(value) -> str:
 
 
 def _agreement_ci(accuracy, n) -> dict | None:
-    """W6-B6b/F1: Wilson CI on the agreement accuracy.
+    """Wilson CI on the agreement accuracy.
 
     ``accuracy`` is a 0..1 ratio; ``n`` is the case count. Returns the Wilson
     interval dict, or None when n is too small (the leaderboard prints
@@ -128,7 +128,7 @@ def _agreement_ci(accuracy, n) -> dict | None:
 def _fmt_pct_with_ci(value, ci) -> str:
     """A percentage with its Wilson interval, or 'n too small'.
 
-    F1: every accuracy on the leaderboard shows the interval next to the
+    Every accuracy on the leaderboard shows the interval next to the
     point estimate. No CI = 'n too small', not an unqualified number.
     Official cited rows (no CI key at all) show the bare percentage.
     """
@@ -198,7 +198,7 @@ def _load_published(path: Path | None) -> tuple[list[dict], dict]:
 def _per_item_end_to_end_ms(folder: Path) -> float | None:
     """The call-level per_item_end_to_end_ms median from timing.json.
 
-    parity-gates (review fix 2): ONE definition — the same source
+    ONE definition — the same source
     summarize_results uses since #99 (timing.json median
     per_item_end_to_end_ms), NOT the per-line latency_ms from predictions
     (which sums rotations and inflated the 7B's time/case to 11.0 s while
@@ -225,12 +225,12 @@ def _local_rows(results_root: Path) -> list[dict]:
 
     parity-gates: a model appears if its folder's parity.json records
     status PASS (the decision-based contract, issue #184). FAIL (a winner
-    changed, or an escaped near-tie) stays excluded. D6: no envelope-band
+    changed, or an escaped near-tie) stays excluded. No envelope-band
     term — a band computed from the run's own max drift is
     self-referential; a parity.json that still carries a band field is
     read unchanged (the field is ignored).
 
-    Time per case (review follow-up on #48): read ONLY the honest
+    Time per case: read ONLY the honest
     per-item end-to-end median (results contract v2). There are no pre-v2
     folders on main, so a parallel combo whose predictions lack
     ``per_item_end_to_end_ms`` is a broken folder, not a fallback case —
@@ -252,16 +252,16 @@ def _local_rows(results_root: Path) -> list[dict]:
             parity = json.loads(parity_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        # F9 decision (c): a payload with no scorer field is a KNOWN legacy
+        # A payload with no scorer field is a KNOWN legacy
         # shape, recognized explicitly (never defaulted, never passed —
         # check_parity still rejects it). The model row STAYS in the table
         # (its accuracy numbers are independent of parity); the Parity
-        # column shows UNVERIFIED (pre-F9) instead of a drift number, because
+        # column shows UNVERIFIED (no scorer recorded) instead of a drift number, because
         # the legacy artifact mixed slots raw rows with labels decisions and
         # its drift numbers mean nothing. A legacy payload whose recorded
         # status is FAIL stays excluded (a winner change is a real
         # divergence under any scorer).
-        # SHORTCUT: pre-F9 parity artifacts; remove when the M5 rerun (P7)
+        # SHORTCUT: parity artifacts from before per-scorer parity; remove when the M5 rerun
         # writes per-scorer parity.
         parity_status = parity.get("status", "PASS")
         if parity_status not in ("PASS", "DRIFT"):
@@ -269,11 +269,11 @@ def _local_rows(results_root: Path) -> list[dict]:
         if parity_status == "DRIFT" and "scoring" in parity:
             # A SCORED DRIFT payload is pre-contract (issue #184: the
             # contract is exactly PASS/FAIL); check_parity rejects it,
-            # the leaderboard excludes it. DRIFT survives only on pre-F9
+            # the leaderboard excludes it. DRIFT survives only on the old no-scorer
             # payloads, which render UNVERIFIED below.
             continue
         if "scoring" not in parity:
-            parity_status = "UNVERIFIED (pre-F9)"
+            parity_status = "UNVERIFIED (no scorer recorded)"
             parity_max_drift = 0.0
         else:
             # The max drift for the Parity column (DRIFT rows show it; PASS
@@ -311,7 +311,7 @@ def _local_rows(results_root: Path) -> list[dict]:
             )
             n_cases = ta.get("n_cases")
             n_fields = ta.get("n_fields")
-            # parity-gates (review fix 3): 'Cases' comes from run.json's
+            # 'Cases' comes from run.json's
             # counts.cases (the source of truth), not from the agreement
             # metrics' n_cases (which can undercount when a case has no
             # valid prediction). If counts.cases is missing, fall back to
@@ -324,11 +324,11 @@ def _local_rows(results_root: Path) -> list[dict]:
             )
             # Count FAILED CASES (distinct case_ids with an error line) for
             # the row note — not error lines: a legacy case failure expands
-            # to one line per labelled field (P3), so line counts overstate.
+            # to one line per labelled field, so line counts overstate.
             from benchmarks.check_results import _failed_cases_in_folder
 
             error_count = _failed_cases_in_folder(combo)
-            # W6-B1: for non-TypeSafe datasets (jabr), the per-workflow
+            # For non-TypeSafe datasets (jabr), the per-workflow
             # breakdown comes from per_workflow_accuracy (general metric),
             # and the overall accuracy from metrics["accuracy"].
             if dataset_name == "jabr":
@@ -365,7 +365,7 @@ def _local_rows(results_root: Path) -> list[dict]:
             rows.append(
                 {
                     "dataset": dataset_name,
-                    # Provenance (F7): the revision recorded in the copied
+                    # Provenance: the revision recorded in the copied
                     # <name>.dataset.lock.json (run.json carries the same
                     # lock's sha256). Rows are grouped per revision below.
                     "revision": _lock_revision(combo, dataset_name),
@@ -376,7 +376,7 @@ def _local_rows(results_root: Path) -> list[dict]:
                     "parity_status": "—" if is_naive else parity_status,
                     "parity_max_drift": 0.0 if is_naive else parity_max_drift,
                     "accuracy": agreement,
-                    # W6-B6b/F1: Wilson CI on the agreement accuracy.
+                    # Wilson CI on the agreement accuracy.
                     "accuracy_ci": _agreement_ci(agreement, cases_count),
                     "by_workflow": {
                         "customer_service": by_workflow.get("customer_service"),
@@ -441,8 +441,8 @@ def _row_line(r: dict) -> str:
     wf_cells = [_fmt_pct(wf.get(key)) for key, _ in _WORKFLOW_COLS]
     cost = r.get("cost_per_case_usd")
     cost_cell = cost if isinstance(cost, str) else _fmt_cost(cost)
-    # Parity column: PASS shows the word; pre-F9 payloads show
-    # UNVERIFIED (pre-F9); FAIL models are excluded by _local_rows. There
+    # Parity column: PASS shows the word; payloads without a scoring key show
+    # UNVERIFIED (no scorer recorded); FAIL models are excluded by _local_rows. There
     # is no scored-DRIFT state (issue #184: the contract is PASS/FAIL).
     parity_cell = str(r.get("parity_status", "—"))
     # Cases cell: counts.cases (45) + error note if there are error lines.
@@ -561,7 +561,7 @@ def build_table(
             lines.append(f"| **{title}** | | | | | | | | | | | | |")
             lines.extend(_row_line(r) for r in group)
 
-    # W6-B1: jabr table — separate block with 8 per-task accuracy columns.
+    # jabr table — separate block with 8 per-task accuracy columns.
     jabr_rows = [r for r in local_rows if r.get("dataset") == "jabr"]
     if jabr_rows:
         if local_rows or official_models or published_models:

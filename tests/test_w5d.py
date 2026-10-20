@@ -1,4 +1,4 @@
-"""W5-D: request-scoped peak memory (finding 32) and log-space legal
+"""Request-scoped peak memory and log-space legal
 mass (findings 37/38).
 
 Fake-model tests — each asserts behavior that FAILS on 1f9f453:
@@ -35,7 +35,7 @@ def test_peak_incremental_present_and_consistent():
     schema = StructuredSchema({"pick": {"type": "enum", "description": "d", "choices": ["A", "B"]}})
     result = run_parallel_generation(make_engine(model, tokenizer), "ctx", schema)
     assert "peak_active_bytes" in result
-    # W5-D finding 32: the incremental pair exists and never goes negative.
+    # The incremental peak pair exists and never goes negative.
     assert "peak_incremental_bytes" in result
     assert result["peak_incremental_bytes"] >= 0
 
@@ -104,7 +104,7 @@ def test_multi_legal_mass_stats_cardinality_free():
 
 def test_count_row_legal_mass_exposed():
     """Finding 38: the count row's legal mass is computed and EXPOSED
-    (it was computed and discarded before). W5-C finding 24: count rows
+    (it was computed and discarded before). Count rows
     live under internal_telemetry, not field_telemetry."""
     schema = StructuredSchema(
         {"tags": {"type": "multi", "description": "d", "choices": ["A", "B", "C"]}}
@@ -112,14 +112,14 @@ def test_count_row_legal_mass_exposed():
     result = run_parallel_generation(
         make_engine(FakeModel(vocab_size=64), FakeTokenizer()), "ctx", schema
     )
-    # W5-C finding 24: count rows live under internal_telemetry.
+    # Count rows live under internal_telemetry.
     count_tel = result["internal_telemetry"].get("tags#count")
     assert count_tel is not None
     assert "legal_mass" in count_tel
     assert 0.0 < count_tel["legal_mass"] <= 1.0
 
 
-# --- W5-D findings 40/41/42: batched parity matrix, real preset contexts, raw logits first ---
+# --- batched parity matrix: real preset contexts, raw logits first ---
 
 
 def test_batched_parity_matrix_stable_fake():
@@ -152,7 +152,7 @@ def test_batched_parity_matrix_catches_row_drift():
                 out = out.at[:, :, 67].add(5.0)
             return out
 
-    # F9: the drift lives on the SLOTS rows (alias tokens); the payload
+    # The drift lives on the SLOTS rows (alias tokens); the payload
     # scorer selects which rows the matrix builds.
     result = check_batched_parity(
         make_engine(_RowDriftModel(), _CountTokenizer()), _cases(), scoring="slots"
@@ -178,7 +178,7 @@ def test_parity_uses_real_preset_context():
 def test_batched_parity_prior_on_matches_independent():
     """Finding 40 matrix includes prior on/off: with prior_correction=True
     the batched results still equal per-context decide (the shared prior
-    object — W5-D finding 26 — flows into every assemble)."""
+    object — the request ledger — flows into every assemble)."""
     from jevmlx.parity import check_batched_parity
 
     result = check_batched_parity(
@@ -187,7 +187,7 @@ def test_batched_parity_prior_on_matches_independent():
     assert result["winners_identical"] is True
 
 
-# --- W5-D review round 2: the width slope is measured, not claimed ---
+# --- the width slope is measured, not claimed ---
 
 
 def test_width_slope_is_an_explicit_budget_parameter():

@@ -51,7 +51,7 @@ LICENSE = (
 )
 
 # The two dataset files + their KNOWN-GOOD sha256 at the pinned revision
-# (verified on download and re-checked on cache reuse — F5 fail-closed).
+# (verified on download and re-checked on cache reuse — fail-closed).
 FILES: dict[str, str] = {
     "authored144": "benchmarks/data/authored144.jsonl",
     "perturbations108": "benchmarks/data/perturbations108.jsonl",
@@ -63,7 +63,7 @@ EXPECTED_SHA256: dict[str, str] = {
 
 
 def _download(dataset_name: str) -> Path:
-    """Download the pinned file from GitHub and VERIFY it (F5).
+    """Download the pinned file from GitHub and VERIFY it.
 
     The raw file is fetched at the pinned revision; the digest must equal
     the hardcoded expectation — any mismatch is a hard OSError (never

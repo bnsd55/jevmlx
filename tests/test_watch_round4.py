@@ -1,4 +1,4 @@
-"""W6-UI round 4a: nits + gz predictions + live attempt selection.
+"""Watcher round: nits + gz predictions + live attempt selection.
 
 Nit A: rotation=null renders —, not the literal 'null'. fmtNullable helper.
 Nit B: cases_per_h is None when fewer than 2 heartbeats exist (no NaN/Infinity).

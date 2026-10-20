@@ -56,12 +56,12 @@ SPLITS = ("train", "test")
 # Bump when the conversion semantics change; recorded in dataset.lock.json.
 PARSER_VERSION = "1"
 
-# F6: results must be reproducible. A floating "current main" revision
+# Results must be reproducible. A floating "current main" revision
 # silently changes the dataset between runs; DEFAULT_REVISION pins the
 # published snapshot this fetcher was written against (resolved once via
 # dataset_info(REPO_ID).sha). --revision overrides it; every value —
 # including a branch name — is resolved to the commit sha via
-# dataset_info(REPO_ID, revision=...).sha (F9), so the lock always records
+# dataset_info(REPO_ID, revision=...).sha, so the lock always records
 # an immutable sha.
 DEFAULT_REVISION = "0af3f0e9dc6d28c2f8f1c9d1ba2e4a55f0e6c9d3"
 

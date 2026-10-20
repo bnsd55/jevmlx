@@ -90,7 +90,7 @@ def server():
 
 
 # ---------------------------------------------------------------------------
-# Existing contract (updated for B7: queue telemetry, no `busy`, request id)
+# Existing contract (updated for the admission queue: telemetry, no `busy`, request id)
 # ---------------------------------------------------------------------------
 
 
@@ -102,7 +102,7 @@ def test_decide_valid_returns_fixed_dict_and_args(server):
     )
 
     assert status == 200
-    # B7: the response carries queue telemetry + request id, ADDED to the
+    # The response carries queue telemetry + request id, ADDED to the
     # engine result (not replacing it).
     for key in ("queue_depth", "queue_wait_ms", "request_id"):
         assert key in body, key
@@ -130,7 +130,7 @@ def test_health(server):
     port, _, _, _ = server
     status, body, _ = _get(port, "/health")
     assert status == 200
-    # /health = process liveness (always 200). B7: carries worker_alive +
+    # /health = process liveness (always 200). Carries worker_alive +
     # queue telemetry. No `busy` (M4).
     assert body["ok"] is True
     assert body["model"] == "fake"
@@ -192,7 +192,7 @@ def test_decide_internal_error_with_empty_message_is_500():
 
 
 def test_serve_does_not_print(server, capsys):
-    """T8a: the library logs, never print()s — stdout must stay clean."""
+    """The library logs, never print()s — stdout must stay clean."""
     port, _, _, _ = server
     schema = {"action": {"type": "enum", "choices": ["APPROVE"], "description": "d"}}
     _post(port, {"schema": schema, "context": "ctx"})
@@ -201,7 +201,7 @@ def test_serve_does_not_print(server, capsys):
 
 
 def test_decide_emits_log_record(server, caplog):
-    """T8b: a decide emits a log record through the logging module."""
+    """A decide emits a log record through the logging module."""
     port, _, _, _ = server
     schema = {"action": {"type": "enum", "choices": ["APPROVE"], "description": "d"}}
     with caplog.at_level(logging.INFO, logger="jevmlx.serve"):
@@ -210,12 +210,12 @@ def test_decide_emits_log_record(server, caplog):
 
 
 # ---------------------------------------------------------------------------
-# W6-B7 tests
+# Admission-queue behaviour tests
 # ---------------------------------------------------------------------------
 
 
 def test_request_id_echoed_when_provided(server):
-    """B7 item 4: echo X-Request-Id if given."""
+    """Echo X-Request-Id if given."""
     port, _, _, _ = server
     schema = {"action": {"type": "enum", "choices": ["APPROVE"], "description": "d"}}
     status, body, headers = _post(
@@ -227,7 +227,7 @@ def test_request_id_echoed_when_provided(server):
 
 
 def test_request_id_generated_when_absent(server):
-    """B7 item 4: generate a request id when the client doesn't send one."""
+    """Generate a request id when the client doesn't send one."""
     port, _, _, _ = server
     schema = {"action": {"type": "enum", "choices": ["APPROVE"], "description": "d"}}
     status, body, headers = _post(port, {"schema": schema, "context": "ctx"})
@@ -238,7 +238,7 @@ def test_request_id_generated_when_absent(server):
 
 
 def test_ready_503_until_marked_ready():
-    """B7 item 3: /ready returns 503 until model load + warm-up, then 200."""
+    """/ready returns 503 until model load + warm-up, then 200."""
     stats = _ServerStats()
     httpd, port, _, aq = _start_server(lambda s, c, t: {}, "fake", stats=stats)
     try:
@@ -278,7 +278,7 @@ def test_ready_503_when_worker_dead():
 
 
 def test_health_always_200_even_before_ready():
-    """B7 item 3: /health is process liveness — always 200 if alive."""
+    """/health is process liveness — always 200 if alive."""
     stats = _ServerStats()
     httpd, port, _, aq = _start_server(lambda s, c, t: {}, "fake", stats=stats)
     try:
@@ -294,7 +294,7 @@ def test_health_always_200_even_before_ready():
 
 
 def test_429_on_queue_overflow_with_retry_after():
-    """B7 item 2: full queue -> 429 with Retry-After header (not 529)."""
+    """Full queue -> 429 with Retry-After header."""
     block = threading.Event()
 
     def blocking_decide(schema_dict, context, temperature=1.0):
@@ -382,7 +382,7 @@ def test_serialization_two_decides_never_overlap(server):
 
 
 def test_admission_rejects_too_many_rows_413():
-    """B7 item 7: max expanded rows exceeded -> 413."""
+    """Max expanded rows exceeded -> 413."""
 
     def count_rows_fn(schema_dict):
         return 3000  # over the default 2048
@@ -410,7 +410,7 @@ def test_admission_rejects_too_many_rows_413():
 
 
 def test_admission_rejects_too_many_prompt_tokens_413():
-    """B7 item 7: max prompt tokens exceeded -> 413."""
+    """Max prompt tokens exceeded -> 413."""
     stats = _ServerStats()
     stats.mark_ready()
     httpd, port, _, aq = _start_server(
@@ -433,7 +433,7 @@ def test_admission_rejects_too_many_prompt_tokens_413():
 
 
 def test_admission_no_projected_memory_limit():
-    """N1: the projected-memory limit is DROPPED. A request that would have
+    """The projected-memory limit is DROPPED. A request that would have
     been rejected by the old memory projection is now accepted (the engine
     chunks rows to its own measured budget)."""
     stats = _ServerStats()
@@ -456,7 +456,7 @@ def test_admission_no_projected_memory_limit():
 
 
 def test_admission_bad_schema_is_400_not_dropped():
-    """B3/N8: a malformed schema (dict that fails StructuredSchema) is 400,
+    """A malformed schema (dict that fails StructuredSchema) is 400,
     not a dropped connection. Mirrors production: _count_rows (O(schema)
     arithmetic, never raises) runs in _admit; StructuredSchema validation
     happens inside the worker (decide_fn) and maps to 400 there."""
@@ -492,7 +492,7 @@ def test_admission_bad_schema_is_400_not_dropped():
 
 
 def test_queue_wait_ms_in_response(server):
-    """B7 item 5: queue depth and queue-wait ms in the response telemetry."""
+    """Queue depth and queue-wait ms in the response telemetry."""
     port, _, _, _ = server
     schema = {"action": {"type": "enum", "choices": ["APPROVE"], "description": "d"}}
     status, body, _ = _post(port, {"schema": schema, "context": "ctx"})
@@ -503,7 +503,7 @@ def test_queue_wait_ms_in_response(server):
 
 
 def test_b1_strict_dead_queued_client_frees_slot():
-    """B1 strict: a dead queued client frees its slot immediately so a live
+    """A dead queued client frees its slot immediately so a live
     client behind it is admitted (not blocked behind the current forward).
 
     A in flight (slow), B queued then disconnects, C must be admitted
@@ -513,7 +513,7 @@ def test_b1_strict_dead_queued_client_frees_slot():
         time.sleep(1.0)  # A occupies the worker for 1s
         return dict(FAKE_RESULT)
 
-    # B1 round 3: maxsize=1 — A occupies worker, B queued (fills the 1
+    # maxsize=1 — A occupies worker, B queued (fills the 1
     # slot), C must be admitted because B's disconnect frees the slot.
     stats = _ServerStats()
     stats.mark_ready()
@@ -551,7 +551,7 @@ def test_b1_strict_dead_queued_client_frees_slot():
         assert aq.depth <= 1, f"depth={aq.depth} — dead B still counted"
 
         c_status, c_body, _ = _post(port, {"schema": schema, "context": "C"})
-        assert c_status != 429, "C was rejected behind a dead queued client (B1 leak)"
+        assert c_status != 429, "C was rejected behind a dead queued client"
     finally:
         httpd.shutdown()
         httpd.server_close()
@@ -559,7 +559,7 @@ def test_b1_strict_dead_queued_client_frees_slot():
 
 
 def test_n3_queue_wait_ms_measures_real_wait():
-    """N3: queue_wait_ms measures the time until the worker picks the request
+    """queue_wait_ms measures the time until the worker picks the request
     up, not just submit() time."""
 
     def slow_decide(schema_dict, context, temperature=1.0):
@@ -585,7 +585,7 @@ def test_n3_queue_wait_ms_measures_real_wait():
         b_status, b_body, _ = _post(port, {"schema": schema, "context": "B"})
         assert b_status == 200
         # B waited behind A for at least 0.2s. queue_wait_ms must reflect a
-        # real wait (N3: the old submit-time delta was 0.0).
+        # the old submit-time delta measured 0.0 — a real wait must not.
         assert b_body["queue_wait_ms"] > 100, (
             f"queue_wait_ms={b_body['queue_wait_ms']} — expected > 100ms (real wait)"
         )
@@ -596,7 +596,7 @@ def test_n3_queue_wait_ms_measures_real_wait():
 
 
 def test_n2_decide_returns_503_during_warmup():
-    """N2: during warm-up, POST /decide returns 503 (not 200 with empty
+    """During warm-up, POST /decide returns 503 (not 200 with empty
     fields), and only ONE worker thread exists."""
     # A server that never calls mark_ready() simulates the warm-up window.
     stats = _ServerStats()  # NOT mark_ready()
@@ -624,7 +624,7 @@ def test_n2_decide_returns_503_during_warmup():
 
 
 def test_n7_non_string_context_is_400(server):
-    """N7: a non-string context (e.g. 5) is 400, not a dropped connection."""
+    """A non-string context (e.g. 5) is 400, not a dropped connection."""
     port, _, _, _ = server
     schema = {"a": {"type": "enum", "choices": ["x"], "description": "d"}}
     status, body, _ = _post(port, {"schema": schema, "context": 5})
@@ -633,7 +633,7 @@ def test_n7_non_string_context_is_400(server):
 
 
 def test_n7_non_dict_schema_is_400(server):
-    """N7: a non-dict schema (e.g. []) is 400."""
+    """A non-dict schema (e.g. []) is 400."""
     port, _, _, _ = server
     status, body, _ = _post(port, {"schema": [], "context": "ctx"})
     assert status == 400
@@ -641,7 +641,7 @@ def test_n7_non_dict_schema_is_400(server):
 
 
 def test_f1_in_flight_disconnect_does_not_over_admit():
-    """F1: a client that disconnects while IN FLIGHT (already popped) must
+    """A client that disconnects while IN FLIGHT (already popped) must
     NOT decrement depth. With maxsize=1: A in flight + B queued, A's client
     disconnects -> depth stays 1 (B), C gets 429 (not admitted)."""
 
@@ -689,7 +689,7 @@ def test_f1_in_flight_disconnect_does_not_over_admit():
         # return False (A is not queued) and NOT decrement depth.
         result = aq.mark_cancelled(a_req)
         assert result is False, "mark_cancelled on an in-flight request should return False"
-        assert aq.depth == 1, f"depth={aq.depth} — in-flight disconnect decremented (F1 bug)"
+        assert aq.depth == 1, f"depth={aq.depth} — in-flight disconnect decremented"
 
         # C: must get 429 (B still holds the slot; A's disconnect didn't free it).
         c_status, c_body, _ = _post(port, {"schema": schema, "context": "C"})
@@ -701,7 +701,7 @@ def test_f1_in_flight_disconnect_does_not_over_admit():
 
 
 def test_f2_baseexception_returns_500():
-    """F2: a decide_fn that raises BaseException (e.g. KeyboardInterrupt)
+    """A decide_fn that raises BaseException (e.g. KeyboardInterrupt)
     returns 500 to that client, not 200 with empty result."""
 
     def boom_baseexception(schema_dict, context, temperature=1.0):
@@ -726,7 +726,7 @@ def test_f2_baseexception_returns_500():
 
 
 # ---------------------------------------------------------------------------
-# B3: /v1/systemone and /v1/models
+# /v1/systemone and /v1/models
 # ---------------------------------------------------------------------------
 
 

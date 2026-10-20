@@ -1,4 +1,4 @@
-"""W3-G: the Apple Silicon platform check moved out of import time.
+"""The Apple Silicon platform check moved out of import time.
 
 `import jevmlx.engine` must succeed on a machine without mlx (Linux CI runs
 schema/plan/metrics tooling); the clear RuntimeError fires only when a model

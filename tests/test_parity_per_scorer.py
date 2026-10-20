@@ -1,11 +1,11 @@
-"""P11 / F9: one parity artifact per scorer.
+"""One parity artifact per scorer.
 
-- T1: scoring flows through EVERY parity call — raw rows, final
+- Scoring flows through EVERY parity call — raw rows, final
   decisions, batched and single-context. Never a hardcoded/default scorer
   inside parity.
-- T2: the batched raw-row comparison covers EVERY context copy of the
+- The batched raw-row comparison covers EVERY context copy of the
   merged pass, not only the first (main read rows 0..R-1 only).
-- T3: multi fields contribute per-option corrected log-odds drift with
+- Multi fields contribute per-option corrected log-odds drift with
   the same atol contract as scalar fields (main skipped them: ls_full is
   None -> continue).
 
@@ -20,7 +20,7 @@ from tests.test_w4b_parity import _cases, _CountTokenizer
 
 
 def test_t1_scoring_flows_through_every_parity_call(monkeypatch):
-    """T1: with scoring="slots", every engine call parity makes — batched,
+    """With scoring="slots", every engine call parity makes — batched,
     chunked, single-context, final decisions — receives scoring="slots"."""
     import jevmlx.engine as engine_mod
 
@@ -52,7 +52,7 @@ def test_t1_scoring_flows_through_every_parity_call(monkeypatch):
 
 
 def test_t2_raw_row_comparison_covers_every_context_copy(monkeypatch):
-    """T2: raw-row drift injected ONLY in the 2nd context copy of the
+    """Raw-row drift injected ONLY in the 2nd context copy of the
     merged pass is detected. Main compares only rows 0..R-1 (the first
     copy) and reports 0.0."""
     import mlx.core as mx
@@ -107,7 +107,7 @@ def test_t2_raw_row_comparison_covers_every_context_copy(monkeypatch):
 
 
 def test_t3_multi_option_drift_flips_the_option_winner():
-    """T3 (issue #184): a multi field whose per-option corrected log-odds
+    """(Issue #184) a multi field whose per-option corrected log-odds
     drift flips the option's winner between batched and chunked FAILS
     parity (the decision invariant). Main skipped multi fields entirely
     (log_scores is None -> continue) and the payload passed. Under the
@@ -150,7 +150,7 @@ def test_t3_multi_option_drift_flips_the_option_winner():
 
 
 def test_t1b_payload_records_its_scorer():
-    """F9: the payload records which scorer it covers, and a slots payload
+    """The payload records which scorer it covers, and a slots payload
     is a DIFFERENT artifact from the labels one."""
     import json
     import tempfile
@@ -180,8 +180,8 @@ def test_t1b_payload_records_its_scorer():
 
 
 def test_check_parity_rejects_payload_without_scorer(tmp_path):
-    """F9: a parity payload with no scoring key is rejected — no silent
-    default (the pre-F9 artifact proved parity for neither scorer)."""
+    """A parity payload with no scoring key is rejected — no silent
+    default (the old shared artifact proved parity for neither scorer)."""
     import json
 
     from benchmarks.check_results import check_parity
@@ -208,7 +208,7 @@ def test_check_parity_rejects_payload_without_scorer(tmp_path):
 
 
 def test_check_parity_requires_every_scorer_artifact_to_pass(tmp_path):
-    """F9: parity.json passes but parity-slots.json FAILs -> the folder is
+    """parity.json passes but parity-slots.json FAILs -> the folder is
     rejected (one bad scorer is a bad model)."""
     import json
 
@@ -240,9 +240,9 @@ def test_check_parity_requires_every_scorer_artifact_to_pass(tmp_path):
 
 
 def test_leaderboard_unverified_for_pre_f9_parity(tmp_path):
-    """F9 decision (c): a legacy parity payload (no scoring key, recorded
+    """A legacy parity payload (no scoring key, recorded
     status DRIFT) keeps the model row in the table — the Parity column
-    reads UNVERIFIED (pre-F9) with no drift number. A FAIL status stays
+    reads UNVERIFIED (no scorer recorded) with no drift number. A FAIL status stays
     excluded under any shape (a winner change is real under any scorer)."""
     import json
     from pathlib import Path
@@ -302,18 +302,18 @@ def test_leaderboard_unverified_for_pre_f9_parity(tmp_path):
 
     rows = _local_rows(root)
     models = {r["model"]: r["parity_status"] for r in rows}
-    assert models["fake-1b"].count("UNVERIFIED (pre-F9)") == 1 or any(
-        r["parity_status"] == "UNVERIFIED (pre-F9)" for r in rows
+    assert models["fake-1b"].count("UNVERIFIED (no scorer recorded)") == 1 or any(
+        r["parity_status"] == "UNVERIFIED (no scorer recorded)" for r in rows
     )
     # The FAIL-status legacy model is excluded entirely.
     assert all(r["parity_status"] != "FAIL" for r in rows)
     # The UNVERIFIED row carries no drift number.
-    unv = [r for r in rows if r["parity_status"] == "UNVERIFIED (pre-F9)"]
+    unv = [r for r in rows if r["parity_status"] == "UNVERIFIED (no scorer recorded)"]
     assert unv and all(r["parity_max_drift"] == 0.0 for r in unv)
 
 
 def test_check_parity_rejects_unknown_scorer(tmp_path):
-    """F9: a payload tagged with an unknown scorer is neither legacy nor a
+    """A payload tagged with an unknown scorer is neither legacy nor a
     valid per-scorer artifact — it fails closed."""
     import json
 

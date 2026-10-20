@@ -1,4 +1,4 @@
-"""W6-UI: read-only live dashboard for a bench/m5 output directory.
+"""Read-only live dashboard for a bench/m5 output directory.
 
 Renders a live dashboard from the files the run already writes
 (RUNBOOK.md, run.json, heartbeat.jsonl, completed_cases.jsonl,
@@ -368,13 +368,13 @@ def _combo_dirs(out_dir: Path) -> list[Path]:
             combo_dir = p.parent
             if combo_dir in seen or combo_dir == out_dir:
                 continue
-            # W6-UI round 4b: skip ab-worktree/ (a git worktree, not results)
+            # Skip ab-worktree/ (a git worktree, not results)
             # and skip invariance/ (own section, not model rows).
             if "ab-worktree" in combo_dir.parts:
                 continue
             seen.add(combo_dir)
             combos.append(combo_dir)
-    # W6-UI-3g: discover QUEUED sibling dirs (never-run, no markers) in model
+    # Discover QUEUED sibling dirs (never-run, no markers) in model
     # folders that already have at least one combo. The model folder must be a
     # proper descendant of <out> so we never walk above out_dir.
     model_dirs: set[Path] = {
@@ -631,7 +631,7 @@ def _parse_pipeline(out_dir: Path) -> dict:
     """Pipeline panel: steps grouped by the LAST attempt.
 
     Parses RUNBOOK.md for attempt headers of two forms:
-    - W6 (#119+): '## attempt <n> <ISO> <hash> <argv>'
+    - #119+: '## attempt <n> <ISO> <hash> <argv>'
     - Legacy (pre-#119): '# M5 runbook — <ISO>' (one per attempt, append-only)
     Both split attempts; attempt_n = count; attempt_started = the ISO.
     Only the last attempt's steps are returned (the dashboard shows the
@@ -653,7 +653,7 @@ def _parse_pipeline(out_dir: Path) -> dict:
             re.finditer(r"^(?:## attempt \d+ \S+ \S+|# M5 runbook — \S+)", text, re.MULTILINE)
         )
         if attempt_starts:
-            # W6-UI round 4: pick the LIVE attempt — the one that has a
+            # Pick the LIVE attempt — the one that has a
             # 'started <id> <ISO>' line with no matching completion (still
             # running). If none is running, pick the newest by started time
             # (the last block). Previously this took the last block by
@@ -794,7 +794,7 @@ def _parse_pipeline(out_dir: Path) -> dict:
                             }
                         )
                 elif line.startswith("step: "):
-                    # W6-UI-3c: the authoritative step id (matches 'started <id>').
+                    # The authoritative step id (matches 'started <id>').
                     # The '## ' line above created an entry with a placeholder
                     # sid (title's first word); replace it with the real id and
                     # try to merge with a prior 'started' entry that has the
@@ -826,7 +826,7 @@ def _parse_pipeline(out_dir: Path) -> dict:
                     if steps_raw:
                         steps_raw[-1]["argv"] = line[5:].strip().split()
         else:
-            # No attempt header (pre-W6 RUNBOOK): fall back to the old parse.
+            # No attempt header (older RUNBOOK format): fall back to the old parse.
             for s in parse_runbook(out_dir):
                 state = {"done": "ok", "aborted": "failed", "skipped": "skipped"}.get(
                     s.get("state", ""), "waiting"
@@ -841,7 +841,7 @@ def _parse_pipeline(out_dir: Path) -> dict:
                         "started": None,
                     }
                 )
-    # W6-UI-3g: dedupe by id — last occurrence wins (legacy append-only
+    # Dedupe by id — last occurrence wins (append-only
     # RUNBOOKs stack the same step across attempts).
     seen_ids: dict[str, dict] = {}
     for s in steps_raw:
@@ -873,7 +873,7 @@ def _parse_pipeline(out_dir: Path) -> dict:
             "error": _extract_step_error(out_dir, sid) if sid else None,
         }
         steps_out.append(step)
-    # W6-UI round 4b: infer the LIVE step from the newest heartbeat's folder
+    # Infer the LIVE step from the newest heartbeat's folder
     # path. RUNBOOK writes a step only on exit, so a running combo's step is
     # not in the RUNBOOK yet. Infer the step name from the bench section:
     #   ab/...           -> 'A/B <branch>'
@@ -1206,7 +1206,7 @@ def _find_live_combo(combos: list[Path]) -> tuple[Path | None, dict | None]:
 
 
 def build_dashboard(out_dir: str | Path) -> dict:
-    """The full /dashboard.json payload (frozen W6-UI-3a contract).
+    """The full /dashboard.json payload (frozen contract).
 
     Pure read-only function: reads files the run already writes, truncates
     half-written trailing lines to the last complete JSON line (same rule as
@@ -1218,14 +1218,14 @@ def build_dashboard(out_dir: str | Path) -> dict:
     out_dir = Path(out_dir)
     run = parse_run_json(out_dir)
     env = (run.get("environment") if run else {}) or {}
-    # W6-UI round 4b: 'memory' is a TOP-LEVEL key in run.json (the real M5
+    # 'memory' is a TOP-LEVEL key in run.json (the real M5
     # shape), not under config. Fall back to config.memory for old fixtures.
     mem_cfg = (run.get("memory") if run else {}) or {}
     if not mem_cfg:
         cfg_tmp = (run.get("config") if run else {}) or {}
         mem_cfg = (cfg_tmp.get("memory") if cfg_tmp else {}) or {}
     combos = _combo_dirs(out_dir)
-    # W6-UI-3g: take environment/hash from the NEWEST run.json by mtime (not
+    # Take environment/hash from the NEWEST run.json by mtime (not
     # the first found). The top-level <out> may have no run.json (m5 writes
     # one per combo).
     if not env and combos:
@@ -1253,7 +1253,7 @@ def build_dashboard(out_dir: str | Path) -> dict:
             env = best_env
             if not mem_cfg:
                 mem_cfg = best_mem_cfg
-    # W6-UI-3g: a RUNBOOK attempt header (## attempt <n> <ISO> <hash>) overrides
+    # A RUNBOOK attempt header (## attempt <n> <ISO> <hash>) overrides
     # the git sha when present (it is the run's own hash, not the file's).
     pipeline = _parse_pipeline(out_dir)
     rb_hash = _read_runbook_hash(out_dir)
@@ -1312,7 +1312,7 @@ def build_dashboard(out_dir: str | Path) -> dict:
     # --- now ---
     now_block = _build_now(now_combo, now_hb, now_cfg, out_dir)
     # --- memory ---
-    # W6-UI round 4b: cap from the newest run.json's top-level 'memory' block
+    # Cap from the newest run.json's top-level 'memory' block
     # (metal_cache_limit_bytes, 8589934592 -> 8.0 GB). stop_gb = the m5 stop
     # rule constant (10 GB).
     newest_run = parse_run_json(now_combo) if now_combo else {}
@@ -1524,13 +1524,13 @@ def _derive_run_index(out_dir: Path, now_combo: Path | None) -> tuple[int | None
 
 def _build_now(now_combo, now_hb, now_cfg, out_dir) -> dict:
     """The 'now' panel: current combo progress + ETA."""
-    total = None  # W6-UI round 4b: None (—) when not derivable, never 0
+    total = None  # None (—) when not derivable, never 0
     done = 0
     pred_lines = 0
     now_run = parse_run_json(now_combo) if now_combo else {}
     now_counts = (now_run.get("counts") if now_run else {}) or {}
     if now_combo:
-        # W6-UI round 4b: cases_done from the heartbeat is in TICK units
+        # cases_done from the heartbeat is in TICK units
         # (case × rotation variants), not record units. counts.cases (45)
         # is records — a different unit. The total ticks is not directly in
         # run.json until the combo finishes. Strategy:
@@ -1605,7 +1605,7 @@ def _build_now(now_combo, now_hb, now_cfg, out_dir) -> dict:
                 hb_age = int(time.time() - hb_path.stat().st_mtime)
             except OSError:
                 pass
-    # W6-UI round 4b: run_i/run_n not in config; derive from model folders.
+    # run_i/run_n not in config; derive from model folders.
     _run_i, _run_n = _derive_run_index(out_dir, now_combo)
     # A2: field-level error count + rate from the latest heartbeat record
     # (cumulative for the combo). The NOW panel shows 'errors N/T (P%)' in
@@ -1760,7 +1760,7 @@ def _build_results(out_dir, combos, env) -> list[dict]:
         timing = _read_timing_json(c)
         t = (timing.get("median") or {}).get("per_item_end_to_end_ms")
         ab_delta = _ab_delta(out_dir, c, accuracy)
-        # W6-UI round 4b: model is never None. Use config.model, else
+        # model is never None. Use config.model, else
         # reconstruct the Hub id from the folder slug (-- -> /), else
         # 'alias folder (no run)' for stub folders like m5max-128gb-quality.
         model = cfg.get("model") or _model_from_folder(c)
@@ -1954,7 +1954,7 @@ def build_questions(out_dir: str | Path, combo_id: str) -> list[dict]:
     if not ds_path.exists():
         ds_path = out_dir / "dataset.jsonl"
     if not ds_path.exists():
-        # W6-UI-3e: read from run.json config.dataset_path.
+        # Read from run.json config.dataset_path.
         combo_run = parse_run_json(combo_dir)
         dp = ((combo_run.get("config") if combo_run else {}) or {}).get("dataset_path")
         if dp:

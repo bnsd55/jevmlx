@@ -1,8 +1,8 @@
-"""W5c-4: batched drift diagnostic matrix — is the 0.125-nat drift kernel
+"""Batched drift diagnostic matrix — is the 0.125-nat drift kernel
 shape or a bug?
 
 decide_many parity shows ~0.125 nats raw row drift at 112 merged rows vs
-batch=1 (0.5B). This probe runs the discriminating matrix (GPT-REVIEW-3
+batch=1 (0.5B). This probe runs the discriminating matrix (the serve review's
 section 2) on a REAL model and writes ``driftprobe.json`` plus a markdown
 table, so the numbers — not a fitted tolerance — decide:
 
@@ -30,7 +30,7 @@ table, so the numbers — not a fitted tolerance — decide:
     the same width matrix (identical winners on easy margins say nothing
     about the rescore gate).
 
-Every metric is per-row and separated (GPT-REVIEW-3 §2):
+Every metric is per-row and separated (the serve review, section 2):
 - d_raw  = max_i |z_i(B) - z_i(1)|            (uncentered, diagnostic only)
 - d_gap  = max_{i<j} |(z_i - z_j)(B) - (z_i - z_j)(1)|
 - d_logp = max_i |logsoftmax(z(B))_i - logsoftmax(z(1))_i|
@@ -576,7 +576,7 @@ def main() -> int:
     with open(json_path, "w") as f:
         json.dump(report, f, indent=2)
 
-    # W5c-9: persist the drift ENVELOPE from this probe's measurements —
+    # Persist the drift ENVELOPE from this probe's measurements —
     # per width bucket, the max d_gap at that bucket — into the user cache
     # (keyed by the envelope tuple) and this probes folder. The engine band
     # reads the recorded envelope; the probe is the authoritative writer.
@@ -596,7 +596,7 @@ def _fmt(v: float | None) -> str:
 
 
 def _persist_envelope(engine: Engine, report: dict[str, Any], out_dir: str) -> list[str]:
-    """W5c-9: write drift-envelope records from the width matrix.
+    """Write drift-envelope records from the width matrix.
 
     For every measured tensor-row count n, the envelope's shape bucket is
     shape_bucket(n) and the bound is that width entry's max d_gap. The
@@ -642,7 +642,7 @@ def _fmt3(d: dict) -> str:
 
 def _markdown(r: dict[str, Any]) -> str:
     lines = [
-        "# Batched drift probe (W5c-4)",
+        "# Batched drift probe",
         "",
         f"model: `{r['model']}` — schema `{r['case']}` ({r['schema_rows']} rows),"
         f" cache dtype {r['cache_dtype']}",

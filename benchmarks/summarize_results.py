@@ -76,7 +76,7 @@ def _row_from_folder(folder: Path) -> dict | None:
         "dataset": dataset,
         "field_accuracy": metrics.get("accuracy"),
         "case_exact": metrics.get("case_exact_match", metrics.get("exact_match")),
-        # P7: majority baseline (mean over fields) and exact-record accuracy
+        # Majority baseline (mean over fields) and exact-record accuracy
         # are first-class columns next to field accuracy.
         "majority_baseline": _mean_or_none(metrics.get("majority_class_baseline")),
         "exact_record": metrics.get("exact_record_accuracy"),
@@ -137,7 +137,7 @@ def _run_extras(folder: Path) -> tuple[float | None, int | None, int | None]:
     """(median call-level latency ms, n_cases, n_calls) from the combo's
     timing.json + run.json.
 
-    B11-naive: the 'p50 latency' column must be the CALL-level
+    The 'p50 latency' column must be the CALL-level
     per_item_end_to_end_ms median from timing.json for every track —
     not the per-line latency_ms (which is shared across a call's fields
     on the parallel track and inflated by rotations). Falls back to
@@ -160,7 +160,7 @@ def _run_extras(folder: Path) -> tuple[float | None, int | None, int | None]:
 
 
 def _model_parity_note(model_dir: Path) -> str | None:
-    """W4-B: the parity-failure note for a model folder, or None when the
+    """The parity-failure note for a model folder, or None when the
     folder carries a PASSING parity.json.
 
     A MISSING parity.json also gates: a bench-produced folder ALWAYS has
@@ -179,7 +179,7 @@ def _model_parity_note(model_dir: Path) -> str | None:
         return None
     # Results contract v2: name WHICH stage failed. Stages: winners (final
     # decisions), final log-score drift, raw pre-rescore row-logit drift
-    # (finding 42 — a batch-1 rescore can mask raw batch drift).
+    # (a batch-1 rescore can mask raw batch drift).
     from benchmarks.check_results import _parity_failed_stages
 
     stages = "; ".join(_parity_failed_stages(parity))
@@ -196,7 +196,7 @@ def _model_parity_note(model_dir: Path) -> str | None:
 def summarize(out: Path, parity_note: str | None = None) -> Path:
     """Write ``out/SUMMARY.md`` from every report.json under ``out``; print it.
 
-    W4-B: a model folder whose ``parity.json`` shows a failed scoring-parity
+    A model folder whose ``parity.json`` shows a failed scoring-parity
     check (or is missing) marks every row of that model ``parity_failed`` —
     the model cannot enter the README compat table (PR #29's gate reads the
     same file; the summary shows WHY). ``parity_note`` (run_bench's
@@ -213,7 +213,7 @@ def summarize(out: Path, parity_note: str | None = None) -> Path:
             else []
         )
         if combo_dirs:
-            # W4-B parity gate: a parity-failing model's rows all show it.
+            # Parity gate: a parity-failing model's rows all show it.
             model_parity = _model_parity_note(machine_dir) or parity_note
             for combo in combo_dirs:
                 row = _row_from_folder(combo)

@@ -124,7 +124,7 @@ def _write_local_result(tmp_path: Path) -> Path:
         "counts": {"cases": 4, "fields": 4, "prediction_lines": 4},
     }
     (combo / "run.json").write_text(json.dumps(run), encoding="utf-8")
-    # W4-A: a model needs a passing parity.json to enter the leaderboard.
+    # A model needs a passing parity.json to enter the leaderboard.
     (machine_dir / "parity.json").write_text(
         json.dumps(
             {
@@ -419,7 +419,7 @@ def test_main_check_readme_exits_0_when_fresh(tmp_path, capsys):
 
 
 def test_local_rows_accept_single_path_folder(tmp_path):
-    """W5c-3: the single path (run_parallel_generation) also reports
+    """The single path (run_parallel_generation) also reports
     per_item_end_to_end_ms — a parallel folder whose timing.json carries
     it is a valid folder: the leaderboard must accept it."""
     official = _write_official(tmp_path)

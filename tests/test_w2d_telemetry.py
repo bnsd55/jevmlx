@@ -1,11 +1,11 @@
-"""W2-D: legal_mass telemetry — the per-branch leakage signal.
+"""legal_mass telemetry — the per-branch leakage signal.
 
 legal_mass = P(model wanted any valid code at the branch) =
 sum(exp(z_allowed)) / sum(exp(z_vocab)). A branch can confidently pick A
 over B even when almost all unconstrained mass is on a reasoning token;
 legal_mass flags that leakage. Always computed (the ~0.002 Metal FP drift
 from the full-vocab logsumexp means bit-identical batch parity was never a
-real invariant on Metal; W1-A asserts winners identical + log_scores
+real invariant on Metal; the parity tests assert winners identical + log_scores
 within atol PARITY_ATOL).
 """
 
@@ -70,7 +70,7 @@ def test_score_trie_returns_tuple():
     nodes = build_trie(remainders)
     logits = [1.0, 2.0]  # branch node 0, children in sorted-token order
     log_probs, lm_logs = score_trie(nodes, 2, lambda n: logits, lambda n: math.log(0.5))
-    # W5-D finding 37: the callback returns the LOG mass; both choices pass
+    # The callback returns the LOG mass; both choices pass
     # the one branch, so each carries ln(0.5).
     assert lm_logs == [math.log(0.5), math.log(0.5)]
     # Without the callback, legal mass logs are 0.0 (mass 1.0) — for the

@@ -1,4 +1,4 @@
-"""B11: unit tests for two_stage.py partition and table builder (no model)."""
+"""Unit tests for two_stage.py partition and table builder (no model)."""
 
 from __future__ import annotations
 

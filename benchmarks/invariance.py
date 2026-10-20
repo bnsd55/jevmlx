@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Irrelevant-field invariance benchmark: does the global schema block hurt?
 
-GPT-review Q1's diagnostic before the W2-A change (field-local prompt tails
+The original review's diagnostic: field-local prompt tails
 over one shared context prefix). For each target field of the bundled and
 TypeSafe cases, build schema variants with 1, 5, 20, 40 UNRELATED extra
 fields appended (deterministic, from a fixed pool of plausible fields with
@@ -579,7 +579,7 @@ def build_parser() -> argparse.ArgumentParser:
     tests/test_m5_e2e.py TestPlannedArgvParses)."""
     parser = argparse.ArgumentParser(
         prog="python -m benchmarks.invariance",
-        description="Irrelevant-field invariance benchmark (W2-A gate).",
+        description="Irrelevant-field invariance benchmark.",
     )
     parser.add_argument("--model", required=True, help="mlx-lm model id")
     parser.add_argument("--data", required=True, help="cases: .json (bundled) or .jsonl (eval)")

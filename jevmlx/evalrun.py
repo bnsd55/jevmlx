@@ -54,7 +54,7 @@ __all__ = [
 
 # decide_fn(schema_dict, context) -> {field: {"prediction", "valid", "error",
 # "log_scores", "probability", "per_option", "type"}, "_meta": {...}}.
-# W5c-3: parallel _meta carries per_item_end_to_end_ms (single and batched
+# Parallel _meta carries per_item_end_to_end_ms (single and batched
 # engine paths both report it); it rides every parallel prediction line.
 DecideFn = Callable[[dict, str], dict[str, Any]]
 
@@ -132,7 +132,7 @@ def _full_line_skeleton(
     so error/marker lines pass the frozen-contract check in check_results.
     Written to errors.jsonl (NOT predictions.jsonl) so they do not survive
     resume (R2) — except case-level VALIDATION failures, which are permanent
-    results and are journaled with ONE line per labelled field (P2: the
+    results and are journaled with ONE line per labelled field (the
     failure must count every labelled field of the case as wrong).
     """
     return {
@@ -181,8 +181,8 @@ def _sha256_file(path: str | None) -> str | None:
     """sha256 hex of the file at ``path``; None only when path is None.
 
     A non-None path that does not exist raises OSError — callers must not
-    write null into run.json for a lock they claimed exists (W5c-17: the
-    bench passed a lock path that was never written, and the silent None
+    write null into run.json for a lock they claimed exists (a bench
+    once passed a lock path that was never written, and the silent None
     hid the broken provenance chain).
     """
     if not path:
@@ -201,7 +201,7 @@ def _compute_tokenizer_metrics(
     plan_provider: Callable[..., dict],
     field_telemetry: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Per-model tokenizer metrics for run.json (W4-A).
+    """Per-model tokenizer metrics for run.json.
 
     Quantifies how the tokenizer segments the schema's quoted codes:
     - ``quoted_code_token_lengths``: list of candidate token lengths
@@ -302,7 +302,7 @@ def parallel_decide_fn(
                 "per_option": telemetry.get("per_option"),
                 "type": telemetry.get("type") or (field.field_type if field else None),
             }
-            # W6-B1: ordered enums carry the scale (choice order = level
+            # Ordered enums carry the scale (choice order = level
             # order) + the derived ordinal telemetry, so ordinal metrics can
             # be computed from the predictions file alone.
             if field is not None and field.ordered:
@@ -318,11 +318,11 @@ def parallel_decide_fn(
             out[fname] = entry
         out["_meta"] = {
             "latency_ms": result["elapsed_ms"],
-            # W3-R: the engine's full timing split rides _meta so bench
+            # The engine's full timing split rides _meta so bench
             # writes the timing JSON per combo from the SAME decide calls
             # (no second run). Strict keys: the engine always sets these —
             # a missing key must be a visible bug (KeyError), not a silent
-            # zero in timing.json (review F2).
+            # zero in timing.json.
             "prior_ms": result["prior_ms"],
             "prefill_ms": result["prefill_ms"],
             "plan_compile_ms": result["plan_compile_ms"],
@@ -331,18 +331,18 @@ def parallel_decide_fn(
             "lm_head_gather_ms": result["lm_head_gather_ms"],
             "second_pass_ms": result["second_pass_ms"],
             "total_ms": result["total_ms"],
-            # W5c-3: the single path's honest per-request latency — the same
+            # The single path's honest per-request latency — the same
             # key the batched path reports per context (results contract v2
             # must not depend on which engine path produced the lines).
             "per_item_end_to_end_ms": result["per_item_end_to_end_ms"],
-            # Results contract v2 (W5-D findings 30/32): retry count and
+            # Results contract v2: retry count and
             # request-scoped peak ride the split so timing.json shows them
             # next to the absolute peak.
             "failed_attempts": result["failed_attempts"],
             "peak_active_bytes": result["peak_active_bytes"],
             "peak_incremental_bytes": result["peak_incremental_bytes"],
             "padded_token_positions": result["padded_token_positions"],
-            # W5c-6 / B4: token-accounting telemetry in timing.json.
+            # Token-accounting telemetry in timing.json.
             "naive_branch_prompt_tokens": result["naive_branch_prompt_tokens"],
             "shared_prefix_tokens": result["shared_prefix_tokens"],
             "logical_suffix_token_positions": result["logical_suffix_token_positions"],
@@ -359,7 +359,7 @@ def parallel_decide_fn(
 
 
 def _attach_ordinal(field, entry: dict) -> None:
-    """W6-B1/F5: every track's decide_fn output carries the ordered scale +
+    """Every track's decide_fn output carries the ordered scale +
     the derived ordinal telemetry, so ordinal_mae/confusion compute on
     EVERY track (no tolerated-absence path).
 
@@ -443,12 +443,12 @@ def naive_local_decide_fn(engine) -> DecideFn:
                 "salvage_prediction": salvage_values.get(fname),
                 "error": next((e for e in errors if fname in e), None),
             }
-            # W6-B1/F5: ordered enums carry the scale on EVERY track.
+            # Ordered enums carry the scale on EVERY track.
             _attach_ordinal(schema.fields.get(fname), entry)
             out[fname] = entry
         out["_meta"] = {
             "latency_ms": result.get("elapsed_ms"),
-            # B11-naive: per-call total_ms (generation wall) and
+            # Naive tracks: per-call total_ms (generation wall) and
             # per_item_end_to_end_ms (one call per case -> same as total_ms).
             "total_ms": result.get("elapsed_ms"),
             "per_item_end_to_end_ms": result.get("elapsed_ms"),
@@ -486,12 +486,12 @@ def api_baseline_decide_fn(
                 "valid": value is not None,
                 "error": next((e for e in result["errors"] if fname in e), None),
             }
-            # W6-B1/F5: ordered enums carry the scale on EVERY track.
+            # Ordered enums carry the scale on EVERY track.
             _attach_ordinal(schema.fields.get(fname), entry)
             out[fname] = entry
         out["_meta"] = {
             "latency_ms": result.get("latency_ms"),
-            # B11-naive: per-call total_ms and per_item_end_to_end_ms.
+            # Naive tracks: per-call total_ms and per_item_end_to_end_ms.
             "total_ms": result.get("latency_ms"),
             "per_item_end_to_end_ms": result.get("latency_ms"),
             "rows": None,
@@ -533,7 +533,7 @@ def openai_slots_decide_fn(
                 "log_scores": telemetry.get("log_scores"),
                 "truncated": telemetry.get("truncated"),
             }
-            # W6-B1/F5: ordered enums carry the scale on EVERY track.
+            # Ordered enums carry the scale on EVERY track.
             _attach_ordinal(field, entry)
             out[fname] = entry
         out["_meta"] = {
@@ -577,7 +577,7 @@ def _heartbeat(
     fields_error: int = 0,
     fields_total: int = 0,
 ) -> None:
-    """W5c-16: print + append one heartbeat record for every N completed cases.
+    """Print + append one heartbeat record for every N completed cases.
 
     One line to stdout (the same GB formatting as the bench [memory] line,
     reusing the local _sample_metal_memory + _memory_block_gb) and one
@@ -615,7 +615,7 @@ def _heartbeat(
         print(f"[heartbeat] could not append heartbeat.jsonl: {exc}", flush=True)
 
 
-# W5c-13/16: Metal memory helpers. Defined here (not in jevmlx.bench) so the
+# Metal memory helpers. Defined here (not in jevmlx.bench) so the
 # eval infra never imports from the bench CLI; bench imports these from here.
 _MEMORY_KEYS = ("peak_memory", "active_memory", "cache_memory")
 
@@ -682,7 +682,7 @@ def _schema_variants(
 
 def _oracle_parents(schema_dict: dict, labels: dict) -> dict[str, object]:
     """The oracle overrides for one case: each depends_on parent that has a
-    label (W3-D part 2). One copy — the run-start oracle-need check and the
+    label. One copy — the run-start oracle-need check and the
     per-case oracle pass both use it."""
     parents: dict[str, object] = {}
     for spec in schema_dict.values():
@@ -744,7 +744,7 @@ def run_eval(
     # OWNING layer — no caller needs to remember a flag.
     carry_perturbation = any((c.get("meta") or {}).get("perturbation") is not None for c in cases)
 
-    # W5c-7: crash-safe resumable eval infrastructure.
+    # Crash-safe resumable eval infrastructure.
     from datetime import UTC, datetime
 
     from jevmlx.resume import (
@@ -802,7 +802,7 @@ def run_eval(
         code_hash=_code_hash,
         run_id=run_id,
     )
-    # N2: sessions list — durable per-session record for the segment counter.
+    # Sessions list — durable per-session record for the segment counter.
     manifest["sessions"] = [
         {"segment": 0, "started_utc": datetime.now(UTC).isoformat(timespec="seconds")}
     ]
@@ -851,7 +851,7 @@ def run_eval(
 
     selected = [c for c in cases if split == "all" or c.get("split", "train") == split]
 
-    # P5 (F2): decide ONCE whether the seam accepts the optional keyword
+    # Decide ONCE whether the seam accepts the optional keyword
     # arguments — never try/except TypeError as feature detection (a
     # TypeError raised INSIDE scoring is a case failure, not a missing
     # parameter). A run with constrained cases and a decide_fn that cannot
@@ -881,7 +881,7 @@ def run_eval(
             "`oracle_overrides`"
         )
 
-    timing_meta: list[dict[str, Any]] = []  # W3-R: parallel _meta timings
+    timing_meta: list[dict[str, Any]] = []  # parallel _meta timings
     lines: list[dict] = []
     n_canonical = 0
     first_field_telemetry: dict[str, Any] | None = None
@@ -903,7 +903,7 @@ def run_eval(
     _fields_error = 0
     _first_error_text: str | None = None
     _error_breaker_tripped: dict | None = None
-    # W5c-16: heartbeat counters (cases committed + run start time).
+    # Heartbeat counters (cases committed + run start time).
     _hb_done = 0
     _hb_start = time.perf_counter()
     # A2: cumulative field-level error counters for the heartbeat record.
@@ -949,10 +949,10 @@ def run_eval(
                         os.fsync(_mf.fileno())
                     continue
                 try:
-                    # P5: the constrained form is chosen by SIGNATURE (the
+                    # The constrained form is chosen by SIGNATURE (the
                     # upfront check guarantees no constrained case reaches
                     # the 2-arg form); a TypeError raised INSIDE decide_fn
-                    # is a case failure through the P2 error path below —
+                    # is a case failure through the canonical error path below —
                     # never an unconstrained retry.
                     if _decide_takes_constraints:
                         results = decide_fn(
@@ -962,8 +962,8 @@ def run_eval(
                         results = decide_fn(schema_dict, case["context"])
                 except Exception as exc:  # noqa: BLE001 — circuit breaker
                     sig = failure_signature(exc)
-                    # P2/P3: write the error line (full shape) for BOTH infra
-                    # and non-infra — the failure IS the result. P2: the
+                    # Write the error line (full shape) for BOTH infra
+                    # and non-infra — the failure IS the result. The
                     # error-inclusive denominator — a case-level failure
                     # must count every LABELLED field of the case as wrong,
                     # so emit one failure line per labelled field (the
@@ -1008,7 +1008,7 @@ def run_eval(
                             _ckey,
                             variant_lines,
                         )
-                        # W5c-16: heartbeat every N committed cases.
+                        # Heartbeat every N committed cases.
                         _hb_done += 1
                         _hb_fields_total += len(variant_lines)
                         _hb_fields_error += sum(1 for vl in variant_lines if vl.get("error"))
@@ -1043,8 +1043,8 @@ def run_eval(
                     continue
                 _breaker.record_success()
                 meta = results.pop("_meta", {})
-                # W3-R: parallel-track _meta carries the engine's timing split.
-                # B11-naive: naive_local and api_baseline also carry per-call
+                # Parallel-track _meta carries the engine's timing split.
+                # Naive tracks (naive_local, api_baseline) also carry per-call
                 # timing (total_ms, per_item_end_to_end_ms, generated_tokens).
                 if tag is None and meta:
                     if track in ("parallel", "naive_local", "api_baseline"):
@@ -1066,7 +1066,7 @@ def run_eval(
                 ):
                     manifest["prompt_sha256"] = _prompt_sha
                     write_manifest(out_dir, manifest)
-                # W3-D part 2: oracle pass.
+                # Oracle pass.
                 oracle_results: dict[str, Any] = {}
                 oracle_error_text: str | None = None
                 if track == "parallel" and tag is None:
@@ -1078,7 +1078,7 @@ def run_eval(
                     if has_depends and labels:
                         oracle_parents = _oracle_parents(schema_dict, labels)
                         if oracle_parents:
-                            # P5: the oracle pass never swallows exceptions.
+                            # The oracle pass never swallows exceptions.
                             # A TypeError-style seam mismatch was decided up
                             # front (signature check); ANY exception inside
                             # the oracle call is recorded on the case's
@@ -1106,7 +1106,7 @@ def run_eval(
                 for fname, res in results.items():
                     field_def = schema.fields.get(fname)
                     prediction = res.get("prediction")
-                    # W6-B1: ordered-enum lines carry the scale + telemetry.
+                    # Ordered-enum lines carry the scale + telemetry.
                     ordinal_choices = res.get("ordinal_choices")
                     ordinal_record = res.get("ordinal")
                     if tag and tag.startswith("rot") and field_def is not None:
@@ -1127,7 +1127,7 @@ def run_eval(
                         "label": label,
                         "prediction": prediction,
                         "valid": bool(res.get("valid", prediction is not None)),
-                        # P2: multi-select compares SETS — the same choices
+                        # Multi-select compares SETS — the same choices
                         # in a different order are the same answer.
                         "correct": None
                         if label is None
@@ -1143,7 +1143,7 @@ def run_eval(
                         "salvage_prediction": res.get("salvage_prediction"),
                         "oracle_prediction": oracle_results.get(fname),
                     }
-                    # P5: an oracle-pass failure rides the case's canonical
+                    # An oracle-pass failure rides the case's canonical
                     # lines (additive key, raw_text pattern) — visible, never
                     # silently dropped.
                     if oracle_error_text:
@@ -1199,7 +1199,7 @@ def run_eval(
                                 max_error_rate,
                                 _first_error_text,
                             )
-                    # B1: commit this variant's lines with its own journal key.
+                    # Commit this variant's lines with its own journal key.
                 if _error_breaker_tripped is not None:
                     # A1: error-rate breaker tripped mid-combo — stop processing
                     # this combo. Flush what we have, then break out of the
@@ -1221,7 +1221,7 @@ def run_eval(
                         variant_lines,
                     )
                     lines.extend(variant_lines)
-                    # W5c-16: heartbeat every N committed cases.
+                    # Heartbeat every N committed cases.
                     _hb_done += 1
                     _hb_fields_total += len(variant_lines)
                     _hb_fields_error += sum(1 for vl in variant_lines if vl.get("error"))
@@ -1264,7 +1264,7 @@ def run_eval(
     if chat_template is not None:
         config["tokenizer_chat_template_sha256"] = _sha256_text(chat_template)
     if plan_provider is not None and selected:
-        # W5b-1 (C7): compiled plans are read-only mappings; hash the CONTENT
+        # Compiled plans are read-only mappings; hash the CONTENT
         # (thawed via schema._thaw_plan), never the frozen container —
         # json.dumps would otherwise raise on MappingProxyType (or, with
         # default=list, collapse every mapping to its key list and hash
@@ -1273,7 +1273,7 @@ def run_eval(
         plan_json = json.dumps(_thaw_plan(plan), sort_keys=True)
         config["compiled_plan_sha256"] = hashlib.sha256(plan_json.encode()).hexdigest()
 
-    # W4-A: per-model tokenizer metrics — quantified how the tokenizer
+    # Per-model tokenizer metrics — quantified how the tokenizer
     # segments the schema's quoted codes. These are model-specific (different
     # tokenizers split JSON differently) and feed the compatibility table.
     if track == "parallel" and plan_provider is not None and selected:

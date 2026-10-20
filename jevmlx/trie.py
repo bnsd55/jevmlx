@@ -47,7 +47,7 @@ def build_trie(remainders: list[list[int]]) -> list[dict]:
 
     branch_nodes: list[dict] = []
 
-    # Iterative pre-order walk with an explicit stack (N1: a long remainder
+    # Iterative pre-order walk with an explicit stack (a long remainder
     # must not depend on the interpreter recursion limit). Children are
     # pushed in REVERSE sorted order so the pop order — and therefore the
     # branch_nodes output order — matches the old recursive pre-order walk
@@ -116,7 +116,7 @@ def softmax(values: list[float], temperature: float = 1.0) -> list[float]:
     _validate_finite(values)
     largest = max(values)
     # Shift BEFORE scaling ((v - max) / T): finite values stay finite for any
-    # finite positive T, however small (B3).
+    # finite positive T, however small.
     exps = [math.exp((v - largest) / temperature) for v in values]
     total = sum(exps)
     return [e / total for e in exps]
@@ -154,7 +154,7 @@ def score_trie(
     the model want *any* valid code here?" — a branch can confidently pick A
     over B even when almost all unconstrained mass is on a reasoning token,
     newline, or label text. Legal mass is that leakage signal. The callback
-    returns the per-node mass as a NATURAL-LOG float (W5-D finding 37: log
+    returns the per-node mass as a NATURAL-LOG float (log
     space end to end — the caller computes it from the full-vocab logits it
     holds; the trie is MLX-free). None (default) leaves every legal mass at
     log 1.0 = 0.0 — the MLX-free unit tests use this.
@@ -172,7 +172,7 @@ def score_trie(
         if not all(math.isfinite(value) for value in child_logits):
             raise ValueError(f"non-finite logits at branch node {node['path']!r}: {child_logits!r}")
         child_log_probs = log_softmax(child_logits)
-        # W5-D finding 37: the callback returns the LOG mass (never a
+        # The callback returns the LOG mass (never a
         # probability) — adding logs directly avoids the exp-then-log
         # round-trip that underflowed to log(0) on extreme values.
         node_legal_mass_log = legal_mass_at_node(node) if legal_mass_at_node is not None else 0.0

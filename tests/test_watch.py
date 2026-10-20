@@ -1,4 +1,4 @@
-"""W6-UI: tests for the read-only live watcher (no model, fake files)."""
+"""Tests for the read-only live watcher (no model, fake files)."""
 
 from __future__ import annotations
 
@@ -325,7 +325,7 @@ class TestRenderHtml:
 
 class TestRenderJson:
     def test_json_has_expected_keys(self, tmp_path):
-        """render_json (= build_dashboard) returns the frozen W6-UI-3a contract."""
+        """render_json (= build_dashboard) returns the frozen contract."""
         (tmp_path / "predictions.jsonl").write_text(
             json.dumps(
                 {
@@ -383,7 +383,7 @@ class TestRenderJson:
         assert data["events"] == []
 
 
-# --- W6-UI-3a: full dashboard data layer (frozen contract) -----------------
+# --- full dashboard data layer (frozen contract) -----------------
 
 
 class TestDashboardContract:
@@ -930,7 +930,7 @@ class TestDashboardContract:
         assert isinstance(d, dict)
 
 
-# --- W6-UI-3d: discover combos from the real bench/m5 layout ---------------
+# --- discover combos from the real bench/m5 layout ---------------
 
 
 class TestRealBenchLayout:
@@ -1307,7 +1307,7 @@ class TestRealBenchLayout:
                 assert ts.endswith("Z")
 
 
-# --- W6-UI-3e: live-tree shapes (real run_eval fixture) -------------------
+# --- live-tree shapes (real run_eval fixture) -------------------
 
 
 class TestRealRunEvalShapes:
