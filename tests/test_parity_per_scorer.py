@@ -229,3 +229,105 @@ def test_check_parity_requires_every_scorer_artifact_to_pass(tmp_path):
     ok, problems = check_parity(tmp_path)
     assert not ok
     assert any("parity-slots.json" in p for p in problems)
+
+
+def test_leaderboard_unverified_for_pre_f9_parity(tmp_path):
+    """F9 decision (c): a legacy parity payload (no scoring key, recorded
+    status DRIFT) keeps the model row in the table — the Parity column
+    reads UNVERIFIED (pre-F9) with no drift number. A FAIL status stays
+    excluded under any shape (a winner change is real under any scorer)."""
+    import json
+    from pathlib import Path
+
+    from benchmarks.leaderboard import _local_rows
+
+    def write_model(root: Path, name: str, parity: dict | None) -> None:
+        model_dir = root / f"m1-8gb-{name}"
+        combo = model_dir / "parallel-slots-typesafe"
+        combo.mkdir(parents=True)
+        (combo / "run.json").write_text(
+            json.dumps(
+                {
+                    "config": {
+                        "track": "parallel",
+                        "dataset_path": "typesafe",
+                        "model": "fake-1b",
+                    }
+                }
+            )
+        )
+        (combo / "report.json").write_text(
+            json.dumps(
+                {
+                    "metrics": {
+                        "agreement": {"agreement_common_subset": 0.9, "n_cases": 45},
+                        "by_workflow": {},
+                    }
+                }
+            )
+        )
+        (combo / "timing.json").write_text(
+            json.dumps({"median": {"per_item_end_to_end_ms": 100.0}})
+        )
+        (model_dir / "parity.json").write_text(json.dumps(parity), encoding="utf-8")
+
+    legacy_drift = {
+        "model": "m",
+        "test": "w1a",
+        "passed": False,
+        "status": "DRIFT",
+        "max_abs_drift_nats": 0.078,
+        "max_raw_row_drift_nats": 0.03,
+        "max_gap_drift_nats": 0.078,
+        "max_margin_drift_nats": 0.063,
+        "atol": 0.05,
+        "winners_identical": True,
+        "cases": ["a"],
+        "run_at": "2026-09-20T12:00:00Z",
+    }
+    legacy_fail = {**legacy_drift, "passed": False, "status": "FAIL", "winners_identical": False}
+
+    root = tmp_path / "results"
+    root.mkdir()
+    write_model(root, "legacy", legacy_drift)
+    write_model(root, "fail", legacy_fail)
+
+    rows = _local_rows(root)
+    models = {r["model"]: r["parity_status"] for r in rows}
+    assert models["fake-1b"].count("UNVERIFIED (pre-F9)") == 1 or any(
+        r["parity_status"] == "UNVERIFIED (pre-F9)" for r in rows
+    )
+    # The FAIL-status legacy model is excluded entirely.
+    assert all(r["parity_status"] != "FAIL" for r in rows)
+    # The UNVERIFIED row carries no drift number.
+    unv = [r for r in rows if r["parity_status"] == "UNVERIFIED (pre-F9)"]
+    assert unv and all(r["parity_max_drift"] == 0.0 for r in unv)
+
+
+def test_check_parity_rejects_unknown_scorer(tmp_path):
+    """F9: a payload tagged with an unknown scorer is neither legacy nor a
+    valid per-scorer artifact — it fails closed."""
+    import json
+
+    from benchmarks.check_results import check_parity
+    from jevmlx.parity import PARITY_TEST_NAME
+
+    weird = {
+        "model": "m",
+        "test": PARITY_TEST_NAME,
+        "scoring": "llm-judge",
+        "passed": True,
+        "status": "PASS",
+        "max_abs_drift_nats": 0.01,
+        "max_raw_row_drift_nats": 0.01,
+        "max_gap_drift_nats": 0.01,
+        "max_margin_drift_nats": 0.01,
+        "winners_identical": True,
+        "atol": 0.05,
+        "cases": ["a"],
+        "run_at": "2026-09-20T12:00:00Z",
+    }
+    (tmp_path / "parity.json").write_text(json.dumps(weird), encoding="utf-8")
+    ok, problems = check_parity(tmp_path)
+    assert not ok
+    assert any("unknown scoring" in p for p in problems)

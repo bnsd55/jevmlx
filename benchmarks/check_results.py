@@ -589,6 +589,13 @@ def _check_parity_payload(parity: dict, name: str) -> tuple[bool, list[str]]:
             "which scorer it covers; regenerate with one parity payload per scorer"
         )
         return False, problems
+    scoring = parity["scoring"]
+    # A scorer-tagged payload with an unknown scorer is neither legacy nor
+    # a valid per-scorer artifact — fail closed (same set the engine's row
+    # builder accepts).
+    if scoring not in ("labels", "slots"):
+        problems.append(f"{name}: unknown scoring {scoring!r} — expected 'labels' or 'slots'")
+        return False, problems
     status = parity.get("status", "PASS" if parity.get("passed") else "FAIL")
     # parity-gates: PASS and DRIFT are publishable (OK); only FAIL (a winner
     # changed, or an escaped near-tie) or missing/unreadable parity is a
