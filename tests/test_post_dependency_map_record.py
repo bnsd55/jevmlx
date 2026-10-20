@@ -25,7 +25,6 @@ the fix it describes "refund" (tiny probability, negative margin).
 
 from __future__ import annotations
 
-import mlx.core as mx
 from conftest import FakeModel, FakeTokenizer, make_engine
 
 from jevmlx.engine import run_parallel_generation
