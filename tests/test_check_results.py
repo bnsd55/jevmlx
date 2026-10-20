@@ -314,21 +314,69 @@ def test_imports_without_mlx(monkeypatch):
     # makes isinstance(bundle, CalibrationBundle) stale across the suite
     # (engine holds the old class object, later imports get a new one).
     # Keep it resident so the typed object's identity is stable.
-    for mod in list(sys.modules):
-        if mod.startswith("jevmlx.") and mod not in (
-            "jevmlx.engine",
-            "jevmlx.calibrate",
-        ):
-            del sys.modules[mod]
-    import importlib
+    import jevmlx as _pkg
 
-    import benchmarks.check_results  # already imported; re-import deps
+    # Snapshot the package state so the eviction can be fully undone:
+    # a stale parent attribute keeps `from jevmlx import X` on the ORPHANED
+    # module while `import jevmlx.X` re-imports fresh — the two resolution
+    # paths then disagree and a test that patches one and calls the other
+    # silently runs unpatched code (order-dependent flake).
+    saved_modules = {m: sys.modules[m] for m in list(sys.modules) if m.startswith("jevmlx.")}
+    saved_parent = dict(vars(_pkg))
+    try:
+        for mod in list(sys.modules):
+            if mod.startswith("jevmlx.") and mod not in (
+                "jevmlx.engine",
+                "jevmlx.calibrate",
+            ):
+                del sys.modules[mod]
+                # Drop the parent attribute: it would keep pointing at the
+                # orphaned module instead of the re-imported one.
+                top = mod.split(".", 1)[1]
+                if "." not in top and hasattr(_pkg, top):
+                    delattr(_pkg, top)
+        import importlib
 
-    importlib.reload(benchmarks.check_results)
-    # compute_metrics / environment must be callable without mlx.
-    records = [_record()]
-    metrics = benchmarks.check_results.compute_metrics(records)
-    assert isinstance(metrics, dict)
+        import benchmarks.check_results  # already imported; re-import deps
+
+        importlib.reload(benchmarks.check_results)
+        # compute_metrics / environment must be callable without mlx.
+        records = [_record()]
+        metrics = benchmarks.check_results.compute_metrics(records)
+        assert isinstance(metrics, dict)
+    finally:
+        # Restore module coherence: drop anything imported during the
+        # evicted window, then put the snapshot back so later tests see the
+        # same module objects this file's collection-time imports hold.
+        for m in list(sys.modules):
+            if m.startswith("jevmlx.") and m not in saved_modules:
+                del sys.modules[m]
+        sys.modules.update(saved_modules)
+        vars(_pkg).clear()
+        vars(_pkg).update(saved_parent)
+
+
+def test_imports_without_mlx_leaves_module_system_coherent(monkeypatch):
+    """After the mlx-eviction test above, the two import paths for a
+    jevmlx submodule must resolve to the SAME module object.
+
+    The eviction deletes sys.modules entries; if re-imports return NEW
+    module objects, every collection-time binding in other test files is
+    stale — a test that patches via one path and calls via the other
+    silently runs unpatched code. Fails on the
+    eviction-without-restore behavior."""
+    import jevmlx.bench as before
+
+    test_imports_without_mlx(monkeypatch)
+
+    import jevmlx.bench as after
+
+    # The eviction must not orphan modules: a re-import returning a NEW
+    # object leaves every collection-time binding stale.
+    assert after is before
+    from jevmlx import bench as via_from
+
+    assert via_from is before
 
 
 def test_bench_machine_tag_patches_live_module(monkeypatch):
