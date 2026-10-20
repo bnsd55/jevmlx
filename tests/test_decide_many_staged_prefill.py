@@ -124,15 +124,71 @@ def _canonical(results: list[dict]) -> list[dict]:
 
 def test_t2_results_identical_to_main_golden(monkeypatch):
     """T2: staged prefill changes NO result content. Compared against the
-    golden captured on main (d9ef53f) for the same fixed batch and forced
-    groups of 2. The mx peak-memory counters are asserted SEPARATELY:
-    staged prefill must peak STRICTLY LOWER than main (fewer live caches)."""
+    golden captured on the merged tree (v10 prompts + F10 grouping, the
+    FakeModel path is exact) for the same fixed batch and forced groups
+    of 2. The cross-strategy identity — the same batch scored with groups
+    of 1 vs groups of 2 produces identical per-context results — is
+    asserted by test_t2b below, which stays valid on any prompts. The mx
+    peak-memory counters are asserted SEPARATELY: staged prefill must
+    peak STRICTLY LOWER than main (fewer live caches)."""
     _force_groups_of_two(monkeypatch)
     results = run_parallel_generation_batched(make_engine(FakeModel()), _CONTEXTS, _SCHEMA)
     got = _canonical(results)
     assert _GOLDEN.exists(), "golden fixture missing"
     golden = json.loads(_GOLDEN.read_text())
     assert got == golden
+
+
+def _force_groups_of_one(monkeypatch) -> None:
+    """Force 1 context per group: the budget admits the single largest
+    cache but never two of them (all cache sizes are distinct, so the two
+    smallest together exceed it)."""
+    import jevmlx.engine as eng
+
+    tok = FakeTokenizer()
+    model = FakeModel(vocab_size=64)
+    profile = make_engine(model, FakeTokenizer()).profile
+    cache_bytes = []
+    for ctx in _CONTEXTS:
+        pf = eng._prefill(model, tok, ctx, _SCHEMA, eng.Ledger(), "labels", profile=profile)
+        cache_bytes.append(eng._cache_nbytes(pf.cache))
+    assert len(set(cache_bytes)) == len(cache_bytes), "cache sizes must be distinct"
+    budget = max(cache_bytes) + 65536
+    assert budget < min(cache_bytes) + sorted(cache_bytes)[1], (
+        "budget must exclude any second context"
+    )
+    monkeypatch.setattr(eng, "_memory_budget_bytes", lambda fraction: budget)
+
+
+def test_t2b_group_composition_changes_no_content(monkeypatch):
+    """T2b (the invariant T2 pinned against a main-captured golden): the
+    same batch scored with groups of 1 vs groups of 2 yields IDENTICAL
+    per-context canonical results (values, probabilities, telemetry —
+    timing/memory excluded). Runs on THIS tree's prompts, so it stays
+    valid whenever prompts change (the golden itself is a regression
+    pin)."""
+    _force_groups_of_two(monkeypatch)
+    grouped = _canonical(
+        run_parallel_generation_batched(make_engine(FakeModel()), _CONTEXTS, _SCHEMA)
+    )
+    _force_groups_of_one(monkeypatch)
+    solo = _canonical(run_parallel_generation_batched(make_engine(FakeModel()), _CONTEXTS, _SCHEMA))
+    assert len(solo) == 6
+    assert {r["contexts_per_pass"] for r in solo} == {1}
+    # Group composition must not change any per-context content. The
+    # group-shape fields (contexts_per_pass, the padded/group positions)
+    # are the batching strategy itself — compare everything else.
+    _shape_keys = (
+        "contexts_per_pass",
+        "group_computed_suffix_token_positions",
+        "padded_token_positions",
+        "prefill_tokens",
+        "suffix_tokens_total",
+    )
+    for g, s in zip(grouped, solo, strict=True):
+        assert {k: v for k, v in g.items() if k not in _shape_keys} == {
+            k: v for k, v in s.items() if k not in _shape_keys
+        }
 
 
 def test_t3_input_order_and_attribution(monkeypatch):

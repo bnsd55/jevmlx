@@ -1,530 +1,542 @@
 [
- {
-  "computed_prompt_token_positions": 4335,
-  "computed_suffix_token_positions": 10,
-  "confidence_model": "labels",
-  "constraints_applied": false,
-  "contexts_per_pass": 2,
-  "failed_attempts": 0,
-  "field_telemetry": {
-   "pick": {
-    "alternatives": [
-     {
-      "choice": "ALPHA",
-      "probability": 0.5
-     },
-     {
-      "choice": "BETA",
-      "probability": 0.5
-     }
+  {
+    "computed_prompt_token_positions": 4335,
+    "computed_suffix_token_positions": 10,
+    "confidence_model": "labels",
+    "constraints_applied": false,
+    "contexts_per_pass": 2,
+    "failed_attempts": 0,
+    "field_telemetry": {
+      "pick": {
+        "alternatives": [
+          {
+            "choice": "ALPHA",
+            "probability": 0.5
+          },
+          {
+            "choice": "BETA",
+            "probability": 0.5
+          }
+        ],
+        "calibrated": null,
+        "calibration_id": null,
+        "cardinality": 2,
+        "drift_envelope_nats": 0.0625,
+        "legal_mass": 0.031249999642877325,
+        "legal_mass_logs": {
+          "ALPHA": -3.4657359142276523,
+          "BETA": -3.4657359142276523
+        },
+        "log_score_margin": 0.0,
+        "log_scores": {
+          "ALPHA": -0.6931471805599453,
+          "BETA": -0.6931471805599453
+        },
+        "probability": 0.5,
+        "probability_margin": 0.0,
+        "rescore_band_nats": 0.125,
+        "rescored": true,
+        "rows": 1,
+        "semantics": {
+          "calibrator_id": null,
+          "constraint_changed": false,
+          "dependency_rescored": false,
+          "prior_mode": "off",
+          "score_source": "rescored_batch1",
+          "temperature": 1.0
+        },
+        "tie": true,
+        "top_choices": [
+          {
+            "choice": "ALPHA",
+            "probability": 0.5
+          },
+          {
+            "choice": "BETA",
+            "probability": 0.5
+          }
+        ],
+        "type": "enum",
+        "value": "ALPHA"
+      }
+    },
+    "group_computed_suffix_token_positions": 20,
+    "internal_telemetry": {},
+    "logical_suffix_token_positions": 10,
+    "naive_branch_prompt_tokens": 4335,
+    "num_fields": 1,
+    "padded_token_positions": 20,
+    "parsed_json": {
+      "pick": {
+        "prob": 0.5,
+        "value": "ALPHA"
+      }
+    },
+    "prefill_tokens": 4325,
+    "prior_correction": false,
+    "probability_status": "1 field: rescored_batch1; constrained-path probability; uncalibrated as decision confidence",
+    "prompt_sha256": "af41fd11ffc632f55b0169c08dd04e6b433548a1bdb9d9cc2789b52607e12e80",
+    "prompt_version": "jevmlx-parallel-v10",
+    "reconciled_fields": [],
+    "rerun_fields": [],
+    "rerun_rows": 0,
+    "rescored_fields": [
+      "pick"
     ],
-    "calibrated": null,
-    "calibration_id": null,
-    "cardinality": 2,
-    "drift_envelope_nats": 0.0625,
-    "legal_mass": 0.031249999642877325,
-    "legal_mass_logs": {
-     "ALPHA": -3.4657359142276523,
-     "BETA": -3.4657359142276523
+    "schema_match": true,
+    "sequential_forward_passes": 1,
+    "shared_prefix_tokens": 4325,
+    "suffix_tokens_total": 10,
+    "total_tokens_generated": 0
+  },
+  {
+    "computed_prompt_token_positions": 4935,
+    "computed_suffix_token_positions": 10,
+    "confidence_model": "labels",
+    "constraints_applied": false,
+    "contexts_per_pass": 2,
+    "failed_attempts": 0,
+    "field_telemetry": {
+      "pick": {
+        "alternatives": [
+          {
+            "choice": "ALPHA",
+            "probability": 0.5
+          },
+          {
+            "choice": "BETA",
+            "probability": 0.5
+          }
+        ],
+        "calibrated": null,
+        "calibration_id": null,
+        "cardinality": 2,
+        "drift_envelope_nats": 0.0625,
+        "legal_mass": 0.031249999642877325,
+        "legal_mass_logs": {
+          "ALPHA": -3.4657359142276523,
+          "BETA": -3.4657359142276523
+        },
+        "log_score_margin": 0.0,
+        "log_scores": {
+          "ALPHA": -0.6931471805599453,
+          "BETA": -0.6931471805599453
+        },
+        "probability": 0.5,
+        "probability_margin": 0.0,
+        "rescore_band_nats": 0.125,
+        "rescored": true,
+        "rows": 1,
+        "semantics": {
+          "calibrator_id": null,
+          "constraint_changed": false,
+          "dependency_rescored": false,
+          "prior_mode": "off",
+          "score_source": "rescored_batch1",
+          "temperature": 1.0
+        },
+        "tie": true,
+        "top_choices": [
+          {
+            "choice": "ALPHA",
+            "probability": 0.5
+          },
+          {
+            "choice": "BETA",
+            "probability": 0.5
+          }
+        ],
+        "type": "enum",
+        "value": "ALPHA"
+      }
     },
-    "log_score_margin": 0.0,
-    "log_scores": {
-     "ALPHA": -0.6931471805599453,
-     "BETA": -0.6931471805599453
+    "group_computed_suffix_token_positions": 20,
+    "internal_telemetry": {},
+    "logical_suffix_token_positions": 10,
+    "naive_branch_prompt_tokens": 4935,
+    "num_fields": 1,
+    "padded_token_positions": 20,
+    "parsed_json": {
+      "pick": {
+        "prob": 0.5,
+        "value": "ALPHA"
+      }
     },
-    "probability": 0.5,
-    "probability_margin": 0.0,
-    "rescore_band_nats": 0.125,
-    "rescored": true,
-    "rows": 1,
-    "semantics": {
-     "calibrator_id": null,
-     "constraint_changed": false,
-     "dependency_rescored": false,
-     "prior_mode": "off",
-     "score_source": "rescored_batch1",
-     "temperature": 1.0
-    },
-    "tie": true,
-    "top_choices": [
-     {
-      "choice": "ALPHA",
-      "probability": 0.5
-     },
-     {
-      "choice": "BETA",
-      "probability": 0.5
-     }
+    "prefill_tokens": 4925,
+    "prior_correction": false,
+    "probability_status": "1 field: rescored_batch1; constrained-path probability; uncalibrated as decision confidence",
+    "prompt_sha256": "a17bc178d15fda0b41501430e82ee00eaaeff3fafedbdaaecf13d2071931c172",
+    "prompt_version": "jevmlx-parallel-v10",
+    "reconciled_fields": [],
+    "rerun_fields": [],
+    "rerun_rows": 0,
+    "rescored_fields": [
+      "pick"
     ],
-    "type": "enum",
-    "value": "ALPHA"
-   }
+    "schema_match": true,
+    "sequential_forward_passes": 1,
+    "shared_prefix_tokens": 4925,
+    "suffix_tokens_total": 10,
+    "total_tokens_generated": 0
   },
-  "group_computed_suffix_token_positions": 20,
-  "internal_telemetry": {},
-  "logical_suffix_token_positions": 10,
-  "naive_branch_prompt_tokens": 4335,
-  "num_fields": 1,
-  "padded_token_positions": 20,
-  "parsed_json": {
-   "pick": {
-    "prob": 0.5,
-    "value": "ALPHA"
-   }
-  },
-  "prior_correction": false,
-  "probability_status": "1 field: rescored_batch1; constrained-path probability; uncalibrated as decision confidence",
-  "prompt_sha256": "af41fd11ffc632f55b0169c08dd04e6b433548a1bdb9d9cc2789b52607e12e80",
-  "prompt_version": "jevmlx-parallel-v9",
-  "reconciled_fields": [],
-  "rerun_fields": [],
-  "rerun_rows": 0,
-  "rescored_fields": [
-   "pick"
-  ],
-  "schema_match": true,
-  "sequential_forward_passes": 1,
-  "shared_prefix_tokens": 4325,
-  "total_tokens_generated": 0
- },
- {
-  "computed_prompt_token_positions": 4935,
-  "computed_suffix_token_positions": 10,
-  "confidence_model": "labels",
-  "constraints_applied": false,
-  "contexts_per_pass": 2,
-  "failed_attempts": 0,
-  "field_telemetry": {
-   "pick": {
-    "alternatives": [
-     {
-      "choice": "ALPHA",
-      "probability": 0.5
-     },
-     {
-      "choice": "BETA",
-      "probability": 0.5
-     }
+  {
+    "computed_prompt_token_positions": 5535,
+    "computed_suffix_token_positions": 10,
+    "confidence_model": "labels",
+    "constraints_applied": false,
+    "contexts_per_pass": 2,
+    "failed_attempts": 0,
+    "field_telemetry": {
+      "pick": {
+        "alternatives": [
+          {
+            "choice": "ALPHA",
+            "probability": 0.5
+          },
+          {
+            "choice": "BETA",
+            "probability": 0.5
+          }
+        ],
+        "calibrated": null,
+        "calibration_id": null,
+        "cardinality": 2,
+        "drift_envelope_nats": 0.0625,
+        "legal_mass": 0.031249999642877325,
+        "legal_mass_logs": {
+          "ALPHA": -3.4657359142276523,
+          "BETA": -3.4657359142276523
+        },
+        "log_score_margin": 0.0,
+        "log_scores": {
+          "ALPHA": -0.6931471805599453,
+          "BETA": -0.6931471805599453
+        },
+        "probability": 0.5,
+        "probability_margin": 0.0,
+        "rescore_band_nats": 0.125,
+        "rescored": true,
+        "rows": 1,
+        "semantics": {
+          "calibrator_id": null,
+          "constraint_changed": false,
+          "dependency_rescored": false,
+          "prior_mode": "off",
+          "score_source": "rescored_batch1",
+          "temperature": 1.0
+        },
+        "tie": true,
+        "top_choices": [
+          {
+            "choice": "ALPHA",
+            "probability": 0.5
+          },
+          {
+            "choice": "BETA",
+            "probability": 0.5
+          }
+        ],
+        "type": "enum",
+        "value": "ALPHA"
+      }
+    },
+    "group_computed_suffix_token_positions": 20,
+    "internal_telemetry": {},
+    "logical_suffix_token_positions": 10,
+    "naive_branch_prompt_tokens": 5535,
+    "num_fields": 1,
+    "padded_token_positions": 20,
+    "parsed_json": {
+      "pick": {
+        "prob": 0.5,
+        "value": "ALPHA"
+      }
+    },
+    "prefill_tokens": 5525,
+    "prior_correction": false,
+    "probability_status": "1 field: rescored_batch1; constrained-path probability; uncalibrated as decision confidence",
+    "prompt_sha256": "d451fae9d4bb559996e006eefccd805b216a37b159354fd783c6c7fc166a26c8",
+    "prompt_version": "jevmlx-parallel-v10",
+    "reconciled_fields": [],
+    "rerun_fields": [],
+    "rerun_rows": 0,
+    "rescored_fields": [
+      "pick"
     ],
-    "calibrated": null,
-    "calibration_id": null,
-    "cardinality": 2,
-    "drift_envelope_nats": 0.0625,
-    "legal_mass": 0.031249999642877325,
-    "legal_mass_logs": {
-     "ALPHA": -3.4657359142276523,
-     "BETA": -3.4657359142276523
+    "schema_match": true,
+    "sequential_forward_passes": 1,
+    "shared_prefix_tokens": 5525,
+    "suffix_tokens_total": 10,
+    "total_tokens_generated": 0
+  },
+  {
+    "computed_prompt_token_positions": 6135,
+    "computed_suffix_token_positions": 10,
+    "confidence_model": "labels",
+    "constraints_applied": false,
+    "contexts_per_pass": 2,
+    "failed_attempts": 0,
+    "field_telemetry": {
+      "pick": {
+        "alternatives": [
+          {
+            "choice": "ALPHA",
+            "probability": 0.5
+          },
+          {
+            "choice": "BETA",
+            "probability": 0.5
+          }
+        ],
+        "calibrated": null,
+        "calibration_id": null,
+        "cardinality": 2,
+        "drift_envelope_nats": 0.0625,
+        "legal_mass": 0.031249999642877325,
+        "legal_mass_logs": {
+          "ALPHA": -3.4657359142276523,
+          "BETA": -3.4657359142276523
+        },
+        "log_score_margin": 0.0,
+        "log_scores": {
+          "ALPHA": -0.6931471805599453,
+          "BETA": -0.6931471805599453
+        },
+        "probability": 0.5,
+        "probability_margin": 0.0,
+        "rescore_band_nats": 0.125,
+        "rescored": true,
+        "rows": 1,
+        "semantics": {
+          "calibrator_id": null,
+          "constraint_changed": false,
+          "dependency_rescored": false,
+          "prior_mode": "off",
+          "score_source": "rescored_batch1",
+          "temperature": 1.0
+        },
+        "tie": true,
+        "top_choices": [
+          {
+            "choice": "ALPHA",
+            "probability": 0.5
+          },
+          {
+            "choice": "BETA",
+            "probability": 0.5
+          }
+        ],
+        "type": "enum",
+        "value": "ALPHA"
+      }
     },
-    "log_score_margin": 0.0,
-    "log_scores": {
-     "ALPHA": -0.6931471805599453,
-     "BETA": -0.6931471805599453
+    "group_computed_suffix_token_positions": 20,
+    "internal_telemetry": {},
+    "logical_suffix_token_positions": 10,
+    "naive_branch_prompt_tokens": 6135,
+    "num_fields": 1,
+    "padded_token_positions": 20,
+    "parsed_json": {
+      "pick": {
+        "prob": 0.5,
+        "value": "ALPHA"
+      }
     },
-    "probability": 0.5,
-    "probability_margin": 0.0,
-    "rescore_band_nats": 0.125,
-    "rescored": true,
-    "rows": 1,
-    "semantics": {
-     "calibrator_id": null,
-     "constraint_changed": false,
-     "dependency_rescored": false,
-     "prior_mode": "off",
-     "score_source": "rescored_batch1",
-     "temperature": 1.0
-    },
-    "tie": true,
-    "top_choices": [
-     {
-      "choice": "ALPHA",
-      "probability": 0.5
-     },
-     {
-      "choice": "BETA",
-      "probability": 0.5
-     }
+    "prefill_tokens": 6125,
+    "prior_correction": false,
+    "probability_status": "1 field: rescored_batch1; constrained-path probability; uncalibrated as decision confidence",
+    "prompt_sha256": "a18a0084f9c19e0b412e557a457c4ebe05112c8083690a66b48c38be8485f94f",
+    "prompt_version": "jevmlx-parallel-v10",
+    "reconciled_fields": [],
+    "rerun_fields": [],
+    "rerun_rows": 0,
+    "rescored_fields": [
+      "pick"
     ],
-    "type": "enum",
-    "value": "ALPHA"
-   }
+    "schema_match": true,
+    "sequential_forward_passes": 1,
+    "shared_prefix_tokens": 6125,
+    "suffix_tokens_total": 10,
+    "total_tokens_generated": 0
   },
-  "group_computed_suffix_token_positions": 20,
-  "internal_telemetry": {},
-  "logical_suffix_token_positions": 10,
-  "naive_branch_prompt_tokens": 4935,
-  "num_fields": 1,
-  "padded_token_positions": 20,
-  "parsed_json": {
-   "pick": {
-    "prob": 0.5,
-    "value": "ALPHA"
-   }
-  },
-  "prior_correction": false,
-  "probability_status": "1 field: rescored_batch1; constrained-path probability; uncalibrated as decision confidence",
-  "prompt_sha256": "a17bc178d15fda0b41501430e82ee00eaaeff3fafedbdaaecf13d2071931c172",
-  "prompt_version": "jevmlx-parallel-v9",
-  "reconciled_fields": [],
-  "rerun_fields": [],
-  "rerun_rows": 0,
-  "rescored_fields": [
-   "pick"
-  ],
-  "schema_match": true,
-  "sequential_forward_passes": 1,
-  "shared_prefix_tokens": 4925,
-  "total_tokens_generated": 0
- },
- {
-  "computed_prompt_token_positions": 5535,
-  "computed_suffix_token_positions": 10,
-  "confidence_model": "labels",
-  "constraints_applied": false,
-  "contexts_per_pass": 2,
-  "failed_attempts": 0,
-  "field_telemetry": {
-   "pick": {
-    "alternatives": [
-     {
-      "choice": "ALPHA",
-      "probability": 0.5
-     },
-     {
-      "choice": "BETA",
-      "probability": 0.5
-     }
+  {
+    "computed_prompt_token_positions": 6735,
+    "computed_suffix_token_positions": 10,
+    "confidence_model": "labels",
+    "constraints_applied": false,
+    "contexts_per_pass": 2,
+    "failed_attempts": 0,
+    "field_telemetry": {
+      "pick": {
+        "alternatives": [
+          {
+            "choice": "ALPHA",
+            "probability": 0.5
+          },
+          {
+            "choice": "BETA",
+            "probability": 0.5
+          }
+        ],
+        "calibrated": null,
+        "calibration_id": null,
+        "cardinality": 2,
+        "drift_envelope_nats": 0.0625,
+        "legal_mass": 0.031249999642877325,
+        "legal_mass_logs": {
+          "ALPHA": -3.4657359142276523,
+          "BETA": -3.4657359142276523
+        },
+        "log_score_margin": 0.0,
+        "log_scores": {
+          "ALPHA": -0.6931471805599453,
+          "BETA": -0.6931471805599453
+        },
+        "probability": 0.5,
+        "probability_margin": 0.0,
+        "rescore_band_nats": 0.125,
+        "rescored": true,
+        "rows": 1,
+        "semantics": {
+          "calibrator_id": null,
+          "constraint_changed": false,
+          "dependency_rescored": false,
+          "prior_mode": "off",
+          "score_source": "rescored_batch1",
+          "temperature": 1.0
+        },
+        "tie": true,
+        "top_choices": [
+          {
+            "choice": "ALPHA",
+            "probability": 0.5
+          },
+          {
+            "choice": "BETA",
+            "probability": 0.5
+          }
+        ],
+        "type": "enum",
+        "value": "ALPHA"
+      }
+    },
+    "group_computed_suffix_token_positions": 20,
+    "internal_telemetry": {},
+    "logical_suffix_token_positions": 10,
+    "naive_branch_prompt_tokens": 6735,
+    "num_fields": 1,
+    "padded_token_positions": 20,
+    "parsed_json": {
+      "pick": {
+        "prob": 0.5,
+        "value": "ALPHA"
+      }
+    },
+    "prefill_tokens": 6725,
+    "prior_correction": false,
+    "probability_status": "1 field: rescored_batch1; constrained-path probability; uncalibrated as decision confidence",
+    "prompt_sha256": "17b140f1c048e1b8895bb1fb0210ac3640d97053fea9865299521ccc24a5cfad",
+    "prompt_version": "jevmlx-parallel-v10",
+    "reconciled_fields": [],
+    "rerun_fields": [],
+    "rerun_rows": 0,
+    "rescored_fields": [
+      "pick"
     ],
-    "calibrated": null,
-    "calibration_id": null,
-    "cardinality": 2,
-    "drift_envelope_nats": 0.0625,
-    "legal_mass": 0.031249999642877325,
-    "legal_mass_logs": {
-     "ALPHA": -3.4657359142276523,
-     "BETA": -3.4657359142276523
+    "schema_match": true,
+    "sequential_forward_passes": 1,
+    "shared_prefix_tokens": 6725,
+    "suffix_tokens_total": 10,
+    "total_tokens_generated": 0
+  },
+  {
+    "computed_prompt_token_positions": 7335,
+    "computed_suffix_token_positions": 10,
+    "confidence_model": "labels",
+    "constraints_applied": false,
+    "contexts_per_pass": 2,
+    "failed_attempts": 0,
+    "field_telemetry": {
+      "pick": {
+        "alternatives": [
+          {
+            "choice": "ALPHA",
+            "probability": 0.5
+          },
+          {
+            "choice": "BETA",
+            "probability": 0.5
+          }
+        ],
+        "calibrated": null,
+        "calibration_id": null,
+        "cardinality": 2,
+        "drift_envelope_nats": 0.0625,
+        "legal_mass": 0.031249999642877325,
+        "legal_mass_logs": {
+          "ALPHA": -3.4657359142276523,
+          "BETA": -3.4657359142276523
+        },
+        "log_score_margin": 0.0,
+        "log_scores": {
+          "ALPHA": -0.6931471805599453,
+          "BETA": -0.6931471805599453
+        },
+        "probability": 0.5,
+        "probability_margin": 0.0,
+        "rescore_band_nats": 0.125,
+        "rescored": true,
+        "rows": 1,
+        "semantics": {
+          "calibrator_id": null,
+          "constraint_changed": false,
+          "dependency_rescored": false,
+          "prior_mode": "off",
+          "score_source": "rescored_batch1",
+          "temperature": 1.0
+        },
+        "tie": true,
+        "top_choices": [
+          {
+            "choice": "ALPHA",
+            "probability": 0.5
+          },
+          {
+            "choice": "BETA",
+            "probability": 0.5
+          }
+        ],
+        "type": "enum",
+        "value": "ALPHA"
+      }
     },
-    "log_score_margin": 0.0,
-    "log_scores": {
-     "ALPHA": -0.6931471805599453,
-     "BETA": -0.6931471805599453
+    "group_computed_suffix_token_positions": 20,
+    "internal_telemetry": {},
+    "logical_suffix_token_positions": 10,
+    "naive_branch_prompt_tokens": 7335,
+    "num_fields": 1,
+    "padded_token_positions": 20,
+    "parsed_json": {
+      "pick": {
+        "prob": 0.5,
+        "value": "ALPHA"
+      }
     },
-    "probability": 0.5,
-    "probability_margin": 0.0,
-    "rescore_band_nats": 0.125,
-    "rescored": true,
-    "rows": 1,
-    "semantics": {
-     "calibrator_id": null,
-     "constraint_changed": false,
-     "dependency_rescored": false,
-     "prior_mode": "off",
-     "score_source": "rescored_batch1",
-     "temperature": 1.0
-    },
-    "tie": true,
-    "top_choices": [
-     {
-      "choice": "ALPHA",
-      "probability": 0.5
-     },
-     {
-      "choice": "BETA",
-      "probability": 0.5
-     }
+    "prefill_tokens": 7325,
+    "prior_correction": false,
+    "probability_status": "1 field: rescored_batch1; constrained-path probability; uncalibrated as decision confidence",
+    "prompt_sha256": "24e5543213c04f1b171eb53765aecb27d949805542b9fb6de297cb47c3d2fd63",
+    "prompt_version": "jevmlx-parallel-v10",
+    "reconciled_fields": [],
+    "rerun_fields": [],
+    "rerun_rows": 0,
+    "rescored_fields": [
+      "pick"
     ],
-    "type": "enum",
-    "value": "ALPHA"
-   }
-  },
-  "group_computed_suffix_token_positions": 20,
-  "internal_telemetry": {},
-  "logical_suffix_token_positions": 10,
-  "naive_branch_prompt_tokens": 5535,
-  "num_fields": 1,
-  "padded_token_positions": 20,
-  "parsed_json": {
-   "pick": {
-    "prob": 0.5,
-    "value": "ALPHA"
-   }
-  },
-  "prior_correction": false,
-  "probability_status": "1 field: rescored_batch1; constrained-path probability; uncalibrated as decision confidence",
-  "prompt_sha256": "d451fae9d4bb559996e006eefccd805b216a37b159354fd783c6c7fc166a26c8",
-  "prompt_version": "jevmlx-parallel-v9",
-  "reconciled_fields": [],
-  "rerun_fields": [],
-  "rerun_rows": 0,
-  "rescored_fields": [
-   "pick"
-  ],
-  "schema_match": true,
-  "sequential_forward_passes": 1,
-  "shared_prefix_tokens": 5525,
-  "total_tokens_generated": 0
- },
- {
-  "computed_prompt_token_positions": 6135,
-  "computed_suffix_token_positions": 10,
-  "confidence_model": "labels",
-  "constraints_applied": false,
-  "contexts_per_pass": 2,
-  "failed_attempts": 0,
-  "field_telemetry": {
-   "pick": {
-    "alternatives": [
-     {
-      "choice": "ALPHA",
-      "probability": 0.5
-     },
-     {
-      "choice": "BETA",
-      "probability": 0.5
-     }
-    ],
-    "calibrated": null,
-    "calibration_id": null,
-    "cardinality": 2,
-    "drift_envelope_nats": 0.0625,
-    "legal_mass": 0.031249999642877325,
-    "legal_mass_logs": {
-     "ALPHA": -3.4657359142276523,
-     "BETA": -3.4657359142276523
-    },
-    "log_score_margin": 0.0,
-    "log_scores": {
-     "ALPHA": -0.6931471805599453,
-     "BETA": -0.6931471805599453
-    },
-    "probability": 0.5,
-    "probability_margin": 0.0,
-    "rescore_band_nats": 0.125,
-    "rescored": true,
-    "rows": 1,
-    "semantics": {
-     "calibrator_id": null,
-     "constraint_changed": false,
-     "dependency_rescored": false,
-     "prior_mode": "off",
-     "score_source": "rescored_batch1",
-     "temperature": 1.0
-    },
-    "tie": true,
-    "top_choices": [
-     {
-      "choice": "ALPHA",
-      "probability": 0.5
-     },
-     {
-      "choice": "BETA",
-      "probability": 0.5
-     }
-    ],
-    "type": "enum",
-    "value": "ALPHA"
-   }
-  },
-  "group_computed_suffix_token_positions": 20,
-  "internal_telemetry": {},
-  "logical_suffix_token_positions": 10,
-  "naive_branch_prompt_tokens": 6135,
-  "num_fields": 1,
-  "padded_token_positions": 20,
-  "parsed_json": {
-   "pick": {
-    "prob": 0.5,
-    "value": "ALPHA"
-   }
-  },
-  "prior_correction": false,
-  "probability_status": "1 field: rescored_batch1; constrained-path probability; uncalibrated as decision confidence",
-  "prompt_sha256": "a18a0084f9c19e0b412e557a457c4ebe05112c8083690a66b48c38be8485f94f",
-  "prompt_version": "jevmlx-parallel-v9",
-  "reconciled_fields": [],
-  "rerun_fields": [],
-  "rerun_rows": 0,
-  "rescored_fields": [
-   "pick"
-  ],
-  "schema_match": true,
-  "sequential_forward_passes": 1,
-  "shared_prefix_tokens": 6125,
-  "total_tokens_generated": 0
- },
- {
-  "computed_prompt_token_positions": 6735,
-  "computed_suffix_token_positions": 10,
-  "confidence_model": "labels",
-  "constraints_applied": false,
-  "contexts_per_pass": 2,
-  "failed_attempts": 0,
-  "field_telemetry": {
-   "pick": {
-    "alternatives": [
-     {
-      "choice": "ALPHA",
-      "probability": 0.5
-     },
-     {
-      "choice": "BETA",
-      "probability": 0.5
-     }
-    ],
-    "calibrated": null,
-    "calibration_id": null,
-    "cardinality": 2,
-    "drift_envelope_nats": 0.0625,
-    "legal_mass": 0.031249999642877325,
-    "legal_mass_logs": {
-     "ALPHA": -3.4657359142276523,
-     "BETA": -3.4657359142276523
-    },
-    "log_score_margin": 0.0,
-    "log_scores": {
-     "ALPHA": -0.6931471805599453,
-     "BETA": -0.6931471805599453
-    },
-    "probability": 0.5,
-    "probability_margin": 0.0,
-    "rescore_band_nats": 0.125,
-    "rescored": true,
-    "rows": 1,
-    "semantics": {
-     "calibrator_id": null,
-     "constraint_changed": false,
-     "dependency_rescored": false,
-     "prior_mode": "off",
-     "score_source": "rescored_batch1",
-     "temperature": 1.0
-    },
-    "tie": true,
-    "top_choices": [
-     {
-      "choice": "ALPHA",
-      "probability": 0.5
-     },
-     {
-      "choice": "BETA",
-      "probability": 0.5
-     }
-    ],
-    "type": "enum",
-    "value": "ALPHA"
-   }
-  },
-  "group_computed_suffix_token_positions": 20,
-  "internal_telemetry": {},
-  "logical_suffix_token_positions": 10,
-  "naive_branch_prompt_tokens": 6735,
-  "num_fields": 1,
-  "padded_token_positions": 20,
-  "parsed_json": {
-   "pick": {
-    "prob": 0.5,
-    "value": "ALPHA"
-   }
-  },
-  "prior_correction": false,
-  "probability_status": "1 field: rescored_batch1; constrained-path probability; uncalibrated as decision confidence",
-  "prompt_sha256": "17b140f1c048e1b8895bb1fb0210ac3640d97053fea9865299521ccc24a5cfad",
-  "prompt_version": "jevmlx-parallel-v9",
-  "reconciled_fields": [],
-  "rerun_fields": [],
-  "rerun_rows": 0,
-  "rescored_fields": [
-   "pick"
-  ],
-  "schema_match": true,
-  "sequential_forward_passes": 1,
-  "shared_prefix_tokens": 6725,
-  "total_tokens_generated": 0
- },
- {
-  "computed_prompt_token_positions": 7335,
-  "computed_suffix_token_positions": 10,
-  "confidence_model": "labels",
-  "constraints_applied": false,
-  "contexts_per_pass": 2,
-  "failed_attempts": 0,
-  "field_telemetry": {
-   "pick": {
-    "alternatives": [
-     {
-      "choice": "ALPHA",
-      "probability": 0.5
-     },
-     {
-      "choice": "BETA",
-      "probability": 0.5
-     }
-    ],
-    "calibrated": null,
-    "calibration_id": null,
-    "cardinality": 2,
-    "drift_envelope_nats": 0.0625,
-    "legal_mass": 0.031249999642877325,
-    "legal_mass_logs": {
-     "ALPHA": -3.4657359142276523,
-     "BETA": -3.4657359142276523
-    },
-    "log_score_margin": 0.0,
-    "log_scores": {
-     "ALPHA": -0.6931471805599453,
-     "BETA": -0.6931471805599453
-    },
-    "probability": 0.5,
-    "probability_margin": 0.0,
-    "rescore_band_nats": 0.125,
-    "rescored": true,
-    "rows": 1,
-    "semantics": {
-     "calibrator_id": null,
-     "constraint_changed": false,
-     "dependency_rescored": false,
-     "prior_mode": "off",
-     "score_source": "rescored_batch1",
-     "temperature": 1.0
-    },
-    "tie": true,
-    "top_choices": [
-     {
-      "choice": "ALPHA",
-      "probability": 0.5
-     },
-     {
-      "choice": "BETA",
-      "probability": 0.5
-     }
-    ],
-    "type": "enum",
-    "value": "ALPHA"
-   }
-  },
-  "group_computed_suffix_token_positions": 20,
-  "internal_telemetry": {},
-  "logical_suffix_token_positions": 10,
-  "naive_branch_prompt_tokens": 7335,
-  "num_fields": 1,
-  "padded_token_positions": 20,
-  "parsed_json": {
-   "pick": {
-    "prob": 0.5,
-    "value": "ALPHA"
-   }
-  },
-  "prior_correction": false,
-  "probability_status": "1 field: rescored_batch1; constrained-path probability; uncalibrated as decision confidence",
-  "prompt_sha256": "24e5543213c04f1b171eb53765aecb27d949805542b9fb6de297cb47c3d2fd63",
-  "prompt_version": "jevmlx-parallel-v9",
-  "reconciled_fields": [],
-  "rerun_fields": [],
-  "rerun_rows": 0,
-  "rescored_fields": [
-   "pick"
-  ],
-  "schema_match": true,
-  "sequential_forward_passes": 1,
-  "shared_prefix_tokens": 7325,
-  "total_tokens_generated": 0
- }
+    "schema_match": true,
+    "sequential_forward_passes": 1,
+    "shared_prefix_tokens": 7325,
+    "suffix_tokens_total": 10,
+    "total_tokens_generated": 0
+  }
 ]

@@ -429,7 +429,7 @@ def make_engine_result(
         "schema_match": True,
         "confidence_model": "slots",
         "prompt_sha256": "abc",
-        "prompt_version": "jevmlx-parallel-v9",
+        "prompt_version": "jevmlx-parallel-v10",
         "probability_status": (
             "constrained-path probability at T=1; uncalibrated as decision confidence"
         ),
@@ -645,3 +645,16 @@ def test_make_field_telemetry_shapes_match_engine():
     assert setcons_mod._YNModel is YNLogitModel
     assert count_mod._BiasedModel is CountCodeModel
     assert parity_mod._StableModel is YNLogitModel
+
+
+def make_test_renderer(tokenizer, schema, scoring="labels"):
+    """Build a render_field_prompt for tests that compile plans directly.
+
+    Tests that only check token-level structure (remainders, codebook, codes)
+    still need a render_field_prompt now that W2-A made it mandatory. This
+    helper creates one with an empty context — the prompt tails are
+    irrelevant to those tests; they only inspect shared_ids/remainders/etc.
+    """
+    from jevmlx.engine import make_field_prompt_renderer
+
+    return make_field_prompt_renderer(tokenizer, "", schema, scoring)

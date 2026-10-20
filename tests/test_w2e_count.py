@@ -12,7 +12,7 @@ reconciled_by on the field entry, plus a '<field>#count' scalar entry.
 import pytest
 from conftest import CountCodeModel as _BiasedModel
 from conftest import _Mod97Tokenizer as _CountTokenizer
-from conftest import make_engine
+from conftest import make_engine, make_test_renderer
 
 from jevmlx.calibrate import CalibrationBundle
 from jevmlx.engine import COUNT_MARGIN_MIN, run_parallel_generation
@@ -189,7 +189,8 @@ def test_count_code_4_no_token_prefix_collision():
 
     schema = _multi_schema()
     # Compiles clean: codes are '"0"'..'"4"', no token-prefix pairs.
-    plan = schema.compile_slot_plan(_GreedyTokenizer())
+    tok = _GreedyTokenizer()
+    plan = schema.compile_slot_plan(tok, make_test_renderer(tok, schema, "slots"))
     remainders = plan["fields"]["flags"]["count"]["remainders"]
     assert all(r for r in remainders), "every count code needs a remainder token"
 
@@ -224,7 +225,10 @@ def test_count_code_4_no_token_prefix_collision():
     compile_globals["COUNT_CODES"] = ["0", "1", "2", "3", "4", "4+"]
     try:
         with pytest.raises(SchemaCompileError):
-            _multi_schema().compile_slot_plan(_TruncatingTokenizer())
+            _multi_schema().compile_slot_plan(
+                _TruncatingTokenizer(),
+                make_test_renderer(_TruncatingTokenizer(), _multi_schema(), "slots"),
+            )
     finally:
         compile_globals["COUNT_CODES"] = old
 
