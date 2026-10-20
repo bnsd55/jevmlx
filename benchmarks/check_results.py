@@ -202,6 +202,9 @@ def check_folder(folder: Path) -> tuple[bool, list[str]]:
         # raw_text is written by naive tracks (naive_local, api_baseline) on
         # ERROR rows only — the truncated generated text, so a failed parse
         # can be inspected / re-scored offline without re-running the model.
+        # oracle_error rides the case's canonical lines when the oracle pass
+        # raised (recorded, never swallowed) — the same add-on pattern as
+        # raw_text.
         extra = [
             k
             for k in extra
@@ -210,6 +213,7 @@ def check_folder(folder: Path) -> tuple[bool, list[str]]:
                 "perturbation",
                 "consensus",
                 "oracle_prediction",
+                "oracle_error",
                 "ordered",
                 "ordinal",
                 "ordinal_choices",
