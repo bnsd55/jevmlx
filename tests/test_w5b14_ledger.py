@@ -218,8 +218,20 @@ class TestReviewFixes:
         # property by checking the invariant on whatever grouping happened.
         for res in results:
             assert res["per_item_end_to_end_ms"] > 0.0
-            # e2e <= own prefill + OWN group's wall (never all groups).
-            assert res["per_item_end_to_end_ms"] <= res["prefill_ms"] + res["group_wall_ms"] + 0.5
+            # The amortized share is DEFINED as group wall / group size
+            # (same ledger values, rounded to 2dp).
+            assert res["per_item_amortized_ms"] == pytest.approx(
+                res["group_wall_ms"] / res["contexts_per_pass"], abs=0.05
+            )
+            # The own-assembly span is a CHILD of the group-wall span (the
+            # ledger nests them), so e2e = prefill + amortized + assembly is
+            # bounded by prefill + group_wall + amortized STRUCTURALLY —
+            # no wall-clock slack that flakes under machine load (the old
+            # `+ 0.5ms` bound failed whenever assembly scheduling exceeded
+            # it).
+            assert res["per_item_end_to_end_ms"] <= (
+                res["prefill_ms"] + res["group_wall_ms"] + res["per_item_amortized_ms"] + 0.05
+            )
 
     def test_batched_prior_ms_shared_nonzero(self):
         """prior_correction=True in the batched path reports the shared
