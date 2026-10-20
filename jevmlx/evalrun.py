@@ -35,6 +35,7 @@ from collections.abc import Callable
 from typing import Any
 
 from jevmlx.baseline import baseline_decide, parse_baseline_output
+from jevmlx.evalmetrics import values_equal
 from jevmlx.evalreport import environment
 from jevmlx.models import DEFAULT_SCORING
 from jevmlx.schema import StructuredSchema, _thaw_plan
@@ -130,7 +131,9 @@ def _full_line_skeleton(
     Every key in PREDICTION_LINE_KEYS is present (None for irrelevant),
     so error/marker lines pass the frozen-contract check in check_results.
     Written to errors.jsonl (NOT predictions.jsonl) so they do not survive
-    resume (R2).
+    resume (R2) — except case-level VALIDATION failures, which are permanent
+    results and are journaled with ONE line per labelled field (P2: the
+    failure must count every labelled field of the case as wrong).
     """
     return {
         "run_id": run_id,
@@ -677,6 +680,19 @@ def _schema_variants(
     return variants
 
 
+def _oracle_parents(schema_dict: dict, labels: dict) -> dict[str, object]:
+    """The oracle overrides for one case: each depends_on parent that has a
+    label (W3-D part 2). One copy — the run-start oracle-need check and the
+    per-case oracle pass both use it."""
+    parents: dict[str, object] = {}
+    for spec in schema_dict.values():
+        if isinstance(spec, dict) and spec.get("depends_on"):
+            parent = spec["depends_on"]
+            if parent in labels:
+                parents[parent] = labels[parent]
+    return parents
+
+
 def run_eval(
     cases: list[dict],
     decide_fn: DecideFn,
@@ -835,6 +851,36 @@ def run_eval(
 
     selected = [c for c in cases if split == "all" or c.get("split", "train") == split]
 
+    # P5 (F2): decide ONCE whether the seam accepts the optional keyword
+    # arguments — never try/except TypeError as feature detection (a
+    # TypeError raised INSIDE scoring is a case failure, not a missing
+    # parameter). A run with constrained cases and a decide_fn that cannot
+    # take them is a configuration error at start: the alternative is
+    # silently running constrained cases unconstrained.
+    import inspect
+
+    _decide_params = inspect.signature(decide_fn).parameters
+    _has_var_kw = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in _decide_params.values())
+    _decide_takes_constraints = "constraints" in _decide_params or _has_var_kw
+    _decide_takes_oracle = "oracle_overrides" in _decide_params or _has_var_kw
+    _constrained_cases = [c for c in selected if c.get("constraints")]
+    if _constrained_cases and not _decide_takes_constraints:
+        raise ValueError(
+            f"decide_fn {decide_fn!r} does not accept `constraints`, but the "
+            f"run has {len(_constrained_cases)} constrained case(s) — refusing "
+            "to run them unconstrained; use a decide_fn that takes `constraints`"
+        )
+    _oracle_needed = track == "parallel" and any(
+        _oracle_parents(c["schema"], c.get("labels") or {}) for c in selected
+    )
+    if _oracle_needed and not _decide_takes_oracle:
+        raise ValueError(
+            f"decide_fn {decide_fn!r} does not accept `oracle_overrides`, but "
+            "the run has dependency cases needing the oracle pass — refusing "
+            "to drop oracle predictions silently; use a decide_fn that takes "
+            "`oracle_overrides`"
+        )
+
     timing_meta: list[dict[str, Any]] = []  # W3-R: parallel _meta timings
     lines: list[dict] = []
     n_canonical = 0
@@ -903,26 +949,53 @@ def run_eval(
                         os.fsync(_mf.fileno())
                     continue
                 try:
-                    results = decide_fn(
-                        schema_dict, case["context"], constraints=case.get("constraints")
-                    )
-                except TypeError:
-                    results = decide_fn(schema_dict, case["context"])
+                    # P5: the constrained form is chosen by SIGNATURE (the
+                    # upfront check guarantees no constrained case reaches
+                    # the 2-arg form); a TypeError raised INSIDE decide_fn
+                    # is a case failure through the P2 error path below —
+                    # never an unconstrained retry.
+                    if _decide_takes_constraints:
+                        results = decide_fn(
+                            schema_dict, case["context"], constraints=case.get("constraints")
+                        )
+                    else:
+                        results = decide_fn(schema_dict, case["context"])
                 except Exception as exc:  # noqa: BLE001 — circuit breaker
                     sig = failure_signature(exc)
                     # P2/P3: write the error line (full shape) for BOTH infra
-                    # and non-infra — the failure IS the result.
-                    variant_lines.append(
-                        _full_line_skeleton(
-                            _run_id_for_run,
-                            case,
-                            tag,
-                            track,
-                            model,
-                            field="_error",
-                            error=f"{type(exc).__name__}:{exc}",
-                        )
-                    )
+                    # and non-infra — the failure IS the result. P2: the
+                    # error-inclusive denominator — a case-level failure
+                    # must count every LABELLED field of the case as wrong,
+                    # so emit one failure line per labelled field (the
+                    # case's own labels name the fields). A case with no
+                    # labels keeps the single _error marker line.
+                    _labels = case.get("labels") or {}
+                    _error_text = f"{type(exc).__name__}:{exc}"
+                    if _labels:
+                        variant_lines = [
+                            _full_line_skeleton(
+                                _run_id_for_run,
+                                case,
+                                tag,
+                                track,
+                                model,
+                                field=fname,
+                                error=_error_text,
+                            )
+                            for fname in _labels
+                        ]
+                    else:
+                        variant_lines = [
+                            _full_line_skeleton(
+                                _run_id_for_run,
+                                case,
+                                tag,
+                                track,
+                                model,
+                                field="_error",
+                                error=_error_text,
+                            )
+                        ]
                     lines.extend(variant_lines)
                     # R2: infra failures go to errors.jsonl, NOT predictions.jsonl
                     # (they must not survive resume). Validation errors (sig
@@ -995,6 +1068,7 @@ def run_eval(
                     write_manifest(out_dir, manifest)
                 # W3-D part 2: oracle pass.
                 oracle_results: dict[str, Any] = {}
+                oracle_error_text: str | None = None
                 if track == "parallel" and tag is None:
                     labels = case.get("labels", {})
                     has_depends = any(
@@ -1002,13 +1076,14 @@ def run_eval(
                         for spec in schema_dict.values()
                     )
                     if has_depends and labels:
-                        oracle_parents: dict[str, object] = {}
-                        for spec in schema_dict.values():
-                            if isinstance(spec, dict) and spec.get("depends_on"):
-                                parent = spec["depends_on"]
-                                if parent in labels:
-                                    oracle_parents[parent] = labels[parent]
+                        oracle_parents = _oracle_parents(schema_dict, labels)
                         if oracle_parents:
+                            # P5: the oracle pass never swallows exceptions.
+                            # A TypeError-style seam mismatch was decided up
+                            # front (signature check); ANY exception inside
+                            # the oracle call is recorded on the case's
+                            # prediction lines (oracle_error) and logged —
+                            # never a silent drop of oracle_prediction.
                             try:
                                 oracle_out = decide_fn(
                                     schema_dict,
@@ -1020,8 +1095,14 @@ def run_eval(
                                 for ofname, ores in oracle_out.items():
                                     if "oracle_prediction" in ores:
                                         oracle_results[ofname] = ores["oracle_prediction"]
-                            except TypeError:
-                                pass
+                            except Exception as exc:  # noqa: BLE001 — recorded, not raised
+                                oracle_error_text = f"{type(exc).__name__}:{exc}"
+                                logger.warning(
+                                    "oracle pass failed for case %s (track %s): %s",
+                                    case.get("id"),
+                                    track,
+                                    oracle_error_text,
+                                )
                 for fname, res in results.items():
                     field_def = schema.fields.get(fname)
                     prediction = res.get("prediction")
@@ -1046,9 +1127,11 @@ def run_eval(
                         "label": label,
                         "prediction": prediction,
                         "valid": bool(res.get("valid", prediction is not None)),
+                        # P2: multi-select compares SETS — the same choices
+                        # in a different order are the same answer.
                         "correct": None
                         if label is None
-                        else (prediction is not None and prediction == label),
+                        else (prediction is not None and values_equal(label, prediction)),
                         "log_scores": res.get("log_scores"),
                         "probability": res.get("probability"),
                         "per_option": res.get("per_option"),
@@ -1060,6 +1143,11 @@ def run_eval(
                         "salvage_prediction": res.get("salvage_prediction"),
                         "oracle_prediction": oracle_results.get(fname),
                     }
+                    # P5: an oracle-pass failure rides the case's canonical
+                    # lines (additive key, raw_text pattern) — visible, never
+                    # silently dropped.
+                    if oracle_error_text:
+                        line["oracle_error"] = oracle_error_text
                     # raw_text: persisted on ERROR rows only (keeps predictions
                     # small). Lets a failed parse be inspected / re-scored
                     # offline without re-running the model. Sourced from the

@@ -201,6 +201,28 @@ def test_driftprobe_main_with_fake_engine(tmp_path, monkeypatch):
     assert "width_matrix" in payload
 
 
+@requires_mlx
+def test_driftprobe_kv_state_reads_full_state_cache():
+    """mlx-lm #1778 (first in 0.32.0) made cache ``state`` return the FULL
+    state — KVCache went from (keys, values) to (keys, values, offset); the
+    batched/rotating caches carry even more fields. driftprobe._kv_state must
+    read keys and values by index and tolerate the extra fields: a fixed
+    2-field unpack raises ValueError on current mlx-lm (the CI failure this
+    fixes), and any arity assumption breaks on one side of the upstream
+    change. Drives a REAL KVCache so the shape contract is the installed
+    mlx-lm's, not a mock's."""
+    import mlx.core as mx
+    from mlx_lm.models.cache import KVCache
+
+    from benchmarks.driftprobe import _kv_state
+
+    cache = KVCache()
+    cache.update_and_fetch(mx.zeros((1, 2, 4, 8)), mx.zeros((1, 2, 4, 8)))
+    keys, values = _kv_state(cache)
+    assert keys.ndim == 4 and values.ndim == 4
+    assert str(keys.dtype) == str(cache.keys.dtype)
+
+
 # ---- layer_bisect.py -------------------------------------------------------
 
 

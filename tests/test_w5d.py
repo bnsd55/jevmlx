@@ -152,7 +152,11 @@ def test_batched_parity_matrix_catches_row_drift():
                 out = out.at[:, :, 67].add(5.0)
             return out
 
-    result = check_batched_parity(make_engine(_RowDriftModel(), _CountTokenizer()), _cases())
+    # F9: the drift lives on the SLOTS rows (alias tokens); the payload
+    # scorer selects which rows the matrix builds.
+    result = check_batched_parity(
+        make_engine(_RowDriftModel(), _CountTokenizer()), _cases(), scoring="slots"
+    )
     # The raw row-logit comparison catches what the final decision gate
     # (with batch=1 rescoring) would mask.
     assert result["max_raw_row_drift_nats"] > 0.0

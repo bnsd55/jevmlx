@@ -749,29 +749,6 @@ def _load_calibration(
     return bundle, effective_temperature
 
 
-def _fold_multi(probs_true: dict[str, float]) -> tuple[list[str], float | None, float]:
-    """Fold per-option P(yes) into a multi field's decision.
-
-    Returns (selected options, field probability, margin): an option is
-    selected when its p_yes >= 0.5 (the fixed uncalibrated rule). No
-    field-level probability is claimed (an exact-set probability would need
-    a separate calibrator); the margin is min over ALL options of the
-    per-option distance from its threshold side (W5-C finding 20: floored
-    at 0 — an option on its decided side always contributes its distance;
-    a forced-against-side option contributes 0 after reconciliation, which
-    recomputes this same formula over the final set).
-    """
-    selected = [option for option, p_yes in probs_true.items() if p_yes >= 0.5]
-    margin = min(
-        (
-            max(0.0, p_yes - 0.5) if p_yes >= 0.5 else max(0.0, 0.5 - p_yes)
-            for p_yes in probs_true.values()
-        ),
-        default=0.0,
-    )
-    return selected, None, margin
-
-
 @dataclass(frozen=True)
 class DispatchResult:
     """Per-row logits dispatched into their row shapes (W5b-10 C1).
@@ -875,18 +852,6 @@ class ScalarEvidence:
     source_shape: str = "batch"  # "batch" | "batch1" | "dependency" | "oracle"
 
 
-# W3-E (GPT-REVIEW Q4 'Near-tie nondeterminism', bug 13): the measured
-# batch-shape instability band on Metal (see the W3-C measurement in
-# tests/conftest.py — worst 0.0293 nats on main itself, identical with the
-# W3-C branch). Log-score gaps inside this band are batch-shape noise, not
-# model signal: a field whose top candidates sit within the band is RESCORED
-# at batch=1 (the canonical shape) and that result is taken. conftest.py
-# imports this constant so tests and engine share one number. W5c-9: this is
-# the PARITY contract (0.05 on d_gap) AND the canonical-path default band;
-# the batched pass widens it with the persisted drift envelope.
-INSTABILITY_BAND = 5e-2
-
-
 @dataclass(frozen=True)
 class OrdinalTelemetry:
     """W6-B1: ordinal (ordered-enum) telemetry, derived from the finalized
@@ -941,6 +906,15 @@ class ScalarDecision:
     top_choices: list[dict]  # sorted [{choice, probability}], best first
     margin_nats: float  # top1-top2 log-score margin (post prior-correction)
     tie: bool  # top1-top2 still inside INSTABILITY_BAND after any rescore
+    # P9: the DECISION numbers about the RETURNED value (the ONE helper,
+    # shared with the constraint MAP): the returned value's log-score gap
+    # to its best competitor, P(returned) - max P(other choice) — both
+    # negative when a constraint forced a lower-ranked value — and the
+    # competitors list ([{choice, probability}], the distribution's top 3
+    # when the returned value is the favorite, else the top 3 OTHER).
+    log_score_margin: float
+    probability_margin: float
+    alternatives: list[dict]
     rescored: bool  # a batch=1 canonical rescore replaced the batched result
     legal_mass: float  # exp(legal_mass_logs[winner])
     legal_mass_logs: dict[str, float]  # per-choice raw legal-mass logs
@@ -1003,21 +977,6 @@ def _field_semantics(
     }
 
 
-def _near_tie_margin(probs: list[float]) -> float:
-    """Top-two probability margin — the shared near-tie quantity.
-
-    Both the engine's rescore gate (finalize_scalar_evidence) and parity's
-    _field_margin key on the SAME concept: is the top-2 gap small enough
-    that batch-shape noise could flip the winner? This helper returns p1 - p2
-    (probability space), the same quantity parity checks against the 0.05
-    near-tie constant. A single-choice field returns inf.
-    """
-    if len(probs) < 2:
-        return float("inf")
-    sorted_p = sorted(probs, reverse=True)
-    return sorted_p[0] - sorted_p[1]
-
-
 def finalize_scalar_evidence(
     evidence: ScalarEvidence,
     *,
@@ -1071,20 +1030,18 @@ def finalize_scalar_evidence(
     band = rescore_band_nats
     rescored = False
     if n > 1 and evidence.source_shape == "batch" and rescore is not None:
-        # D5 fix (c): the gate decides on the FINAL post-prior probability
-        # margin (p1 - p2 after prior correction + softmax), NOT the raw
-        # log-score gap. Parity's near-tie detection (_field_margin) checks
-        # the same final probabilities; a field that is a final near-tie must
-        # always get the batch=1 rescore, even when the raw margin was above
-        # the band (the prior correction can narrow the gap). One definition
-        # of 'near-tie margin' shared by engine and parity: p1 - p2 <
-        # INSTABILITY_BAND (0.05). The rescore_band_nats (drift envelope) is
-        # NOT used for the gate decision — only the fixed 0.05 probability
-        # margin that parity checks. The prior correction is cheap (no model
-        # call).
+        # The gate decides on ONE quantity m: the top-two gap of the
+        # PRIOR-CORRECTED log-scores at T=1 (nats). The same m the tie flag
+        # reports and parity's _field_margin reads (margin_nats). The band is
+        # the pass's rescore_band_nats (INSTABILITY_BAND widened by the drift
+        # envelope's E_bound) — a NATS quantity, as documented. The prior
+        # correction is cheap (no model call). Temperature is applied only
+        # to the reported probabilities — it never gates: it cannot change
+        # the winner, and the batch-shape noise the band bounds was measured
+        # on raw score gaps.
         pre_scores = _apply_prior(raw_scores, choices, prior_entry)
-        pre_probs = softmax(pre_scores, temperature=temperature)
-        if _near_tie_margin(pre_probs) < INSTABILITY_BAND:
+        pre_order = sorted(range(n), key=pre_scores.__getitem__, reverse=True)
+        if pre_scores[pre_order[0]] - pre_scores[pre_order[1]] <= band:
             rescored_evidence = rescore(rescore_idxs or [])
             raw_scores = list(rescored_evidence.log_scores_raw)
             legal_logs = list(rescored_evidence.legal_mass_logs)
@@ -1099,10 +1056,17 @@ def finalize_scalar_evidence(
     probs_list = softmax(scores, temperature=temperature)
     order = sorted(range(n), key=probs_list.__getitem__, reverse=True)
     w_idx = order[0]
-    # W3-E tie flag: top1-top2 still inside INSTABILITY_BAND after any
-    # canonical rescore — the model genuinely cannot separate them.
-    is_tie = n > 1 and (scores[order[0]] - scores[order[1]]) < INSTABILITY_BAND
-    w_prob = probs_list[w_idx]
+    # P9: the DECISION numbers come from the ONE helper — the same records
+    # the constraint MAP recomputes when it overrides the value. On the
+    # normal path the returned value IS the argmax, so probability/tie are
+    # the numbers this path always reported; probability_margin and
+    # alternatives are new telemetry (additive).
+    decision_record = _decision_record(
+        {c: lp for c, lp in zip(choices, scores, strict=True)},
+        choices[w_idx],
+        temperature,
+    )
+    w_prob = decision_record["probability"]
 
     decision = ScalarDecision(
         value=choices[w_idx],
@@ -1114,7 +1078,16 @@ def finalize_scalar_evidence(
             reverse=True,
         ),
         margin_nats=scores[order[0]] - scores[order[1]] if n > 1 else float("inf"),
-        tie=is_tie,
+        # W3-E tie flag: the SAME corrected log-score gap m the rescore
+        # gate keyed on, after any canonical rescore — but against the
+        # FIXED INSTABILITY_BAND (no envelope): the model genuinely cannot
+        # separate the top two. Temperature never enters (log-space gap).
+        # P9: the returned value's gap to its best competitor (identical on
+        # the argmax path; the MAP path reuses the helper after a change).
+        tie=decision_record["tie"],
+        log_score_margin=decision_record["log_score_margin"],
+        probability_margin=decision_record["probability_margin"],
+        alternatives=decision_record["alternatives"],
         rescored=rescored,
         legal_mass=math.exp(legal_logs[w_idx]),
         legal_mass_logs={c: lm for c, lm in zip(choices, legal_logs, strict=True)},
@@ -1797,7 +1770,9 @@ def _constrained_map(
                 # produced no log_scores): the current value is the only
                 # candidate. Multi fields cannot be case-constrained
                 # (compile rejects that) — they can only appear via
-                # exclusivity, which never reaches MAP.
+                # exclusivity, which the multi joint set solver enforces
+                # (P10: solve_multi_set, via score_multi_field's
+                # exclusivity_groups; never the scalar MAP).
                 current = field_values.get(fname, {}).get("value")
                 fdef = schema.fields.get(fname)
                 if fdef is not None and fdef.field_type == "boolean" and current is not None:
@@ -1864,6 +1839,90 @@ def _bool_score_key(value: object) -> str:
 def _value_score_key(value: object) -> str:
     """The scored representation of a non-boolean value (str(value))."""
     return str(value)
+
+
+def _decision_score_key(value: object) -> str:
+    """The log_scores key for a RETURNED value (P9 — the ONE value→key
+    lookup for decision reporting): booleans score under the string keys
+    "true"/"false" but decide as Python bools, and str(True) is "True"
+    — never a key. Everything else is str(value)."""
+    if isinstance(value, bool):
+        return _bool_score_key(value)
+    return _value_score_key(value)
+
+
+def _decision_record(
+    log_scores: dict[str, float], value: object, temperature: float
+) -> dict[str, Any]:
+    """P9: the DECISION numbers about the RETURNED value, from the field's
+    distribution (T=1 log-scores keyed by choice).
+
+    The ONE copy: the normal finalize path and the constraint-MAP path both
+    call it. Reconciliation changes WHICH value is returned, never the
+    distribution — log_scores / top_choices / ordinal stay distribution
+    numbers and are NOT touched here. The decision part:
+
+      probability        P(returned value) — softmax at the caller's T
+      score              log P(returned value) — the T=1 log-score
+      log_score_margin   log score(returned) - max log score(other choice) —
+                         negative when a constraint forced a lower-ranked
+                         value (the argmax path's top1-top2)
+      probability_margin P(returned) - max P(other choice) — negative when
+                         a constraint forced a lower-ranked value
+      tie                the returned value sits inside INSTABILITY_BAND of
+                         its best competitor (|gap| in nats; the argmax
+                         path's top-2 gap is the returned-side case)
+      alternatives       the returned value's competitors: the distribution's
+                         top 3 when the returned value IS the favorite (the
+                         established winner-first scalar contract), else the
+                         top 3 choices OTHER than the returned value (a
+                         forced value's own entry is not a competitor)
+
+    Raises KeyError naming the missing key when the returned value is not
+    in the distribution — a contract violation, never a silent stale
+    number (that miss is exactly the F7 bug).
+    """
+    key = _decision_score_key(value)
+    if key not in log_scores:
+        raise KeyError(
+            f"returned value {value!r} (score key {key!r}) is not in the "
+            f"field's distribution {sorted(log_scores)} — cannot report "
+            "decision numbers for a value the model never scored"
+        )
+    ranked = sorted(log_scores.items(), key=lambda kv: -kv[1])
+    ls = log_scores[key]
+    # Temperature applied once, here: softmax(log_scores / T) — the same
+    # probabilities the normal path reports (ranking is invariant).
+    scaled = {c: lp / temperature for c, lp in log_scores.items()}
+    m = max(scaled.values())
+    total = sum(math.exp(v - m) for v in scaled.values())
+    probs = {c: math.exp(v - m) / total for c, v in scaled.items()}
+    others = [(c, ls_other) for c, ls_other in ranked if c != key]
+    if others:
+        best_other_ls = max(ls_other for _c, ls_other in others)
+        best_other_key = next(c for c, ls_other in others if ls_other == best_other_ls)
+        probability_margin = probs[key] - probs[best_other_key]
+        log_score_margin = ls - best_other_ls
+        is_tie = abs(ls - best_other_ls) < INSTABILITY_BAND
+        if key == ranked[0][0]:
+            alternatives = [{"choice": c, "probability": probs[c]} for c, _l in ranked[:3]]
+        else:
+            alternatives = [{"choice": c, "probability": probs[c]} for c, _l in others[:3]]
+    else:
+        probability_margin = 0.0
+        log_score_margin = 0.0
+        is_tie = False
+        # The distribution's top 3 of a one-choice field is the field's own
+        # value (the winner-first contract; no competitors exist).
+        alternatives = [{"choice": key, "probability": probs[key]}]
+    return {
+        "probability": probs[key],
+        "score": ls,
+        "log_score_margin": log_score_margin,
+        "probability_margin": probability_margin,
+        "tie": is_tie,
+        "alternatives": alternatives,
+    }
 
 
 def _score_key_value(fname: str, key: str, schema: StructuredSchema) -> object:
@@ -1946,12 +2005,9 @@ def _selective_second_pass(
             return float("-inf")
         scores = ft.get("log_scores") or {}
         chosen = assignments.get(parent)
-        # Score lookup by the scored representation of the typed value.
-        key = (
-            _bool_score_key(chosen)
-            if isinstance(chosen, bool)
-            else (str(chosen) if chosen is not None else None)
-        )
+        # Score lookup by the scored representation of the typed value
+        # (P9: the ONE value→key lookup).
+        key = _decision_score_key(chosen) if chosen is not None else None
         if key is None or key not in scores:
             return float("-inf")
         chosen_score = scores[key]
@@ -2159,6 +2215,11 @@ def _selective_second_pass(
             field_telemetry[fname]["log_scores"] = dict(decision.log_scores)
             field_telemetry[fname]["top_choices"] = decision.top_choices[:5]
             field_telemetry[fname]["tie"] = decision.tie
+            # P9: the decision part rides every re-decided field too (the
+            # SAME ScalarDecision the finalize path emitted it from).
+            field_telemetry[fname]["log_score_margin"] = decision.log_score_margin
+            field_telemetry[fname]["probability_margin"] = decision.probability_margin
+            field_telemetry[fname]["alternatives"] = decision.alternatives
             field_telemetry[fname]["rescored"] = False
             field_telemetry[fname]["legal_mass"] = decision.legal_mass
             field_telemetry[fname]["legal_mass_logs"] = dict(decision.legal_mass_logs)
@@ -2253,21 +2314,28 @@ def _rescore_rows_batch1(
     vocab_size: int,
     pad_id: int,
     ledger: "Ledger",
+    row_count: dict[int, int] | None = None,
 ) -> dict:
     """Rescore one field's rows at batch=1 (W3-E, the canonical shape).
 
     The suffix pass normally runs rows together; Metal batched matmuls tile
-    differently per batch shape and logit gaps inside INSTABILITY_BAND are
+    differently per batch shape and logit gaps inside the decision band are
     noise. This re-runs ONLY this field's rows through the SHARED
     _score_rows helper (auto_max_rows=1: one row per forward pass, the
     canonical shape) on a fresh broadcast of the same prefill cache, then
     dispatches each row's logits into the shapes the batched pass fills:
     branch rows -> node_logits keyed by branch-node index; multi option
-    rows -> option_pair ([yes_logit, no_logit]). One copy of the scoring
-    loop (review F3, PR #27).
+    rows -> option_pair ([yes_logit, no_logit]); count rows (P4: row_count
+    given) -> count_node_logits keyed by count-branch index. One copy of
+    the scoring loop (review F3, PR #27).
     """
     if not idxs:
-        return {"node_logits": {}, "node_legal_mass_log": {}, "option_pair": {}}
+        return {
+            "node_logits": {},
+            "node_legal_mass_log": {},
+            "option_pair": {},
+            "count_node_logits": {},
+        }
     sub_rows = [rows[ridx] for ridx in idxs]
     sub_decisions = [row_decision[ridx] for ridx in idxs]
     scored = _score_rows(
@@ -2283,6 +2351,7 @@ def _rescore_rows_batch1(
     node_logits: dict[int, dict[int, list[float]]] = {}
     node_legal_mass_log: dict[int, Any] = {}
     option_pair: dict[int, list[float]] = {}
+    count_node_logits: dict[int, dict[int, list[float]]] = {}
     # _score_rows re-indexes the rows it receives (bucket sort runs over
     # range(len(rows))), so its returned keys are POSITIONS in idxs, not the
     # caller's global row indexes — map back through idxs.
@@ -2293,6 +2362,11 @@ def _rescore_rows_batch1(
             # Multi option row: RAW [yes_logit, no_logit] + flat legal mass.
             option_pair[ridx] = values
             node_legal_mass_log[ridx] = mass_log
+        elif row_count is not None and ridx in row_count:
+            # Count row: per-node logits keyed by the count-branch index.
+            bi = row_count[ridx]
+            count_node_logits[ridx] = {bi: values}
+            node_legal_mass_log[ridx] = {bi: mass_log}
         else:
             # Branch row: per-node logits in node["children"] order.
             bi = row_branch[ridx]
@@ -2302,6 +2376,7 @@ def _rescore_rows_batch1(
         "node_logits": node_logits,
         "node_legal_mass_log": node_legal_mass_log,
         "option_pair": option_pair,
+        "count_node_logits": count_node_logits,
     }
 
 
@@ -2536,14 +2611,17 @@ def run_parallel_generation(
     when its P(yes) >= 0.5; with ``calibration`` (a JSON file path or a dict
     with {"multi": {"a": ..., "b": ...}} — the shape ``jevmlx calibrate
     --out`` writes) selection is calibrated_log_odds > 0 with
-    calibrated_log_odds = a * (yes_logit - no_logit) + b (W2-E step 2: no
-    threshold path exists anywhere).
+    calibrated_log_odds = a * corrected_log_odds + b, where
+    corrected_log_odds = (yes - no) - (prior_yes - prior_no) (W2-E step 2,
+    P8: the same z the reported P(yes) = sigmoid(calibrated_log_odds) comes
+    from; no threshold path exists anywhere).
 
     The prefill KV cache is broadcast across rows; batches larger than the
     chunking heuristic allows run in chunks over the same prefill cache.
-    Logits from batched Metal matmuls vary slightly with batch shape; equal-
-    scoring choices (top1-top2 < 1e-6 in log-score space) are resolved by
-    schema order and flagged with ``tie: true`` in field telemetry.
+    Logits from batched Metal matmuls vary slightly with batch shape; a
+    field whose corrected top-two log-score gap sits inside the decision
+    band is re-measured at batch=1 (the canonical shape) and flagged with
+    ``tie: true`` when the gap is still inside INSTABILITY_BAND.
 
     ``temperature`` is a post-hoc temperature applied to the per-choice
     logits (softmax(logits / temperature)) — it is not a token-level sampling
@@ -2900,7 +2978,13 @@ def _cardinality_one_outcome(
     val = p["alias_map"][choices_list[0]] if scoring == "slots" else choices_list[0]
     if fdef.field_type == "boolean":
         val = val == "true" if isinstance(val, str) else val
-    key = val if isinstance(val, str) else str(val)
+    # P9: the log_scores key through the ONE value→key lookup — a boolean
+    # value scores under "true"/"false" (str(True) is "True", never a key).
+    key = _decision_score_key(val)
+    # P9/R1: the decision part rides the schema-determined entry too — the
+    # ONE helper over the degenerate one-choice distribution (P=1, margins
+    # 0, no competitors beyond the value itself).
+    record = _decision_record({key: 0.0}, val, 1.0)
     telemetry = {
         "value": val,
         "type": fdef.field_type,
@@ -2908,6 +2992,9 @@ def _cardinality_one_outcome(
         "cardinality": fdef.cardinality,
         "log_scores": {key: 0.0},
         "top_choices": [{"choice": key, "probability": 1.0}],
+        "log_score_margin": record["log_score_margin"],
+        "probability_margin": record["probability_margin"],
+        "alternatives": record["alternatives"],
         "rows": 0,
         "legal_mass": 1.0,
         # W5b-13: cardinality-1 fields are schema-determined — no model
@@ -3054,6 +3141,14 @@ def score_scalar_field(
         # W3-E: True only when the top candidates are STILL within
         # INSTABILITY_BAND after the batch=1 rescore.
         "tie": decision.tie,
+        # P9: the DECISION numbers about the RETURNED value — P(returned)
+        # minus max P(other choice), the returned value's log-score gap to
+        # its best competitor (both negative after a constraint forces a
+        # lower-ranked value) and the returned value's competitors. The
+        # distribution keys above stay untouched by reconciliation.
+        "log_score_margin": decision.log_score_margin,
+        "probability_margin": decision.probability_margin,
+        "alternatives": decision.alternatives,
         "rescored": rescored,
         # W5c-9: the decision band this field's rescore gate used —
         # INSTABILITY_BAND + E_bound(M) from the persisted drift envelope —
@@ -3102,12 +3197,17 @@ def _count_telemetry(
     count_log_probs = _log_softmax(count_scores)
     count_probs = [math.exp(lp) for lp in count_log_probs]
     count_display = list(count_codes)
+    log_scores = {code: lp for code, lp in zip(count_display, count_log_probs, strict=True)}
+    # P9: the decision part rides the count entry too (R1: EVERY log_scores
+    # entry carries it) — the count value is the row's argmax, so these are
+    # the winner-first numbers, at T=1 (the row's probabilities are T=1).
+    record = _decision_record(log_scores, count_choice, 1.0)
     return {
         "value": count_choice,
         "type": "enum",
         "probability": max(count_probs),
         "cardinality": len(count_display),
-        "log_scores": {code: lp for code, lp in zip(count_display, count_log_probs, strict=True)},
+        "log_scores": log_scores,
         "top_choices": sorted(
             (
                 {"choice": c, "probability": pr}
@@ -3116,6 +3216,9 @@ def _count_telemetry(
             key=lambda x: x["probability"],
             reverse=True,
         ),
+        "log_score_margin": record["log_score_margin"],
+        "probability_margin": record["probability_margin"],
+        "alternatives": record["alternatives"],
         "margin_nats": count_margin,
         "legal_mass": math.exp(count_legal_mass_logs[count_display.index(count_choice)]),
         "min_option_legal_mass": math.exp(min(count_legal_mass_logs)),
@@ -3124,59 +3227,54 @@ def _count_telemetry(
 
 def solve_multi_set(
     *,
-    probs_yes: dict[str, float],
-    raw_pairs: dict[str, list[float]],
+    decision: dict[str, tuple[float, float]],
     options: list[str],
     count_codes: list[str],
     count_scores: list[float],
     count_legal_mass_logs: list[float],
-    multi_ab: dict | None,
+    calibrated: bool,
     set_constraints: tuple[Mapping[str, Any], ...] = (),
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Stage 3b (W5b-10 C1): ONE multi field's selection + reconciliation.
 
-    Threshold rule (calibrated log-odds when a calibrator ran, else the
-    fixed P(yes) >= 0.5), W2-E step 3 count reconciliation through
+    ``decision`` maps option -> (z, p) — the ONE per-option decision
+    coordinate (P8): z is the corrected log-odds as the selection consumes
+    it (calibrated: a*z + b; uncalibrated: the corrected log-odds itself),
+    p = sigmoid(z) — the exact probability the threshold compares. Selection
+    (threshold, trusted count, joint set solver) and every reported number
+    use that one record; raw pairs never enter this function.
+
+    Threshold rule (calibrated z > 0 when a calibrator ran, else the fixed
+    P(yes) >= 0.5 — i.e. z >= 0), W2-E step 3 count reconciliation through
     COUNT_MARGIN_MIN, then W2-SETCONS hard set constraints LAST (the solver
     corrects a violating proposal). Mutates nothing: every output is fresh.
 
     Returns (telemetry_update, count_telemetry, selection) where
     selection is the final list of chosen options.
     """
-    # W2-E step 2 selection: with calibration, calibrated log-odds
-    # (a * (yes - no) + b) > 0 picks the option. The margin stays in
-    # PROBABILITY units on both paths (F1: the abstention gate compares it
-    # to a [0, 1) cut) — min |sigmoid(c) - 0.5|; the raw calibrated
-    # log-odds ride telemetry as calibrated_log_odds. Without calibration
-    # the fixed P(yes) >= 0.5 rule stands.
-    # W2-E step 2 selection: with calibration, calibrated log-odds
-    # (a * (yes - no) + b) > 0 picks the option. The margin stays in
-    # PROBABILITY units on both paths (F1: the abstention gate compares it
-    # to a [0, 1) cut). W5-C finding 20: the margin is min over ALL options
-    # of the per-option distance from its threshold side, floored at 0 —
-    # recomputed after every reconciler below. Without calibration the
-    # fixed P(yes) >= 0.5 rule stands (_fold_multi carries the same
-    # margin contract).
-    if multi_ab is not None:
-        a_coef, b_coef = multi_ab
-        calibrated = {
-            option: a_coef * (pair[0] - pair[1]) + b_coef for option, pair in raw_pairs.items()
-        }
-        probs_yes = {option: 1.0 / (1.0 + math.exp(-c)) for option, c in calibrated.items()}
-        selected = [option for option, c in calibrated.items() if c > 0]
-        selected_set = set(selected)
-        margin = min(
-            (
-                max(0.0, probs_yes[o] - 0.5) if o in selected_set else max(0.0, 0.5 - probs_yes[o])
-                for o in probs_yes
-            ),
-            default=0.0,
-        )
-        calibrated_log_odds: dict[str, float] | None = calibrated
+    # W2-E step 2 selection: the decision quantity z picks the side —
+    # calibrated: z > 0 (the fitted boundary); uncalibrated: P(yes) >= 0.5,
+    # i.e. z >= 0 (the fixed rule). The margin stays in PROBABILITY units
+    # on both paths (F1: the abstention gate compares it to a [0, 1) cut).
+    # W5-C finding 20: the margin is min over ALL options of the per-option
+    # distance from its threshold side, floored at 0 — recomputed after
+    # every reconciler below.
+    probs_yes = {option: p for option, (_z, p) in decision.items()}
+    if calibrated:
+        selected = [option for option, (z, _p) in decision.items() if z > 0]
     else:
-        selected, _prob, margin = _fold_multi(probs_yes)
-        selected_set = set(selected)
-        calibrated_log_odds = None
+        selected = [option for option, (z, _p) in decision.items() if z >= 0]
+    selected_set = set(selected)
+    margin = min(
+        (
+            max(0.0, probs_yes[o] - 0.5) if o in selected_set else max(0.0, 0.5 - probs_yes[o])
+            for o in probs_yes
+        ),
+        default=0.0,
+    )
+    calibrated_log_odds: dict[str, float] | None = (
+        {option: z for option, (z, _p) in decision.items()} if calibrated else None
+    )
 
     # W2-E step 3 reconciliation: the count row ALWAYS ran (no flag), scored
     # through score_trie like a scalar enum (the count trie may have
@@ -3235,15 +3333,12 @@ def solve_multi_set(
             reconciled_by = "count"
     # W2-SETCONS + W5-C finding 18: one optimization over the schema's set
     # constraints AND the trusted-count constraint. The solver selects the
-    # score-maximizing set satisfying both (calibrated log-odds when a
-    # calibrator ran, else RAW yes/no log-odds — monotone in P(yes) either
+    # score-maximizing set satisfying both, scored in the SAME decision
+    # coordinate the threshold used (z — monotone in the reported p either
     # way, so a non-binding constraint set reproduces the proposal).
     joint_constraints = [*set_constraints, *trusted_count_constraints]
     if joint_constraints:
-        if calibrated_log_odds is not None:
-            option_scores = dict(calibrated_log_odds)
-        else:
-            option_scores = {option: float(pair[0] - pair[1]) for option, pair in raw_pairs.items()}
+        option_scores = {option: z for option, (z, _p) in decision.items()}
         selected, setcons_rule = select_constrained_set(
             list(options), option_scores, joint_constraints, selected_set
         )
@@ -3306,12 +3401,25 @@ def _log_softmax(scores: list[float]) -> list[float]:
     return [v - (m + math.log(total)) for v in scores]
 
 
+def _sigmoid(x: float) -> float:
+    """Numerically stable logistic function (the ONE copy).
+
+    1/(1+exp(-x)) overflows for large negative x (exp of a large positive);
+    branching on the sign keeps every input finite."""
+    if x >= 0:
+        return 1.0 / (1.0 + math.exp(-x))
+    e = math.exp(x)
+    return e / (1.0 + e)
+
+
 def _rescore_multi_options(
     model,
     cache,
     built: dict,
     dispatch: DispatchResult,
     idxs: tuple[int, ...],
+    options: list[str],
+    prior_pairs: dict[str, list[float]] | None,
     vocab_size: int,
     pad_id: int,
     ledger: "Ledger",
@@ -3319,22 +3427,34 @@ def _rescore_multi_options(
 ) -> tuple[list[int], bool]:
     """W3-E band rescore for a multi field's near-threshold options.
 
-    A Y/N decision near p=0.5 is the same near-tie as a scalar enum — a
-    |yes - no| inside the decision band is batch-shape noise. Rescore those
-    options' rows at batch=1 and replace their raw pairs (and legal-mass
-    entries, in the row's own shape) IN the dispatch object so prior +
-    softmax + selection all see the canonical result. Returns (rescored
-    option indexes, whether any rescore ran).
+    A Y/N decision near its threshold is the same near-tie as a scalar enum
+    — the option's DECISION quantity is the corrected yes/no log-odds
+    (yes - no after prior correction; log-softmax renormalisation keeps the
+    difference). A |corrected log-odds| inside the decision band is
+    batch-shape noise: rescore those options' rows at batch=1 and replace
+    their raw pairs (and legal-mass entries, in the row's own shape) IN the
+    dispatch object so prior + softmax + selection all see the canonical
+    result. Returns (rescored option indexes, whether any rescore ran).
 
-    W5c-9: the band is the pass's DECISION band (INSTABILITY_BAND +
-    E_bound(M) from the persisted drift envelope) when provided; None =>
-    the historical constant (envelope-less paths).
+    P4: the gate keys on the CORRECTED log-odds — the quantity selection
+    actually consumes — never the raw pair (the prior can narrow a wide raw
+    gap into a near-tie, and the raw gap can sit inside the band while the
+    corrected one is decisive). The band is the pass's DECISION band
+    (drift_band[0] = INSTABILITY_BAND + E_bound(M)); None-envelope paths
+    carry the historical constant.
     """
     band = drift_band[0]
+
+    def _corrected_log_odds(oi: int, ridx: int) -> float:
+        pair = dispatch.option_pair[ridx]
+        gap = pair[0] - pair[1]
+        pp = prior_pairs.get(options[oi]) if prior_pairs is not None else None
+        if pp is not None:
+            gap -= pp[0] - pp[1]
+        return gap
+
     rescored_oids = [
-        oi
-        for oi, ridx in enumerate(idxs)
-        if abs(dispatch.option_pair[ridx][0] - dispatch.option_pair[ridx][1]) < band
+        oi for oi, ridx in enumerate(idxs) if abs(_corrected_log_odds(oi, ridx)) <= band
     ]
     if not rescored_oids:
         return [], False
@@ -3364,6 +3484,101 @@ def _rescore_multi_options(
     return rescored_oids, True
 
 
+def _count_scores_raw(
+    built: dict,
+    dispatch: DispatchResult,
+    fr: FieldRows,
+    p: dict,
+) -> tuple[list[float], list[float]]:
+    """Raw count-row bucket scores for ONE multi field (P4: shared by the
+    rescore gate and _score_count_row): score_trie over the count trie (it
+    may have multiple branch nodes) from the dispatch's batched count
+    logits. Returns (count_scores_raw, count_legal_mass_logs) at T=1, log
+    space, in p['count']['codes'] order."""
+    count_trie = built["tries"][count_key(fr.fname)]
+    count_logits_by_branch: dict[int, list[float]] = {}
+    for ridx in fr.count_idxs:
+        count_logits_by_branch.update(dispatch.count_node_logits[ridx])
+    count_branch_index = {id(node): bi for bi, node in enumerate(count_trie)}
+
+    def count_logits_at_node(
+        node: dict, _lookup=count_logits_by_branch, _index=count_branch_index
+    ) -> list[float]:
+        return _lookup[_index[id(node)]]
+
+    return score_trie(count_trie, len(p["count"]["codes"]), count_logits_at_node)
+
+
+def _corrected_count_scores(
+    raw_scores: list[float], p: dict, prior: dict | None, fname: str
+) -> list[float]:
+    """Prior-corrected count bucket scores (P4: the ONE correction — the
+    same subtraction _score_count_row applies; the neutral pass caches
+    count rows under '<field>#count' as a scalar-type prior)."""
+    prior_count_entry = prior.get(count_key(fname)) if prior is not None else None
+    return [
+        s - prior_count_entry["log_scores"][code]
+        if prior_count_entry is not None and code in prior_count_entry["log_scores"]
+        else s
+        for s, code in zip(raw_scores, p["count"]["codes"], strict=True)
+    ]
+
+
+def _rescore_count_row(
+    model,
+    cache,
+    built: dict,
+    dispatch: DispatchResult,
+    fr: FieldRows,
+    p: dict,
+    prior: dict | None,
+    vocab_size: int,
+    pad_id: int,
+    ledger: "Ledger",
+    drift_band: tuple[float, float | None],
+) -> bool:
+    """P4: the count row's near-tie rescore — the same rule as the scalar
+    enum and the multi options, on the count row's own quantity m: the
+    top-two gap of the PRIOR-CORRECTED bucket log-scores at T=1. A gap
+    inside the decision band (drift_band[0]) is batch-shape noise: rescore
+    the count rows at batch=1 and replace them in the dispatch so the
+    trusted-count decision sees the canonical shape. Returns whether a
+    rescore ran. The band never decides WHICH bucket wins — only whether
+    the evidence is re-measured canonically."""
+    ridxs = list(fr.count_idxs)
+    if not ridxs:
+        return False
+    raw_scores, _mass = _count_scores_raw(built, dispatch, fr, p)
+    corrected = _corrected_count_scores(raw_scores, p, prior, fr.fname)
+    if len(corrected) < 2:
+        return False
+    top_two = sorted(corrected, reverse=True)
+    if top_two[0] - top_two[1] > drift_band[0]:
+        return False
+    rescored_raw = _rescore_rows_batch1(
+        model,
+        cache,
+        built["rows"],
+        ridxs,
+        built["row_decision"],
+        built["row_branch"],
+        built["row_option"],
+        vocab_size,
+        pad_id,
+        ledger,
+        row_count=built["row_count"],
+    )
+    for ridx in ridxs:
+        dispatch.count_node_logits[ridx].update(rescored_raw["count_node_logits"][ridx])
+        mass = rescored_raw["node_legal_mass_log"][ridx]
+        existing = dispatch.node_legal_mass_log[ridx]
+        if isinstance(existing, dict):
+            existing.update(mass)
+        else:
+            dispatch.node_legal_mass_log[ridx] = mass
+    return True
+
+
 def _score_count_row(
     built: dict,
     dispatch: DispatchResult,
@@ -3378,28 +3593,8 @@ def _score_count_row(
     under '<field>#count' as a scalar-type prior. Returns (count_scores,
     count_legal_mass_logs) at T=1, log space.
     """
-    fname = fr.fname
-    count_trie = built["tries"][count_key(fname)]
-    count_logits_by_branch: dict[int, list[float]] = {}
-    for ridx in fr.count_idxs:
-        count_logits_by_branch.update(dispatch.count_node_logits[ridx])
-    count_branch_index = {id(node): bi for bi, node in enumerate(count_trie)}
-
-    def count_logits_at_node(
-        node: dict, _lookup=count_logits_by_branch, _index=count_branch_index
-    ) -> list[float]:
-        return _lookup[_index[id(node)]]
-
-    count_scores_raw, count_legal_mass_logs = score_trie(
-        count_trie, len(p["count"]["codes"]), count_logits_at_node
-    )
-    prior_count_entry = prior.get(count_key(fname)) if prior is not None else None
-    count_scores = [
-        s - prior_count_entry["log_scores"][code]
-        if prior_count_entry is not None and code in prior_count_entry["log_scores"]
-        else s
-        for s, code in zip(count_scores_raw, p["count"]["codes"], strict=True)
-    ]
+    count_scores_raw, count_legal_mass_logs = _count_scores_raw(built, dispatch, fr, p)
+    count_scores = _corrected_count_scores(count_scores_raw, p, prior, fr.fname)
     return count_scores, list(count_legal_mass_logs)
 
 
@@ -3414,6 +3609,7 @@ def _multi_telemetry(
     multi_rescored: bool,
     prior_entry: dict | None,
     prior_pairs: dict | None,
+    prior_applied: bool,
     selected: list[str],
 ) -> dict[str, Any]:
     """A multi field's telemetry entry (W2-E/W2-SETCONS/W5-D/W5-C keys)."""
@@ -3457,14 +3653,18 @@ def _multi_telemetry(
             p["options"][oi]: dispatch.node_legal_mass_log.get(ridx, 0.0)
             for oi, ridx in enumerate(idxs)
         },
-        # W3-E: set when any option's Y/N decision sat inside the band and
-        # was rescored at batch=1.
+        # W3-E: set when any option's Y/N decision (corrected log-odds) or
+        # the field's count row (corrected bucket gap) sat inside the band
+        # and was rescored at batch=1.
         "rescored": multi_rescored,
     }
     telemetry.update(solved_telemetry)
-    if prior_entry is not None:
+    if prior_pairs is not None:
         telemetry["prior_option_pairs"] = {k: list(v) for k, v in prior_pairs.items()}
-        telemetry["prior_corrected"] = True
+    # P8: True only when a prior was ACTUALLY subtracted from this field's
+    # decision — a present-but-unmatched prior entry is provenance, not
+    # correction.
+    telemetry["prior_corrected"] = prior_applied
     return telemetry
 
 
@@ -3485,67 +3685,112 @@ def score_multi_field(
     pad_id: int,
     ledger: "Ledger",
     drift_band: tuple[float, float | None],
+    exclusivity_groups: tuple[frozenset, ...] = (),
 ) -> FieldOutcome:
     """Stage 3 (W5b-10 C1): finalize ONE multi field.
 
     Per-option Y/N rows scored independently (one-vs-rest), the W3-E band
-    rescore for near-threshold options, per-option prior correction, the
-    selection + count + set-constraint reconciliation (solve_multi_set),
-    and the count row's own scalar-type telemetry entry ('<field>#count').
+    rescore for near-threshold options (gated on |corrected log-odds|), the
+    count row's own near-tie rescore (same corrected-margin rule, P4), the
+    ONE per-option decision coordinate (P8: corrected log-odds z, calibrated
+    a*z + b; p = sigmoid(z) — selection and every reported number use it),
+    the selection + count + set-constraint reconciliation (solve_multi_set —
+    P10: including the case-level exclusivity groups for this field, passed
+    as at-most-one set constraints), and the count row's own scalar-type
+    telemetry entry ('<field>#count').
     """
     fname = fr.fname
     idxs = fr.option_idxs
 
     probs_yes: dict[str, float] = {}
-    raw_pairs: dict[str, list[float]] = {}
+    decision: dict[str, tuple[float, float]] = {}
     prior_entry = prior.get(fname) if prior is not None else None
     prior_pairs = prior_entry["option_pairs"] if prior_entry else None
+    prior_applied = False
     # W2-E row codes: rows are keyed '<field>/<code>', but codes are
     # positional (choices order), so row oi IS options[oi] — no map needed;
     # results and telemetry stay option-keyed directly.
     #
-    # W3-E near-tie rescore for multi (review F3): a Y/N decision near
-    # p=0.5 is the same near-tie as a scalar enum — a |yes - no| inside
-    # INSTABILITY_BAND is batch-shape noise. Rescore those options' rows at
-    # batch=1 and replace their raw pairs BEFORE the scoring loop, so prior
-    # + softmax + selection all see the canonical result.
+    # W3-E near-tie rescore for multi (review F3): a Y/N decision near its
+    # threshold is the same near-tie as a scalar enum — the option's
+    # corrected log-odds inside the decision band is batch-shape noise.
+    # Rescore those options' rows at batch=1 and replace their raw pairs
+    # BEFORE the scoring loop, so prior + softmax + selection all see the
+    # canonical result.
     rescored_oids, multi_rescored = _rescore_multi_options(
         model,
         cache,
         built,
         dispatch,
         idxs,
+        options=list(p["options"]),
+        prior_pairs=prior_pairs,
+        vocab_size=vocab_size,
+        pad_id=pad_id,
+        ledger=ledger,
+        drift_band=drift_band,
+    )
+    # P8 (review F6): ONE decision coordinate per option. z = corrected
+    # log-odds — the raw yes/no logit difference with the prior difference
+    # subtracted; a calibrator scales it (a*z + b). p = sigmoid(z_dec) —
+    # the SAME number selection consumes and telemetry reports (uncalibrated
+    # p = sigmoid(z/T): softmax(corrected pair, T)[yes] is exactly that, so
+    # the uncalibrated numbers are unchanged). Raw pairs ride telemetry as
+    # provenance only — they never decide anything here.
+    multi_calibrated = calib is not None and calib.has_multi
+    multi_ab = (calib.multi_a, calib.multi_b) if multi_calibrated else None
+    for oi, ridx in enumerate(idxs):
+        pair = list(dispatch.option_pair[ridx])
+        option_name = p["options"][oi]
+        z = pair[0] - pair[1]
+        pp = prior_pairs.get(option_name) if prior_pairs is not None else None
+        if pp is not None:
+            z -= pp[0] - pp[1]
+            prior_applied = True
+        z_dec = multi_ab[0] * z + multi_ab[1] if multi_ab is not None else z
+        p_yes = _sigmoid(z_dec if multi_calibrated else z / temperature)
+        decision[option_name] = (z_dec, p_yes)
+        probs_yes[option_name] = p_yes
+
+    # P4: the count row's own near-tie gate — the same corrected log-score
+    # margin m as the scalar enum (top-two bucket gap vs the decision
+    # band). A rescore replaces the batched count logits in the dispatch
+    # BEFORE _score_count_row reads them, so the trusted-count decision is
+    # canonical too. The field's rescored flag covers any of its rows
+    # (option pairs or the count row) that were re-measured.
+    count_rescored = _rescore_count_row(
+        model,
+        cache,
+        built,
+        dispatch,
+        fr,
+        p,
+        prior,
         vocab_size,
         pad_id,
         ledger,
         drift_band=drift_band,
     )
-    for oi, ridx in enumerate(idxs):
-        pair = list(dispatch.option_pair[ridx])
-        option_name = p["options"][oi]
-        raw_pairs[option_name] = pair
-        if prior_pairs is not None and option_name in prior_pairs:
-            # Per-option additive prior in log space on the Y/N pair
-            # (P(yes) semantics), then renormalise (log-softmax shape).
-            pp = prior_pairs[option_name]
-            pair = [pv - qv for pv, qv in zip(pair, pp, strict=True)]
-            m = max(pair)
-            total = sum(math.exp(v - m) for v in pair)
-            pair = [v - (m + math.log(total)) for v in pair]
-        (p_yes, _p_no) = softmax(pair, temperature=temperature)
-        probs_yes[option_name] = p_yes
+    multi_rescored = multi_rescored or count_rescored
 
     count_scores, count_legal_mass_logs = _score_count_row(built, dispatch, fr, p, prior)
 
     solved_telemetry, count_telemetry, selected = solve_multi_set(
-        probs_yes=probs_yes,
-        raw_pairs=raw_pairs,
+        decision=decision,
         options=list(p["options"]),
         count_codes=list(p["count"]["codes"]),
         count_scores=count_scores,
         count_legal_mass_logs=list(count_legal_mass_logs),
-        multi_ab=(calib.multi_a, calib.multi_b) if calib is not None and calib.has_multi else None,
-        set_constraints=fdef.set_constraints,
+        calibrated=multi_calibrated,
+        # P10: case-level exclusivity groups join the schema's set
+        # constraints in the SAME joint solver — at most one of the group
+        # may be selected. Schema constraints and exclusivity are HARD;
+        # the trusted count is evidence and drops when jointly infeasible
+        # (the existing precedence, now covering exclusivity).
+        set_constraints=[
+            *fdef.set_constraints,
+            *({"type": "at_most_one", "options": sorted(group)} for group in exclusivity_groups),
+        ],
     )
 
     ranked = sorted(probs_yes.items(), key=lambda kv: -kv[1])
@@ -3560,6 +3805,7 @@ def score_multi_field(
         multi_rescored,
         prior_entry,
         prior_pairs,
+        prior_applied,
         selected,
     )
     # W5b-13 F4: constraint_changed compares the FINAL selected set to the
@@ -3570,17 +3816,16 @@ def score_multi_field(
     constraint_changed = set(selected) != set(solved_telemetry["threshold_proposal"])
     # W5b-13: multi semantics. score_source mirrors the scalar vocabulary —
     # 'rescored_batch1' when any option's Y/N pair was band-rescored. The
-    # caller temperature was applied to the P(yes) softmax, BUT the
-    # calibrated selection (a*(yes-no)+b, calib.has_multi) ignores it — the
-    # record's temperature is None in that case so nobody reads a T that
-    # did not set the decision.
-    multi_temperature = None if (calib is not None and calib.has_multi) else temperature
+    # calibrated selection (a*z + b on the corrected log-odds) ignores the
+    # caller temperature — the record's temperature is None in that case so
+    # nobody reads a T that did not set the decision.
+    multi_temperature = None if multi_calibrated else temperature
     telemetry["semantics"] = _field_semantics(
         score_source="rescored_batch1" if multi_rescored else "batched",
         temperature=multi_temperature,
         calib=calib,
-        calibrated_applied=calib is not None and calib.has_multi,
-        prior_corrected=prior_entry is not None,
+        calibrated_applied=multi_calibrated,
+        prior_corrected=prior_applied,
         constraint_changed=constraint_changed,
     )
     # The count row rides the parent multi's prior mode and score path; its
@@ -3595,7 +3840,7 @@ def score_multi_field(
             temperature=None,
             calib=None,
             calibrated_applied=False,
-            prior_corrected=prior_entry is not None,
+            prior_corrected=prior_applied,
             constraint_changed=solved_telemetry.get("reconciled_by") == "count"
             and count_telemetry.get("dropped_reason") is None,
         )
@@ -3613,14 +3858,20 @@ def reconcile_case_constraints(
     constraints,
     schema: StructuredSchema,
     compiled_constraints: CompiledConstraints,
+    *,
+    temperature: float = 1.0,
 ) -> AssembledState:
     """Stage 4 (W5b-10 C1): constrained MAP over the first-pass decisions.
 
     Consumes the request's CompiledConstraints (W5b-11 — compiled once by
     compile_constraints) and re-picks the joint assignment maximizing
     summed per-field log scores subject to the case-level constraints.
-    Telemetry is updated in place for changed fields (value + probability
-    from the winning score key).
+    Telemetry is updated in place for changed fields: the value AND its
+    DECISION numbers (P9 — recomputed through the ONE _decision_record
+    helper from the UNCHANGED distribution, so the record reports the value
+    it actually returns: P(returned), its log score, its margin to the best
+    other choice — negative when a constraint forced a lower-ranked value —
+    its tie flag and its competitors).
 
     Returns the updated AssembledState carrying the SAME rescored_fields
     plus the reconciled names (parsed_json / field_telemetry are the SAME
@@ -3650,11 +3901,22 @@ def reconcile_case_constraints(
             if val != old_val:
                 parsed_json[fname]["value"] = val
                 # Update the field telemetry to reflect the reconciled value.
+                # P9: the field must report the value it returns — the
+                # DECISION numbers are recomputed from the UNCHANGED
+                # distribution through the ONE helper (P(returned), its log
+                # score, its margin — negative when the constraint forced a
+                # lower-ranked value — tie, competitors). The distribution
+                # keys (log_scores / top_choices / ordinal) stay untouched.
                 field_telemetry[fname]["value"] = val
-                if fname in field_log_scores and str(val) in field_log_scores[fname]:
-                    field_telemetry[fname]["probability"] = math.exp(
-                        field_log_scores[fname][str(val)]
-                    )
+                log_scores = field_telemetry[fname].get("log_scores")
+                if log_scores:
+                    record = _decision_record(log_scores, val, temperature)
+                    field_telemetry[fname]["probability"] = record["probability"]
+                    field_telemetry[fname]["log_score_margin"] = record["log_score_margin"]
+                    field_telemetry[fname]["probability_margin"] = record["probability_margin"]
+                    field_telemetry[fname]["tie"] = record["tie"]
+                    field_telemetry[fname]["alternatives"] = record["alternatives"]
+                    parsed_json[fname]["prob"] = record["probability"]
                 # W5b-13: the MAP overrode the raw winner — the field's
                 # semantics record says so (F2: must exist — index directly).
                 field_telemetry[fname]["semantics"]["constraint_changed"] = True
@@ -3902,7 +4164,8 @@ def finalize_public_result(
         # and retried — recorded separately, never counted as passes.
         "failed_attempts": scored.failed_attempts,
         # W3-E: fields whose batched result was replaced by the batch=1
-        # canonical rescore (top candidates inside INSTABILITY_BAND).
+        # canonical rescore (corrected top-two log-score gap inside the
+        # decision band).
         "rescored_fields": list(state.rescored_fields),
         "schema_match": True,  # keys/enums guaranteed by construction
         # The per-choice probabilities are the constrained path probability
@@ -3947,6 +4210,7 @@ def _score_all_fields(
     pad_id: int,
     ledger: "Ledger",
     drift_band: tuple[float, float | None],
+    compiled_constraints: "CompiledConstraints | None" = None,
 ) -> tuple[AssembledState, list[str]]:
     """Stage 2 (W5b-10 C1): first-pass scoring of EVERY field.
 
@@ -3957,6 +4221,15 @@ def _score_all_fields(
     """
     layout = field_rows_of(built)
     field_plans = built["field_plans"]
+    # P10: case-level exclusivity groups are enforced in the multi joint set
+    # solver (solve_multi_set), not the scalar MAP — the MAP's components
+    # only cover implies/excludes fields. Each multi field gets the groups
+    # compiled for IT, translated to the solver's at-most-one shape.
+    exclusivity_by_field: dict[str, list[frozenset]] = {}
+    if compiled_constraints is not None:
+        for c in compiled_constraints.exclusivities:
+            fname = compiled_constraints.field_names[c.field_idx]
+            exclusivity_by_field.setdefault(fname, []).append(c.options)
     parsed_json: dict[str, Any] = {}
     field_telemetry: dict[str, Any] = {}
     internal_telemetry: dict[str, Any] = {}
@@ -3981,6 +4254,7 @@ def _score_all_fields(
                 pad_id=pad_id,
                 ledger=ledger,
                 drift_band=drift_band,
+                exclusivity_groups=tuple(exclusivity_by_field.get(fname, ())),
             )
             if outcome.rescored:
                 rescored_fields.append(fname)
@@ -4117,6 +4391,7 @@ def _assemble(
             pad_id=pad_id,
             ledger=ledger,
             drift_band=drift_band,
+            compiled_constraints=compiled_constraints,
         )
 
     # W3-D: constrained MAP. W5-B (review 43): PRIOR MODE STOPS HERE — the
@@ -4124,7 +4399,9 @@ def _assemble(
     # pass; its field finalization is the last step the prior cache consumes.
     if constraints and not _prior_mode:
         with ledger.span("reconciliation"):
-            state = reconcile_case_constraints(state, constraints, schema, compiled_constraints)
+            state = reconcile_case_constraints(
+                state, constraints, schema, compiled_constraints, temperature=temperature
+            )
 
     # W3-D part 2: the selective parent-conditioned second pass. Review 43:
     # never in prior mode (the prior cache must hold only first-pass
@@ -4349,8 +4626,25 @@ def run_parallel_generation_batched(
     order = sorted(range(len(contexts)), key=_prompt_len)
 
     # 3. Incremental groups: walk the length order, admitting a context
-    #    only while (sum of actual cache nbytes + projected suffix bytes for
-    #    one more context's rows) stays inside the measured budget.
+    #    only while (sum of estimated cache nbytes + projected suffix bytes
+    #    for one more context's rows) stays inside the measured budget.
+    #
+    #    F10 (staged prefill): groups form from CHEAP length estimates, not
+    #    from prefill — the old loop prefilled EVERY context up front and
+    #    kept every cache alive until the call returned, so peak memory was
+    #    O(N contexts x KV) instead of O(group x KV). What the old grouping
+    #    read from prefill: only ``_cache_nbytes(pf.cache)`` — the estimate
+    #    below replaces it 1:1; nothing else.
+    #
+    #    A fresh per-context cache's bytes are a step function of its
+    #    prompt token count L: mlx_lm KVCache preallocates in fixed steps
+    #    (``cache.step``, default 256), so actual bytes = ceil(L/S)*S*t
+    #    for a per-token t. One probe prefill of the SHORTEST context
+    #    (cheapest) measures the per-block bytes; the estimate
+    #    ``ceil(L/S) * block_bytes`` reproduces the old budget arithmetic
+    #    EXACTLY for stepped and byte-linear caches alike (S=1 when the
+    #    cache class carries no step attribute) — same groups, same order,
+    #    same shapes.
     budget = _memory_budget_bytes(_CHUNK_TARGET_FRACTION)
     suffix_bytes_per_ctx = 0
     if rows:
@@ -4359,12 +4653,28 @@ def run_parallel_generation_batched(
             R * width_max * vocab_size * 4  # one context's share of chunk logits
         )
 
+    prompt_lens = {i: _prompt_len(i) for i in range(len(contexts))}
+    prealloc_step = 1
+    kv_block_bytes = 0  # actual KV bytes per prealloc step
+    if order:
+        first = order[0]  # the shortest context: the cheapest probe prefill
+        probe = _prefill_cached(first, contexts[first])
+        prealloc_step = max(1, int(getattr(probe.cache[0], "step", 1)) if probe.cache else 1)
+        probe_len = prompt_lens[first]
+        probe_blocks = -(-probe_len // prealloc_step)  # ceil
+        if probe_blocks > 0:
+            kv_block_bytes = _cache_nbytes(probe.cache) // probe_blocks
+        # F10: the probe's PrefillResult must not outlive this expression —
+        # pf_cache[first] still holds it for the first group's reuse; the
+        # local name would pin it across ALL groups.
+        probe = None
+
     groups: list[list[int]] = []
     current: list[int] = []
     current_bytes = 0
     for idx in order:
-        pf = _prefill_cached(idx, contexts[idx])
-        ctx_bytes = _cache_nbytes(pf.cache) + suffix_bytes_per_ctx
+        est_blocks = -(-prompt_lens[idx] // prealloc_step)  # ceil
+        ctx_bytes = est_blocks * kv_block_bytes + suffix_bytes_per_ctx
         if current and current_bytes + ctx_bytes > budget:
             groups.append(current)
             current = []
@@ -4522,10 +4832,27 @@ def run_parallel_generation_batched(
             results[idx] = res
         return scored
 
-    for group_idx in groups:
+    def _stage_group(gi: int, group_idx: list[int]) -> None:
+        """Prefill, score, assemble and DISCARD one context group (F10).
+
+        All PrefillResults live only in this frame: when it returns, the
+        group's KV caches are unreferenced and the next group's prefill
+        replaces, never stacks (peak live caches = one group). Loop-scope
+        names in the caller would otherwise keep the previous group's
+        caches alive across the group boundary."""
         group_pf = [(idx, _prefill_cached(idx, contexts[idx])) for idx in group_idx]
         n_group = len(group_pf)
         group_ledger = Ledger()  # group-level spans (wall, merged pass)
+        # F10: one debug line per group (contexts, rows, prefill tokens) —
+        # the staged-prefill visibility contract.
+        logger.debug(
+            "decide_many group %d/%d: contexts=%d rows=%d prefill_tokens=%s",
+            gi,
+            len(groups),
+            n_group,
+            n_group * R,
+            sum(prompt_lens[i] for i in group_idx),
+        )
         with group_ledger.span("group_wall"):
             group_scored = _run_group(group_idx, group_pf, n_group, group_ledger)
         # F4/N5: the amortized share is ONE derived number from the group
@@ -4551,4 +4878,12 @@ def run_parallel_generation_batched(
             # wall time. prior_ms is reported separately (shared
             # request-level value); it is NOT added here.
             res["per_item_end_to_end_ms"] = res.pop("_per_item_own_ms") + amortized
+        # F10: the group's results are assembled — its KV caches are dead.
+        # Drop them (by index: no PrefillResult binding outlives the frame)
+        # so the next group's prefill replaces, never stacks.
+        for idx in group_idx:
+            pf_cache.pop(idx, None)
+
+    for gi, group_idx in enumerate(groups, 1):
+        _stage_group(gi, group_idx)
     return results

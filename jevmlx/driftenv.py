@@ -36,8 +36,9 @@ Sources of the envelope, in order of authority:
    recorded value). The canary MEASURES; it never installs a constant —
    on failure the load RAISES (no silent under-cover).
 
-E_bound = max over all recorded buckets AT OR ABOVE the pass's bucket
-(the plateau is monotone in M up to the flat region), rounded UP to the
+E_bound comes from the NEAREST (tightest) recorded bucket AT OR ABOVE the
+pass's bucket — a higher bucket's plateau bounds any smaller M, so the
+nearest covering record is the least wasteful bound — rounded UP to the
 next 1/64 nat — the drift lattice IS the fp16 ULP ladder
 (0.015625/0.03125/0.0625/0.125), so the band lives on the same grid it
 protects. A pass with M ABOVE the largest recorded bucket uses the
@@ -149,20 +150,6 @@ except OSError:
     # Source checkout without the data file packaged (e.g. a raw sdist) —
     # the constant above stands; a packaged install always has the file.
     pass
-
-
-def _load_shipped_edges() -> tuple[int, ...]:
-    """Read the shipped bucket_edges.json (the package's source of truth).
-
-    A malformed/missing file is a packaging bug, not a runtime fallback:
-    raise so it surfaces in CI, never silently to the band.
-    """
-    path = Path(__file__).resolve().parent / "data" / "bucket_edges.json"
-    data = json.loads(path.read_text(encoding="utf-8"))
-    edges = sorted(int(e) for e in data["edges"] if isinstance(e, (int, float)) and e > 0)
-    if len(edges) < 2 or len(edges) != len(set(edges)):
-        raise DriftEnvelopeError(f"malformed bucket_edges.json: {edges}")
-    return tuple(edges)
 
 
 def bucket_labels() -> list[str]:

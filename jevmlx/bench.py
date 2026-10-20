@@ -609,27 +609,41 @@ def _write_failure_run(combo_dir: Path, status: str, exc: BaseException) -> Path
     return run_path
 
 
-def _run_model_parity(model: str, engine, folder: Path) -> str | None:
-    """W4-B: run the scoring-parity check on a loaded engine and write
-    ``<folder>/parity.json``. Returns None on pass, else a short failure
-    note for the summary rows. Takes the loaded :class:`Engine`."""
+def _run_model_parity(
+    model: str, engine, folder: Path, scorers: list[str] | None = None
+) -> str | None:
+    """W4-B + F9: run the scoring-parity check on a loaded engine and write
+    ONE parity artifact per scorer (``parity.json`` for the default scorer,
+    ``parity-<scorer>.json`` for the others). A payload that mixed scorers
+    proved parity for neither, so every scorer the bench will run gets its
+    own payload, and ALL must pass. Returns None on pass, else a short
+    failure note for the summary rows. Takes the loaded :class:`Engine`."""
+    from jevmlx.models import DEFAULT_SCORING
     from jevmlx.parity import write_parity_json
 
-    payload = write_parity_json(engine, model, folder)
-    if payload["passed"]:
+    if not scorers:
+        scorers = [DEFAULT_SCORING]
+    worst_drift = 0.0
+    for scoring in scorers:
+        payload = write_parity_json(engine, model, folder, scoring=scoring)
+        if not payload["passed"]:
+            print(
+                f"parity[{payload['scoring']}]: FAIL (winners_identical="
+                f"{payload['winners_identical']}, "
+                f"max drift {payload['max_abs_drift_nats']} nats, atol {payload['atol']})"
+            )
+            return (
+                f"parity_failed[{payload['scoring']}]: "
+                f"max_abs_drift_nats={payload['max_abs_drift_nats']} "
+                f"atol={payload['atol']} winners_identical={payload['winners_identical']}"
+            )
         print(
-            f"parity: PASS (max drift {payload['max_abs_drift_nats']} nats, "
-            f"atol {payload['atol']}, {len(payload['cases'])} cases)"
+            f"parity[{payload['scoring']}]: PASS (max drift "
+            f"{payload['max_abs_drift_nats']} nats, atol {payload['atol']}, "
+            f"{len(payload['cases'])} cases)"
         )
-        return None
-    print(
-        f"parity: FAIL (winners_identical={payload['winners_identical']}, "
-        f"max drift {payload['max_abs_drift_nats']} nats, atol {payload['atol']})"
-    )
-    return (
-        f"parity_failed: max_abs_drift_nats={payload['max_abs_drift_nats']} "
-        f"atol={payload['atol']} winners_identical={payload['winners_identical']}"
-    )
+        worst_drift = max(worst_drift, payload["max_abs_drift_nats"])
+    return None
 
 
 def run_bench(
@@ -769,7 +783,7 @@ def run_bench(
 
                     try:
                         engine = load_engine(model)
-                        parity_note = _run_model_parity(model, engine, folder)
+                        parity_note = _run_model_parity(model, engine, folder, scorers=scorers)
                     except Exception as parity_exc:  # noqa: BLE001 - failure is a result
                         parity_note = f"parity_failed: {type(parity_exc).__name__}: {parity_exc}"
                         print(f"parity check error: {parity_note}", flush=True)

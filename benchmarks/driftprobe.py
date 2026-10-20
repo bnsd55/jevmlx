@@ -324,6 +324,19 @@ def _mask_control(
     }
 
 
+def _kv_state(cache: Any) -> tuple[Any, Any]:
+    """(keys, values) of an unbatched cache, whatever arity ``state`` has.
+
+    mlx-lm #1778 (ee19be43, first released in 0.32.0) changed ``state``
+    from ``(keys, values)`` to the FULL state: ``(keys, values, offset)``
+    for KVCache and more fields for rotating/batched caches. Unpacking a
+    fixed arity breaks on one side of that change; index the first two
+    fields instead — keys and values are always first. The offset is
+    compared separately from the cache attribute below.
+    """
+    return cache.state[0], cache.state[1]
+
+
 def _cache_control(
     engine: Engine,
     schema: Any,
@@ -363,8 +376,8 @@ def _cache_control(
         """Exact elementwise equality of two unbatched cache lists
         (values, shapes, offsets)."""
         for ca, cb in zip(a, b, strict=True):
-            ka, va = ca.state
-            kb, vb = cb.state
+            ka, va = _kv_state(ca)
+            kb, vb = _kv_state(cb)
             if not _eq(ka, kb) or not _eq(va, vb):
                 return False
             if int(getattr(ca, "offset", 0)) != int(getattr(cb, "offset", 0)):
@@ -384,7 +397,7 @@ def _cache_control(
     merged = _broadcast_cache(pf_cache_list, n)
     merged_ok = True
     for layer_src, layer_b in zip(pf_cache_list, merged, strict=True):
-        src_k, src_v = layer_src.state
+        src_k, src_v = _kv_state(layer_src)
         # keys layout: (batch, n_kv_heads, seq, head_dim) — seq is axis 2.
         # The unbatched cache keeps its leading batch dim of 1; squeeze it
         # so shapes match the per-slot slice.
