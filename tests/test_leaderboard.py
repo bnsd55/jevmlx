@@ -129,6 +129,7 @@ def _write_local_result(tmp_path: Path) -> Path:
         json.dumps(
             {
                 "model": "fake-1b",
+                "scoring": "labels",
                 "test": "w1a",
                 "passed": True,
                 "max_drift_nats": 0.02,
@@ -455,6 +456,7 @@ def _write_local_result_with_parity(tmp_path: Path, *, status: str, passed: bool
     machine_dir = root / "m1-8gb-fake"
     parity = {
         "model": "fake-1b",
+        "scoring": "labels",
         "test": "w1a",
         "passed": passed,
         "status": status,
