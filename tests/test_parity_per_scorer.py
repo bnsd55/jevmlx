@@ -106,21 +106,26 @@ def test_t2_raw_row_comparison_covers_every_context_copy(monkeypatch):
     )
 
 
-def test_t3_multi_option_drift_fails_parity():
-    """T3: a multi field whose per-option corrected log-odds drift above
-    atol (batched vs chunked) FAILS parity. Main skipped multi fields
-    entirely (log_scores is None -> continue) and the payload passed."""
+def test_t3_multi_option_drift_flips_the_option_winner():
+    """T3 (issue #184): a multi field whose per-option corrected log-odds
+    drift flips the option's winner between batched and chunked FAILS
+    parity (the decision invariant). Main skipped multi fields entirely
+    (log_scores is None -> continue) and the payload passed. Under the
+    decision-based contract the drift NUMBER is a diagnostic: what fails
+    is the winner change (multi_drift == inf sets winners_identical
+    False)."""
     from jevmlx.parity import parity_report
 
     class _MultiDriftModel(YNLogitModel):
-        """Boosts the multi YES token only in batched suffix calls
-        (>1-row chunks): per-option corrected log-odds drift >= atol."""
+        """Suppresses the multi YES token only in batched suffix calls
+        (>1-row chunks): the option's winner flips yes->no, which the
+        decision contract measures as an infinite per-option drift."""
 
         def __call__(self, tokens, cache=None):
             out = super().__call__(tokens, cache=cache)
             if tokens.shape[0] > 1 and tokens.shape[1] > 1:
                 # the multi option's YES token id (_mod97(ord('Y'))).
-                out = out.at[:, :, 90].add(3.0)
+                out = out.at[:, :, 90].add(-10.0)
             return out
 
     multi_case = (
@@ -135,10 +140,13 @@ def test_t3_multi_option_drift_fails_parity():
     payload = parity_report(
         make_engine(_MultiDriftModel(), _CountTokenizer()), "fake/multi-drift", [multi_case]
     )
-    assert payload["max_abs_drift_nats"] >= payload["atol"], (
+    # The multi per-option drift IS measured (main silently skipped multi
+    # fields entirely — log_scores is None -> continue).
+    assert payload["max_abs_drift_nats"] > 0, (
         "multi per-option drift was not measured (main silently skipped it)"
     )
     assert payload["passed"] is False
+    assert payload["status"] == "FAIL"
 
 
 def test_t1b_payload_records_its_scorer():

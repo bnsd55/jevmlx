@@ -2268,7 +2268,11 @@ def _selective_second_pass(
         for fname, val in reconciled.items():
             if fname in parsed_json and parsed_json[fname]["value"] != val:
                 parsed_json[fname]["value"] = val
-                field_telemetry[fname]["value"] = val
+                # #194: the SAME P9 recompute the pre-dependency MAP runs —
+                # the returned value's probability/score/margin/tie/
+                # alternatives describe the value actually returned, not the
+                # wave's pre-MAP winner.
+                _apply_decision_record(parsed_json, field_telemetry, fname, val, temperature)
                 # W5b-13: the post-dependency MAP changed this field again
                 # (F2: the record must exist — index directly).
                 field_telemetry[fname]["semantics"]["constraint_changed"] = True
@@ -3882,6 +3886,36 @@ def score_multi_field(
     )
 
 
+def _apply_decision_record(
+    parsed_json: dict[str, Any],
+    field_telemetry: dict[str, Any],
+    fname: str,
+    val: object,
+    temperature: float,
+) -> None:
+    """P9 (#194): the ONE decision-number recompute for a MAP-overridden value.
+
+    Both MAP sites (reconcile_case_constraints and the post-dependency MAP
+    inside _selective_second_pass) must report the value they RETURN:
+    probability, log_score_margin, probability_margin, tie, alternatives and
+    parsed_json.prob are recomputed from the UNCHANGED distribution through
+    _decision_record. The distribution keys (log_scores / top_choices /
+    ordinal) stay untouched — they describe the field's evidence, not the
+    returned value. No-op for fields without log_scores (multi: no field
+    log P by design; the MAP never reconciles them).
+    """
+    field_telemetry[fname]["value"] = val
+    log_scores = field_telemetry[fname].get("log_scores")
+    if log_scores:
+        record = _decision_record(log_scores, val, temperature)
+        field_telemetry[fname]["probability"] = record["probability"]
+        field_telemetry[fname]["log_score_margin"] = record["log_score_margin"]
+        field_telemetry[fname]["probability_margin"] = record["probability_margin"]
+        field_telemetry[fname]["tie"] = record["tie"]
+        field_telemetry[fname]["alternatives"] = record["alternatives"]
+        parsed_json[fname]["prob"] = record["probability"]
+
+
 def reconcile_case_constraints(
     state: AssembledState,
     constraints,
@@ -3936,16 +3970,9 @@ def reconcile_case_constraints(
                 # score, its margin — negative when the constraint forced a
                 # lower-ranked value — tie, competitors). The distribution
                 # keys (log_scores / top_choices / ordinal) stay untouched.
-                field_telemetry[fname]["value"] = val
-                log_scores = field_telemetry[fname].get("log_scores")
-                if log_scores:
-                    record = _decision_record(log_scores, val, temperature)
-                    field_telemetry[fname]["probability"] = record["probability"]
-                    field_telemetry[fname]["log_score_margin"] = record["log_score_margin"]
-                    field_telemetry[fname]["probability_margin"] = record["probability_margin"]
-                    field_telemetry[fname]["tie"] = record["tie"]
-                    field_telemetry[fname]["alternatives"] = record["alternatives"]
-                    parsed_json[fname]["prob"] = record["probability"]
+                # #194: the ONE helper is _apply_decision_record — the
+                # post-dependency MAP shares it (no second copy).
+                _apply_decision_record(parsed_json, field_telemetry, fname, val, temperature)
                 # W5b-13: the MAP overrode the raw winner — the field's
                 # semantics record says so (F2: must exist — index directly).
                 field_telemetry[fname]["semantics"]["constraint_changed"] = True
@@ -4688,6 +4715,16 @@ def run_parallel_generation_batched(
     if order:
         first = order[0]  # the shortest context: the cheapest probe prefill
         probe = _prefill_cached(first, contexts[first])
+        # SHORTCUT: the estimate assumes a stepped or byte-linear KV cache
+        # (mlx_lm KVCache preallocates in cache.step-sized blocks). A cache
+        # class whose nbytes is neither — e.g. a quantized-KV ArraysCache
+        # carrying non-linear scales — could estimate LOW and form larger
+        # groups than the prefill-sized arithmetic would. Fail-safe today:
+        # every supported model uses standard KVCache, and an
+        # overestimate only shrinks groups (slower, never wrong). Upgrade
+        # path: prefill-measure one context per DISTINCT cache class (or
+        # fall back to per-context prefill sizing) when a non-stepped
+        # class shows up in engine.cache_capabilities.
         prealloc_step = max(1, int(getattr(probe.cache[0], "step", 1)) if probe.cache else 1)
         probe_len = prompt_lens[first]
         probe_blocks = -(-probe_len // prealloc_step)  # ceil

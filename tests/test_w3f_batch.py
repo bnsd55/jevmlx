@@ -2,7 +2,8 @@
 
 Verifies:
 - 3 contexts through decide_many (batched) equal 3 separate decide calls
-  within PARITY_ATOL (logits are compared via the parsed values + telemetry).
+  (winners and log_scores compared via the parsed values + telemetry; drift
+  is a diagnostic — the decision-based parity contract, issue #184).
 - run_parallel_generation_batched returns results in input order.
 - One scoring pass total (passes telemetry shared, divided per context).
 - Constraints + prior_correction flow through the batched path.

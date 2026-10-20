@@ -24,12 +24,10 @@ This module is that implementation:
       "run_at": "2026-09-18T12:00:00Z"
     }
 
-``atol`` is ``INSTABILITY_BAND`` (5e-2 nats) — the same constant the slow
-parity test asserts against, so a recorded ``passed: true`` means the slow
-test's invariant held on this machine at bench time. Metal batched matmuls
-tile differently per batch shape and the legal-mass logsumexp adds a
-reduction; bit-identity is not the invariant, WINNERS are, and log_scores
-must agree within the band.
+The parity gate checks DECISIONS, not raw numbers (issue #184): PASS =
+winners identical + no escaped near-tie; the drift quantities are fp16
+lattice noise of the batched kernels (measured 4-8 ulp steps), reported
+as diagnostics and never gated.
 
 The schema is a superset of PR #29's BENCHMARKING.md record (model, test,
 passed, max_drift_nats, atol, run_at): the extra keys (prompt_version,
@@ -37,19 +35,22 @@ winners_identical, max_abs_drift_nats alias, cases) identify WHAT ran;
 PR #29's ``check_parity`` only reads ``passed``, so the superset stays
 compatible both ways.
 
-P4/I7: ``status`` is the REPORTING word (PASS / DRIFT / FAIL). The GATE
-(``passed``) is unchanged — DRIFT and FAIL both set ``passed: false``.
-PASS = all drifts < atol. DRIFT = some drift >= atol but winners identical
-on all cases and no escaped near-tie (batch-shape noise, not a real
-divergence). FAIL = a winner changed, or an escaped near-tie. The measured
-max drift is always reported as is (D6: no self-referential band — a band
-computed from the run's own max drift can never fail).
+The REPORTING status has exactly TWO states: PASS and FAIL. PASS = every
+field's batched winner equals the batch=1 winner AND no escaped near-tie
+(every field whose margin sat inside the engine's rescore band was
+actually rescored). FAIL = a winner differs, or an escaped near-tie. The
+drift numbers (raw / gap / margin / logp, in nats AND in fp16 ulps of the
+measured logit magnitude) ride the payload as diagnostics and never gate.
+Readers reject a scored payload still carrying status DRIFT
+(pre-contract) with a regenerate hint; pre-F9 payloads without a scoring
+key keep the UNVERIFIED (pre-F9) display.
 """
 
 from __future__ import annotations
 
 import datetime
 import json
+import math
 from importlib import resources
 from typing import Any
 
@@ -374,18 +375,18 @@ def parity_report(
     rejects a parity.json without ``max_raw_row_drift_nats`` as pre-v2, so
     the bench's payload must always carry both key sets.
 
-    The GATE is fail-closed at the FIXED 0.05 contract (review section 2:
-    no widening): winners identical (both checks), single-context
-    batch-vs-chunked drift, the batched pairwise GAP drift (d_gap), and
-    the batched top-two margin drift — all under ``atol``. Raw logits
-    carry an arbitrary additive offset, so ``max_raw_row_drift_nats`` is a
-    DIAGNOSTIC only (not gated); the gap drift is what catches a real
-    divergence. On the 0.5B: d_raw 0.125 but d_gap 0.070 — the drift is
-    partly real, so the batched gate FAILS (parity_passed=false, fail
-    closed). The single-context W1-A gate still passes.
+    The GATE is decision-based (owner-approved, issue #184): winners
+    identical (both checks) AND no escaped near-tie (every field whose
+    margin sat inside the engine's rescore band was actually rescored).
+    The drift numbers are DIAGNOSTICS (nats + fp16 ulps of the measured
+    logit magnitude): measured (issue #184) as exact fp16 lattice steps (4-8
+    ulp) at the logits' magnitude, so an absolute nat tolerance sat inside
+    the lattice noise and failed by construction while every winner was
+    identical. Raw logits carry an arbitrary additive offset, so
+    ``max_raw_row_drift_nats`` remains a DIAGNOSTIC only.
     """
 
-    from jevmlx.engine import INSTABILITY_BAND, PROMPT_VERSION
+    from jevmlx.engine import PROMPT_VERSION
     from jevmlx.models import DEFAULT_SCORING
 
     result = check_scoring_parity(engine, cases, max_rows_options, scoring=scoring)
@@ -413,26 +414,24 @@ def parity_report(
     # band reads. The PARITY GATE below stays at the FIXED 0.05: recording
     # the envelope never redefines parity; it bounds the rescore band.
     recorded = _record_envelope_from_report(engine, model_id, max_gap_drift, max_merged_rows)
-    passed = bool(
-        winners_identical
-        and max_abs_drift < INSTABILITY_BAND
-        and max_gap_drift < INSTABILITY_BAND
-        and max_margin_drift < INSTABILITY_BAND
-        and not escaped
-    )
-    # P4/I7 (D6): the REPORTING status (PASS / DRIFT / FAIL). The GATE
-    # (passed) is unchanged — DRIFT and FAIL both set passed=False. DRIFT =
-    # some drift >= atol but winners identical on all cases and no escaped
-    # near-tie (batch-shape noise, not a real divergence). FAIL = a winner
-    # changed, or an escaped near-tie. The measured max drift is reported
-    # as is — no envelope-band term (a band computed from the run's own
-    # max drift can never fail; it tested nothing).
-    if passed:
-        status = "PASS"
-    elif winners_identical and not escaped:
-        status = "DRIFT"
-    else:
-        status = "FAIL"
+    # The decision-based contract (owner-approved, issue #184): the gate
+    # checks DECISIONS, not raw numbers — winners identical (both checks)
+    # and no escaped near-tie. The drift quantities are fp16-lattice noise
+    # at the logits' magnitude (measured 4-8 ulp steps; an absolute nat
+    # tolerance sat inside the noise and failed by construction) — they are
+    # reported as diagnostics (nats + ulps), never gated.
+    passed = bool(winners_identical and not escaped)
+    # The REPORTING status: exactly PASS or FAIL (the old DRIFT middle
+    # state is gone — batch-shape noise with identical winners IS a pass;
+    # readers reject scored DRIFT payloads as pre-contract, #184).
+    status = "PASS" if passed else "FAIL"
+    # Diagnostics: drift in fp16 ulps of the measured logit magnitude (issue #184).
+    max_abs_logit = float(batched.get("max_abs_logit", 0.0) or 0.0)
+    ulp = 2.0 ** (math.floor(math.log2(max_abs_logit)) - 10) if max_abs_logit >= 1 else 0.0
+
+    def _ulps(drift: float) -> float:
+        return round(drift / ulp, 1) if ulp else 0.0
+
     return {
         "model": model_id,
         # F9: the scorer this payload covers. One payload per scorer — the
@@ -448,8 +447,14 @@ def parity_report(
         "max_logp_drift_nats": round(max_logp_drift, 6),
         "max_margin_drift_nats": round(max_margin_drift, 6),
         "max_batched_drift_nats": round(max_batched_drift, 6),
+        # Diagnostics (issue #184): the drift quantities in fp16 ulps of the measured
+        # logit magnitude — never gated.
+        "max_abs_logit": round(max_abs_logit, 4),
+        "max_raw_row_drift_ulps": _ulps(max_raw_drift),
+        "max_gap_drift_ulps": _ulps(max_gap_drift),
+        "max_logp_drift_ulps": _ulps(max_logp_drift),
+        "max_margin_drift_ulps": _ulps(max_margin_drift),
         "winners_identical": winners_identical,
-        "atol": INSTABILITY_BAND,
         # W5c-9: the drift-envelope resolution this report persisted (bound,
         # source) — informational; the gate above is untouched. D6: the
         # band field is gone — it was round_up(0.05 + this run's own max
@@ -460,10 +465,7 @@ def parity_report(
         # Environment metadata (review item 3).
         "environment": _environment_metadata(engine),
         "passed": passed,
-        # P4/I7: the REPORTING status (PASS / DRIFT / FAIL). passed is
-        # unchanged (False for DRIFT and FAIL); status tells the operator
-        # whether the drift is batch-shape noise (DRIFT) or a real divergence
-        # (FAIL).
+        # The REPORTING status: exactly PASS or FAIL (see above).
         "status": status,
         "cases": [case_id for case_id, _preset in (cases or bundled_preset_specs())],
         "test": PARITY_TEST_NAME,
@@ -667,6 +669,7 @@ def check_batched_parity(
     max_gap_drift = 0.0
     max_logp_drift = 0.0
     max_margin_drift = 0.0
+    max_abs_logit = 0.0  # the raw decision-logit magnitude (drift ulps, #184)
     max_merged_rows = 0  # W5c-9 C4: the largest merged pass M the matrix ran
     per_case: dict[str, dict[str, Any]] = {}
 
@@ -683,6 +686,7 @@ def check_batched_parity(
         # W5c-1 review: decompose into d_raw (diagnostic) / d_gap (gate) /
         # d_logp (diagnostic) + margin drift (gate).
         raw_drift = gap_drift = logp_drift = margin_drift = 0.0
+        raw_logit_magnitude = 0.0
         if built["rows"]:
             vocab_size = engine.vocab_size
             from jevmlx.timing import Ledger
@@ -739,10 +743,12 @@ def check_batched_parity(
                         margin_drift,
                         abs(_top_two_margin(ref_vals) - _top_two_margin(got_vals)),
                     )
+                    max_abs_logit = max(max_abs_logit, max(abs(v) for v in ref_vals))
         max_raw_drift = max(max_raw_drift, raw_drift)
         max_gap_drift = max(max_gap_drift, gap_drift)
         max_logp_drift = max(max_logp_drift, logp_drift)
         max_margin_drift = max(max_margin_drift, margin_drift)
+        max_abs_logit = max(max_abs_logit, raw_logit_magnitude)
         max_merged_rows = max(max_merged_rows, n_ctx * len(built["rows"]))
 
         # --- Final decisions at 1/2/4 contexts, equal + mixed lengths.
@@ -806,10 +812,11 @@ def check_batched_parity(
         "winners_identical": winners_identical,
         "max_abs_drift_nats": max_abs_drift,
         "max_raw_row_drift_nats": max_raw_drift,
-        # W5c-1 review section 2: the GATE metrics — pairwise gap drift and
-        # top-two margin drift, both at the FIXED 0.05 contract (no
-        # widening). d_raw is a diagnostic only (raw logits carry an
-        # arbitrary additive offset).
+        # W5c-1 review section 2: the drift decomposition — d_raw is a
+        # diagnostic (raw logits carry an arbitrary additive offset); under
+        # the decision-based contract (issue #184) NOTHING here gates.
+        # max_abs_logit feeds the fp16-ulp diagnostics of the payload.
+        "max_abs_logit": max_abs_logit,
         "max_gap_drift_nats": max_gap_drift,
         "max_logp_drift_nats": max_logp_drift,
         "max_margin_drift_nats": max_margin_drift,

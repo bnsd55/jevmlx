@@ -1,20 +1,12 @@
 """Shared test fixtures, fakes and result factories.
 
-PARITY_ATOL is the tolerance for real-model batch-vs-chunked log_score
-parity: Metal batched matmuls tile differently at different batch shapes,
-and the legal-mass full-vocab logsumexp (W2-D) adds a reduction that
-perturbs the lazy evaluation graph.
-
-Measured (W3-C, Qwen2.5-0.5B-4bit on M5, fintech_fraud + support_triage,
-max_rows=3 vs full): worst drift 0.0293 nats — IDENTICAL on main before and
-after the W3-C branch, i.e. pre-existing batch-shape noise, not a W3-C
-regression. Coder1's F3 proposed 1e-2; the measurement shows 1e-2 fails on
-main itself, so the constant ships at 5e-2 pending a remeasure.
-
-W3-E: the constant now LIVES in jevmlx.engine as INSTABILITY_BAND (the
-near-tie rescore band uses the same measurement) and is re-exported here so
-tests and engine share exactly one number.
-The FakeModel path stays exact (deterministic zeros).
+Historical note (issue #184): the tests used to share a PARITY_ATOL
+(5e-2 nats) real-model batch-vs-chunked log_score tolerance. Q4 measured
+the batch drift as exact fp16 lattice steps (2-8 ulp at the decision
+logits' magnitude of |x| ~ 20), so an absolute nat tolerance sat inside
+the noise and failed by construction; the parity contract is now
+decision-based and the constant is gone. The ENGINE's INSTABILITY_BAND is
+untouched — it drives the near-tie rescore, i.e. decisions.
 
 W5b-2: shared fakes live HERE, once. One tokenizer per tokenization family,
 one model per biasing behaviour, one engine-result factory — the per-file
@@ -27,12 +19,6 @@ import math
 import os
 
 import pytest
-
-# Real-model log_score parity tolerance (nats) == engine.INSTABILITY_BAND;
-# re-exported under the tests' name for the parity suites.
-from jevmlx.engine import INSTABILITY_BAND
-
-PARITY_ATOL = INSTABILITY_BAND
 
 # The slow-suite model. ONE place reads the env: benchmarks/m5.py's parity
 # step runs `pytest -m slow` with MODEL_ID=<parity model>, so every slow

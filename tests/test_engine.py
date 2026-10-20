@@ -3,7 +3,6 @@ import math
 import pytest
 from conftest import (  # noqa: F401  (documented in slow-test docstrings)
     MODEL_ID,
-    PARITY_ATOL,
     skip_on_shared_runner,
 )
 
@@ -95,7 +94,7 @@ def test_scores_stable_under_chunking(engine):
     must agree wherever the margin (in BOTH runs) exceeds 0.1.
     Fields below that margin are reported, not asserted — the model is
     genuinely undecided on them and chunk shape may flip the argmax.
-    Drift >= PARITY_ATOL with identical winners is DRIFT (acceptable
+    Drift with identical winners is batch-shape noise (acceptable
     batch-shape noise), not a test failure — the same contract as the
     parity gate (#102).
     """
@@ -110,9 +109,9 @@ def test_scores_stable_under_chunking(engine):
             ls_chunk = chunked["field_telemetry"][fname].get("log_scores")
             if ls_full is not None:
                 assert set(ls_full) == set(ls_chunk), (preset_name, fname)
-                # Drift >= PARITY_ATOL is DRIFT (acceptable batch-shape noise)
+                # Drift with identical winners is batch-shape noise (acceptable)
                 # when winners agree — the same contract as the parity gate
-                # (#102). Do not hard-assert log_scores < PARITY_ATOL.
+                # (#102). Drift is a diagnostic; the winners are the invariant.
             # Winner agreement only where both runs are decided enough.
             top_full = full["field_telemetry"][fname]["top_choices"]
             top_chunk = chunked["field_telemetry"][fname]["top_choices"]
@@ -473,7 +472,7 @@ def test_w1a_scoring_parity_batch_vs_chunked_real_model(engine):
     evaluation graph by ~0.002 nats (GPT Q4 reaches the same conclusion).
     W3-C's measurement on this machine: since W2-B shortened the slot rows
     to 4 tokens the observed worst drift is ~0.029 nats on the fintech_fraud
-    preset (winner stable) — hence the shared PARITY_ATOL constant in
+    preset (winner stable) — hence the parity tolerance history in
     conftest.py (the shared W2-D tolerance). The
     invariant that MATTERS is the decision: the same winner per field, and
     log_scores that agree to within FP tolerance. Exact equality is still
@@ -504,8 +503,8 @@ def test_w1a_scoring_parity_batch_vs_chunked_real_model(engine):
         again_vals = {f: v["value"] for f, v in again["parsed_json"].items()}
         assert again_vals == full_vals, f"max_rows={max_rows}"
         # Probabilities drift with batch shape (see the docstring): within
-        # PARITY_ATOL, not bit-identical. Drift >= PARITY_ATOL is DRIFT if
-        # winners are identical (asserted above) — not a test failure.
+        # batch-shape noise, not bit-identical. Drift with identical
+        # winners (asserted above) is not a test failure (issue #184).
 
 
 @pytest.mark.slow
@@ -515,11 +514,11 @@ def test_bug16_lead_in_prefill_breaks_parity(engine):
     matmul tiling and degrades batch=1 vs batch=N parity. This test encodes
     the measured findings: (a) at the W2-B row width (4 tokens) parity is
     drift-bounded, not bit-exact — log_scores must stay within the T4 chunk
-    PARITY_ATOL tolerance and the winner must not flip; (b) the earlier W1-A
+    decision contract and the winner must not flip; (b) the earlier W1-A
     bit-exact guarantee held only at the pre-W2-B width (6 tokens); W2-B's
     shorter rows exposed Metal's batch-shape drift on this machine (measured
-    max 0.004 nats, winner stable). Drift >= PARITY_ATOL with identical
-    winners is DRIFT, not FAIL (#102). If the winner flips, row widths
+    max 0.004 nats, winner stable). Drift with identical winners is
+    batch-shape noise, not FAIL (#102). If the winner flips, row widths
     changed again — re-run the bug-16 probe before trusting bit-parity
     claims anywhere."""
     schema = StructuredSchema(
@@ -539,8 +538,8 @@ def test_bug16_lead_in_prefill_breaks_parity(engine):
     )
     full = run_parallel_generation(engine, ctx, schema)
     one = run_parallel_generation(engine, ctx, schema, max_rows=1)
-    # Winners must be identical (FAIL if not). Drift >= PARITY_ATOL is DRIFT
-    # (acceptable batch-shape noise) — the same contract as the parity gate
-    # (#102). Do not hard-assert log_scores < PARITY_ATOL.
+    # Winners must be identical (FAIL if not). Drift with identical winners
+    # is batch-shape noise — the same decision-based contract as the parity
+    # gate (issue #184). Drift is a diagnostic; the winners are the invariant.
     assert full["parsed_json"]["action"]["value"] == one["parsed_json"]["action"]["value"]
     assert full["parsed_json"]["flag"]["value"] == one["parsed_json"]["flag"]["value"]
