@@ -172,9 +172,7 @@ def test_t2b_group_composition_changes_no_content(monkeypatch):
         run_parallel_generation_batched(make_engine(FakeModel()), _CONTEXTS, _SCHEMA)
     )
     _force_groups_of_one(monkeypatch)
-    solo = _canonical(
-        run_parallel_generation_batched(make_engine(FakeModel()), _CONTEXTS, _SCHEMA)
-    )
+    solo = _canonical(run_parallel_generation_batched(make_engine(FakeModel()), _CONTEXTS, _SCHEMA))
     assert len(solo) == 6
     assert {r["contexts_per_pass"] for r in solo} == {1}
     # Group composition must not change any per-context content. The
