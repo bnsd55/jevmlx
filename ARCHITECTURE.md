@@ -420,6 +420,21 @@ REAL contexts (W5-D finding 41: `bundled_preset_specs` returns the whole
 preset; `_case_context` falls back to a stable filler only for bare test
 schemas).
 
+Why the residual drift is not an LM-head rounding problem: PR #70 tried one
+candidate fix — a TRUE fp32 head for decision positions (dequantize
+the quantized LM head once at load, matmul the body's final hidden states
+against the fp32 weight; an `astype(float32)` on the quantized kernel's
+input does not count, a known MLX path still yields fp16-grid results). On
+the 0.5B the batched gap drift did NOT collapse: d_gap max 0.036 at M=8,
+~0.06 at M=16-32, 0.064 at M=112 — the same plateau the quantized head
+shows (winners identical at every M; 545 MB extra head weights, ~11%
+latency overhead at M=112). The divergence starts in the transformer BODY
+(batched attention/MLP kernels pick different fp16 rounding by shape), and
+the fp32 head faithfully reproduces those drifting hidden states into
+logits — exact equality needs same-shape execution, not a wider head. If a
+follow-up is ever wanted, `benchmarks/layer_bisect.py` exists for layer
+bisection.
+
 ### Eval `cases.jsonl` line — writers: `to_jsonl.py`, `typesafe/fetch.py`
 
 | Key | Meaning |
