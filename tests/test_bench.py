@@ -383,6 +383,14 @@ def _patch_bench_core(monkeypatch, tmp_path, failing_models=()):
     monkeypatch.setattr(bench, "_run_one", fake_run_one)
     monkeypatch.setattr(bench, "_print_pr_instructions", lambda folder, last_run: None)
     monkeypatch.setattr(bench, "BENCH_CACHE", tmp_path / "cache")  # lock copies are best-effort
+    # run_bench's parity block imports jevmlx.engine.load_engine DIRECTLY —
+    # without this patch the parity check makes a REAL Hub request for the
+    # fake model id (an HF 401 in a networked env, LocalEntryNotFoundError
+    # offline). Patch the canonical engine module (it is exempt from the
+    # mlx-eviction, so the lazy import inside run_bench reads THIS attr).
+    import jevmlx.engine as _engine_mod
+
+    monkeypatch.setattr(_engine_mod, "load_engine", lambda model: object())
     return run_calls
 
 
@@ -1641,6 +1649,12 @@ class TestFailedComboReruns:
     def test_failed_combo_reruns_fresh_not_resume(self, tmp_path, monkeypatch):
         """A combo with run_failed + manifest.json must rerun fresh (dir
         removed, resume=False), not resume from partial predictions."""
+        # Resolve bench at CALL time: this file's module-level `bench`
+        # binding may be an ORPHANED module after test_check_results.py's
+        # mlx-eviction (the parent attr and sys.modules can disagree).
+        # Patching one instance and calling the other runs the REAL loader.
+        from jevmlx import bench
+
         _patch_bench_core(monkeypatch, tmp_path)
         # Simulate a previously-failed combo: manifest.json + run.json(run_failed).
         model = "fake/m"
