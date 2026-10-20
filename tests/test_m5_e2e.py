@@ -647,12 +647,15 @@ class TestRealArtifactShapes:
                 / "parity.json"
             ).read_text()
         )
-        assert parity["status"] in ("PASS", "DRIFT", "FAIL")
+        # The decision-based contract (issue #184): exactly PASS or FAIL;
+        # drift diagnostics in nats AND fp16 ulps; no atol gate.
+        assert parity["status"] in ("PASS", "FAIL")
         assert isinstance(parity["passed"], bool)
         assert isinstance(parity["winners_identical"], bool)
         assert isinstance(parity["max_abs_drift_nats"], (int, float))
         assert isinstance(parity["max_raw_row_drift_nats"], (int, float))
-        assert isinstance(parity["atol"], (int, float))
+        assert isinstance(parity["max_abs_logit"], (int, float))
+        assert isinstance(parity["max_gap_drift_ulps"], (int, float))
 
     def test_bench_summary_md_rows_have_real_numbers(self, artifacts):
         summary = (artifacts / "bench-quality" / "SUMMARY.md").read_text()
