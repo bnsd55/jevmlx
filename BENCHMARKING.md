@@ -282,14 +282,14 @@ active / cache) per combo into the bench log and the combo's `run.json`
 leftover is released. `run_bench_models` (multi-model) already cleared
 between models; that is unchanged.
 
-A **cache cap** (`--metal-cache-gb`) (`--metal-cache-gb`, default 8): at `run_bench`
+A **cache cap** (`--metal-cache-gb`, default 8): at `run_bench`
 start `mx.metal.set_cache_limit` makes the allocator evict freed buffers
 above the cap instead of hoarding them — so inside a long combo (typesafe,
 426+ cases with rotations) the Metal allocator can no longer hoard ~94 GB
 and push the machine into swap. The cap is recorded in each combo's
 `run.json` `memory` block as `metal_cache_limit_bytes`.
 
-A **heartbeat** (`--heartbeat-every`) (`--heartbeat-every`, default 25, 0 disables):
+A **heartbeat** (`--heartbeat-every`, default 25, 0 disables):
 the per-case eval loop prints `[heartbeat] <combo> cases_done=N pred_lines=M
 elapsed_s=S peak=X active=Y cache=Z` every N completed cases (reusing the
 same GB formatting as the `[memory]` line) and appends the same fields as
