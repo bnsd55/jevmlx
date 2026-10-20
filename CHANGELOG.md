@@ -17,6 +17,18 @@
   their log-score drift, with the same atol contract as scalar fields
   (main skipped them entirely: log_scores is None -> continue).
 
+- engine: decide_many prefills one CONTEXT GROUP at a time (staged
+  prefill, F10). Groups still form in prompt-length order inside the same
+  measured memory budget, but from CHEAP length estimates instead of
+  prefills: one probe prefill of the shortest context measures the KV
+  bytes per prealloc step (mlx_lm KVCache preallocates in fixed steps,
+  default 256 tokens) and `ceil(tokens/step) * block_bytes` reproduces the
+  old cache-byte arithmetic exactly — same groups, same shapes, byte-
+  identical results (golden test vs main). Each group is prefilled, scored
+  with one merged pass, assembled, then its KV caches are DROPPED before
+  the next group prefills, so peak live caches = one group instead of all
+  N contexts. One debug line per group (contexts, rows, prefill tokens).
+
 - metrics: every headline metric now counts CANONICAL answer lines only.
   evalrun writes one line per (case, field, permutation); rotation lines
   (`permutation="rotN:<field>"`) are order probes. field_accuracy,

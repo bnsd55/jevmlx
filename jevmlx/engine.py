@@ -4626,8 +4626,25 @@ def run_parallel_generation_batched(
     order = sorted(range(len(contexts)), key=_prompt_len)
 
     # 3. Incremental groups: walk the length order, admitting a context
-    #    only while (sum of actual cache nbytes + projected suffix bytes for
-    #    one more context's rows) stays inside the measured budget.
+    #    only while (sum of estimated cache nbytes + projected suffix bytes
+    #    for one more context's rows) stays inside the measured budget.
+    #
+    #    F10 (staged prefill): groups form from CHEAP length estimates, not
+    #    from prefill — the old loop prefilled EVERY context up front and
+    #    kept every cache alive until the call returned, so peak memory was
+    #    O(N contexts x KV) instead of O(group x KV). What the old grouping
+    #    read from prefill: only ``_cache_nbytes(pf.cache)`` — the estimate
+    #    below replaces it 1:1; nothing else.
+    #
+    #    A fresh per-context cache's bytes are a step function of its
+    #    prompt token count L: mlx_lm KVCache preallocates in fixed steps
+    #    (``cache.step``, default 256), so actual bytes = ceil(L/S)*S*t
+    #    for a per-token t. One probe prefill of the SHORTEST context
+    #    (cheapest) measures the per-block bytes; the estimate
+    #    ``ceil(L/S) * block_bytes`` reproduces the old budget arithmetic
+    #    EXACTLY for stepped and byte-linear caches alike (S=1 when the
+    #    cache class carries no step attribute) — same groups, same order,
+    #    same shapes.
     budget = _memory_budget_bytes(_CHUNK_TARGET_FRACTION)
     suffix_bytes_per_ctx = 0
     if rows:
@@ -4636,12 +4653,28 @@ def run_parallel_generation_batched(
             R * width_max * vocab_size * 4  # one context's share of chunk logits
         )
 
+    prompt_lens = {i: _prompt_len(i) for i in range(len(contexts))}
+    prealloc_step = 1
+    kv_block_bytes = 0  # actual KV bytes per prealloc step
+    if order:
+        first = order[0]  # the shortest context: the cheapest probe prefill
+        probe = _prefill_cached(first, contexts[first])
+        prealloc_step = max(1, int(getattr(probe.cache[0], "step", 1)) if probe.cache else 1)
+        probe_len = prompt_lens[first]
+        probe_blocks = -(-probe_len // prealloc_step)  # ceil
+        if probe_blocks > 0:
+            kv_block_bytes = _cache_nbytes(probe.cache) // probe_blocks
+        # F10: the probe's PrefillResult must not outlive this expression —
+        # pf_cache[first] still holds it for the first group's reuse; the
+        # local name would pin it across ALL groups.
+        probe = None
+
     groups: list[list[int]] = []
     current: list[int] = []
     current_bytes = 0
     for idx in order:
-        pf = _prefill_cached(idx, contexts[idx])
-        ctx_bytes = _cache_nbytes(pf.cache) + suffix_bytes_per_ctx
+        est_blocks = -(-prompt_lens[idx] // prealloc_step)  # ceil
+        ctx_bytes = est_blocks * kv_block_bytes + suffix_bytes_per_ctx
         if current and current_bytes + ctx_bytes > budget:
             groups.append(current)
             current = []
@@ -4799,10 +4832,27 @@ def run_parallel_generation_batched(
             results[idx] = res
         return scored
 
-    for group_idx in groups:
+    def _stage_group(gi: int, group_idx: list[int]) -> None:
+        """Prefill, score, assemble and DISCARD one context group (F10).
+
+        All PrefillResults live only in this frame: when it returns, the
+        group's KV caches are unreferenced and the next group's prefill
+        replaces, never stacks (peak live caches = one group). Loop-scope
+        names in the caller would otherwise keep the previous group's
+        caches alive across the group boundary."""
         group_pf = [(idx, _prefill_cached(idx, contexts[idx])) for idx in group_idx]
         n_group = len(group_pf)
         group_ledger = Ledger()  # group-level spans (wall, merged pass)
+        # F10: one debug line per group (contexts, rows, prefill tokens) —
+        # the staged-prefill visibility contract.
+        logger.debug(
+            "decide_many group %d/%d: contexts=%d rows=%d prefill_tokens=%s",
+            gi,
+            len(groups),
+            n_group,
+            n_group * R,
+            sum(prompt_lens[i] for i in group_idx),
+        )
         with group_ledger.span("group_wall"):
             group_scored = _run_group(group_idx, group_pf, n_group, group_ledger)
         # F4/N5: the amortized share is ONE derived number from the group
@@ -4828,4 +4878,12 @@ def run_parallel_generation_batched(
             # wall time. prior_ms is reported separately (shared
             # request-level value); it is NOT added here.
             res["per_item_end_to_end_ms"] = res.pop("_per_item_own_ms") + amortized
+        # F10: the group's results are assembled — its KV caches are dead.
+        # Drop them (by index: no PrefillResult binding outlives the frame)
+        # so the next group's prefill replaces, never stacks.
+        for idx in group_idx:
+            pf_cache.pop(idx, None)
+
+    for gi, group_idx in enumerate(groups, 1):
+        _stage_group(gi, group_idx)
     return results
