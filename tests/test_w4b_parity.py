@@ -10,9 +10,9 @@ parity_failed in SUMMARY.md and cannot enter the README compat table
 import json
 
 import pytest
-from conftest import PARITY_ATOL, make_engine, skip_on_shared_runner
 from conftest import YNLogitModel as _StableModel
 from conftest import _Mod97Tokenizer as _CountTokenizer
+from conftest import make_engine, skip_on_shared_runner
 
 
 class _DriftingModel(_StableModel):
@@ -59,20 +59,27 @@ def _cases():
 
 
 def test_parity_report_passes_on_stable_fake(tmp_path):
+    """The decision-based contract (issue #184): PASS = winners identical +
+    no escaped near-tie. Drift numbers are diagnostics (nats + fp16 ulps),
+    never gated."""
     from jevmlx.parity import bundled_preset_specs, parity_report, write_parity_json
 
     payload = parity_report(make_engine(_StableModel(), _CountTokenizer()), "fake/stable", _cases())
     assert payload["passed"] is True
-    assert payload["status"] == "PASS"  # P4/I7
+    assert payload["status"] == "PASS"
     assert payload["winners_identical"] is True
     assert payload["max_abs_drift_nats"] == 0.0
-    assert payload["atol"] == PARITY_ATOL
     assert payload["max_raw_row_drift_nats"] == 0.0  # diagnostic only
-    assert payload["max_gap_drift_nats"] == 0.0  # the gate (fail-closed at atol)
+    assert payload["max_gap_drift_nats"] == 0.0  # diagnostic only
     assert payload["max_margin_drift_nats"] == 0.0
     assert payload["max_batched_drift_nats"] == 0.0  # recorded, not gated
+    # Q4 diagnostics: the drift quantities in fp16 ulps of the measured
+    # logit magnitude (0.0 here — the stable fake has no raw rows).
+    assert payload["max_abs_logit"] == 0.0
+    assert payload["max_gap_drift_ulps"] == 0.0
     assert payload["rescore_gate"]["escaped_near_tie"] == []  # empty = pass
     assert "environment" in payload
+    assert "atol" not in payload  # the absolute tolerance no longer gates
     assert payload["model"] == "fake/stable"
     assert payload["prompt_version"].startswith("jevmlx-parallel-")
     assert payload["test"] == "test_w1a_scoring_parity_batch_vs_chunked_real_model"
@@ -118,24 +125,22 @@ def test_parity_report_fails_when_winners_flip(tmp_path):
     assert on_disk["scoring"] == "slots"
 
 
-def test_parity_report_drift_when_winners_identical_and_large_drift(monkeypatch, tmp_path):
-    """D6: DRIFT = winners identical + no escaped near-tie, regardless of
-    the drift size. The old envelope-band term was self-referential (the
-    band was round_up(0.05 + THIS run's own max gap drift), so the band
-    check could never fail) — removed; the measured drift is reported as
-    is. The drift is injected at the check boundary: the branch under test
-    is the status decision, not the drift mechanism (covered by
-    test_batched_parity_matrix_catches_row_drift)."""
+def test_T1_identical_winners_and_lattice_drift_passes(monkeypatch, tmp_path):
+    """T1 (issue #184, decision-based contract): identical winners + a
+    0.0625-nat drift (4 fp16 ulps at the measured logit magnitude) is a
+    PASS — the drift is batch-shape lattice noise, not a divergence. Main
+    gates on the absolute 0.05 and reports DRIFT / passed=False."""
     import jevmlx.parity as parity_mod
     from jevmlx.parity import write_parity_json
 
     big_drift = {
         "winners_identical": True,
-        "max_abs_drift_nats": 0.078,
-        "max_raw_row_drift_nats": 0.09,
-        "max_gap_drift_nats": 0.078,
-        "max_logp_drift_nats": 0.078,
-        "max_margin_drift_nats": 0.063,
+        "max_abs_drift_nats": 0.0625,
+        "max_raw_row_drift_nats": 0.0625,
+        "max_gap_drift_nats": 0.0625,
+        "max_logp_drift_nats": 0.0625,
+        "max_margin_drift_nats": 0.0625,
+        "max_abs_logit": 24.0,  # fp16 ulp there = 0.015625 -> 4 ulp
         "max_merged_rows": 8,
         "per_case": {},
     }
@@ -145,18 +150,14 @@ def test_parity_report_drift_when_winners_identical_and_large_drift(monkeypatch,
         make_engine(_StableModel(), _CountTokenizer()), "fake/drift", tmp_path, _cases()
     )
     assert payload["winners_identical"] is True
-    assert (
-        max(
-            payload["max_abs_drift_nats"],
-            payload["max_gap_drift_nats"],
-            payload["max_margin_drift_nats"],
-        )
-        >= PARITY_ATOL
-    )
-    assert payload["passed"] is False
-    assert payload["status"] == "DRIFT"
+    assert payload["rescore_gate"]["escaped_near_tie"] == []
+    assert payload["passed"] is True
+    assert payload["status"] == "PASS"
+    # The diagnostics ride the payload in nats AND ulps.
+    assert payload["max_gap_drift_nats"] == 0.0625
+    assert payload["max_abs_logit"] == 24.0
+    assert payload["max_gap_drift_ulps"] == 4.0
     on_disk = json.loads((tmp_path / "parity.json").read_text(encoding="utf-8"))
-    # D6: the payload no longer persists the band field.
     assert "band" not in (on_disk.get("drift_envelope") or {})
 
 
@@ -180,7 +181,7 @@ def test_parity_report_drift_without_band_term_accepts_old_payload(tmp_path):
         "max_margin_drift_nats": 0.063,
         "max_batched_drift_nats": 0.078,
         "winners_identical": True,
-        "atol": PARITY_ATOL,
+        "atol": 0.05,  # legacy payload: the old absolute tolerance
         "drift_envelope": {"band": 0.14, "shape_bucket": "M>16"},
         "cases": ["a"],
         "run_at": "2026-09-20T12:00:00Z",
@@ -222,7 +223,10 @@ def test_parity_report_fails_on_escaped_near_tie(monkeypatch, tmp_path):
     assert payload["winners_identical"] is True
     assert payload["rescore_gate"]["escaped_near_tie"]
     assert payload["passed"] is False
-    assert payload["status"] == "FAIL"  # not DRIFT: the escape is a divergence
+    assert payload["status"] == "FAIL"
+    # T3: the ulps diagnostics ride the FAIL payload too (main lacks the
+    # ulps keys entirely).
+    assert "max_gap_drift_ulps" in payload
 
 
 def test_summarize_gates_parity_failed_rows(tmp_path):
@@ -287,38 +291,42 @@ def test_summarize_gates_parity_failed_rows(tmp_path):
 @pytest.mark.slow
 @skip_on_shared_runner()
 def test_parity_real_model_twin(engine):
-    """Slow twin: the SAME check on a real model must pass with drift
-    within PARITY_ATOL — this is exactly the W1-A slow test's invariant,
-    now through the shared producer (all four bundled presets).
+    """Slow twin: the SAME check on a real model under the DECISION-BASED
+    contract (issue #184) — winners identical + no escaped near-tie. The
+    drift numbers are printed in nats AND fp16 ulps of the measured logit
+    magnitude; they are diagnostics and never gate (Q4: the old absolute
+    0.05-nat tolerance sat below the fp16 lattice noise of batched kernels
+    — 4-8 ulp steps — so it failed by construction while every winner was
+    identical).
 
-    Default-model-only: PARITY_ATOL (== INSTABILITY_BAND = 5e-2) is the
-    batch-vs-chunked log_score drift measured on the 0.5B dev model. Larger
-    models (1.5B, 7B) see a higher raw drift from Metal batch-shape matmul
-    variation; the M5 parity step injects those models via MODEL_ID env,
-    and this 0.5B-calibrated tolerance would flunk them. Skip unless the
-    slow suite is running against the default model."""
+    Default-model-only: the drift magnitudes were measured on the 0.5B dev
+    model. Larger models (1.5B, 7B) see higher raw drift from Metal
+    batch-shape matmul variation; the M5 parity step injects those models
+    via MODEL_ID env, and the old 0.5B-calibrated absolute tolerance
+    flunked them on lattice noise. Skip unless the slow suite is running
+    against the default model."""
     from conftest import MODEL_ID as _MODEL_ID
 
     if _MODEL_ID != "mlx-community/Qwen2.5-0.5B-Instruct-4bit":
-        pytest.skip(f"PARITY_ATOL is 0.5B-calibrated; skipping for {_MODEL_ID}")
+        pytest.skip(f"drift magnitudes were measured on the 0.5B; skipping for {_MODEL_ID}")
 
     from jevmlx.parity import parity_report
 
     payload = parity_report(engine, "twin/real-model")
-    # Winners stay identical (the decision invariant holds).
+    # The DECISION invariant: winners identical + no escaped near-tie.
     assert payload["winners_identical"] is True
-    # The single-context W1-A gate still passes (measured ~0.044 < 0.05).
-    assert payload["max_abs_drift_nats"] < PARITY_ATOL
-    # W5c-1 review section 2: the batched pairwise GAP drift (0.070) and
-    # margin drift (0.063) EXCEED the fixed 0.05 contract, so the batched
-    # gate FAILS CLOSED — parity_passed is False for the 0.5B. The raw
-    # drift (0.125) is a diagnostic, not the gate. This is the honest
-    # result: the 0.5B does NOT pass batched parity at the fixed band.
-    assert (
-        payload["max_gap_drift_nats"] >= PARITY_ATOL
-        or payload["max_margin_drift_nats"] >= PARITY_ATOL
+    assert payload["rescore_gate"]["escaped_near_tie"] == []
+    assert payload["passed"] is True
+    assert payload["status"] == "PASS"
+    # Report the drift in nats AND fp16 ulps of the measured logit
+    # magnitude (Q4): the lattice steps, not an absolute nat gate.
+    print(
+        f"\ntwin drift: max_abs {payload['max_abs_drift_nats']} nats "
+        f"({payload.get('max_gap_drift_ulps')} ulp gap, "
+        f"{payload.get('max_margin_drift_ulps')} ulp margin, "
+        f"max |logit| {payload.get('max_abs_logit')})"
     )
-    assert payload["passed"] is False
+    assert payload["max_gap_drift_ulps"] > 0  # the noise is real and measured
     assert payload["cases"] == [
         "code_security",
         "content_moderation",
@@ -345,8 +353,12 @@ def test_parity_report_carries_v2_keys_and_passes_check_parity(monkeypatch, tmp_
     assert "max_raw_row_drift_nats" in payload  # diagnostic
     assert "max_abs_drift_nats" in payload
     assert "max_batched_drift_nats" in payload  # recorded, not gated
-    assert "max_gap_drift_nats" in payload  # the gate
+    assert "max_gap_drift_nats" in payload  # diagnostic
     assert "max_margin_drift_nats" in payload
+    # Q4: the fp16-ulp diagnostics ride the payload.
+    assert "max_abs_logit" in payload
+    assert "max_gap_drift_ulps" in payload
+    assert "max_margin_drift_ulps" in payload
     assert "rescore_gate" in payload
     assert "environment" in payload
     assert payload["winners_identical"] is True
@@ -368,11 +380,12 @@ def test_parity_report_carries_v2_keys_and_passes_check_parity(monkeypatch, tmp_
 
     big_drift = {
         "winners_identical": True,
-        "max_abs_drift_nats": 0.078,
-        "max_raw_row_drift_nats": 0.09,
-        "max_gap_drift_nats": 0.078,
-        "max_logp_drift_nats": 0.078,
-        "max_margin_drift_nats": 0.063,
+        "max_abs_drift_nats": 0.0625,
+        "max_raw_row_drift_nats": 0.0625,
+        "max_gap_drift_nats": 0.0625,
+        "max_logp_drift_nats": 0.0625,
+        "max_margin_drift_nats": 0.0625,
+        "max_abs_logit": 24.0,
         "max_merged_rows": 8,
         "per_case": {},
     }
@@ -386,12 +399,45 @@ def test_parity_report_carries_v2_keys_and_passes_check_parity(monkeypatch, tmp_
         _cases(),
     )
     on_disk = json.loads((drift_dir / "parity.json").read_text(encoding="utf-8"))
-    assert on_disk["passed"] is False
-    # DRIFT (not FAIL): winners identical, inside envelope band.
-    assert on_disk["status"] == "DRIFT"
-    stages = _parity_failed_stages(on_disk)
-    assert stages and stages != ["unspecified stage (payload carries no stage keys)"]
-    # parity-gates: DRIFT is publishable — check_parity returns OK with a note.
+    # The decision-based contract: winners identical + no escaped near-tie
+    # = PASS, whatever the drift size (the drift is lattice noise,
+    # reported in nats + ulps, never gated). Main said DRIFT / not-passed.
+    assert on_disk["passed"] is True
+    assert on_disk["status"] == "PASS"
+    assert on_disk["max_gap_drift_ulps"] == 4.0
+    # The decision-based stage classifier finds NO failing stage: the drift
+    # is lattice noise, not a divergence (main's classifier named the
+    # drift-over-atol stages).
+    assert _parity_failed_stages(on_disk) == []
     ok, problems = check_parity(drift_dir)
-    assert ok is True
-    assert any("DRIFT" in p for p in problems)
+    assert ok is True, problems
+
+
+def test_T2_winner_flip_fails_with_diagnostics(monkeypatch, tmp_path):
+    """T2 (issue #184): a winner differs -> FAIL. The fp16-ulp diagnostics
+    ride the FAIL payload (main has no ulps keys and gates on the drift)."""
+    import jevmlx.parity as parity_mod
+    from benchmarks.check_results import _parity_failed_stages
+    from jevmlx.parity import write_parity_json
+
+    flip = {
+        "winners_identical": False,
+        "max_abs_drift_nats": 0.0625,
+        "max_raw_row_drift_nats": 0.0625,
+        "max_gap_drift_nats": 0.0625,
+        "max_logp_drift_nats": 0.0625,
+        "max_margin_drift_nats": 0.0625,
+        "max_abs_logit": 24.0,
+        "max_merged_rows": 8,
+        "per_case": {},
+    }
+    monkeypatch.setattr(parity_mod, "check_batched_parity", lambda engine, cases, **kw: flip)
+    payload = write_parity_json(
+        make_engine(_StableModel(), _CountTokenizer()), "fake/flip", tmp_path, _cases()
+    )
+    assert payload["winners_identical"] is False
+    assert payload["passed"] is False
+    assert payload["status"] == "FAIL"
+    assert payload["max_gap_drift_ulps"] == 4.0
+    stages = _parity_failed_stages(payload)
+    assert stages == ["winners flipped (final decisions disagree)"]

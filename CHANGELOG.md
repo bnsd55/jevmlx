@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- parity: the contract checks DECISIONS, not raw numbers (issue #184,
+  owner-approved). PASS = every field's batched winner equals the batch=1
+  winner AND no escaped near-tie (every field whose margin sat inside the
+  engine's rescore band was actually rescored); FAIL = a winner differs or
+  an escaped near-tie. The DRIFT status is gone (new payloads carry
+  exactly PASS/FAIL; readers keep legacy-DRIFT as publishable-with-note).
+  Why: the drift quantities are exact fp16 lattice steps of the batched
+  kernels — measured 2-8 ulp at the decision logits' magnitude (|x| ~ 20,
+  ulp 0.0156) — so the absolute 0.05-nat tolerance sat inside the noise
+  and failed by construction while every winner was identical. The drift
+  numbers stay in parity.json as diagnostics, now in nats AND fp16 ulps of
+  the measured logit magnitude (max_abs_logit, *_ulps keys). The parity
+  atol constant is deleted from the payload and the tests; the engine's
+  INSTABILITY_BAND (the near-tie rescore band) is untouched.
+
 - parity: ONE parity payload per scorer (F9). The pre-F9 parity.json mixed
   slots raw rows with labels final decisions and proved parity for neither.
   The scorer now flows through every parity call: raw rows, final

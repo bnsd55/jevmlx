@@ -386,12 +386,19 @@ Written by the bench into each model folder right after the engine load
 
 (Four bundled presets on disk; the docstring example shows two. Field names
 match `parity.py` verbatim: `model`, `prompt_version`, `max_abs_drift_nats`,
-`winners_identical`, `atol`, `passed`, `status`, `cases`, `test` = `PARITY_TEST_NAME`,
-`run_at`.) P4/I7: `status` is the REPORTING word (PASS / DRIFT / FAIL).
-The GATE (`passed`) is unchanged — DRIFT and FAIL both set `passed: false`.
-PASS = all drifts < atol. DRIFT = some drift >= atol but winners identical
-on all cases AND max drift inside the persisted envelope band for the run's
-shape bucket. FAIL = a winner changed, or drift beyond the band.
+`winners_identical`, `passed`, `status`, `cases`, `test` = `PARITY_TEST_NAME`,
+`run_at`, plus the drift diagnostics in nats AND fp16 ulps of the measured
+logit magnitude (`max_abs_logit`, `max_raw_row_drift_ulps`,
+`max_gap_drift_ulps`, `max_margin_drift_ulps`.) The status has exactly TWO
+states (decision-based contract, issue #184): PASS = every field's batched
+winner equals the batch=1 winner AND no escaped near-tie (every field whose
+margin sat inside the engine's rescore band was actually rescored); FAIL =
+a winner differs, or an escaped near-tie. The drift numbers are fp16-lattice
+noise of the batched kernels (measured 2-8 ulp steps at decision-logit
+magnitudes of abs(x) ~ 20; the old absolute 0.05-nat tolerance sat inside
+that noise and failed by construction) — they are reported in nats + ulps
+and NEVER gate. Legacy payloads with status DRIFT (pre-decision-contract)
+read as publishable-with-note until the M5 rerun replaces them.
 
 One check, two consumers: the slow parity test and the bench share
 `check_scoring_parity`. A model without a passing `parity.json` gets

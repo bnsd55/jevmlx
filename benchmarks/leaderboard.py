@@ -223,13 +223,13 @@ def _per_item_end_to_end_ms(folder: Path) -> float | None:
 def _local_rows(results_root: Path) -> list[dict]:
     """One row per results folder with dataset=typesafe and track=parallel.
 
-    W4-A / issue parity-gates: a model appears if its folder's parity.json
-    records status PASS or DRIFT. PASS = all drifts < atol. DRIFT = some
-    drift >= atol but winners identical on all cases and no escaped
-    near-tie (batch-shape noise, not a real divergence) — publishable, the
-    Parity column shows the word + the measured max drift. FAIL (a winner
-    changed, or an escaped near-tie) stays excluded. D6: no envelope-band
-    term — a band computed from the run's own max drift is
+    W4-A / parity-gates: a model appears if its folder's parity.json
+    records status PASS (the decision-based contract, issue #184) — or the
+    legacy DRIFT word from pre-contract payloads, publishable-with-note
+    until the M5 rerun replaces them (the Parity column shows the word +
+    the measured max drift). FAIL (a winner changed, or an escaped
+    near-tie) stays excluded. D6: no envelope-band term — a band computed
+    from the run's own max drift is
     self-referential; a parity.json that still carries a band field is
     read unchanged (the field is ignored).
 

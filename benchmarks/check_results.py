@@ -547,11 +547,12 @@ def check_parity(model_dir: Path) -> tuple[bool, list[str]]:
           "run_at": "2026-09-18T12:00:00Z"
         }
 
-    ``passed`` covers three stages: winners identical, final log-score
-    drift within atol, batched pairwise gap drift within atol, and the
-    rescore-gate escape flag (W5c-1 review: fail-closed at the fixed band)
-    (W5c-1: the batched raw gate is a batch-shape stress with its own
-    documented band, distinct from the single-context atol). The failure
+    Under the decision-based contract (issue #184) ``passed`` covers two
+    stages: winners identical (both checks) and the rescore-gate escape
+    flag (no near-tie field escaped the rescore under batching). The drift
+    numbers are fp16-lattice noise of the batched kernels — reported as
+    diagnostics (nats + ulps), never gated. Legacy DRIFT payloads
+    (pre-decision-contract) stay publishable with a note. The failure
     message names the stage that failed.
     """
     problems: list[str] = []
@@ -597,13 +598,15 @@ def _check_parity_payload(parity: dict, name: str) -> tuple[bool, list[str]]:
         problems.append(f"{name}: unknown scoring {scoring!r} — expected 'labels' or 'slots'")
         return False, problems
     status = parity.get("status", "PASS" if parity.get("passed") else "FAIL")
-    # parity-gates: PASS and DRIFT are publishable (OK); only FAIL (a winner
-    # changed, or an escaped near-tie) or missing/unreadable parity is a
-    # hard FAIL. DRIFT is OK-with-note — the one-sentence explanation so an
-    # operator sees the batch-shape noise is expected, not a regression.
-    # D6: no envelope-band term — a band computed from the run's own max
-    # drift is self-referential. Old files that still carry a
-    # drift_envelope.band field are accepted as is (the field is ignored).
+    # The decision-based contract (issue #184): PASS is publishable; FAIL
+    # (a winner changed, or an escaped near-tie) is a hard FAIL. Legacy
+    # DRIFT payloads (pre-decision-contract: winners identical but drift
+    # beyond the old absolute tolerance, which sat inside the fp16 lattice
+    # noise of batched kernels) stay publishable with a note until the M5
+    # rerun replaces them. D6: no envelope-band term — a band computed from
+    # the run's own max drift is self-referential. Old files that still
+    # carry a drift_envelope.band field are accepted as is (the field is
+    # ignored).
     if status == "DRIFT":
         max_drift = max(
             parity.get("max_abs_drift_nats", 0),
@@ -622,8 +625,7 @@ def _check_parity_payload(parity: dict, name: str) -> tuple[bool, list[str]]:
         sentence = (
             f"FAIL: {'; '.join(stages)} "
             f"(max_drift={parity['max_abs_drift_nats']}, "
-            f"raw_row_drift={parity['max_raw_row_drift_nats']}, "
-            f"atol={parity['atol']})"
+            f"raw_row_drift={parity.get('max_raw_row_drift_nats')})"
         )
         problems.append(f"{name}: payload shows test did not pass — {sentence}")
         return False, problems
@@ -642,26 +644,15 @@ def _check_parity_payload(parity: dict, name: str) -> tuple[bool, list[str]]:
 def _parity_failed_stages(parity: dict) -> list[str]:
     """Which parity stages failed, from the recorded payload.
 
-    W5c-1 review section 2: the gate is fail-closed at the fixed atol.
-    Stages: winners flipped, single-context log-score drift over atol,
-    batched pairwise GAP drift over atol (d_gap — raw logits carry an
-    arbitrary offset, so d_raw is diagnostic only), batched top-two margin
-    drift over atol, and the rescore-gate escape flag
-    (reference_near_tie && !production_rescored).
+    The decision-based contract (issue #184): the FAIL stages are a winner
+    flip and the rescore-gate escape flag (reference_near_tie &&
+    !production_rescored). The drift quantities are fp16-lattice noise at
+    the logits' magnitude and never gate (they are reported as diagnostics
+    in nats + ulps).
     """
-    atol = parity["atol"]
     stages: list[str] = []
     if not parity.get("winners_identical", True):
         stages.append("winners flipped (final decisions disagree)")
-    drift = parity["max_abs_drift_nats"]
-    if isinstance(drift, int | float) and drift >= atol:
-        stages.append("single-context log-score drift >= atol")
-    gap = parity["max_gap_drift_nats"]
-    if isinstance(gap, int | float) and gap >= atol:
-        stages.append("batched pairwise gap drift >= atol")
-    margin = parity["max_margin_drift_nats"]
-    if isinstance(margin, int | float) and margin >= atol:
-        stages.append("batched top-two margin drift >= atol")
     rescore = parity.get("rescore_gate", {})
     if isinstance(rescore, dict) and rescore.get("escaped_near_tie"):
         stages.append("rescore-gate escape (reference_near_tie && !production_rescored)")
