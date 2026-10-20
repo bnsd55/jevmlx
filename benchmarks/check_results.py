@@ -590,7 +590,7 @@ def _check_parity_payload(parity: dict, name: str) -> tuple[bool, list[str]]:
     problems: list[str] = []
     if "scoring" not in parity:
         problems.append(
-            f"{name}: no-scorer-recorded (no scoring key) — the artifact does not record "
+            f'{name}: no scorer recorded (no "scoring" key) — the artifact does not record '
             "which scorer it covers; regenerate with one parity payload per scorer"
         )
         return False, problems

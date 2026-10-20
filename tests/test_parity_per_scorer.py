@@ -204,7 +204,7 @@ def test_check_parity_rejects_payload_without_scorer(tmp_path):
     (tmp_path / "parity.json").write_text(json.dumps(legacy), encoding="utf-8")
     ok, problems = check_parity(tmp_path)
     assert not ok
-    assert any("no scoring key" in p for p in problems)
+    assert any('no scorer recorded (no "scoring" key)' in p for p in problems)
 
 
 def test_check_parity_requires_every_scorer_artifact_to_pass(tmp_path):
