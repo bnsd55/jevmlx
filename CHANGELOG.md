@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- typesafe.fetch: a group where every question was skipped (unmapped qid
+  or no consensus) is no longer yielded — it has no decidable field, and a
+  record with `schema={}` + `labels={}` crashed the bench's metric
+  collector. The fetch summary now reports a `skipped_groups` count so the
+  drop is visible. The cached dataset goes from 45 -> 44 records (one case:
+  `typesafe/security_incidents/art_T1546.018-2__change_covers__t2/n1`, whose
+  only question is free-text). The dataset and its lock are NOT regenerated
+  in this PR (M5 runs on the pinned dataset; the lock changes only after
+  the full list finishes).
+
 - metrics: every headline metric now counts CANONICAL answer lines only.
   evalrun writes one line per (case, field, permutation); rotation lines
   (`permutation="rotN:<field>"`) are order probes. field_accuracy,
