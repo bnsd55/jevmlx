@@ -35,7 +35,7 @@ jobs:
         # F1: the tokenizers are PINNED to snapshot revisions (the key), so
         # the cache is stable and only downloads tokenizer files (KBs-MBs,
         # never model weights).
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/huggingface/hub
           key: golden-prompts-qwen25-a5339a41-gemma-2c715097
