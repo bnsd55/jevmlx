@@ -161,11 +161,13 @@ def test_T1_identical_winners_and_lattice_drift_passes(monkeypatch, tmp_path):
     assert "band" not in (on_disk.get("drift_envelope") or {})
 
 
-def test_parity_report_drift_without_band_term_accepts_old_payload(tmp_path):
-    """D6: an OLD parity.json that still carries drift_envelope.band parses
-    fine through check_results — the field is ignored, never a failure.
-    (Leaderboard acceptance of the same old shape is covered by
-    test_leaderboard_includes_drift_model, whose fixture carries a band.)"""
+def test_parity_report_drift_without_band_term_is_pre_contract(tmp_path):
+    """A SCORED payload with status DRIFT (the old gate's middle state) is
+    pre-contract (issue #184): the drift quantities are fp16 lattice noise
+    — reported as diagnostics, never gated — so check_parity rejects it
+    with a regenerate hint instead of accepting it. The old
+    drift_envelope.band field rides along ignored (the rejection names the
+    status, not the band)."""
     from benchmarks.check_results import check_parity
     from jevmlx.parity import PARITY_TEST_NAME
 
@@ -188,8 +190,8 @@ def test_parity_report_drift_without_band_term_accepts_old_payload(tmp_path):
     }
     (tmp_path / "parity.json").write_text(json.dumps(old), encoding="utf-8")
     ok, problems = check_parity(tmp_path)
-    assert ok, problems
-    assert "envelope band" not in problems[0]
+    assert not ok, problems
+    assert any("pre-decision-contract" in p and "regenerate" in p for p in problems)
 
 
 def test_parity_report_fails_on_escaped_near_tie(monkeypatch, tmp_path):

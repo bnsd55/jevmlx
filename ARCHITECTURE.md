@@ -397,8 +397,10 @@ a winner differs, or an escaped near-tie. The drift numbers are fp16-lattice
 noise of the batched kernels (measured 2-8 ulp steps at decision-logit
 magnitudes of abs(x) ~ 20; the old absolute 0.05-nat tolerance sat inside
 that noise and failed by construction) — they are reported in nats + ulps
-and NEVER gate. Legacy payloads with status DRIFT (pre-decision-contract)
-read as publishable-with-note until the M5 rerun replaces them.
+and NEVER gate. A scored payload with status DRIFT is
+pre-contract and rejected with a regenerate hint (no dead compatibility
+path); pre-F9 payloads without a scoring key keep the UNVERIFIED (pre-F9)
+display.
 
 One check, two consumers: the slow parity test and the bench share
 `check_scoring_parity`. A model without a passing `parity.json` gets

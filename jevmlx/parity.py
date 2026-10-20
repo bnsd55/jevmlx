@@ -24,13 +24,10 @@ This module is that implementation:
       "run_at": "2026-09-18T12:00:00Z"
     }
 
-``atol`` is the drift gate's reference scale — REMOVED as a gate by the
-decision-based contract (owner-approved, issue #184): the drift quantities
-are fp16-lattice noise at the logits' magnitude (measured 4-8 ulp steps at
-abs(logit) ~ 20; the absolute 0.05-nat tolerance sat inside that noise and
-failed by construction). Metal batched matmuls tile differently per batch
-shape and the legal-mass logsumexp adds a reduction; bit-identity is not
-the invariant, WINNERS are.
+The parity gate checks DECISIONS, not raw numbers (issue #184): PASS =
+winners identical + no escaped near-tie; the drift quantities are fp16
+lattice noise of the batched kernels (measured 4-8 ulp steps), reported
+as diagnostics and never gated.
 
 The schema is a superset of PR #29's BENCHMARKING.md record (model, test,
 passed, max_drift_nats, atol, run_at): the extra keys (prompt_version,
@@ -44,8 +41,9 @@ field's batched winner equals the batch=1 winner AND no escaped near-tie
 actually rescored). FAIL = a winner differs, or an escaped near-tie. The
 drift numbers (raw / gap / margin / logp, in nats AND in fp16 ulps of the
 measured logit magnitude) ride the payload as diagnostics and never gate.
-Legacy payloads with status DRIFT (pre-decision-contract) read as
-publishable-with-note until the M5 rerun replaces them.
+Readers reject a scored payload still carrying status DRIFT
+(pre-contract) with a regenerate hint; pre-F9 payloads without a scoring
+key keep the UNVERIFIED (pre-F9) display.
 """
 
 from __future__ import annotations
@@ -381,7 +379,7 @@ def parity_report(
     identical (both checks) AND no escaped near-tie (every field whose
     margin sat inside the engine's rescore band was actually rescored).
     The drift numbers are DIAGNOSTICS (nats + fp16 ulps of the measured
-    logit magnitude): Q4 measured them as exact fp16 lattice steps (4-8
+    logit magnitude): measured (issue #184) as exact fp16 lattice steps (4-8
     ulp) at the logits' magnitude, so an absolute nat tolerance sat inside
     the lattice noise and failed by construction while every winner was
     identical. Raw logits carry an arbitrary additive offset, so
@@ -423,12 +421,11 @@ def parity_report(
     # tolerance sat inside the noise and failed by construction) — they are
     # reported as diagnostics (nats + ulps), never gated.
     passed = bool(winners_identical and not escaped)
-    # The REPORTING status: exactly PASS or FAIL (the old DRIFT middle state
-    # is gone — batch-shape noise with identical winners IS a pass; readers
-    # accept legacy DRIFT payloads as publishable-with-note until the M5
-    # rerun replaces them).
+    # The REPORTING status: exactly PASS or FAIL (the old DRIFT middle
+    # state is gone — batch-shape noise with identical winners IS a pass;
+    # readers reject scored DRIFT payloads as pre-contract, #184).
     status = "PASS" if passed else "FAIL"
-    # Q4 diagnostics: drift in fp16 ulps of the measured logit magnitude.
+    # Diagnostics: drift in fp16 ulps of the measured logit magnitude (issue #184).
     max_abs_logit = float(batched.get("max_abs_logit", 0.0) or 0.0)
     ulp = 2.0 ** (math.floor(math.log2(max_abs_logit)) - 10) if max_abs_logit >= 1 else 0.0
 
@@ -450,7 +447,7 @@ def parity_report(
         "max_logp_drift_nats": round(max_logp_drift, 6),
         "max_margin_drift_nats": round(max_margin_drift, 6),
         "max_batched_drift_nats": round(max_batched_drift, 6),
-        # Q4 diagnostics: the drift quantities in fp16 ulps of the measured
+        # Diagnostics (issue #184): the drift quantities in fp16 ulps of the measured
         # logit magnitude — never gated.
         "max_abs_logit": round(max_abs_logit, 4),
         "max_raw_row_drift_ulps": _ulps(max_raw_drift),
@@ -672,7 +669,7 @@ def check_batched_parity(
     max_gap_drift = 0.0
     max_logp_drift = 0.0
     max_margin_drift = 0.0
-    max_abs_logit = 0.0  # Q4: the raw decision-logit magnitude (drift ulps)
+    max_abs_logit = 0.0  # the raw decision-logit magnitude (drift ulps, #184)
     max_merged_rows = 0  # W5c-9 C4: the largest merged pass M the matrix ran
     per_case: dict[str, dict[str, Any]] = {}
 

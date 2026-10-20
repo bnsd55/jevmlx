@@ -7,7 +7,9 @@
   winner AND no escaped near-tie (every field whose margin sat inside the
   engine's rescore band was actually rescored); FAIL = a winner differs or
   an escaped near-tie. The DRIFT status is gone (new payloads carry
-  exactly PASS/FAIL; readers keep legacy-DRIFT as publishable-with-note).
+  exactly PASS/FAIL; a scored DRIFT payload is pre-contract and rejected
+  with a regenerate hint — no dead compatibility path; pre-F9 payloads
+  without a scoring key keep the UNVERIFIED (pre-F9) display).
   Why: the drift quantities are exact fp16 lattice steps of the batched
   kernels — measured 2-8 ulp at the decision logits' magnitude (|x| ~ 20,
   ulp 0.0156) — so the absolute 0.05-nat tolerance sat inside the noise

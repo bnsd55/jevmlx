@@ -551,9 +551,8 @@ def check_parity(model_dir: Path) -> tuple[bool, list[str]]:
     stages: winners identical (both checks) and the rescore-gate escape
     flag (no near-tie field escaped the rescore under batching). The drift
     numbers are fp16-lattice noise of the batched kernels — reported as
-    diagnostics (nats + ulps), never gated. Legacy DRIFT payloads
-    (pre-decision-contract) stay publishable with a note. The failure
-    message names the stage that failed.
+    diagnostics (nats + ulps), never gated. The failure message names the
+    stage that failed.
     """
     problems: list[str] = []
     name = str(model_dir)
@@ -598,28 +597,22 @@ def _check_parity_payload(parity: dict, name: str) -> tuple[bool, list[str]]:
         problems.append(f"{name}: unknown scoring {scoring!r} — expected 'labels' or 'slots'")
         return False, problems
     status = parity.get("status", "PASS" if parity.get("passed") else "FAIL")
-    # The decision-based contract (issue #184): PASS is publishable; FAIL
-    # (a winner changed, or an escaped near-tie) is a hard FAIL. Legacy
-    # DRIFT payloads (pre-decision-contract: winners identical but drift
-    # beyond the old absolute tolerance, which sat inside the fp16 lattice
-    # noise of batched kernels) stay publishable with a note until the M5
-    # rerun replaces them. D6: no envelope-band term — a band computed from
-    # the run's own max drift is self-referential. Old files that still
-    # carry a drift_envelope.band field are accepted as is (the field is
-    # ignored).
+    # The decision-based contract (issue #184): the status is exactly PASS
+    # or FAIL; FAIL (a winner changed, or an escaped near-tie) is a hard
+    # FAIL. status DRIFT on a SCORED payload is pre-contract (the drift is
+    # fp16 lattice noise — reported as diagnostics, never gated) — the
+    # artifact regenerates. No dead compatibility path: no committed
+    # artifact carries scoring + DRIFT.
     if status == "DRIFT":
-        max_drift = max(
-            parity.get("max_abs_drift_nats", 0),
-            parity.get("max_gap_drift_nats", 0),
-            parity.get("max_margin_drift_nats", 0),
+        problems.append(
+            f"{name}: pre-decision-contract (status DRIFT) — the drift "
+            "quantities are fp16 lattice noise and never gated; regenerate "
+            "the folder with the decision-based parity producer"
         )
-        sentence = (
-            f"DRIFT: batched drift {max_drift} >= atol {parity['atol']}, "
-            "winners identical on all cases (batch-shape noise, not a "
-            "divergence); measured drift reported as is"
-        )
-        # DRIFT is OK (publishable) — the note is informational, not a problem.
-        return True, [f"{name}: status=DRIFT — {sentence}"]
+        return False, problems
+    if status not in ("PASS", "FAIL"):
+        problems.append(f"{name}: unknown status {status!r} — expected PASS or FAIL")
+        return False, problems
     if status == "FAIL" or not parity.get("passed"):
         stages = _parity_failed_stages(parity)
         sentence = (

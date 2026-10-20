@@ -347,8 +347,10 @@ faster than a single trie-constrained pass on 255-option enums. Output:
       ``check_results --check-parity`` prints the status word and one
       sentence; the leaderboard shows the status word in the Parity column.
 
-      **Publishability** (parity-gates): a model with status PASS (legacy
-      DRIFT payloads are publishable-with-note until the M5 rerun)
+      **Publishability** (parity-gates): a model with status PASS (the
+      decision-based contract, issue #184; a scored DRIFT payload is
+      pre-contract and rejected — regenerate; pre-F9 payloads without a
+      scoring key show UNVERIFIED (pre-F9))
       is publishable — it appears in the leaderboard (DRIFT shows the word
       + max drift in the Parity column) and ``check_results --check-parity``
       returns OK (DRIFT with an informational note). Status FAIL (a winner
