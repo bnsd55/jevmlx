@@ -10,6 +10,50 @@
   fixtures regenerated for v10. HOLD: merge only after the A/B runs with
   the fixed m5 A/B setup, compares BOTH scorers, and labels typesafe does
   not drop.
+=======
+- parity: the contract checks DECISIONS, not raw numbers (issue #184,
+  owner-approved). PASS = every field's batched winner equals the batch=1
+  winner AND no escaped near-tie (every field whose margin sat inside the
+  engine's rescore band was actually rescored); FAIL = a winner differs or
+  an escaped near-tie. The DRIFT status is gone (new payloads carry
+  exactly PASS/FAIL; a scored DRIFT payload is pre-contract and rejected
+  with a regenerate hint — no dead compatibility path; pre-F9 payloads
+  without a scoring key keep the UNVERIFIED (pre-F9) display).
+  Why: the drift quantities are exact fp16 lattice steps of the batched
+  kernels — measured 2-8 ulp at the decision logits' magnitude (|x| ~ 20,
+  ulp 0.0156) — so the absolute 0.05-nat tolerance sat inside the noise
+  and failed by construction while every winner was identical. The drift
+  numbers stay in parity.json as diagnostics, now in nats AND fp16 ulps of
+  the measured logit magnitude (max_abs_logit, *_ulps keys). The parity
+  atol constant is deleted from the payload and the tests; the engine's
+  INSTABILITY_BAND (the near-tie rescore band) is untouched.
+
+- parity: ONE parity payload per scorer (F9). The pre-F9 parity.json mixed
+  slots raw rows with labels final decisions and proved parity for neither.
+  The scorer now flows through every parity call: raw rows, final
+  decisions, batched and single-context. The batch writes one artifact per
+  scorer (parity.json for the default scorer, parity-<scorer>.json for the
+  others), and check_parity requires EVERY artifact to pass. A payload
+  that does not record its scorer is rejected by every reader (no silent
+  default) — the four committed model folders carry pre-F9 payloads and
+  fail the gate until the m5 parity step regenerates them per scorer.
+  The batched raw-row comparison now covers EVERY context copy of the
+  merged pass (main compared only rows 0..R-1, the first copy). Multi
+  fields contribute per-option corrected log-odds drift and count rows
+  their log-score drift, with the same atol contract as scalar fields
+  (main skipped them entirely: log_scores is None -> continue).
+
+- engine: decide_many prefills one CONTEXT GROUP at a time (staged
+  prefill, F10). Groups still form in prompt-length order inside the same
+  measured memory budget, but from CHEAP length estimates instead of
+  prefills: one probe prefill of the shortest context measures the KV
+  bytes per prealloc step (mlx_lm KVCache preallocates in fixed steps,
+  default 256 tokens) and `ceil(tokens/step) * block_bytes` reproduces the
+  old cache-byte arithmetic exactly — same groups, same shapes, byte-
+  identical results (golden test vs main). Each group is prefilled, scored
+  with one merged pass, assembled, then its KV caches are DROPPED before
+  the next group prefills, so peak live caches = one group instead of all
+  N contexts. One debug line per group (contexts, rows, prefill tokens).
 
 - metrics: every headline metric now counts CANONICAL answer lines only.
   evalrun writes one line per (case, field, permutation); rotation lines

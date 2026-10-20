@@ -129,6 +129,7 @@ def _write_local_result(tmp_path: Path) -> Path:
         json.dumps(
             {
                 "model": "fake-1b",
+                "scoring": "labels",
                 "test": "w1a",
                 "passed": True,
                 "max_drift_nats": 0.02,
@@ -455,6 +456,7 @@ def _write_local_result_with_parity(tmp_path: Path, *, status: str, passed: bool
     machine_dir = root / "m1-8gb-fake"
     parity = {
         "model": "fake-1b",
+        "scoring": "labels",
         "test": "w1a",
         "passed": passed,
         "status": status,
@@ -470,16 +472,14 @@ def _write_local_result_with_parity(tmp_path: Path, *, status: str, passed: bool
     return root
 
 
-def test_leaderboard_includes_drift_model(tmp_path):
-    """A model with parity status=DRIFT (publishable batch-shape noise)
-    appears in the leaderboard, and the Parity column shows 'DRIFT' + max drift."""
+def test_leaderboard_excludes_scored_drift_model(tmp_path):
+    """A SCORED payload with status DRIFT is pre-contract (issue #184:
+    the contract is PASS/FAIL) — the model is excluded from the
+    leaderboard; check_parity rejects the folder."""
     official = _write_official(tmp_path)
     results = _write_local_result_with_parity(tmp_path, status="DRIFT", passed=False)
     table = build_table(results, None, official)
-    assert "fake-1b" in table
-    assert "DRIFT" in table
-    # The Parity column shows the word (not just the status code).
-    assert "DRIFT (0.078)" in table
+    assert "fake-1b" not in table
 
 
 def test_leaderboard_includes_pass_model(tmp_path):

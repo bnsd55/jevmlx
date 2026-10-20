@@ -223,11 +223,8 @@ def _per_item_end_to_end_ms(folder: Path) -> float | None:
 def _local_rows(results_root: Path) -> list[dict]:
     """One row per results folder with dataset=typesafe and track=parallel.
 
-    W4-A / issue parity-gates: a model appears if its folder's parity.json
-    records status PASS or DRIFT. PASS = all drifts < atol. DRIFT = some
-    drift >= atol but winners identical on all cases and no escaped
-    near-tie (batch-shape noise, not a real divergence) — publishable, the
-    Parity column shows the word + the measured max drift. FAIL (a winner
+    parity-gates: a model appears if its folder's parity.json records
+    status PASS (the decision-based contract, issue #184). FAIL (a winner
     changed, or an escaped near-tie) stays excluded. D6: no envelope-band
     term — a band computed from the run's own max drift is
     self-referential; a parity.json that still carries a band field is
@@ -246,8 +243,8 @@ def _local_rows(results_root: Path) -> list[dict]:
     if not results_root.exists():
         return rows
     for machine_dir in sorted(p for p in results_root.iterdir() if p.is_dir()):
-        # W4-A / parity-gates: include PASS and DRIFT; exclude FAIL and
-        # missing/unreadable parity.
+        # parity-gates: include PASS (the decision-based contract, issue
+        # #184); exclude FAIL and missing/unreadable parity.
         parity_path = machine_dir / "parity.json"
         if not parity_path.exists():
             continue
@@ -255,16 +252,37 @@ def _local_rows(results_root: Path) -> list[dict]:
             parity = json.loads(parity_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
+        # F9 decision (c): a payload with no scorer field is a KNOWN legacy
+        # shape, recognized explicitly (never defaulted, never passed —
+        # check_parity still rejects it). The model row STAYS in the table
+        # (its accuracy numbers are independent of parity); the Parity
+        # column shows UNVERIFIED (pre-F9) instead of a drift number, because
+        # the legacy artifact mixed slots raw rows with labels decisions and
+        # its drift numbers mean nothing. A legacy payload whose recorded
+        # status is FAIL stays excluded (a winner change is a real
+        # divergence under any scorer).
+        # SHORTCUT: pre-F9 parity artifacts; remove when the M5 rerun (P7)
+        # writes per-scorer parity.
         parity_status = parity.get("status", "PASS")
         if parity_status not in ("PASS", "DRIFT"):
             continue
-        # The max drift for the Parity column (DRIFT rows show it; PASS
-        # rows show 0 / the measured value, which is < atol).
-        parity_max_drift = max(
-            parity.get("max_abs_drift_nats", 0.0) or 0.0,
-            parity.get("max_gap_drift_nats", 0.0) or 0.0,
-            parity.get("max_margin_drift_nats", 0.0) or 0.0,
-        )
+        if parity_status == "DRIFT" and "scoring" in parity:
+            # A SCORED DRIFT payload is pre-contract (issue #184: the
+            # contract is exactly PASS/FAIL); check_parity rejects it,
+            # the leaderboard excludes it. DRIFT survives only on pre-F9
+            # payloads, which render UNVERIFIED below.
+            continue
+        if "scoring" not in parity:
+            parity_status = "UNVERIFIED (pre-F9)"
+            parity_max_drift = 0.0
+        else:
+            # The max drift for the Parity column (DRIFT rows show it; PASS
+            # rows show 0 / the measured value, which is < atol).
+            parity_max_drift = max(
+                parity.get("max_abs_drift_nats", 0.0) or 0.0,
+                parity.get("max_gap_drift_nats", 0.0) or 0.0,
+                parity.get("max_margin_drift_nats", 0.0) or 0.0,
+            )
         for combo in sorted(p for p in machine_dir.iterdir() if p.is_dir()):
             report_path = combo / "report.json"
             if not report_path.exists():
@@ -423,14 +441,10 @@ def _row_line(r: dict) -> str:
     wf_cells = [_fmt_pct(wf.get(key)) for key, _ in _WORKFLOW_COLS]
     cost = r.get("cost_per_case_usd")
     cost_cell = cost if isinstance(cost, str) else _fmt_cost(cost)
-    # Parity column: PASS shows the word; DRIFT shows the word + max drift
-    # (publishable batch-shape noise); the column never shows FAIL (those
-    # models are excluded by _local_rows).
-    parity_word = r.get("parity_status", "—")
-    if parity_word == "DRIFT":
-        parity_cell = f"DRIFT ({r.get('parity_max_drift', 0):.3f})"
-    else:
-        parity_cell = str(parity_word)
+    # Parity column: PASS shows the word; pre-F9 payloads show
+    # UNVERIFIED (pre-F9); FAIL models are excluded by _local_rows. There
+    # is no scored-DRIFT state (issue #184: the contract is PASS/FAIL).
+    parity_cell = str(r.get("parity_status", "—"))
     # Cases cell: counts.cases (45) + error note if there are error lines.
     cases_cell = str(r.get("cases", "—"))
     if r.get("error_count"):

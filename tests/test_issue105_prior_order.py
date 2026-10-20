@@ -246,3 +246,50 @@ def test_prior_corrected_labels_order_invariant_on_15b():
         f"prior_correction flipped {flips}/6 cases across orderings "
         f"(expected <= 1 after the canonical-prior fix): {results}"
     )
+
+
+# Issue #190: the slots scorer's own order sensitivity, MEASURED on the 1.5B
+# (main ab8c02c, 2026-10-20): 5/6 cases flip across the 3 orderings with
+# prior OFF (slot distribution 1/14/3 — the model mass-picks slot 2). The
+# gate pins THAT measured number: it is the model's own baseline, not an
+# invented target. A regression = slots getting MORE order-sensitive than
+# the model already is.
+SLOTS_PRIOR_OFF_BASELINE = 5
+
+
+@pytest.mark.slow
+@_skip_in_ci
+def test_slots_order_stability_reports_both_priors_on_15b():
+    """Issue #190 slow: the same choice-order grid for scoring="slots".
+
+    ONE implementation with the labels test (_run_grid is parametrized by
+    scoring); this test only fixes the SLOTS gate. Measured on the 1.5B:
+
+    | scorer | prior | flips |
+    |---|---|---|
+    | slots | off  | 5/6 (1/14/3) |
+    | slots | on   | 3/6 (4/13/1) |
+
+    The assertion pins the prior-OFF count (the model's own order
+    sensitivity, measured, see SLOTS_PRIOR_OFF_BASELINE). The prior-ON
+    number is REPORTED, not gated: on main the slots prior is computed on
+    the canonicalized (sorted-choices) schema while the evidence pass scores
+    the declared order — its interpretation is exactly the open
+    prior-presentation question (issue #183), so
+    inventing a gate for it here would bake in a number whose mechanism is
+    still undecided.
+    """
+    results_off = _run_grid("slots", prior_correction=False)
+    flips_off = _count_flips(results_off)
+    results_on = _run_grid("slots", prior_correction=True)
+    flips_on = _count_flips(results_on)
+    print(f"\nslots flips: prior OFF {flips_off}/6, prior ON {flips_on}/6")
+    for name, by_order in results_off.items():
+        print(f"  prior OFF {name}: {by_order}")
+    for name, by_order in results_on.items():
+        print(f"  prior ON  {name}: {by_order}")
+    assert flips_off <= SLOTS_PRIOR_OFF_BASELINE, (
+        f"slots prior-OFF flipped {flips_off}/6 cases across orderings "
+        f"(baseline measured on the 1.5B: {SLOTS_PRIOR_OFF_BASELINE}/6): "
+        f"{results_off}"
+    )

@@ -116,11 +116,11 @@ automatically. The page renders client-side and has, top to bottom:
 - **FAILURE DIAGNOSIS**: the first failed step's argv, stdout tail, and
   error; previous failures of the run are collapsed in a `<details>`.
 - **AGGREGATES SO FAR**: field accuracy (parallel labels + naive), exact
-  record, time per case (parallel + naive), parity counts (pass / drift /
+  record, time per case (parallel + naive), parity counts (pass / fail /
   fail), cases scored.
 - **RESULTS**: one row per combo (model × dataset × scorer × track) with
   the same columns as the README leaderboard (field accuracy + Wilson CI,
-  majority, exact, parity status word, time/case, calls, cases, A/B Δ).
+  majority, exact, parity status word (PASS/FAIL), time/case, calls, cases, A/B Δ).
   Filter chips (model / dataset / scorer / track / status) + a free-text
   filter; click a header to sort; click a row to load its questions below.
 - **QUESTIONS**: every decision of the selected combo (time, case +
@@ -347,14 +347,18 @@ faster than a single trie-constrained pass on 255-option enums. Output:
       ``check_results --check-parity`` prints the status word and one
       sentence; the leaderboard shows the status word in the Parity column.
 
-      **Publishability** (parity-gates): a model with status PASS or DRIFT
+      **Publishability** (parity-gates): a model with status PASS (the
+      decision-based contract, issue #184; a scored DRIFT payload is
+      pre-contract and rejected — regenerate; pre-F9 payloads without a
+      scoring key show UNVERIFIED (pre-F9))
       is publishable — it appears in the leaderboard (DRIFT shows the word
       + max drift in the Parity column) and ``check_results --check-parity``
       returns OK (DRIFT with an informational note). Status FAIL (a winner
       changed, or an escaped near-tie) is excluded from the leaderboard
-      and ``check_results`` returns FAIL. ``parity.passed`` semantics in
-      ``jevmlx/parity.py`` are untouched (DRIFT and FAIL both set
-      ``passed: false``); the gate is now on ``status``, not ``passed``.`
+      and ``check_results`` returns FAIL. ``parity.passed`` semantics
+      (issue #184, the decision-based contract): PASS = every field's
+      batched winner equals the batch=1 winner AND no escaped near-tie;
+      the drift numbers are diagnostics in nats + fp16 ulps, never gated.
 - [ ] `SUMMARY.md` pasted into the PR description
 - [ ] Machine specs (chip, RAM, macOS) mentioned in the PR body
 - [ ] No hand-edited numbers — recompute instead of fixing up

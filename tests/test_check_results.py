@@ -187,6 +187,19 @@ def test_ordinal_keys_accepted(tmp_path):
     assert ok, problems
 
 
+def test_oracle_error_addon_key_passes(tmp_path):
+    """oracle_error is an optional add-on key (the oracle pass's exception,
+    written on the case's canonical lines when it raises) — a folder whose
+    lines carry it passes the contract."""
+    folder = tmp_path / "combo"
+    rec = _record()
+    rec["oracle_error"] = "RuntimeError:oracle boom"
+    rec2 = _record(case_id="c2", label="LOW", prediction="HIGH", correct=False, probability=0.3)
+    _write_valid(folder, records=[rec, rec2])
+    ok, problems = check_folder(folder)
+    assert ok, problems
+
+
 def test_unknown_key_still_fails(tmp_path):
     """An unrecognized key (not in the contract, not in the optional add-on
     list) is still a contract violation."""
@@ -354,6 +367,7 @@ class TestParityGate:
                 {
                     "model": "mlx-community/Qwen2.5-7B-Instruct-4bit",
                     "prompt_version": "jevmlx-parallel-v8",
+                    "scoring": "labels",
                     "test": "test_w1a_scoring_parity_batch_vs_chunked_real_model",
                     "passed": True,
                     "status": "PASS",
@@ -369,16 +383,18 @@ class TestParityGate:
         assert ok
         assert problems == []
 
-    def test_drift_parity_passes_with_note(self, tmp_path):
-        """parity-gates: status=DRIFT is publishable (OK) — the note is
-        informational (batch-shape noise, not a regression). Before the
-        fix, DRIFT set passed=False and check_parity returned FAIL."""
+    def test_drift_parity_is_pre_contract(self, tmp_path):
+        """A SCORED payload with status=DRIFT is pre-contract (issue #184:
+        the contract is exactly PASS/FAIL) — check_parity rejects it with a
+        regenerate hint. The old gate produced these files; the M5 rerun
+        replaces them."""
         from benchmarks.check_results import check_parity
 
         (tmp_path / "parity.json").write_text(
             json.dumps(
                 {
                     "model": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+                    "scoring": "labels",
                     "test": "test_w1a_scoring_parity_batch_vs_chunked_real_model",
                     "passed": False,
                     "status": "DRIFT",
@@ -394,13 +410,8 @@ class TestParityGate:
             )
         )
         ok, problems = check_parity(tmp_path)
-        assert ok, f"DRIFT should be OK (publishable), got problems={problems}"
-        assert len(problems) == 1
-        assert "DRIFT" in problems[0]
-        assert "batched drift" in problems[0]
-        # D6: the note cites no envelope band; the file still carries the
-        # old drift_envelope.band field — accepted, ignored.
-        assert "envelope band" not in problems[0]
+        assert not ok
+        assert any("pre-decision-contract" in p and "regenerate" in p for p in problems)
 
     def test_missing_parity_fails(self, tmp_path):
         from benchmarks.check_results import check_parity
@@ -416,45 +427,52 @@ class TestParityGate:
             json.dumps(
                 {
                     "model": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+                    "scoring": "labels",
                     "test": "test_w1a_scoring_parity_batch_vs_chunked_real_model",
                     "passed": False,
+                    "status": "FAIL",
                     "max_abs_drift_nats": 0.15,
                     "max_raw_row_drift_nats": 0.02,
-                    "atol": 0.05,
                     "max_gap_drift_nats": 0.01,
                     "max_margin_drift_nats": 0.01,
-                    "winners_identical": True,
+                    "winners_identical": False,
                     "run_at": "2026-09-18T12:00:00Z",
                 }
             )
         )
         ok, problems = check_parity(tmp_path)
         assert not ok
-        assert any("did not pass" in p and "log-score drift" in p for p in problems)
+        # The decision-based contract: the stage is the WINNER flip.
+        assert any("winners flipped" in p for p in problems)
 
-    def test_gap_drift_stage_named(self, tmp_path):
-        """A batched pairwise GAP drift failure names THAT stage (W5c-1
-        review section 2): the final-decision drift can stay inside the
-        band while the pairwise gaps drift past it — raw-logit drift is a
-        diagnostic, the gap is the gate."""
+    def test_gap_drift_is_not_a_stage(self, tmp_path):
+        """The decision-based contract (issue #184): a gap-drift-only
+        payload with identical winners and no escaped near-tie PASSES —
+        the drift is fp16 lattice noise (Q4: 4-8 ulp at the logits'
+        magnitude), reported as a diagnostic, never gated. Main failed
+        this payload on the gap stage."""
         from benchmarks.check_results import check_parity
 
         (tmp_path / "parity.json").write_text(
             json.dumps(
                 {
-                    "passed": False,
-                    "max_abs_drift_nats": 0.01,
-                    "max_raw_row_drift_nats": 0.2,
-                    "max_gap_drift_nats": 0.2,
-                    "max_margin_drift_nats": 0.01,
-                    "atol": 0.05,
+                    "scoring": "labels",
+                    "passed": True,
+                    "status": "PASS",
+                    "max_abs_drift_nats": 0.0625,
+                    "max_raw_row_drift_nats": 0.0625,
+                    "max_gap_drift_nats": 0.0625,
+                    "max_margin_drift_nats": 0.0625,
+                    "max_abs_logit": 24.0,
+                    "max_gap_drift_ulps": 4.0,
+                    "max_margin_drift_ulps": 4.0,
                     "winners_identical": True,
+                    "rescore_gate": {"escaped_near_tie": []},
                 }
             )
         )
         ok, problems = check_parity(tmp_path)
-        assert not ok
-        assert any("batched pairwise gap drift" in p for p in problems)
+        assert ok, problems
 
     def test_pre_v2_parity_payload_fails(self, tmp_path):
         """A v1 parity.json (no raw-gate key) fails: the bench regenerates
@@ -465,6 +483,7 @@ class TestParityGate:
             json.dumps(
                 {
                     "model": "m",
+                    "scoring": "labels",
                     "test": "w1a",
                     "passed": True,
                     "max_drift_nats": 0.02,
@@ -487,6 +506,7 @@ class TestParityGate:
             json.dumps(
                 {
                     "model": "m",
+                    "scoring": "labels",
                     "test": "w1a",
                     "passed": True,
                     "max_abs_drift_nats": 0.02,
@@ -508,18 +528,17 @@ class TestParityGate:
         assert not ok
         assert any("unreadable" in p for p in problems)
 
-    def test_drift_status_prints_drift_word(self, tmp_path):
-        """parity-gates: a parity.json with status=DRIFT (drift >= atol,
-        winners identical, no escaped near-tie) is OK (publishable) and
-        prints the DRIFT sentence as an informational note. D6: the note
-        cites no envelope band (the old band was self-referential); the
-        file still carries the old band field and parses unchanged."""
+    def test_drift_status_is_pre_contract(self, tmp_path):
+        """A SCORED parity.json with status=DRIFT is pre-contract (issue
+        #184): the state set is exactly PASS/FAIL, so check_parity rejects
+        it with a regenerate hint (no dead compatibility path)."""
         from benchmarks.check_results import check_parity
 
         (tmp_path / "parity.json").write_text(
             json.dumps(
                 {
                     "model": "m",
+                    "scoring": "labels",
                     "test": "w1a",
                     "passed": False,
                     "status": "DRIFT",
@@ -535,11 +554,8 @@ class TestParityGate:
             )
         )
         ok, problems = check_parity(tmp_path)
-        assert ok  # DRIFT is publishable (batch-shape noise, not a regression)
-        msg = problems[0]  # the informational note
-        assert "DRIFT:" in msg
-        assert "winners identical" in msg
-        assert "envelope band" not in msg
+        assert not ok
+        assert any("pre-decision-contract" in p and "regenerate" in p for p in problems)
 
     def test_fail_status_prints_fail_word(self, tmp_path):
         """P4/I7: a parity.json with a winner changed (status=FAIL) prints
@@ -550,6 +566,7 @@ class TestParityGate:
             json.dumps(
                 {
                     "model": "m",
+                    "scoring": "labels",
                     "test": "w1a",
                     "passed": False,
                     "status": "FAIL",
@@ -577,6 +594,7 @@ class TestParityGate:
             json.dumps(
                 {
                     "model": "m",
+                    "scoring": "labels",
                     "test": "w1a",
                     "passed": True,
                     "status": "PASS",
@@ -628,6 +646,7 @@ class TestParityGate:
             json.dumps(
                 {
                     "model": "qwen7b",
+                    "scoring": "labels",
                     "test": "w1a",
                     "passed": True,
                     "max_drift_nats": 0.02,
@@ -696,7 +715,15 @@ def test_leaderboard_cases_from_run_json_counts(tmp_path):
     combo = model_dir / "parallel-trie-typesafe"
     combo.mkdir(parents=True)
     (model_dir / "parity.json").write_text(
-        json.dumps({"passed": True, "status": "PASS", "max_abs_drift_nats": 0.01, "atol": 0.05})
+        json.dumps(
+            {
+                "scoring": "labels",
+                "passed": True,
+                "status": "PASS",
+                "max_abs_drift_nats": 0.01,
+                "atol": 0.05,
+            }
+        )
     )
     (combo / "report.json").write_text(
         json.dumps({"metrics": {"agreement": {"agreement_common_subset": 0.9, "n_cases": 44}}})

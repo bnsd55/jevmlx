@@ -845,17 +845,22 @@ def test_load_engine_with_timeout_happy_path():
 
 
 def test_parity_note_names_stage_and_drift(tmp_path):
-    """Contract v2: the parity_failed reason shows max drift AND which stage
-    failed (winners / final log-score drift / batched pairwise gap drift)."""
+    """The decision-based contract (issue #184): the parity_failed reason
+    names the failing DECISION stage (winners flipped / rescore-gate
+    escape); the drift numbers are diagnostics that never gate."""
     from benchmarks.summarize_results import _model_parity_note
 
     d = tmp_path / "m5-32gb-x"
     d.mkdir()
 
+    # Winners identical + no escape = PASS under the decision contract,
+    # whatever the drift (0.2 nats of fp16 lattice noise). Main gated on
+    # the gap drift and failed this payload.
     (d / "parity.json").write_text(
         json.dumps(
             {
                 "passed": False,
+                "status": "FAIL",
                 "max_abs_drift_nats": 0.01,
                 "max_raw_row_drift_nats": 0.2,
                 "atol": 0.05,
@@ -866,18 +871,13 @@ def test_parity_note_names_stage_and_drift(tmp_path):
         ),
         encoding="utf-8",
     )
-    note = _model_parity_note(d)
-    assert "batched pairwise gap drift" in note
-    assert "max_raw_row_drift_nats=0.2" in note
-    assert "max_abs_drift_nats=0.01" in note
-
-    # Winners stage: final decisions flipped.
+    # A real FAIL under the decision contract: the winners stage.
     (d / "parity.json").write_text(
         json.dumps(
             {
                 "passed": False,
+                "status": "FAIL",
                 "winners_identical": False,
-                "atol": 0.05,
                 "max_gap_drift_nats": 0.01,
                 "max_margin_drift_nats": 0.01,
                 "max_abs_drift_nats": 0.3,

@@ -386,12 +386,21 @@ Written by the bench into each model folder right after the engine load
 
 (Four bundled presets on disk; the docstring example shows two. Field names
 match `parity.py` verbatim: `model`, `prompt_version`, `max_abs_drift_nats`,
-`winners_identical`, `atol`, `passed`, `status`, `cases`, `test` = `PARITY_TEST_NAME`,
-`run_at`.) P4/I7: `status` is the REPORTING word (PASS / DRIFT / FAIL).
-The GATE (`passed`) is unchanged — DRIFT and FAIL both set `passed: false`.
-PASS = all drifts < atol. DRIFT = some drift >= atol but winners identical
-on all cases AND max drift inside the persisted envelope band for the run's
-shape bucket. FAIL = a winner changed, or drift beyond the band.
+`winners_identical`, `passed`, `status`, `cases`, `test` = `PARITY_TEST_NAME`,
+`run_at`, plus the drift diagnostics in nats AND fp16 ulps of the measured
+logit magnitude (`max_abs_logit`, `max_raw_row_drift_ulps`,
+`max_gap_drift_ulps`, `max_margin_drift_ulps`.) The status has exactly TWO
+states (decision-based contract, issue #184): PASS = every field's batched
+winner equals the batch=1 winner AND no escaped near-tie (every field whose
+margin sat inside the engine's rescore band was actually rescored); FAIL =
+a winner differs, or an escaped near-tie. The drift numbers are fp16-lattice
+noise of the batched kernels (measured 2-8 ulp steps at decision-logit
+magnitudes of abs(x) ~ 20; the old absolute 0.05-nat tolerance sat inside
+that noise and failed by construction) — they are reported in nats + ulps
+and NEVER gate. A scored payload with status DRIFT is
+pre-contract and rejected with a regenerate hint (no dead compatibility
+path); pre-F9 payloads without a scoring key keep the UNVERIFIED (pre-F9)
+display.
 
 One check, two consumers: the slow parity test and the bench share
 `check_scoring_parity`. A model without a passing `parity.json` gets
@@ -419,6 +428,21 @@ per-case `max_raw_row_drift_nats`. Parity cases use the bundled presets'
 REAL contexts (W5-D finding 41: `bundled_preset_specs` returns the whole
 preset; `_case_context` falls back to a stable filler only for bare test
 schemas).
+
+Why the residual drift is not an LM-head rounding problem: PR #70 tried one
+candidate fix — a TRUE fp32 head for decision positions (dequantize
+the quantized LM head once at load, matmul the body's final hidden states
+against the fp32 weight; an `astype(float32)` on the quantized kernel's
+input does not count, a known MLX path still yields fp16-grid results). On
+the 0.5B the batched gap drift did NOT collapse: d_gap max 0.036 at M=8,
+~0.06 at M=16-32, 0.064 at M=112 — the same plateau the quantized head
+shows (winners identical at every M; 545 MB extra head weights, ~11%
+latency overhead at M=112). The divergence starts in the transformer BODY
+(batched attention/MLP kernels pick different fp16 rounding by shape), and
+the fp32 head faithfully reproduces those drifting hidden states into
+logits — exact equality needs same-shape execution, not a wider head. If a
+follow-up is ever wanted, `benchmarks/layer_bisect.py` exists for layer
+bisection.
 
 ### Eval `cases.jsonl` line — writers: `to_jsonl.py`, `typesafe/fetch.py`
 

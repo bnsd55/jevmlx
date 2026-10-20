@@ -202,6 +202,9 @@ def check_folder(folder: Path) -> tuple[bool, list[str]]:
         # raw_text is written by naive tracks (naive_local, api_baseline) on
         # ERROR rows only — the truncated generated text, so a failed parse
         # can be inspected / re-scored offline without re-running the model.
+        # oracle_error rides the case's canonical lines when the oracle pass
+        # raised (recorded, never swallowed) — the same add-on pattern as
+        # raw_text.
         extra = [
             k
             for k in extra
@@ -210,6 +213,7 @@ def check_folder(folder: Path) -> tuple[bool, list[str]]:
                 "perturbation",
                 "consensus",
                 "oracle_prediction",
+                "oracle_error",
                 "ordered",
                 "ordinal",
                 "ordinal_choices",
@@ -547,61 +551,87 @@ def check_parity(model_dir: Path) -> tuple[bool, list[str]]:
           "run_at": "2026-09-18T12:00:00Z"
         }
 
-    ``passed`` covers three stages: winners identical, final log-score
-    drift within atol, batched pairwise gap drift within atol, and the
-    rescore-gate escape flag (W5c-1 review: fail-closed at the fixed band)
-    (W5c-1: the batched raw gate is a batch-shape stress with its own
-    documented band, distinct from the single-context atol). The failure
-    message names the stage that failed.
+    Under the decision-based contract (issue #184) ``passed`` covers two
+    stages: winners identical (both checks) and the rescore-gate escape
+    flag (no near-tie field escaped the rescore under batching). The drift
+    numbers are fp16-lattice noise of the batched kernels — reported as
+    diagnostics (nats + ulps), never gated. The failure message names the
+    stage that failed.
     """
     problems: list[str] = []
     name = str(model_dir)
-    parity_path = model_dir / "parity.json"
-    if not parity_path.exists():
+    # F9: one parity artifact per scorer. parity.json is the default
+    # scorer's payload; parity-<scorer>.json files are the others. ALL must
+    # pass, and EVERY payload must record its scorer — a payload with no
+    # scorer is rejected (pre-F9 mixed slots raw rows with labels decisions
+    # and proved parity for neither; there is no silent default).
+    parity_paths = sorted(model_dir.glob("parity*.json"))
+    if not parity_paths:
         problems.append(f"{name}: missing parity.json (slow parity test not recorded)")
         return False, problems
-    try:
-        parity = json.loads(parity_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as e:
-        problems.append(f"{name}: parity.json unreadable: {e}")
+    any_bad = False
+    for parity_path in parity_paths:
+        try:
+            parity = json.loads(parity_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            problems.append(f"{name}: {parity_path.name} unreadable: {e}")
+            any_bad = True
+            continue
+        ok, p = _check_parity_payload(parity, f"{name}/{parity_path.name}")
+        problems.extend(p)
+        if not ok:
+            any_bad = True
+    return not any_bad, problems
+
+
+def _check_parity_payload(parity: dict, name: str) -> tuple[bool, list[str]]:
+    """Validate ONE parity payload (F9: must record its scorer)."""
+    problems: list[str] = []
+    if "scoring" not in parity:
+        problems.append(
+            f"{name}: pre-F9 (no scoring key) — the artifact does not record "
+            "which scorer it covers; regenerate with one parity payload per scorer"
+        )
+        return False, problems
+    scoring = parity["scoring"]
+    # A scorer-tagged payload with an unknown scorer is neither legacy nor
+    # a valid per-scorer artifact — fail closed (same set the engine's row
+    # builder accepts).
+    if scoring not in ("labels", "slots"):
+        problems.append(f"{name}: unknown scoring {scoring!r} — expected 'labels' or 'slots'")
         return False, problems
     status = parity.get("status", "PASS" if parity.get("passed") else "FAIL")
-    # parity-gates: PASS and DRIFT are publishable (OK); only FAIL (a winner
-    # changed, or an escaped near-tie) or missing/unreadable parity is a
-    # hard FAIL. DRIFT is OK-with-note — the one-sentence explanation so an
-    # operator sees the batch-shape noise is expected, not a regression.
-    # D6: no envelope-band term — a band computed from the run's own max
-    # drift is self-referential. Old files that still carry a
-    # drift_envelope.band field are accepted as is (the field is ignored).
+    # The decision-based contract (issue #184): the status is exactly PASS
+    # or FAIL; FAIL (a winner changed, or an escaped near-tie) is a hard
+    # FAIL. status DRIFT on a SCORED payload is pre-contract (the drift is
+    # fp16 lattice noise — reported as diagnostics, never gated) — the
+    # artifact regenerates. No dead compatibility path: no committed
+    # artifact carries scoring + DRIFT.
     if status == "DRIFT":
-        max_drift = max(
-            parity.get("max_abs_drift_nats", 0),
-            parity.get("max_gap_drift_nats", 0),
-            parity.get("max_margin_drift_nats", 0),
+        problems.append(
+            f"{name}: pre-decision-contract (status DRIFT) — the drift "
+            "quantities are fp16 lattice noise and never gated; regenerate "
+            "the folder with the decision-based parity producer"
         )
-        sentence = (
-            f"DRIFT: batched drift {max_drift} >= atol {parity['atol']}, "
-            "winners identical on all cases (batch-shape noise, not a "
-            "divergence); measured drift reported as is"
-        )
-        # DRIFT is OK (publishable) — the note is informational, not a problem.
-        return True, [f"{name}: parity.json status=DRIFT — {sentence}"]
+        return False, problems
+    if status not in ("PASS", "FAIL"):
+        problems.append(f"{name}: unknown status {status!r} — expected PASS or FAIL")
+        return False, problems
     if status == "FAIL" or not parity.get("passed"):
         stages = _parity_failed_stages(parity)
         sentence = (
             f"FAIL: {'; '.join(stages)} "
             f"(max_drift={parity['max_abs_drift_nats']}, "
-            f"raw_row_drift={parity['max_raw_row_drift_nats']}, "
-            f"atol={parity['atol']})"
+            f"raw_row_drift={parity.get('max_raw_row_drift_nats')})"
         )
-        problems.append(f"{name}: parity.json shows test did not pass — {sentence}")
+        problems.append(f"{name}: payload shows test did not pass — {sentence}")
         return False, problems
     # status == PASS — a v1 file (no v2 keys) predates the decomposition; a
     # folder regenerated by the current bench always carries them.
     missing = [k for k in ("max_raw_row_drift_nats", "max_gap_drift_nats") if k not in parity]
     if missing:
         problems.append(
-            f"{name}: parity.json is pre-v2 (missing {', '.join(missing)}) — "
+            f"{name}: pre-v2 (missing {', '.join(missing)}) — "
             "rerun the bench to regenerate with the per-row decomposition"
         )
         return False, problems
@@ -611,26 +641,15 @@ def check_parity(model_dir: Path) -> tuple[bool, list[str]]:
 def _parity_failed_stages(parity: dict) -> list[str]:
     """Which parity stages failed, from the recorded payload.
 
-    W5c-1 review section 2: the gate is fail-closed at the fixed atol.
-    Stages: winners flipped, single-context log-score drift over atol,
-    batched pairwise GAP drift over atol (d_gap — raw logits carry an
-    arbitrary offset, so d_raw is diagnostic only), batched top-two margin
-    drift over atol, and the rescore-gate escape flag
-    (reference_near_tie && !production_rescored).
+    The decision-based contract (issue #184): the FAIL stages are a winner
+    flip and the rescore-gate escape flag (reference_near_tie &&
+    !production_rescored). The drift quantities are fp16-lattice noise at
+    the logits' magnitude and never gate (they are reported as diagnostics
+    in nats + ulps).
     """
-    atol = parity["atol"]
     stages: list[str] = []
     if not parity.get("winners_identical", True):
         stages.append("winners flipped (final decisions disagree)")
-    drift = parity["max_abs_drift_nats"]
-    if isinstance(drift, int | float) and drift >= atol:
-        stages.append("single-context log-score drift >= atol")
-    gap = parity["max_gap_drift_nats"]
-    if isinstance(gap, int | float) and gap >= atol:
-        stages.append("batched pairwise gap drift >= atol")
-    margin = parity["max_margin_drift_nats"]
-    if isinstance(margin, int | float) and margin >= atol:
-        stages.append("batched top-two margin drift >= atol")
     rescore = parity.get("rescore_gate", {})
     if isinstance(rescore, dict) and rescore.get("escaped_near_tie"):
         stages.append("rescore-gate escape (reference_near_tie && !production_rescored)")
