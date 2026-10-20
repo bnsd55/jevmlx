@@ -22,7 +22,7 @@ parent of the combo), not in the combo folder itself. The checker:
 3. Recomputes report.json's metrics from predictions.jsonl via
    :func:`jevmlx.evalmetrics.compute_metrics` and diffs against the
    committed report.json (numeric tolerance 1e-9).
-4. Checks the W5 timing contract (results contract v2): a parallel-track
+4. Checks the timing contract (results contract v2): a parallel-track
    run.json must carry the honest timing keys in ``config``-adjacent
    ``timing.json``/predictions — ``group_wall_ms`` / ``per_item_amortized_ms``
    / ``per_item_end_to_end_ms`` / ``contexts_per_pass`` on batched paths,
@@ -53,11 +53,11 @@ __all__ = ["check_folder", "check_root", "check_parity", "main"]
 
 _NUMERIC_TOLERANCE = 1e-9
 
-# Results contract v2 (W5): the timing split keys every parallel-track combo
+# Results contract v2: the timing split keys every parallel-track combo
 # must carry in timing.json's ``median`` block (ride the parallel _meta).
 # Batched decide_many keys land there only when the run used the batched
 # path; the single-context split below is required either way.
-# W5b-14: the keys are UNCHANGED but their provenance changed — every one
+# The keys are UNCHANGED but their provenance changed — every one
 # is a derivation of the request's timing.Ledger (derived_flat), measured
 # once per interval; suffix_eval_ms stays the documented composite.
 TIMING_SPLIT_KEYS = (
@@ -71,7 +71,7 @@ TIMING_SPLIT_KEYS = (
     "total_ms",
 )
 
-# W5-D finding 27/30/32 + W5c-3: the per-item timing split. Since W5c-3 the
+# The per-item timing split: the
 # SINGLE path also reports per_item_end_to_end_ms (own prefill span + own
 # assembly span, from the same ledger), so that key is required on every
 # parallel prediction line; group_wall_ms / per_item_amortized_ms stay the
@@ -82,7 +82,7 @@ PER_ITEM_END_TO_END_KEY = "per_item_end_to_end_ms"
 BATCHED_TIMING_KEYS = ("group_wall_ms", "per_item_amortized_ms")
 RUN_TIMING_KEYS = ("peak_active_bytes", "peak_incremental_bytes", "failed_attempts")
 
-# W5c-6 / B4: token-accounting telemetry — every parallel-track combo must
+# Token-accounting telemetry — every parallel-track combo must
 # carry these in timing.json's ``median`` block (ride the parallel _meta).
 # The ratio of naive_branch_prompt_tokens to computed_prompt_token_positions
 # is NOT a speedup (a suffix query still attends over the cached prefix).
@@ -95,7 +95,7 @@ TOKEN_ACCOUNTING_KEYS = (
     "retry_wasted_ms",
 )
 
-# W6-B6b/F2: results contract v2 — every report.json metrics dict must carry
+# Results contract v2 — every report.json metrics dict must carry
 # these CI keys (additive; they ride alongside the point estimates). The
 # _metrics_match key-set check catches a missing key, but this explicit
 # list documents the contract and produces a clear error message.
@@ -110,7 +110,8 @@ def _read_predictions_lines(path: Path) -> list[dict]:
     """Load predictions.jsonl via the shared loader (evalmetrics).
 
     One loader for metrics AND the checker: the legacy ``_error`` expansion
-    (P3) applies identically to recomputed metrics and to the contract
+    (one line per labelled field) applies identically to the recomputed
+    metrics and to the contract
     checks, and gzip is handled in one place.
     """
     from jevmlx.evalmetrics import load_predictions
@@ -196,7 +197,7 @@ def check_folder(folder: Path) -> tuple[bool, list[str]]:
         extra = sorted(set(record) - set(PREDICTION_LINE_KEYS))
         # perturbation / consensus / oracle_prediction are optional add-ons,
         # not contract violations (oracle_prediction rides under
-        # oracle_overrides evaluation; W3-D). ordered / ordinal /
+        # oracle_overrides evaluation). ordered / ordinal /
         # ordinal_choices are written by OrdinalTelemetry (ordered=True enum
         # fields); they are optional — only present on ordinal fields.
         # raw_text is written by naive tracks (naive_local, api_baseline) on
@@ -302,7 +303,7 @@ def check_folder(folder: Path) -> tuple[bool, list[str]]:
                     "(the dataset was rebuilt after this run; rerun the combo)"
                 )
 
-    # Results contract v2 (W5): a parallel-track combo must carry the
+    # Results contract v2: a parallel-track combo must carry the
     # honest timing split. predictions lines ride per-field latency_ms;
     # the _meta-split keys land in timing.json (same calls, medians).
     is_parallel = bool(records) and all(r.get("track") in (None, "parallel") for r in records)
@@ -335,7 +336,7 @@ def check_folder(folder: Path) -> tuple[bool, list[str]]:
                         f"{name}: timing.json median peak_incremental_bytes is "
                         f"{peak_incremental!r}, expected a number"
                     )
-                # W5c-6 / B4: token-accounting keys must be present in the
+                # Token-accounting keys must be present in the
                 # median block (ride the parallel _meta).
                 for key in TOKEN_ACCOUNTING_KEYS:
                     if key not in median:
@@ -343,7 +344,7 @@ def check_folder(folder: Path) -> tuple[bool, list[str]]:
                             f"{name}: timing.json median missing key {key!r} "
                             "(results contract v2: token-accounting telemetry)"
                         )
-                # W5c-7 item 5: timing segment isolation. A resumed run
+                # Timing segment isolation. A resumed run
                 # carries segment > 0 and a segment_id; the report/leaderboard
                 # read per-item timings only from the LATEST segment — never
                 # pool across segments (a resumed run's timings are from a
@@ -366,9 +367,9 @@ def check_folder(folder: Path) -> tuple[bool, list[str]]:
                 "(group_wall_ms / per_item_amortized_ms land together)"
             )
 
-    # W5c-3: per_item_end_to_end_ms is required on parallel lines — the
-    # single path reports it since W5c-3 (elapsed - plan), the batched path
-    # since W5-D finding 27/N6. A parallel line without it is a broken
+    # per_item_end_to_end_ms is required on parallel lines — the
+    # single path reports it (elapsed - plan), the batched path
+    # likewise. A parallel line without it is a broken
     # folder (no fallback; the leaderboard reads this key).
     # Exception: error lines (error key set) may have null
     # per_item_end_to_end_ms — the field's scoring failed before timing
@@ -396,7 +397,7 @@ def check_folder(folder: Path) -> tuple[bool, list[str]]:
         committed_metrics = committed_report.get("metrics", {})
         if not _metrics_match(recomputed, committed_metrics, name, problems):
             pass  # problems already appended by _metrics_match
-        # W6-B6b/F2: results contract v2 — the CI keys must be present.
+        # Results contract v2 — the CI keys must be present.
         for key in REQUIRED_CI_KEYS:
             if key not in committed_metrics:
                 problems.append(
@@ -502,9 +503,9 @@ def _load_json(path: Path) -> dict | None:
 
 
 def _latest_timing_path(folder: Path) -> Path | None:
-    """The latest timing segment file (P4).
+    """The latest timing segment file.
 
-    W5c-7: timing segments are separate files (timing.segment-N.json).
+    Timing segments are separate files (timing.segment-N.json).
     Return the highest-numbered segment, or timing.json (segment 0) if
     no segments exist. Never merge across segments.
     """
@@ -528,10 +529,10 @@ def check_parity(model_dir: Path) -> tuple[bool, list[str]]:
 
     A model enters the README compatibility table only with a passing slow
     parity test recorded in its results folder as ``parity.json``. Results
-    contract v2 (W5): the file is produced by the parity producer over
+    contract v2: the file is produced by the parity producer over
     BOTH the batch=1/chunked scoring comparison AND the batched matrix's
-    RAW pre-rescore row-logit gate (finding 42: a batch-1 rescore can mask
-    raw batch drift, so the raw gate is its own pass/fail stage).
+    RAW pre-rescore row-logit comparison (a batch-1 rescore can mask
+    raw batch drift, so the raw rows are compared on their own).
 
     The ``parity.json`` schema (v2 — the raw gate keys are required)::
 
@@ -560,10 +561,10 @@ def check_parity(model_dir: Path) -> tuple[bool, list[str]]:
     """
     problems: list[str] = []
     name = str(model_dir)
-    # F9: one parity artifact per scorer. parity.json is the default
+    # One parity artifact per scorer. parity.json is the default
     # scorer's payload; parity-<scorer>.json files are the others. ALL must
     # pass, and EVERY payload must record its scorer — a payload with no
-    # scorer is rejected (pre-F9 mixed slots raw rows with labels decisions
+    # scorer is rejected (that artifact era mixed slots raw rows with labels decisions
     # and proved parity for neither; there is no silent default).
     parity_paths = sorted(model_dir.glob("parity*.json"))
     if not parity_paths:
@@ -585,11 +586,11 @@ def check_parity(model_dir: Path) -> tuple[bool, list[str]]:
 
 
 def _check_parity_payload(parity: dict, name: str) -> tuple[bool, list[str]]:
-    """Validate ONE parity payload (F9: must record its scorer)."""
+    """Validate ONE parity payload (must record its scorer)."""
     problems: list[str] = []
     if "scoring" not in parity:
         problems.append(
-            f"{name}: pre-F9 (no scoring key) — the artifact does not record "
+            f'{name}: no scorer recorded (no "scoring" key) — the artifact does not record '
             "which scorer it covers; regenerate with one parity payload per scorer"
         )
         return False, problems
@@ -687,7 +688,7 @@ def _failed_cases_in_folder(folder: Path) -> int:
     """Distinct case_ids with at least one error line in predictions.jsonl.
 
     The leaderboard 'cases' column reports FAILED CASES, not error lines:
-    a legacy case failure expands to one line per labelled field (P3), so
+    a legacy case failure expands to one line per labelled field, so
     line counts overstate the failure count. Naive field-level errors stay
     one line per failed field, usually one distinct case each.
     """
@@ -805,7 +806,7 @@ def main(argv: list[str] | None = None) -> int:
     for arg in argv_dirs:
         all_results.extend(check_root(Path(arg)))
 
-    # W4-A: optional slow parity gate. A model enters the README compat table
+    # Optional slow parity gate. A model enters the README compat table
     # only with a passing slow parity test (parity.json in the model folder).
     if args.check_parity:
         checked_models: set[Path] = set()

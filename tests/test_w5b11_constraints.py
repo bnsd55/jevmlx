@@ -1,4 +1,4 @@
-"""W5b-11 tests: compiled constraint objects (GPT-REVIEW-2 C6).
+"""Compiled constraint objects tests.
 
 - compile_constraints is the ONLY entry: unknown fields/values/types and
   multi-field violations all fail at compile time, before any model work.
@@ -146,7 +146,7 @@ class TestMapIdenticalOnDependentFixture:
 
 
 def test_evalmetrics_compiled_only():
-    """W5b-11 review fix: evalmetrics has NO dict-walking dual path —
+    """evalmetrics has NO dict-walking dual path —
     constraint_violation_rate compiles per case and evaluates
     compiled.satisfied (and _check_constraint is gone)."""
     import jevmlx.evalmetrics as em

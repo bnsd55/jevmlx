@@ -1,4 +1,4 @@
-"""W5b-13: per-field probability semantics (GPT-REVIEW-2 §C item 9).
+"""Per-field probability semantics.
 
 The engine's stages set a ``semantics`` record on every field_telemetry
 entry (score_source / temperature / calibrator_id / prior_mode /
@@ -154,7 +154,7 @@ def test_decide_fields_carry_semantics(monkeypatch):
 def test_missing_semantics_record_fails_loudly(monkeypatch):
     """A telemetry entry without a semantics record is a contract violation:
     _build_field_results raises naming the field — never a silent None
-    (F2: the boundary indexes directly; a KeyError and the ValueError are
+    (the boundary indexes directly; a KeyError and the ValueError are
     both loud, so the pin accepts either)."""
     import jevmlx.api as api
     from tests.conftest import make_engine_result, make_field_telemetry
@@ -449,7 +449,7 @@ def test_uncalibrated_multi_carries_caller_temperature():
 
 
 def test_trusted_nonbinding_count_reports_constraint_changed_false():
-    """F3/F4: neither an untrusted count (margin below COUNT_MARGIN_MIN: no
+    """Neither an untrusted count (margin below COUNT_MARGIN_MIN: no
     constraint ran) nor a trusted count whose constraint was non-binding
     may claim constraint_changed — only a reconciler that CHANGED the
     selection (or the count row's own trusted constraint running) may."""

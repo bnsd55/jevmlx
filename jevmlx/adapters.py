@@ -1,9 +1,9 @@
-"""W6-1: LM-head adapters — backbone/lm_head split, standalone module.
+"""LM-head adapters — backbone/lm_head split, standalone module.
 
 No engine wiring: this module only describes HOW a supported mlx_lm model
 splits into a backbone (token ids -> hidden states, cache-aware) and an LM
 head (hidden states -> vocab logits). Engine call sites adopt it later
-(W6-2+).
+(an engine change adopts the call sites).
 
 Ground truth is the installed mlx_lm model classes: every family computes
 ``Model.__call__(x) = head(backbone(x))`` — qwen2/qwen3/qwen3_moe/llama/

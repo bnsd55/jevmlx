@@ -1,7 +1,7 @@
-"""P3: legacy combo folders journal a case-level failure as ONE
+"""Legacy combo folders journal a case-level failure as ONE
 ``field="_error"`` line with no label. Read-time expansion (in
 ``load_predictions``, the shared loader) must count that failed case as
-wrong for every labelled field of the case — otherwise committed pre-P2
+wrong for every labelled field of the case — otherwise committed folders
 runs silently drop failures from every accuracy denominator.
 
 The fixture rewrites a REAL run_eval-produced predictions file into the
@@ -61,7 +61,7 @@ def _write_legacy_combo(tmp_path: Path) -> Path:
         chat_template="T",
     )
     records = evalmetrics.load_predictions(combo / "predictions.jsonl")
-    # Rewrite c-fail as the legacy single _error line (pre-P2 writer shape).
+    # Rewrite c-fail as the legacy single _error line (the old writer shape).
     legacy = []
     for r in records:
         if r["case_id"] == "c-fail":

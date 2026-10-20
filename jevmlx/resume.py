@@ -1,4 +1,4 @@
-"""Crash-safe resumable eval infrastructure (W5c-7 / B6 part 1).
+"""Crash-safe resumable eval infrastructure.
 
 Three concerns, one module:
 
@@ -21,7 +21,7 @@ Three concerns, one module:
   case key so ``--resume`` can skip them without re-reading the full
   predictions file.
 
-The contract (from GPT-REVIEW-3 B6): a case becomes complete only after
+The contract: a case becomes complete only after
 all its prediction lines are durably written. Appending field lines
 directly can leave a case half-complete after a crash — so each case is
 written as one atomic blob (all its lines in one ``write`` + ``flush`` +
@@ -63,7 +63,7 @@ MANIFEST_PATH = "manifest.json"
 LOCK_PATH = ".lock"
 JOURNAL_PATH = "completed_cases.jsonl"
 
-# B6: trip the infra breaker after this many consecutive failures with
+# Trip the infra breaker after this many consecutive failures with
 # the same broad signature. Five is the review's number.
 circuit_breaker_threshold = 5
 
@@ -76,7 +76,7 @@ circuit_breaker_threshold = 5
 def _git_code_hash() -> dict[str, Any]:
     """git HEAD sha + dirty flag for the jevmlx checkout.
 
-    W5c-7 review: uses the PACKAGE directory (where this file lives), not
+    Uses the PACKAGE directory (where this file lives), not
     the process cwd — the process cwd may be / or a results dir, returning
     None,None and making the manifest useless for resume verification.
     Falls back to None when not in a git checkout (e.g. site-packages).
@@ -312,7 +312,7 @@ class ResultsLock:
     def _is_stale(self) -> bool:
         """True if the lock's owner PID is not alive.
 
-        W5c-7 review: a malformed/unreadable lock is NOT auto-stale —
+        A malformed/unreadable lock is NOT auto-stale —
         that would allow breaking a lock we can't identify. Returns False
         (refuse to break) so the operator investigates. PID reuse is
         mitigated by ``started_utc``: if the PID is alive but the lock is
@@ -461,7 +461,7 @@ def write_case_blob(
 ) -> None:
     """Durably commit one case's prediction lines.
 
-    W5c-7 review S1/S2/S3: the blob is appended (write+flush+fsync), then
+    The blob is appended (write+flush+fsync), then
     the journal entry — carrying the byte offset AFTER the append — lands.
     On resume, ``truncate_to_last_commit`` discards any trailing data past
     the last journal offset, so a crash mid-blob leaves a clean file
@@ -534,7 +534,7 @@ def machine_probe() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Circuit breaker (B6)
+# Circuit breaker
 # ---------------------------------------------------------------------------
 
 # The broad failure signatures that count toward the breaker. A malformed
@@ -581,9 +581,9 @@ def failure_signature(exc: BaseException) -> str | None:
 
 class CircuitBreaker:
     """Trip after N consecutive infrastructure failures with the same
-    broad signature (B6).
+    broad signature.
 
-    W5c-7 review: "consecutive" means consecutive — a success RESETS the
+    "Consecutive" means consecutive — a success RESETS the
     count. Five infra failures spread over 1000 successful cases do NOT
     trip the breaker. A malformed dataset row or expected validation
     failure does NOT trip it ("failure is a result") and does NOT reset

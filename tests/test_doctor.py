@@ -544,7 +544,7 @@ class TestEditableInstall:
     def test_no_direct_url_fails(self, monkeypatch):
         # No dist-info at all is still a FAIL (jevmlx not installed),
         # distinct from a package install whose dist-info lacks
-        # direct_url.json (F1: OK).
+        # direct_url.json (harmless).
         monkeypatch.setattr(
             doctor.importlib.metadata,
             "distribution",

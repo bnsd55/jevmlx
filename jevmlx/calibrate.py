@@ -7,7 +7,7 @@ Two calibrators, one module:
 - Pooled logistic: a single (a, b) pair fitted on multi option log-odds
   z against yes/no labels — calibrated_log_odds = a * z + b, an option is
   selected when calibrated_log_odds > 0. z is the quantity the ENGINE
-  applies the calibrator to (P8): the corrected log-odds
+  applies the calibrator to: the corrected log-odds
   (yes - no) - (prior_yes - prior_no); collected with
   ``prior_correction=False`` (the CLI's prior_mode='off') z IS the raw
   log-odds, so bundles fitted before corrected-z collection still apply to
@@ -147,7 +147,7 @@ def collect_multi(
     Same cases shape as :func:`collect`; runs the engine once per case and,
     for every labeled multi field, folds each option's RAW [yes, no] logits
     (``option_logit_pairs``, bug 8, T=1, caller-temperature-agnostic) to the
-    decision quantity z the engine applies the calibrator to (P8):
+    decision quantity z the engine applies the calibrator to:
 
         z = (yes - no) - (prior_yes - prior_no)
 
@@ -247,7 +247,7 @@ def calibrated_log_odds(a: float, b: float, log_odds: float) -> float:
 
 @dataclass(frozen=True)
 class CalibrationBundle:
-    """Typed calibration artifact (W5-C finding 22).
+    """Typed calibration artifact.
 
     One object carries every fitted calibrator plus the provenance it is
     valid under. The engine derives the scalar temperature and the multi
@@ -256,7 +256,7 @@ class CalibrationBundle:
     revision) instead of silently applying numbers fitted elsewhere.
 
     ``prior_mode`` records which input the multi calibrator was fitted on
-    (finding 21): ``"off"`` = raw evidence log-odds; ``"neutral_v1"`` =
+    ``"off"`` = raw evidence log-odds; ``"neutral_v1"`` =
     prior-corrected log-odds (the neutral-context pass subtracted). Fit and
     apply must use the same input — the engine enforces it.
 

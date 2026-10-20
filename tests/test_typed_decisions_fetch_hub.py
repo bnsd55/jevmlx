@@ -1,6 +1,6 @@
 """fetch_all end-to-end with the Hub and parquet reads monkeypatched.
 
-Covers F6/F9: the default revision is DEFAULT_REVISION, any --revision value
+Covers the reproducibility contract: the default revision is DEFAULT_REVISION, any --revision value
 (branch name or sha) is resolved to a commit sha BEFORE downloading, every
 shard shares the resolved revision, per-shard sha256 files land in the lock
 sources, and write_outputs pins them into dataset.lock.json.

@@ -1,6 +1,6 @@
 """Fake-model tests for the invariance benchmark (no mlx, no model runs).
 
-Covers the W2-A gate's seams: deterministic variant construction, the
+Covers the invariance gate's seams: deterministic variant construction, the
 log-odds metric, and the flip/drift aggregation — the pieces that must be
 correct before the M5 run means anything.
 """

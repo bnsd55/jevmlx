@@ -1,11 +1,12 @@
-"""M5 CRITICAL B2+B3: A/B worktree from origin/<branch>; failed A/B setup
+"""A/B worktree from origin/<branch>; a failed A/B setup
 skips A/B steps instead of crashing.
 
-B2: benchmarks/m5.py ran 'git worktree add --detach <path> w2a-field-local'
-but on the M5 clone only origin/w2a-field-local exists (no local branch).
-Fix: _resolve_ab_ref tries the local branch first, then origin/<branch>.
+The ref bug: benchmarks/m5.py ran 'git worktree add --detach <path>
+w2a-field-local' but on the M5 clone only origin/w2a-field-local exists
+(no local branch). Fix: _resolve_ab_ref tries the local branch first,
+then origin/<branch>.
 
-B3: after B2 failed, the A/B bench step ran with cwd=ab-worktree (which did
+The cwd bug: after that failed, the A/B bench step ran with cwd=ab-worktree (which did
 not exist) -> uncaught FileNotFoundError killed the runbook before SUMMARY.
 Fix at the owning layer:
   (a) a step whose declared cwd is missing is recorded as failed (exit -1),
@@ -44,7 +45,7 @@ def _planned_root(tmp_path, monkeypatch):
     monkeypatch.setattr(m5, "REPO_ROOT", planned_root)
 
 
-# ---- B2: _resolve_ab_ref ---------------------------------------------------
+# ---- _resolve_ab_ref ---------------------------------------------------
 
 
 def test_resolve_ab_ref_prefers_local_branch(tmp_path):
@@ -111,7 +112,7 @@ def test_resolve_ab_ref_returns_bare_name_when_neither_resolves(tmp_path):
     assert ref == "nonexistent-branch"
 
 
-# ---- B3(a): missing cwd ----------------------------------------------------
+# ---- missing cwd ----------------------------------------------------
 
 
 def test_execute_step_missing_cwd_recorded_not_raised(tmp_path):
@@ -132,7 +133,7 @@ def test_execute_step_missing_cwd_recorded_not_raised(tmp_path):
     assert "cwd does not exist" in log
 
 
-# ---- B3(c): unexpected exception caught ------------------------------------
+# ---- unexpected exception caught ------------------------------------
 
 
 def test_execute_step_exception_caught_and_recorded(tmp_path, monkeypatch):
@@ -159,7 +160,7 @@ def test_execute_step_exception_caught_and_recorded(tmp_path, monkeypatch):
     monkeypatch.delenv("JEVMLX_M5_CAFFEINATED", raising=False)
 
     rc = m5.main(["--out", str(out), "--parity-models", QUALITY_TARGET, "--allow-sleep"])
-    # B3(d): exit non-zero (a step failed).
+    # Exit non-zero (a step failed).
     assert rc == 1
     # The exception was recorded in the step's log.
     log = (out / "timing.log").read_text()
@@ -171,7 +172,7 @@ def test_execute_step_exception_caught_and_recorded(tmp_path, monkeypatch):
     assert (out / "SUMMARY.md").exists()
 
 
-# ---- B3(b): A/B setup failure skips later A/B steps ------------------------
+# ---- A/B setup failure skips later A/B steps ------------------------
 
 
 def test_ab_setup_failure_skips_ab_steps_and_summaries(tmp_path, monkeypatch):
@@ -219,7 +220,7 @@ def test_ab_setup_failure_skips_ab_steps_and_summaries(tmp_path, monkeypatch):
             "--allow-sleep",
         ]
     )
-    # B3(d): exit non-zero (a step failed).
+    # Exit non-zero (a step failed).
     assert rc == 1
 
     runbook = (out / "RUNBOOK.md").read_text()
@@ -231,7 +232,7 @@ def test_ab_setup_failure_skips_ab_steps_and_summaries(tmp_path, monkeypatch):
     # No traceback leaked.
     assert "Traceback" not in runbook
 
-    # B3(b): SUMMARY still ran for the main side.
+    # SUMMARY still ran for the main side.
     summary_path = out / "SUMMARY.md"
     assert summary_path.exists(), "SUMMARY.md must be written even when A/B setup failed"
     summary = summary_path.read_text()
@@ -248,7 +249,7 @@ def test_ab_setup_success_runs_ab_steps(tmp_path, monkeypatch):
     """When A/B setup succeeds, the ab-bench and ab-invariance steps DO run
     (the skip logic does not fire). This guards against over-skipping.
 
-    B12: the fake ab-side bench rewrites its run.json git_sha to a DIFFERENT
+    The install guard: the fake ab-side bench rewrites its run.json git_sha to a DIFFERENT
     value (a real A/B run's jevmlx comes from the worktree), so GUARD 2 does
     not fire — the equal-sha case is test_ab_bench_measured_base_fails."""
     from tests.test_m5_e2e import TestM5MainEndToEnd
@@ -261,7 +262,7 @@ def test_ab_setup_success_runs_ab_steps(tmp_path, monkeypatch):
     def ab_ok_run(argv, **kwargs):
         joined = " ".join(argv)
         bin0 = argv[0].split("/")[-1]
-        # B8: ab-setup argv is a Python stale-worktree cleanup; git worktree
+        # ab-setup argv is a Python stale-worktree cleanup; git worktree
         # add is the first extra_argv. Both must exit 0.
         # Match by basename prefix (python/python3) — sys.executable's
         # basename differs per environment (uv managed CPython is 'python3').
@@ -269,7 +270,7 @@ def test_ab_setup_success_runs_ab_steps(tmp_path, monkeypatch):
         if is_python and "-c" in argv and "rmtree" in joined:
             calls.append(("ab-setup-cleanup", 0))
             return subprocess.CompletedProcess(tuple(argv), 0, stdout="", stderr="")
-        # B12 GUARD 1: <ab-venv>/python -I -c <guard snippet>. The fake venv
+        # Install GUARD 1: <ab-venv>/python -I -c <guard snippet>. The fake venv
         # has no python, so this must exit 0 WITHOUT running.
         if is_python and "-I" in argv and "-c" in argv:
             calls.append(("ab-install-guard", 0))
@@ -289,7 +290,7 @@ def test_ab_setup_success_runs_ab_steps(tmp_path, monkeypatch):
             calls.append(("uv", 0))
             return subprocess.CompletedProcess(tuple(argv), 0, stdout="", stderr="")
         proc = fake_run(argv, **kwargs)
-        # B12: the ab-side bench's run.jsons must not carry main's git_sha,
+        # The ab-side bench's run.jsons must not carry main's git_sha,
         # or GUARD 2 fails the step (they would — the fake builder writes the
         # real environment() of THIS repo for both sides).
         if bin0 == "jevmlx" and "bench" in argv[1:3] and "/ab/" in joined:
@@ -322,7 +323,7 @@ def test_ab_setup_success_runs_ab_steps(tmp_path, monkeypatch):
     assert "skipped: A/B measured the base code" not in runbook
 
 
-# ---- B3(b) summary note ----------------------------------------------------
+# ---- summary note for a skipped A/B side ------------------------------------
 
 
 def test_build_summary_text_ab_failed_note():

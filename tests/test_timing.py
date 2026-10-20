@@ -1,4 +1,4 @@
-"""W5b-8 tests: jevmlx/timing.py — the event ledger.
+"""jevmlx/timing.py tests — the event ledger.
 
 Pure-Python tests (no mlx): partition contracts fire, nested spans
 summarize, derived flat keys match today's engine keys, batched views.

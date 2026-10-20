@@ -1,4 +1,4 @@
-"""W1-C regression tests: prompt profiles, PEP 604 optionals, small fixes.
+"""Regression tests: prompt profiles, PEP 604 optionals, small fixes.
 
 Fast fake-tokenizer/model tests (no model loads); real-model coverage is in
 test_engine.py's slow module.
@@ -22,7 +22,7 @@ from jevmlx.engine import (
 )
 from jevmlx.schema import StructuredSchema
 
-# --- bug 3 / Q5: PromptProfile -------------------------------------------------
+# --- PromptProfile -------------------------------------------------
 
 
 def test_profile_for_qwen3_family_disables_thinking():
@@ -205,7 +205,7 @@ def test_pep604_union_of_two_still_rejected():
 
 def test_load_engine_logs_model_load_once(capsys):
     # Source-level check: the CACHED loader body contains exactly one
-    # "Engine loaded" line (the old code logged it twice). W5-D finding 36:
+    # "Engine loaded" line (the old code logged it twice). The
     # the cached body is _load_engine_resolved; the public wrapper resolves
     # the id and delegates.
     import inspect

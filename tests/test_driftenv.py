@@ -1,4 +1,4 @@
-"""W5c-9: the persisted drift envelope and the widened rescore band.
+"""The persisted drift envelope and the widened rescore band.
 
 The near-tie rescore must fire whenever the batched top-two margin sits
 inside INSTABILITY_BAND + E_bound(M) — E_bound from the PERSISTED drift
@@ -240,7 +240,7 @@ def test_engine_end_to_end_constant_band():
     """Same engine with a 0.0-bound envelope: margin 0.25 nats -> probability
     margin ~0.12 > 0.05, no rescore (the behavior the envelope widens).
 
-    D5 fix (c): the gate now checks the FINAL probability margin (p1 - p2),
+    The gate checks the FINAL probability margin (p1 - p2),
     not the raw log-score gap. A raw gap of 0.25 nats produces a probability
     margin of ~0.12 (well above 0.05), so the gate does not fire. The old
     test used margin=0.075 which is 0.037 in probability space — a near-tie

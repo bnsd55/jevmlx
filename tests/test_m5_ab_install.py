@@ -1,4 +1,4 @@
-"""B12: the A/B setup installs THE A/B WORKTREE, and the guards make a
+"""The A/B setup installs THE A/B WORKTREE, and the guards make a
 main-repo install impossible to repeat.
 
 Field evidence (M5, issue #63, 15:08 UTC): ab-setup.log ran
@@ -316,7 +316,7 @@ def test_ab_bench_measured_base_fails_runbook(tmp_path, monkeypatch):
 
 
 def test_build_summary_text_ab_base_code_note():
-    """B12: the A/B note names the base-code discard, not 'setup failed'."""
+    """The A/B note names the base-code discard, not 'setup failed'."""
     main = {"combos": [], "parity_status": "-"}
     text = m5.build_summary_text(main, None, parity_models=[], ab_base_code=True)
     assert "measured the base code" in text

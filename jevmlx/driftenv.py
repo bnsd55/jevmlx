@@ -1,6 +1,6 @@
-"""W5c-9: the persisted batched-drift envelope and the derived rescore band.
+"""The persisted batched-drift envelope and the derived rescore band.
 
-The near-tie rescore (W3-E) exists because batched Metal matmuls tile
+The near-tie rescore exists because batched Metal matmuls tile
 differently per shape and log-score gaps inside the band are batch-shape
 noise. The band was the CONSTANT ``INSTABILITY_BAND`` (0.05 nats); PR #66's
 drift probe measured pairwise-gap drift (d_gap) up to 0.0625 nats at >= 16
@@ -9,7 +9,7 @@ margin 0.031 with a batched raw-logit margin 0.0625 sat ABOVE the 0.05
 band and never reached the canonical shape (seen in parity:
 code_security/is_vulnerability, batch-one margin 0.031, escaped).
 
-The rule this module ships (GPT-REVIEW-4-drift question 2):
+The rule this module ships:
 
     for a pass with M rows: rescore when batched top-two margin <=
     INSTABILITY_BAND + E_bound(M)
@@ -86,7 +86,7 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 # The drift lattice: pairwise-gap drift on the fp16 grid lands on multiples
-# of 1/64 nat (measured plateau: 0.0625; every observed value in the W5c-4
+# of 1/64 nat (measured plateau: 0.0625; every observed value in the drift
 # matrix is a multiple of 0.00390625). Bands round UP onto this grid.
 DRIFT_LATTICE = 64.0
 
@@ -116,7 +116,7 @@ class DriftEnvelopeError(RuntimeError):
 # Bucket edges — shipped in the package, versioned, part of the envelope key.
 # ---------------------------------------------------------------------------
 
-# The W5c-4 matrix measured the drift plateau starting at 16 rows and flat
+# The drift matrix measured the plateau starting at 16 rows and flat
 # to 128. These edges are the DEFAULT set; a finer M>16 split (the fp32
 # bisect jump between M=16 and M=112) lands as a NEW versioned edge set —
 # never an in-place edit, because the edge version rides in the envelope

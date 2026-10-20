@@ -1,4 +1,4 @@
-"""Canonical JSON serialization (W5-A, finding 39).
+"""Canonical JSON serialization (`ensure_ascii=False`).
 
 One serializer for every prompt and candidate path: ``ensure_ascii=False``.
 The stdlib default escaped non-ASCII labels ("\u00e9") in candidate

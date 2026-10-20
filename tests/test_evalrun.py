@@ -248,7 +248,7 @@ def test_split_and_dataset_lock(tmp_path):
 
 
 def test_dataset_lock_sha256_is_the_lock_file_hash(tmp_path):
-    """W5c-17: run.json's dataset_lock_sha256 == sha256 of the exact lock
+    """run.json's dataset_lock_sha256 == sha256 of the exact lock
     file that was passed in (was silently null when the bench registered a
     lock path nothing had written)."""
     import hashlib
@@ -284,7 +284,7 @@ def test_dataset_lock_sha256_is_the_lock_file_hash(tmp_path):
 
 
 def test_missing_dataset_lock_is_an_error_not_null(tmp_path):
-    """W5c-17: a non-None dataset_lock_path whose file does not exist must
+    """A non-None dataset_lock_path whose file does not exist must
     raise OSError — a silent null in run.json breaks the provenance chain
     (leaderboard rows could not be traced to a dataset revision)."""
     cases = [
@@ -570,7 +570,7 @@ def test_carry_consensus_flag_adds_consensus_distribution(tmp_path):
 
 
 def test_run_eval_writes_timing_json_for_parallel_track(tmp_path):
-    """W3-R: the parallel track's _meta timing split is aggregated into
+    """The parallel track's _meta timing split is aggregated into
     <combo>/timing.json (median over canonical calls; no second run). A
     _meta without the split keys (mock decide_fn) still yields a file with
     defaults, and the naive track writes none."""
@@ -629,7 +629,7 @@ def test_run_eval_writes_timing_json_for_parallel_track(tmp_path):
     assert not (out2 / "timing.json").exists()
 
 
-# --- W5c-16: heartbeat every N completed cases ------------------------------
+# --- heartbeat every N completed cases ------------------------------
 
 
 def _n_cases(n: int) -> list[dict]:
@@ -791,11 +791,11 @@ class TestHeartbeat:
         assert "fields_error=2/4" in hb_lines[1]
 
 
-# --- B11-naive: naive_local track writes timing.json -----------------------
+# --- naive_local track writes timing.json -----------------------
 
 
 def test_naive_track_writes_timing_json_with_call_level_ms(tmp_path):
-    """B11-naive: when naive_local _meta carries per_item_end_to_end_ms,
+    """When naive_local _meta carries per_item_end_to_end_ms,
     run_eval writes timing.json with the call-level median (not per-line
     latency_ms)."""
     cases = [
@@ -843,7 +843,7 @@ def test_naive_track_writes_timing_json_with_call_level_ms(tmp_path):
 
 
 def test_naive_track_prediction_lines_carry_per_item_end_to_end_ms(tmp_path):
-    """B11-naive: naive prediction lines carry per_item_end_to_end_ms from
+    """Naive prediction lines carry per_item_end_to_end_ms from
     _meta, so the call-level latency is on every line."""
     cases = [
         {
@@ -954,7 +954,7 @@ def test_naive_raw_text_truncated_to_4000_chars():
     assert out.endswith("...[truncated 500 chars]")
 
 
-# ------------- P5 (F2): the eval never silently retries or swallows -------
+# ------------- the eval never silently retries or swallows -------
 
 
 def _constrained_case():
@@ -979,8 +979,8 @@ def _constrained_case():
 
 
 def test_T1_typeerror_inside_decide_fn_is_a_case_failure(tmp_path):
-    """P5 T1: a decide_fn that ACCEPTS constraints but raises TypeError
-    inside (scoring/MLX) is a case FAILURE through the P2 error path —
+    """A decide_fn that ACCEPTS constraints but raises TypeError
+    inside (scoring/MLX) is a case FAILURE through the canonical error path —
     never an unconstrained retry that turns the case into a success.
     Main retries without constraints and journals an unconstrained result."""
     calls = []
@@ -1001,7 +1001,7 @@ def test_T1_typeerror_inside_decide_fn_is_a_case_failure(tmp_path):
     )
     assert run["counts"]["cases"] == 1
     lines = _read_lines(tmp_path / "predictions.jsonl")
-    # One failure line per labelled field (P2) — no unconstrained success.
+    # One failure line per labelled field — no unconstrained success.
     assert [line["field"] for line in lines] == ["action"]
     assert "TypeError" in lines[0]["error"]
     assert lines[0]["prediction"] is None
@@ -1010,7 +1010,7 @@ def test_T1_typeerror_inside_decide_fn_is_a_case_failure(tmp_path):
 
 
 def test_T2_two_arg_decide_fn_with_constrained_case_fails_at_start(tmp_path):
-    """P5 T2: a 2-arg decide_fn + a case carrying constraints is a
+    """A 2-arg decide_fn + a case carrying constraints is a
     configuration error at run start, naming the decide_fn — the run never
     silently drops the constraints. Main retried unconstrained and
     completed the run."""
@@ -1031,7 +1031,7 @@ def test_T2_two_arg_decide_fn_with_constrained_case_fails_at_start(tmp_path):
 
 
 def test_T3_oracle_pass_failure_is_recorded_not_dropped(tmp_path):
-    """P5 T3: an exception inside the oracle pass is recorded on the case's
+    """An exception inside the oracle pass is recorded on the case's
     prediction lines (oracle_error) and logged — never `pass`. Main dropped
     the oracle result on TypeError and CRASHED the run on anything else."""
     import logging
@@ -1086,7 +1086,7 @@ def test_T3_oracle_pass_failure_is_recorded_not_dropped(tmp_path):
 
 
 def test_T3b_two_arg_decide_fn_with_oracle_case_fails_at_start(tmp_path):
-    """P5: the same upfront rule for `oracle_overrides` — a 2-arg decide_fn
+    """The same upfront rule for `oracle_overrides` — a 2-arg decide_fn
     + a dependency case needing the oracle pass fails at start."""
 
     def decide_fn(schema_dict, context):

@@ -1,4 +1,4 @@
-"""W3-D part 2 tests: selective parent-conditioned second pass.
+"""Selective parent-conditioned second pass tests.
 
 Verifies:
 - Child flips under parent conditioning (the second pass changes the child's
@@ -35,7 +35,7 @@ def _make_schema_with_depends() -> dict:
 
 def test_no_depends_on_is_bit_identical():
     """A schema without depends_on fields does NOT run a second pass — the
-    result is bit-identical to the pre-W3-D-part-2 behaviour."""
+    result is bit-identical to the behaviour before the second pass existed."""
     model = FakeModel()
     tokenizer = FakeTokenizer()
     schema = StructuredSchema({"a": {"type": "enum", "description": "d", "choices": ["A", "B"]}})
@@ -199,7 +199,7 @@ def test_oracle_parent_gap_none_without_oracle_predictions():
 
 
 def test_conditioned_row_token_reconstruction():
-    """F1 fix: the conditioned row tokens must equal tokenize(lead_in_text +
+    """The conditioned row tokens must equal tokenize(lead_in_text +
     parent_json + child_object). Verifies no double-prefixing of parent tokens.
     """
     import json as _json

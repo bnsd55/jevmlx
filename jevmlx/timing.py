@@ -1,8 +1,8 @@
-"""W5b-8: the event ledger for engine timing (GPT-REVIEW-2 §C item 12).
+"""The event ledger for engine timing.
 
 Standalone module — pure Python, NO mlx import, NO engine wiring yet.
 Engine adoption (deleting the t_gather_ms/t_broadcast_ms/t_scored_ms
-accumulators) lands after W5-B.
+replaces the ad-hoc accumulators).
 
 Why: the current ``*_ms`` keys overlap (``suffix_eval_ms`` includes
 broadcast + gather, which are ALSO reported separately), ``elapsed_ms``
@@ -206,7 +206,7 @@ class Ledger:
 
         ``prior_ms`` overrides the prior-phase derivation for ledgers that
         carry no prior span (the batched per-context ledgers: the neutral
-        pass runs ONCE on the request ledger — finding 26 — and is exposed
+        pass runs ONCE on the request ledger and is exposed
         on every result as the shared value).
         """
         top_level = self._top_level_intervals()
@@ -221,7 +221,7 @@ class Ledger:
         if prior_ms is None:
             prior_ms = sum(iv.ms for iv in self._top_level_intervals(phase="prior"))
         # elapsed_ms = the ONE top-level ``request`` span when present
-        # (W5b-14 review F10: true wall time — the stage spans are children
+        # True wall time — the stage spans are children
         # of it and never double-count). Older paths without a request span
         # fall back to the top-level MAIN-span sum (the partition).
         request_ivs = [iv for iv in top_level if iv.name == "request" and iv.phase == "main"]

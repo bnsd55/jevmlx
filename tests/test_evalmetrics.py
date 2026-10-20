@@ -360,7 +360,7 @@ class TestAssembly:
             "ece_5bin_equal_mass",
             "tie_rate",
             "risk_coverage",
-            # W6-B6b: the old accuracy_cluster_bootstrap (1000 draws) is
+            # The old accuracy_cluster_bootstrap (1000 draws) is
             # replaced by accuracy_ci (case-cluster bootstrap, B=2000).
             "accuracy_ci",
             "valid_accuracy",
@@ -729,7 +729,7 @@ class TestTypesafeReportTable:
 
 
 # ---------------------------------------------------------------------------
-# W6-B6b: statistics (Wilson, cluster bootstrap, McNemar, paired)
+# Statistics (Wilson, cluster bootstrap, McNemar, paired)
 # ---------------------------------------------------------------------------
 
 
@@ -805,7 +805,7 @@ class TestClusterBootstrapCI:
         assert cluster_bootstrap_ci(single, field_accuracy) is None
 
     def test_b2000_default(self):
-        """The default is B=2000 (the B6 spec)."""
+        """The default is B=2000."""
         from jevmlx.evalmetrics import cluster_bootstrap_ci, field_accuracy
 
         ci = cluster_bootstrap_ci(P, field_accuracy)

@@ -4,7 +4,7 @@ A constrained case with a depends_on field where the dependency wave's
 re-scored argmax VIOLATES a case constraint: the constraint MAP forces the
 value back, and the field's telemetry (probability, log_score_margin,
 probability_margin, tie, alternatives, parsed prob) must describe the
-RETURNED value — the same P9 recompute reconcile_case_constraints runs on
+RETURNED value — the same recompute reconcile_case_constraints runs on
 the pre-dependency MAP.
 
 The scenario (deterministic token-id model, see _TokenBiasModel):
@@ -88,7 +88,7 @@ def test_post_dependency_map_rebuilds_decision_record():
     assert result["parsed_json"]["subtype"]["value"] == "refund"
 
     tel = result["field_telemetry"]["subtype"]
-    # P9/#194: the record describes the RETURNED value. refund is the wave
+    # The record describes the RETURNED value (issue #194). refund is the wave
     # distribution's LOSER (bug carries the +5 bias), so its probability is
     # tiny and its margin to the best competitor negative.
     assert tel["value"] == "refund"

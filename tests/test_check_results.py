@@ -284,7 +284,7 @@ def test_main_exits_0_on_success(tmp_path, capsys):
 
 
 def test_summary_row_has_majority_and_exact_columns(tmp_path):
-    """P7: SUMMARY.md rows carry 'majority' (mean over fields) and 'exact'
+    """SUMMARY.md rows carry 'majority' (mean over fields) and 'exact'
     columns next to field accuracy."""
     from benchmarks.summarize_results import _row_from_folder
 
@@ -309,7 +309,7 @@ def test_imports_without_mlx(monkeypatch):
     monkeypatch.setitem(sys.modules, "mlx.core", None)
     monkeypatch.setitem(sys.modules, "mlx_lm", None)
     # Force a re-import of the check module's dependencies.
-    # W5-C-fix: jevmlx.calibrate is NOT an mlx dependency and holds the
+    # jevmlx.calibrate is NOT an mlx dependency and holds the
     # CalibrationBundle class; evicting it while jevmlx.engine survives
     # makes isinstance(bundle, CalibrationBundle) stale across the suite
     # (engine holds the old class object, later imports get a new one).
@@ -356,7 +356,7 @@ def test_bench_machine_tag_patches_live_module(monkeypatch):
 
 
 class TestParityGate:
-    """W4-A: a model enters the README compat table only with a passing
+    """A model enters the README compat table only with a passing
     slow parity test (parity.json in the model folder)."""
 
     def test_passing_parity_passes(self, tmp_path):
@@ -448,7 +448,7 @@ class TestParityGate:
     def test_gap_drift_is_not_a_stage(self, tmp_path):
         """The decision-based contract (issue #184): a gap-drift-only
         payload with identical winners and no escaped near-tie PASSES —
-        the drift is fp16 lattice noise (Q4: 4-8 ulp at the logits'
+        the drift is fp16 lattice noise (4-8 ulp at the logits'
         magnitude), reported as a diagnostic, never gated. Main failed
         this payload on the gap stage."""
         from benchmarks.check_results import check_parity
@@ -497,7 +497,7 @@ class TestParityGate:
         assert any("pre-v2" in p for p in problems)
 
     def test_missing_gap_drift_key_fails(self, tmp_path):
-        """W5c-1 review: a v2 payload that carries max_raw_row_drift_nats but
+        """A v2 payload that carries max_raw_row_drift_nats but
         is missing max_gap_drift_nats is a CONTRACT failure (not a fallback)
         — the gated decomposition key is mandatory."""
         from benchmarks.check_results import check_parity
@@ -558,7 +558,7 @@ class TestParityGate:
         assert any("pre-decision-contract" in p and "regenerate" in p for p in problems)
 
     def test_fail_status_prints_fail_word(self, tmp_path):
-        """P4/I7: a parity.json with a winner changed (status=FAIL) prints
+        """A parity.json with a winner changed (status=FAIL) prints
         'FAIL: ...' not 'DRIFT: ...'."""
         from benchmarks.check_results import check_parity
 
@@ -587,7 +587,7 @@ class TestParityGate:
         assert "DRIFT:" not in msg
 
     def test_pass_status_passes(self, tmp_path):
-        """P4/I7: a parity.json with status=PASS passes check_parity."""
+        """A parity.json with status=PASS passes check_parity."""
         from benchmarks.check_results import check_parity
 
         (tmp_path / "parity.json").write_text(
@@ -678,7 +678,7 @@ class TestParityGate:
 
 
 def test_check_folder_lock_sha_mismatch_fails(tmp_path):
-    """parity-gates (review fix 1): the dataset lock lives at the MODEL
+    """The dataset lock lives at the MODEL
     folder level as <dataset>.dataset.lock.json; check_results verifies
     its sha256 matches run.json's dataset_lock_sha256."""
 
@@ -706,7 +706,7 @@ def test_check_folder_missing_model_lock_fails(tmp_path):
 
 
 def test_leaderboard_cases_from_run_json_counts(tmp_path):
-    """parity-gates (review fix 3): the 'Cases' column comes from run.json's
+    """The 'Cases' column comes from run.json's
     counts.cases (the source of truth), not from the agreement metrics'
     n_cases (which can undercount when a case has no valid prediction)."""
     from benchmarks.leaderboard import _local_rows

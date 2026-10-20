@@ -116,9 +116,9 @@ class TestPlanSteps:
             "readme",
         ]
         ab_setup = next(s for s in steps if s.id == "ab-setup")
-        # B8: argv is a stale-worktree cleanup; git worktree add is the first
+        # argv is a stale-worktree cleanup; git worktree add is the first
         # extra_argv. The branch ref and worktree path appear across them.
-        # B12: extra_argv entries are ExtraCmd(argv, cwd) — the install runs
+        # extra_argv entries are ExtraCmd(argv, cwd) — the install runs
         # -e <worktree>[dev,bench] with cwd=<worktree> (never the caller's
         # cwd, which made every A/B measure main — issue #63), followed by a
         # guard that fails unless the venv's jevmlx resolves in the worktree.
@@ -135,7 +135,7 @@ class TestPlanSteps:
         assert guard.cwd == m5.REPO_ROOT  # -I makes the cwd irrelevant, kept neutral
         assert "-I" in guard.argv and "-c" in guard.argv
         assert str(worktree) in guard.argv[-1]
-        # B12: --ab-eval-args ride the ab-bench and ab-invariance argvs.
+        # --ab-eval-args ride the ab-bench and ab-invariance argvs.
         steps = plan_steps(
             out,
             parity_models=[QUALITY_TARGET],
@@ -384,7 +384,7 @@ class TestBuildSummaryText:
         assert "75.0%" in text
 
 
-# --- W5c-15: macOS idle-sleep blocking (caffeinate re-exec) ----------------
+# --- macOS idle-sleep blocking (caffeinate re-exec) ----------------
 
 
 class TestMaybeCaffeinate:

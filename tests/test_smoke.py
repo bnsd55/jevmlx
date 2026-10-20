@@ -74,7 +74,7 @@ def test_validate_json_non_object_is_valid_but_no_match():
 
 
 def test_validate_json_boolean_and_enum_type_checks():
-    """D2: booleans must be real JSON bools; enums compare as str only."""
+    """Booleans must be real JSON bools; enums compare as str only."""
     from jevmlx.engine import _validate_json
 
     schema = StructuredSchema(

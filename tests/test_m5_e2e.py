@@ -1,4 +1,4 @@
-"""End-to-end test of benchmarks/m5.py on REAL-shaped artifacts (W5c-M5-E2E).
+"""End-to-end test of benchmarks/m5.py on REAL-shaped artifacts .
 
 Why this file exists: the M5 7B smoke ran 8 hours and crashed at the LAST
 step (SUMMARY) on a report.json shape the unit tests never saw — typesafe's
@@ -618,7 +618,7 @@ class TestRealArtifactShapes:
         assert run["config"]["track"] == "parallel"
         assert run["config"]["permutations"] == "rotations"
         # No lock file passed -> sha stays None here; the sha contract itself
-        # is owned by test_evalrun (W5c-17).
+        # is owned by test_evalrun.
         assert "dataset_lock_sha256" in run["config"]
 
     def test_timing_json_preset_aggregate_shape(self, artifacts):
@@ -768,7 +768,7 @@ class TestFmtCoverageOnRealArtifacts:
 
 
 class TestPlannedArgvParses:
-    """B1 ROOT-CAUSE guard: every argv that benchmarks/m5.py plan_steps builds
+    """ROOT-CAUSE guard: every argv that benchmarks/m5.py plan_steps builds
     for OUR OWN CLI/module must parse against the REAL argparse — parse-only,
     no execution.
 
@@ -826,7 +826,7 @@ class TestPlannedArgvParses:
         assert steps, "plan_steps returned no steps"
         parsed_any = False
         for step in steps:
-            # B12: extra_argv entries are ExtraCmd(argv, cwd) — unpack .argv.
+            # extra_argv entries are ExtraCmd(argv, cwd) — unpack .argv.
             for argv in (
                 step.argv,
                 step.pre_argv,
@@ -844,7 +844,7 @@ class TestPlannedArgvParses:
         assert parsed_any, "no jevmlx/benchmarks.* argv was checked"
 
     def test_bench_models_file_alone_parses(self):
-        """B1 fix: ``jevmlx bench --models-file <f>`` no longer requires --model."""
+        """``jevmlx bench --models-file <f>`` no longer requires --model."""
         from jevmlx.cli import build_parser
 
         ns = build_parser().parse_args(["bench", "--models-file", "/tmp/m.txt", "--out", "/tmp/o"])
@@ -867,7 +867,7 @@ class TestPlannedArgvParses:
             )
 
     def test_no_alias_token_as_model_value_in_planned_argv(self, tmp_path):
-        """B4: every planned argv passes the RESOLVED Hub id (not an alias)
+        """Every planned argv passes the RESOLVED Hub id (not an alias)
         as the --model value. An A/B branch may predate the alias resolver,
         so a cross-branch argv carrying 'quality' asks the Hub for a repo
         named 'quality' (401). Aliases are for humans at the CLI only."""
@@ -884,7 +884,7 @@ class TestPlannedArgvParses:
         alias_tokens = set(MODEL_ALIASES)
         checked = 0
         for step in steps:
-            # B12: extra_argv entries are ExtraCmd(argv, cwd) — unpack .argv.
+            # extra_argv entries are ExtraCmd(argv, cwd) — unpack .argv.
             for argv in (
                 step.argv,
                 step.pre_argv,
@@ -1164,7 +1164,7 @@ class TestM5MainEndToEnd:
 
         calls.clear()
         m5.main(["--out", str(out), "--parity-models", QUALITY_TARGET, "--allow-sleep"])
-        # B9: the summary and readme steps are in_process and NEVER skipped
+        # The summary and readme steps are in_process and NEVER skipped
         # (always regenerated); every OTHER step is skipped because its
         # outputs exist. The readme step fires its two subprocess calls
         # (leaderboard + check_results) on every run — against the planned
@@ -1330,7 +1330,7 @@ class TestM5MainEndToEnd:
         assert "sleep_blocked: False" in runbook
 
     def test_b7_bench_reruns_when_combo_failed(self, tmp_path, monkeypatch):
-        """B7: a bench step whose combos include a run_failed/load_failed
+        """A bench step whose combos include a run_failed/load_failed
         combo is NOT done on rerun — it reruns so the failed combos get
         retried (bench itself skips the clean combos). The .done marker
         alone is insufficient because bench exits 0 when at least one
@@ -1362,7 +1362,7 @@ class TestM5MainEndToEnd:
         assert "jevmlx bench --model quality" in runbook
 
     def test_b9_summary_always_regenerates(self, tmp_path, monkeypatch):
-        """B9: SUMMARY.md is a pure function of the JSON artifacts — it is
+        """SUMMARY.md is a pure function of the JSON artifacts — it is
         ALWAYS regenerated, never marker-skipped. A second run rewrites it
         even when every other step is skipped."""
         out = tmp_path / "run-b9"

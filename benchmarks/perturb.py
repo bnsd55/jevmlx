@@ -85,7 +85,7 @@ TRANSFORMS: dict[str, tuple[Callable[..., str], bool]] = {
     "shuffle": (_shuffle, True),
 }
 
-# Schema perturbation kinds (W6-B2): label-preserving schema changes. These
+# Schema perturbation kinds: label-preserving schema changes. These
 # transform the CASE (schema), not the context. optrev reverses every enum
 # field's option order (labels are strings — the option description — so a
 # reversed order keeps the label valid). criterion prefixes each field's
@@ -247,7 +247,7 @@ def main(argv: list[str] | None = None) -> int:
         for record in records:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-    # B6: write the dataset lock so build_datasets finds the registered
+    # Write the dataset lock so build_datasets finds the registered
     # <name>.dataset.lock.json (without this, the bench passed a lock path
     # that was never written and run.json's dataset_lock_sha256 raised
     # OSError at eval time). The lock records the sha256 of the cases file

@@ -40,18 +40,18 @@ DATASETS = (
     "synthetic-dependent",
 )
 
-# W6-B5 public gold datasets (F2): the BARE name is accepted on the CLI as
+# Public gold datasets: the BARE name is accepted on the CLI as
 # shorthand for both views; build_datasets only produces the VIEW-SUFFIXED
 # cases files, so combos expand bare -> suffixed.
 PUBLIC_DATASETS = ("ag_news", "boolq", "sst5")
 PUBLIC_VIEWS = ("balanced", "natural")
 PUBLIC_DATASET_NAMES = tuple(f"{name}.{view}" for name in PUBLIC_DATASETS for view in PUBLIC_VIEWS)
 
-# W6-B2 OpenJev datasets: authored144 (3-way evidence interpretation) and
+# OpenJev datasets: authored144 (3-way evidence interpretation) and
 # perturbations108 (label-preserving perturbations). No views — each is one
 # cases file. Model-reviewed, not human-adjudicated (meta.annotation_status).
 OPENJEV_DATASETS = ("authored144", "perturbations108")
-# W6-B1: jabr classifier-benchmark — single-view (all 78 cases are the
+# jabr classifier-benchmark — single-view (all 78 cases are the
 # benchmark; no balanced/natural sampling). Not in PUBLIC_VIEWS expansion.
 JABR_DATASETS = ("jabr",)
 DATASETS_ALL = DATASETS + PUBLIC_DATASETS + PUBLIC_DATASET_NAMES + OPENJEV_DATASETS + JABR_DATASETS
@@ -201,10 +201,10 @@ def build_datasets(
         paths[name] = jsonl
         paths_locks[name] = lock
 
-    # W6-B5 public gold datasets: two views each (balanced diagnostic /
+    # Public gold datasets: two views each (balanced diagnostic /
     # natural distribution), each view its own cases file + lock. The
-    # verifier re-checks the pinned file sha256s on cache reuse (F5). Both
-    # the bare name and the view-suffixed names are accepted here (F2); the
+    # verifier re-checks the pinned file sha256s on cache reuse. Both
+    # the bare name and the view-suffixed names are accepted here; the
     # requested views are tracked so only the asked-for files are built.
     requested_public = {
         (name[: -len(f".{view}")], view)
@@ -235,7 +235,7 @@ def build_datasets(
             paths[f"{name}.{view}"] = jsonl
             paths_locks[f"{name}.{view}"] = lock
 
-    # W6-B2 OpenJev datasets: authored144 + perturbations108 (one cases file
+    # OpenJev datasets: authored144 + perturbations108 (one cases file
     # each, no views). Fetch + convert from the pinned GitHub revision.
     for name in OPENJEV_DATASETS:
         if name not in datasets:
@@ -258,9 +258,9 @@ def build_datasets(
         paths[name] = jsonl
         paths_locks[name] = lock
 
-    # W6-B1: jabr classifier-benchmark — single-view (all 78 cases are the
+    # jabr classifier-benchmark — single-view (all 78 cases are the
     # benchmark; no balanced/natural sampling). The verifier re-checks the
-    # pinned file sha256 on cache reuse (same F5 rule).
+    # pinned file sha256 on cache reuse (the same fail-closed rule).
     if "jabr" in datasets:
         jsonl = BENCH_CACHE / "jabr.jsonl"
         lock = BENCH_CACHE / "jabr.dataset.lock.json"
@@ -302,7 +302,7 @@ def build_datasets(
             paths[name] = jsonl
             paths_locks[name] = lock
 
-    # B6: fail fast — every registered dataset must have its lock file on
+    # Fail fast — every registered dataset must have its lock file on
     # disk right after building. A missing lock here (a builder that wrote
     # the wrong name, or wrote none) used to surface per-combo at eval time
     # as 'OSError: dataset lock file not found' AFTER the model loaded — an
@@ -325,7 +325,7 @@ def _rebuild_if_needed(jsonl: Path, lock: Path, build, verify=None) -> None:
     ``cases_sha256`` (the same integrity rule the fetchers apply); a
     mismatched pair (truncated write, stale cache, edited file) rebuilds.
     ``verify`` (a lock -> problem-string-or-None callable) adds an extra
-    validity gate on cache reuse — the public fetchers' pin re-check (F5):
+    validity gate on cache reuse — the public fetchers' pin re-check:
     a lock whose recorded file sha256 no longer equals the hardcoded
     expectation forces a rebuild.
     """
@@ -368,7 +368,7 @@ def _build_typesafe() -> None:
     # (build_datasets reads it back from there). Without --lock the fetcher
     # writes its default 'dataset.lock.json', so the registered path goes
     # missing and run.json's dataset_lock_sha256 raised OSError at eval
-    # time (the B6 field failure). Same convention as _build_bundled /
+    # time (the field failure). Same convention as _build_bundled /
     # _build_typed_decisions.
     rc = fetch_main(["--out", out, "--lock", lock])
     if rc != 0:
@@ -376,7 +376,7 @@ def _build_typesafe() -> None:
 
 
 def _public_pin_problem(lock: Path) -> str | None:
-    """F5: on cache reuse, re-check the lock's recorded file sha256s against
+    """On cache reuse, re-check the lock's recorded file sha256s against
     the hardcoded pin expectations. None = still the pinned bytes."""
     from benchmarks.public.fetch import DATASETS
 
@@ -461,7 +461,7 @@ def _build_jabr() -> None:
 
 
 def _jabr_pin_problem(lock: Path) -> str | None:
-    """F5 on cache reuse: re-check the lock's recorded file sha256 against
+    """On cache reuse: re-check the lock's recorded file sha256 against
     the hardcoded pin expectation. None = still the pinned bytes."""
     from benchmarks.public.jabr import EXPECTED_SHA256, REVISION, SOURCE_FILE
 
@@ -513,7 +513,7 @@ def _build_perturbed(bundled: Path) -> None:
             "3",
             "--seed",
             "0",
-            # B6: the registered lock name is <dataset>.dataset.lock.json
+            # The registered lock name is <dataset>.dataset.lock.json
             # (same convention as every other builder).
             "--lock",
             str(BENCH_CACHE / "perturbed.dataset.lock.json"),
@@ -570,7 +570,7 @@ def _load_engine_with_timeout(model: str, load_timeout: float) -> Any:
 
 
 def _combo_previously_failed(combo_dir: Path) -> bool:
-    """B6: True when the combo's run.json records a run_failed/load_failed
+    """True when the combo's run.json records a run_failed/load_failed
     status — a failed combo must rerun fresh, not resume from partial
     predictions (which are not a valid resume point).
 
@@ -612,7 +612,7 @@ def _write_failure_run(combo_dir: Path, status: str, exc: BaseException) -> Path
 def _run_model_parity(
     model: str, engine, folder: Path, scorers: list[str] | None = None
 ) -> str | None:
-    """W4-B + F9: run the scoring-parity check on a loaded engine and write
+    """Run the scoring-parity check on a loaded engine and write
     ONE parity artifact per scorer (``parity.json`` for the default scorer,
     ``parity-<scorer>.json`` for the others). A payload that mixed scorers
     proved parity for neither, so every scorer the bench will run gets its
@@ -679,8 +679,8 @@ def run_bench(
     tag = preflight(force, machine_override)
     print(f"machine: {tag}")
 
-    # W5c-14 (#79): cap the Metal buffer cache for the whole run. The
-    # per-combo clear (W5c-13) releases the cache between combos, but inside
+    # Cap the Metal buffer cache for the whole run (#79). The
+    # per-combo clear releases the cache between combos, but inside
     # a long combo (typesafe, 426+ cases with rotations) the Metal allocator
     # hoards freed buffers and pushes the machine into swap. set_cache_limit
     # makes the allocator evict buffers above the cap instead of hoarding —
@@ -729,13 +729,13 @@ def run_bench(
         for dataset in combo_dataset_names
     ]
     engine_loaded = False
-    parity_note: str | None = None  # W4-B: set when the parity check fails
+    parity_note: str | None = None  # set when the parity check fails
     try:
         for track, scorer, dataset in combos:
             combo = f"{track}-{scorer}-{dataset}"
             combo_dir = folder / combo
             combo_dir.mkdir(parents=True, exist_ok=True)
-            # N3: --fresh deletes the combo dir (explicit, logged) so the
+            # --fresh deletes the combo dir (explicit, logged) so the
             # run starts clean. Otherwise: manifest present -> resume,
             # absent -> fresh.
             if fresh and combo_dir.exists():
@@ -744,7 +744,7 @@ def run_bench(
                 print(f"=== {combo}: --fresh, removing existing dir ===")
                 _shutil.rmtree(combo_dir)
                 combo_dir.mkdir(parents=True, exist_ok=True)
-            # B6: a combo whose run.json says run_failed/load_failed must
+            # A combo whose run.json says run_failed/load_failed must
             # rerun (fresh), not resume — a failed run's partial predictions
             # are not a valid resume point. Without this, a transient failure
             # (e.g. a missing lock, now fixed) stuck the combo as 'resume'
@@ -757,7 +757,7 @@ def run_bench(
                 combo_dir.mkdir(parents=True, exist_ok=True)
             _has_manifest = (combo_dir / "manifest.json").is_file()
             print(f"=== {combo} ({runs} run(s)) [{'resume' if _has_manifest else 'fresh'}] ===")
-            # W5c-13 (#79): reset the Metal peak-memory counter at combo
+            # Reset the Metal peak-memory counter at combo
             # start so each combo's peak is its own (not cumulative across
             # the matrix). The clear happens AFTER the combo (below).
             _reset_metal_peak_memory()
@@ -766,7 +766,7 @@ def run_bench(
                     # Load once per model, lazily, inside the timeout guard.
                     _load_engine_with_timeout(model, load_timeout)
                     engine_loaded = True
-                    # W4-B: scoring parity (batch=1 vs batched vs chunked)
+                    # Scoring parity (batch=1 vs batched vs chunked)
                     # over the bundled presets, recorded as parity.json in
                     # the model folder. A model that cannot demonstrate
                     # scoring parity gets NO accuracy numbers: every combo
@@ -790,7 +790,7 @@ def run_bench(
                 result = None
                 for run_index in range(runs):
                     if run_index > 0:
-                        # W5c-12: repeat runs start from a clean combo dir.
+                        # Repeat runs start from a clean combo dir.
                         # 'last one kept' semantics: run 1's output is
                         # discarded (rmtree + recreate), then run 2+ runs
                         # fresh (resume=False). --resume applies to the FIRST
@@ -818,7 +818,7 @@ def run_bench(
                     print(f"  run {run_index + 1}/{runs} done")
                 assert result is not None
                 last_run[combo] = result
-                # W5c-13 (#79): sample Metal memory AFTER the combo, then
+                # Sample Metal memory AFTER the combo, then
                 # clear the buffer cache so it does not accumulate across
                 # combos (the single-model run_bench path never called
                 # _clear_metal_cache before — only run_bench_models did,
@@ -851,7 +851,7 @@ def run_bench(
         # After ALL combos: drop the engine/weights cache so memory returns
         # to baseline before the caller (or the next model in
         # run_bench_models) proceeds. The per-combo Metal buffer-cache
-        # clear is above (W5c-13 #79); this releases the model itself.
+        # clear is above; this releases the model itself.
         from jevmlx.engine import clear_engine_cache
 
         clear_engine_cache()
@@ -944,13 +944,13 @@ def run_bench_models(
     if all_combos == 0 and failed_combos:
         summarize(out)  # failure rows still get a summary
         raise SystemExit("every model failed")
-    # W4-B: parity.json lives in each model folder; the summarizer reads it
+    # parity.json lives in each model folder; the summarizer reads it
     # per model folder and marks parity_failed rows itself.
     summarize(out)
     return out
 
 
-# W5c-13 (#79): per-combo Metal memory telemetry. The three counters the
+# Per-combo Metal memory telemetry. The three counters the
 # Metal API exposes, sampled after a combo finishes, plus a peak reset at
 # combo start so each combo's peak is its own (not cumulative across the
 # matrix). All best-effort: a non-Metal build / import failure yields -1
@@ -974,7 +974,7 @@ def _reset_metal_peak_memory() -> None:
 def _augment_run_json_memory(
     combo_dir: Path, mem: dict[str, int], *, metal_cache_limit_bytes: int | None = None
 ) -> None:
-    """Add the 'memory' block to the combo's run.json (W5c-13 #79, W5c-14).
+    """Add the 'memory' block to the combo's run.json (#79).
 
     run.json is written by jevmlx.evalrun.run_eval (out of this PR's
     scope); this reads it back, attaches the per-combo Metal memory
@@ -982,7 +982,7 @@ def _augment_run_json_memory(
     missing/corrupt run.json is skipped (the eval result is already on
     disk). The check_results contract accepts unknown-but-present optional
     keys (benchmarks/check_results.py: 'unknown-but-present optional keys
-    are not type-checked'). W5c-14: the cache cap set at run start is
+    are not type-checked'). The cache cap set at run start is
     recorded as metal_cache_limit_bytes (None when the cap could not be set).
     """
     import json
@@ -1070,7 +1070,7 @@ def _run_one(
         },
         chat_template=chat_template,
         dataset_path=str(jsonl),
-        # Provenance (F7): the dataset lock's sha256 lands in run.json so
+        # Provenance: the dataset lock's sha256 lands in run.json so
         # leaderboard rows are traceable to a pinned dataset revision.
         dataset_lock_path=str(dataset_lock_path) if dataset_lock_path else None,
         # Consensus datasets (typesafe, typed-decisions) carry per-field
@@ -1210,7 +1210,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="jevmlx bench",
         description="One command: complete PR-ready benchmark results folder.",
     )
-    # B1: --model and --models-file are mutually exclusive; exactly one is
+    # --model and --models-file are mutually exclusive; exactly one is
     # required (the old code had --model required=True, so --models-file
     # alone exited 2).
     _bench_model_group = parser.add_mutually_exclusive_group(required=True)

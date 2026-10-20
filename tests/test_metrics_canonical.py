@@ -1,4 +1,4 @@
-"""P2: headline metrics count canonical answers only, failures included,
+"""Headline metrics count canonical answers only, failures included,
 multi as sets.
 
 Every fixture here is built through the REAL evalrun writer (``run_eval``),

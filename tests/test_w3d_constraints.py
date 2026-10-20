@@ -1,7 +1,7 @@
-"""W3-D F2 tests: constraints wired through the api path and evalrun.
+"""Constraints wired through the api path and evalrun.
 
-F1: constraints.py is the single source of truth (imported by engine + evalmetrics).
-F2: decide()/decide_many() accept constraints=, CLI --constraints path, and
+constraints.py is the single source of truth (imported by engine + evalmetrics).
+decide()/decide_many() accept constraints=, the CLI --constraints path, and
     evalrun passes case['constraints'] so the dependent set exercises MAP
     and constraint_violation_rate can hit 0.
 """
@@ -15,12 +15,12 @@ from jevmlx.constraints import check_constraint, validate_constraints
 from jevmlx.schema import StructuredSchema
 
 # ---------------------------------------------------------------------------
-# F1: constraints.py is the single source of truth
+# constraints.py is the single source of truth
 # ---------------------------------------------------------------------------
 
 
 def test_check_constraint_shared_implementation():
-    """W5b-11: the single source of truth is the COMPILED path — engine MAP
+    """The single source of truth is the COMPILED path — engine MAP
     and evalmetrics both evaluate CompiledConstraints (no dict-walking
     helper left anywhere)."""
     from jevmlx.constraints import compile_constraints as compile_c
@@ -73,7 +73,7 @@ def test_validate_constraints_accepts_valid():
 
 
 # ---------------------------------------------------------------------------
-# F2: api path — decide/decide_many pass constraints through
+# api path — decide/decide_many pass constraints through
 # ---------------------------------------------------------------------------
 
 
@@ -181,7 +181,7 @@ def test_decide_many_passes_constraints_to_engine(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# F2: evalrun — dependent fixture exercises MAP, violation_rate == 0
+# evalrun — dependent fixture exercises MAP, violation_rate == 0
 # ---------------------------------------------------------------------------
 
 

@@ -111,17 +111,17 @@ def _metric_rows(run: dict) -> list[tuple]:
     (e.g. majority_class_baseline per field); list-valued or nested metrics
     (risk_coverage curve) stay JSON-only to keep the table readable.
 
-    W6-B6b: when a ``<metric>_ci`` key exists alongside the point estimate,
+    When a ``<metric>_ci`` key exists alongside the point estimate,
     the row shows ``point [ci_low, ci_high] (method)`` instead of the bare
     number. No CI => the row shows the bare number (the JSON carries the
     interval; the table is a summary).
     """
     metrics = run.get("metrics") or {}
     rows: list[tuple] = []
-    # W6-B6b: accuracy row carries its CI when present.
+    # The accuracy row carries its CI when present.
     if "accuracy" in metrics:
         rows.append(("accuracy", _with_ci("accuracy", metrics)))
-    # P7: majority baseline (mean over fields) and exact-record accuracy
+    # Majority baseline (mean over fields) and exact-record accuracy
     # are first-class, right after accuracy — a reader sees them before any
     # other metric. The 7B bundled smoke read 61% accuracy while exact-record
     # was 0 and one field was below majority; these must be visible up top.
@@ -149,11 +149,11 @@ def _metric_rows(run: dict) -> list[tuple]:
         if key in metrics:
             rows.append((key, _with_ci(key, metrics)))
     handled = set(ordered) | {"accuracy", "risk_coverage"}
-    # W6-B6b: the _ci keys are rendered alongside their point estimate,
+    # The _ci keys are rendered alongside their point estimate,
     # not as standalone rows; per_field_accuracy has its own table.
     handled |= {k for k in metrics if k.endswith("_ci")}
     handled |= {"valid_accuracy", "per_field_accuracy"}
-    # P7: majority_class_baseline and exact_record_accuracy are rendered as
+    # majority_class_baseline and exact_record_accuracy are rendered as
     # first-class rows above; don't also dump them as generic rows.
     handled |= {"majority_class_baseline", "exact_record_accuracy"}
     for key in sorted(set(metrics) - handled):
@@ -176,7 +176,7 @@ def _metric_rows(run: dict) -> list[tuple]:
 def _with_ci(metric_key: str, metrics: dict) -> str:
     """Format a metric value with its CI: '0.850 [0.720, 0.930] (bootstrap)'.
 
-    F6: when the metric exists but its CI is None (too few cases for a
+    When the metric exists but its CI is None (too few cases for a
     bootstrap), returns 'n too small' — not a bare number that looks
     precise without an interval.
     """
@@ -187,7 +187,7 @@ def _with_ci(metric_key: str, metrics: dict) -> str:
             return "n too small"
         method = ci.get("method", "ci")
         return f"{value:.4f} [{ci['ci_low']:.4f}, {ci['ci_high']:.4f}] ({method})"
-    # F6: the CI key is absent. If the metric itself is absent, return None
+    # The CI key is absent. If the metric itself is absent, return None
     # (the row won't render). If the metric is present but has no CI key at
     # all (old data), return the bare value. If the CI key is explicitly
     # None, the bootstrap ran but returned None (too few cases) -> 'n too small'.
@@ -245,7 +245,7 @@ def _to_markdown(run: dict) -> str:
         (run.get("per_field") or (run.get("metrics") or {}).get("per_field_accuracy") or []),
         key=lambda row: (_accuracy(row.get("accuracy")), str(row.get("field", ""))),
     )
-    # P7: per-field majority baseline (from metrics.majority_class_baseline).
+    # Per-field majority baseline (from metrics.majority_class_baseline).
     per_field_mcb = (run.get("metrics") or {}).get("majority_class_baseline") or {}
     if not isinstance(per_field_mcb, dict):
         per_field_mcb = {}
@@ -287,7 +287,7 @@ def _to_markdown(run: dict) -> str:
 def _per_field_row(row: dict, mcb: dict) -> tuple:
     """One per-field table row: field, n, accuracy (+CI), majority.
 
-    P7: when accuracy < majority, a † marker appears next to acc — the field
+    When accuracy < majority, a † marker appears next to acc — the field
     is below the always-predict-modal baseline (the case the 7B smoke hit).
     """
     field = row.get("field", "")
@@ -304,7 +304,7 @@ def _per_field_row(row: dict, mcb: dict) -> tuple:
 def _per_field_accuracy_cell(row: dict) -> object:
     """Per-field accuracy with its Wilson interval, or 'n too small'.
 
-    W6-B6b: per-field rows carry a ``ci`` dict (Wilson) when the field has
+    Per-field rows carry a ``ci`` dict (Wilson) when the field has
     enough labelled cases; otherwise the cell says 'n too small' rather than
     an unqualified number.
     """

@@ -1,4 +1,4 @@
-"""W3-F tests: decide_many context batching.
+"""decide_many context batching tests.
 
 Verifies:
 - 3 contexts through decide_many (batched) equal 3 separate decide calls
@@ -144,7 +144,7 @@ def test_decide_many_batched_end_to_end(monkeypatch):
 
 def test_contexts_per_pass_telemetry_and_bounding():
     """contexts_per_pass lands in the result and bounds how many caches are
-    alive at once (review F2): 500 contexts are processed in groups of the
+    alive at once: 500 contexts are processed in groups of the
     budgeted size, never all at once."""
     schema = StructuredSchema(
         {"pick": {"type": "enum", "description": "d", "choices": ["ALPHA", "BETA"]}}
@@ -240,7 +240,7 @@ def test_grouped_contexts_prefill_their_own_prompts(monkeypatch):
 
 
 def test_token_accounting_telemetry_keys_present():
-    """W5c-6 / B4: every result carries the token-accounting keys with
+    """Every result carries the token-accounting keys with
     honest values — actual rows/branches counted, not fields."""
     schema = StructuredSchema(
         {
@@ -282,7 +282,7 @@ def test_token_accounting_telemetry_keys_present():
 
 
 def test_batched_token_accounting_per_context_logical_plus_group_computed():
-    """W5c-6 / B4: decide_many reports per-context LOGICAL values +
+    """decide_many reports per-context LOGICAL values +
     group-level COMPUTED values (the merged pass totals)."""
     schema = StructuredSchema(
         {"pick": {"type": "enum", "description": "d", "choices": ["ALPHA", "BETA"]}}

@@ -1,4 +1,4 @@
-"""Tests for benchmarks.public.jabr (W6-B1: jabr classifier-benchmark).
+"""Tests for benchmarks.public.jabr (the jabr classifier-benchmark).
 
 Network-free: the AST parser runs against a fixture source file; the
 download path is monkeypatched. The pin test asserts the revision is a
@@ -134,7 +134,7 @@ def test_option_order_enum_vs_boolean():
     assert jabr._option_order(noul_task, jabr._task_schema(noul_task)) == ["false", "true"]
 
 
-# ---- F5: download pin is VERIFIED, not just recorded ----------------------
+# ---- download pin is VERIFIED, not just recorded ----------------------
 
 
 def test_pin_is_commit_sha_and_sha256_recorded():
@@ -157,7 +157,7 @@ def test_license_is_cc0_redistribution_allowed():
 
 
 def test_download_verifies_sha256_and_fails_closed(monkeypatch, tmp_path):
-    """F5: a sha256 mismatch is a hard OSError (never parsed, never locked)."""
+    """A sha256 mismatch is a hard OSError (never parsed, never locked)."""
 
     def fake_urlopen(request, timeout=60):
         class FakeResponse:
@@ -178,7 +178,7 @@ def test_download_verifies_sha256_and_fails_closed(monkeypatch, tmp_path):
 
 
 def test_download_failure_is_oserror_not_systemexit(monkeypatch):
-    """F6: build_datasets catches OSError for the offline skip; a download
+    """build_datasets catches OSError for the offline skip; a download
     failure must be one."""
 
     def boom(request, timeout=60):
@@ -288,7 +288,7 @@ def test_bench_wires_jabr_name(hubless, monkeypatch, tmp_path):
 
 
 def test_bench_pin_problem_detects_drift(hubless, monkeypatch, tmp_path):
-    """F5 on reuse: a lock whose recorded file sha256 differs from the pin
+    """On reuse: a lock whose recorded file sha256 differs from the pin
     forces a rebuild; a matching lock passes."""
     import jevmlx.bench as bench
 

@@ -256,7 +256,7 @@ def test_clear_engine_cache_is_public_and_idempotent():
 
 
 def test_load_engine_cache_is_single_slot():
-    """Y9 (W5-D finding 36): one model in unified memory at a time — the
+    """One model in unified memory at a time — the
     lru_cache sits on the RESOLVED id, maxsize=1. Aliases and raw Hub ids
     resolve to the same entry."""
     from jevmlx.engine import _load_engine_resolved
@@ -265,7 +265,7 @@ def test_load_engine_cache_is_single_slot():
 
 
 def test_load_engine_resolves_before_caching():
-    """W5-D finding 36: the cache key is the RESOLVED model id —
+    """The cache key is the RESOLVED model id —
     load_engine("quality") and load_engine(full-id) must hit one entry."""
 
     from jevmlx import engine
@@ -452,7 +452,7 @@ def test_choice_glosses_unknown_choice_rejected_by_schema():
         )
 
 
-# --- W2-D: allow_none_of_above (explicit opt-out, was allow_unknown) --------
+# --- allow_none_of_above (explicit opt-out) --------
 
 
 def test_allow_none_of_above_requires_optional_enum():
@@ -545,7 +545,7 @@ def test_allow_none_of_above_rejects_existing_choice():
         jevmlx.decide(Collide, "ctx", model="fake/model", allow_none_of_above=True)
 
 
-# --- W2-D: abstention (confidence gate, not a choice) ------------------------
+# --- abstention (confidence gate, not a choice) ------------------------
 
 
 def _abstain_result(margin: float):
@@ -774,7 +774,7 @@ def test_decision_has_no_confidence_attribute():
 
 
 def test_abstain_requires_optional_fields_before_inference(monkeypatch):
-    """W5-C finding 25 (review F4): abstain_below_margin with a NON-Optional
+    """abstain_below_margin with a NON-Optional
     field is a usage error at decide() START — TypeError naming the first
     offending field, before any inference. run_parallel_generation is
     monkeypatched to RAISE if called: the check must fire first."""
@@ -793,11 +793,11 @@ def test_abstain_requires_optional_fields_before_inference(monkeypatch):
         jevmlx.decide(StrictModel, "ctx", model="fake/model", abstain_below_margin=0.1)
 
 
-# ------------- P9 (F7 part 1): the record reports the value it returns ----
+# ------------- the record reports the value it returns ----
 
 
 def test_T2_score_is_the_returned_value_log_score(monkeypatch):
-    """P9 T2: a constraint-forced field's FieldResult.score is log P of the
+    """A constraint-forced field's FieldResult.score is log P of the
     RETURNED value — not the independent argmax's. The telemetry shape is
     what the fixed engine emits after a MAP change (value HIGH forced while
     the model's winner is LOW; probability = P(HIGH); distribution keys

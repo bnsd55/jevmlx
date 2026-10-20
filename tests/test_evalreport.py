@@ -127,7 +127,7 @@ class TestWriteReport:
         assert "## Metrics" in md
 
     def test_majority_baseline_and_exact_record_are_first_class(self, tmp_path):
-        """P7: majority baseline (mean over fields) and exact-record accuracy
+        """Majority baseline (mean over fields) and exact-record accuracy
         appear right after accuracy in the metrics table — a reader sees them
         before any other metric."""
         json_path = tmp_path / "run.json"
@@ -154,7 +154,7 @@ class TestWriteReport:
         assert md.index("| accuracy |") < md.index("majority baseline") < md.index("exact record")
 
     def test_per_field_table_has_majority_column_and_below_marker(self, tmp_path):
-        """P7: the per-field table has a 'majority' column, and a † marker
+        """The per-field table has a 'majority' column, and a † marker
         appears when acc < majority (the 7B smoke case: one field below the
         always-predict-modal baseline)."""
         json_path = tmp_path / "run.json"

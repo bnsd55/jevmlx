@@ -1,4 +1,4 @@
-"""Tests for jevmlx.resume — crash-safe resumable eval infrastructure (W5c-7 / B6).
+"""Tests for jevmlx.resume — crash-safe resumable eval infrastructure.
 
 Four contracts, one file:
 
@@ -412,7 +412,7 @@ class TestCompletedCaseKeys:
     def test_tolerates_malformed_and_blank_journal_lines(self, tmp_path):
         """Malformed/blank lines stop reading (interrupted journal write).
 
-        W5c-7 review: a malformed journal line means the journal write was
+        A malformed journal line means the journal write was
         interrupted — later entries are unreliable. The reader stops at the
         first malformed line; entries before it are still valid.
         """
@@ -440,7 +440,7 @@ class TestCompletedCaseKeys:
 
 class TestCrashBetweenBlobAndJournal:
     def test_blob_without_journal_entry_is_not_complete(self, tmp_path):
-        """The B6 commit contract: the journal entry is the commit point.
+        """The commit contract: the journal entry is the commit point.
 
         Simulates a crash AFTER case-b's blob became durable but BEFORE its
         journal entry landed: resume must NOT consider case-b complete.
@@ -576,7 +576,7 @@ class TestCircuitBreaker:
 
 
 class TestEndToEndKillResume:
-    """W5c-7 review: ONE end-to-end test that runs run_eval, kills at each
+    """ONE end-to-end test that runs run_eval, kills at each
     of 3 crash points, resumes, and asserts byte-identical predictions.jsonl
     to a clean run.
     """
@@ -771,7 +771,7 @@ class TestEndToEndKillResume:
         self._assert_full_contract(out, tmp_path / "clean", 6)
 
     def test_rotations_kill_and_resume_is_identical(self, tmp_path):
-        """B1: with permutations='rotations', a kill+resume produces
+        """With permutations='rotations', a kill+resume produces
         byte-identical predictions and one journal entry per (case, variant).
         """
         from jevmlx.evalrun import run_eval
@@ -831,7 +831,7 @@ class TestEndToEndKillResume:
 
 
 class TestReviewRound4:
-    """W5c-7 review round 4 mandatory tests."""
+    """Kill-and-resume mandatory paths."""
 
     _FIXED_RUN_ID = "20260919T000000Z-testrun"
 
@@ -987,7 +987,7 @@ class TestReviewRound4:
         keys = completed_case_keys(out)
         assert "case-1::canonical" not in keys
         # The failure is journaled in errors.jsonl, NOT predictions.jsonl.
-        # P2: one line per LABELLED field (error-inclusive denominator), so
+        # One line per LABELLED field (error-inclusive denominator), so
         # the line carries the real field name, not the _error marker.
         assert (out / "errors.jsonl").exists()
         errors_content = (out / "errors.jsonl").read_text()
@@ -1017,7 +1017,7 @@ class TestReviewRound4:
         )
 
     def test_bench_run_eval_into_empty_dir(self, tmp_path, monkeypatch):
-        """B3: one run through run_bench/_run_one with ONLY the engine load
+        """One run through run_bench/_run_one with ONLY the engine load
         mocked. Exercises bench's manifest-present -> resume rule and --fresh
         rmtree. Verifies the manifest is written, predictions are per-case,
         and run.json has full counts."""
@@ -1119,8 +1119,8 @@ class TestReviewRound4:
         assert (combo / "predictions.jsonl").stat().st_mtime >= old_mtime
 
 
-class TestW5c12RepeatRuns:
-    """W5c-12: bench --runs N repeat runs start from a clean combo dir."""
+class TestRepeatRuns:
+    """bench --runs N repeat runs start from a clean combo dir."""
 
     def _decide(self):
         def decide(schema_dict, context, **kwargs):

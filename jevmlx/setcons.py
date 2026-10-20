@@ -1,4 +1,4 @@
-"""W2-SETCONS (W5-C rewrite): exact hard set-constraint selection.
+"""Exact hard set-constraint selection.
 
 Given per-option scores (the calibrated log-odds when a calibrator ran, else
 a monotone transform of P(yes)) and the field's validated set constraints,
@@ -7,7 +7,7 @@ constraint. This is a HARD selection: the unconstrained threshold rule
 proposes, the solver disposes — the result always satisfies the schema's
 declared constraints.
 
-Solver shape (exact, W5-C: one solver, complete components):
+Solver shape (exact — one solver, complete components):
 
 The solver is a single exact search over CONNECTED COMPONENTS built from
 BOTH group-overlap edges (mutually_exclusive / at_most_one / at_most_k /
@@ -28,13 +28,13 @@ than MAX_COMPONENT_OPTIONS (20) cannot be enumerated in acceptable time
 raises ValueError naming the component — the schema compiler surfaces it
 at compile time, before any inference. The cap is on ONE component, not
 the field: a 64-option field whose largest component has 12 options is
-fine (F8 decision, review 2026-09-19: the cap stays).
+fine (the cap stays).
 
 Unconstrained options (touched by no constraint) keep their threshold
 decision: they are free, their score contribution is fixed, and the solver
 never has a reason to flip them.
 
-Feasibility (used by the schema compiler too, finding 17):
+Feasibility (used by the schema compiler too):
 :func:`is_feasible` runs the same component enumeration without scores.
 The compiler calls it instead of inferring unsatisfiability from syntactic
 patterns (A->B + B->A, A->B + at_most_one(A,B), A->B + exact_k([B], 0) are
@@ -50,7 +50,7 @@ __all__ = [
     "components_of",
 ]
 
-# F8 (review 2026-09-19): a single component above this size is not
+# A single component above this size is not
 # enumerated — 2^20 bitmask candidates is already a multi-second Python
 # loop and 2^30 is minutes. is_feasible runs the same search at schema
 # COMPILE time, so an over-large component fails loudly there (the
@@ -224,7 +224,7 @@ def select_constrained_set(
             )
         # Bitmask enumeration with implication closure applied per
         # candidate. Closure targets outside the component are added to
-        # the assembled set after per-component selection (finding 16:
+        # the assembled set after per-component selection (composing
         # components were built OVER implication edges, so a forced
         # option is in this component or free-but-implication-linked;
         # either way adding it at assembly cannot invalidate a sibling
@@ -282,7 +282,7 @@ def select_constrained_set(
 def is_feasible(options: list[str], constraints: list[dict]) -> bool:
     """Satisfiability of ``constraints`` over ``options`` — no scores.
 
-    The schema compiler runs this (finding 17) instead of syntactic
+    The schema compiler runs this instead of syntactic
     contradiction rules: A->B + B->A, A->B + at_most_one(A,B), and A->B +
     exact_k([B], 0) are all satisfiable (both absent / A forbidden / A not
     selected). Same enumeration as the scored solver, empty proposal.
@@ -300,6 +300,6 @@ def is_feasible(options: list[str], constraints: list[dict]) -> bool:
         if message.startswith("internal error"):
             raise  # a solver bug, not an unsatisfiable schema
         if message.startswith("set-constraint component has"):
-            raise  # F8: the cap breach is the caller's problem to see
+            raise  # the cap breach is the caller's problem to see
         return False
     return True

@@ -1,5 +1,5 @@
 /**
- * W6-UI-3f: Node test for the dashboard's pure helper functions.
+ * Node test for the dashboard's pure helper functions.
  *
  * The dashboard HTML (jevmlx/web/dashboard.html) is a self-contained single
  * file — we do NOT split it into a separate module (that would break the
@@ -94,7 +94,7 @@ describe("dashboard pure helpers", () => {
     it("renders null as em dash", () => {
       assert.equal(fmtNum(null), "—");
     });
-    it("renders NaN as em dash (W6-UI round 4: cases/h with <2 heartbeats)", () => {
+    it("renders NaN as em dash (cases/h with <2 heartbeats)", () => {
       assert.equal(fmtNum(NaN), "—");
     });
     it("renders Infinity as em dash", () => {
@@ -115,7 +115,7 @@ describe("dashboard pure helpers", () => {
   });
 
   describe("fmtNullable", () => {
-    it("renders null as em dash (W6-UI round 4: rotation=null)", () => {
+    it("renders null as em dash (rotation=null)", () => {
       assert.equal(fmtNullable(null), "—");
     });
     it("renders undefined as em dash", () => {
@@ -148,7 +148,7 @@ describe("dashboard pure helpers", () => {
   });
 
   describe("fmtAttempt", () => {
-    it("renders null as em dash (W6-UI-3h)", () => {
+    it("renders null as em dash", () => {
       assert.equal(fmtAttempt(null), "—");
     });
     it("renders undefined as em dash", () => {

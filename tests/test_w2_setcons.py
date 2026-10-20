@@ -1,4 +1,4 @@
-"""W2-SETCONS: hard set constraints for multi fields.
+"""Hard set constraints for multi fields.
 
 Schema-declared set constraints (mutually_exclusive, at_most_one,
 at_most_k, at_least_one, exact_k, implies between options) are validated at
@@ -57,7 +57,7 @@ def test_valid_constraints_compile_and_roundtrip():
 
 
 def test_implies_into_exclusive_group_compiles_feasible():
-    """W5-C finding 17: x implies y with x,y in one mutually_exclusive group
+    """x implies y with x,y in one mutually_exclusive group
     is SATISFIABLE — the empty set satisfies both (x absent => y not forced;
     at-most-one holds). The old compiler rejected it with a syntactic rule;
     the solver-based satisfiability check accepts it, and the engine's
@@ -79,7 +79,7 @@ def test_implies_into_exclusive_group_compiles_feasible():
 
 
 def test_mutual_implies_pair_compiles():
-    """W5-C finding 17: A->B, B->A is satisfiable (both absent)."""
+    """A->B, B->A is satisfiable (both absent)."""
     schema = StructuredSchema(
         {
             "flags": {
@@ -97,7 +97,7 @@ def test_mutual_implies_pair_compiles():
 
 
 def test_implies_into_exact_k0_group_compiles():
-    """W5-C finding 17: A->B with exact_k([B], 0) is satisfiable (A not
+    """A->B with exact_k([B], 0) is satisfiable (A not
     selected — the empty set closes to itself)."""
     schema = StructuredSchema(
         {
@@ -138,7 +138,7 @@ def test_truly_unsatisfiable_constraints_raise():
 
 
 def test_implies_cycle_compiles_and_solver_never_selects():
-    """W5-C finding 17: a 2-cycle x->y->x is SATISFIABLE (both absent — the
+    """A 2-cycle x->y->x is SATISFIABLE (both absent — the
     closure of the empty selection is empty), so it compiles; the engine's
     solver then simply never selects x or y (selecting either forces both,
     which is fine for implies-only — actually selecting x gives {x,y}, which
@@ -361,7 +361,7 @@ def test_engine_non_binding_constraints_keep_per_option():
 
 
 class TestW5CSolverExactness:
-    """W5-C findings 14-16: one exact component solver over group overlap
+    """One exact component solver over group overlap
     AND implication edges; no caps that reject legal schemas."""
 
     def test_two_disjoint_groups_both_feasible(self):
@@ -436,7 +436,7 @@ class TestW5CSolverExactness:
         assert set(selected) == set(options)
 
     def test_component_cap_raises_above_20(self):
-        """F8 (review 2026-09-19): the cap STAYS — a 24-option at_most_one
+        """The cap STAYS — a 24-option at_most_one
         component is 2^24 Python-loop candidates (multi-second), so the
         solver raises naming the component and the limit; the schema
         compiler surfaces it at compile time."""
@@ -450,7 +450,7 @@ class TestW5CSolverExactness:
             select_constrained_set(options, scores, constraints, set())
 
     def test_component_cap_is_per_component_not_per_field(self):
-        """F8: the cap is on ONE component. A 30-option field whose groups
+        """The cap is on ONE component. A 30-option field whose groups
         are 3-option components (max 3) enumerates fine."""
         from jevmlx.setcons import select_constrained_set
 
@@ -480,7 +480,7 @@ class TestW5CSolverExactness:
 
     def test_implies_edges_merge_components(self):
         """An implies edge between two groups fuses them into one component
-        (finding 16: the old solver composed independently-optimized
+        (the old solver composed independently-optimized
         subcomponents even when an implication crossed them)."""
         from jevmlx.setcons import components_of
 
@@ -496,7 +496,7 @@ class TestW5CSolverExactness:
 
 
 class TestW5CReviewF8F17:
-    """Review 2026-09-19: F8 cap decision + F17 is_feasible propagation."""
+    """The cap decision and is_feasible propagation."""
 
     def test_is_feasible_propagates_component_cap(self):
         """F17: a cap breach through is_feasible (compile time) PROPAGATES —
@@ -521,7 +521,7 @@ class TestW5CReviewF8F17:
         )
 
     def test_oversized_component_fails_at_schema_compile(self):
-        """F8 end-to-end: a >20-option component is a COMPILE error via the
+        """End-to-end: a >20-option component is a COMPILE error via the
         solver's cap, surfaced by the compiler."""
         from jevmlx.schema import SchemaCompileError, StructuredSchema
 
@@ -539,7 +539,7 @@ class TestW5CReviewF8F17:
             )
 
 
-# ------------- P10 (F7 part 2): case-level exclusivity in the solver -------
+# ------------- case-level exclusivity in the solver -------
 
 
 def _excl_schema():
@@ -549,7 +549,7 @@ def _excl_schema():
 
 
 def test_T1_case_exclusivity_enforced_in_selection():
-    """P10 T1 (the F6-report probe): a case-level exclusivity [x, y] on a
+    """A case-level exclusivity [x, y] on a
     multi field is enforced by the joint set solver — the model wants
     x, y, z (uniform P(yes) > 0.5), the result keeps the higher-of-x/y by z
     (a tie here: schema order) plus z. Main returns [x, y, z] unchecked."""
@@ -569,12 +569,12 @@ def test_T1_case_exclusivity_enforced_in_selection():
     assert {"type": "at_most_one", "options": ["x", "y"]} in telemetry["set_constraints"]
     assert telemetry["threshold_proposal"] == ["x", "y", "z"]
     assert telemetry["semantics"]["constraint_changed"] is True
-    # Per-option numbers stay DISTRIBUTION numbers (P9 rule).
+    # Per-option numbers stay DISTRIBUTION numbers.
     assert all(p > 0.5 for p in telemetry["per_option"].values())
 
 
 def test_T2_exclusivity_and_trusted_count_jointly():
-    """P10 T2: a trusted count k=2 AND exclusivity [x, y] are ONE solver
+    """A trusted count k=2 AND exclusivity [x, y] are ONE solver
     call — the result honors both ({x, z}: two options, at most one of the
     group). Rule when they conflict: schema exclusivity is HARD, the count
     is evidence and DROPS (existing precedence) — tested by the infeasible
@@ -594,7 +594,7 @@ def test_T2_exclusivity_and_trusted_count_jointly():
 
 
 def test_T2b_exclusivity_beats_infeasible_trusted_count():
-    """P10 T2 (the conflict rule): count k=2 over [x, y] with exclusivity
+    """The conflict rule: count k=2 over [x, y] with exclusivity
     [x, y] is jointly infeasible — schema exclusivity is HARD, the trusted
     count drops (dropped_reason recorded) and the joint solver still
     enforces the exclusivity on the threshold proposal. Main: no drop, no
@@ -619,7 +619,7 @@ def test_T2b_exclusivity_beats_infeasible_trusted_count():
 
 
 def test_T3_no_exclusivity_selection_identical():
-    """P10 T3: the same field with NO case constraints — the threshold
+    """The same field with NO case constraints — the threshold
     proposal stands untouched, no set-constraint telemetry keys (the
     main-identical invariant)."""
     from jevmlx.engine import run_parallel_generation
@@ -634,7 +634,7 @@ def test_T3_no_exclusivity_selection_identical():
 
 
 def test_T4_eval_exclusivity_violation_rate_zero():
-    """P10 T4: the engine's constrained output satisfies the exclusivity —
+    """The engine's constrained output satisfies the exclusivity —
     constraint_violation_rate reports 0 for a run whose UNCONSTRAINED
     selection ([x, y, z]) would violate it. Main's output violates — the
     metric reports a nonzero rate."""

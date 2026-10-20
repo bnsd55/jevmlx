@@ -4,7 +4,7 @@ Pure Python + math, no third-party dependencies. Every metric treats an
 invalid prediction as wrong (unconditional field accuracy); ``correct`` is
 respected when present (null label -> excluded from accuracy denominators).
 
-Canonical-only contract (P2): evalrun writes one line per
+Canonical-only contract: evalrun writes one line per
 (case, field, permutation) — rotation lines (``permutation="rotN:<field>``)
 are order probes. Every headline metric filters to canonical lines INSIDE
 the metric function, so callers can pass raw predictions.jsonl; permutation
@@ -48,15 +48,15 @@ def load_predictions(path: str | Path) -> list[dict]:
     """Read a predictions.jsonl file (one JSON object per non-blank line).
 
     ``.gz`` paths are decompressed transparently. Legacy combo folders
-    (pre-P2) journal a case-level failure as ONE ``field="_error"`` line
+    the old single-line format journals a case-level failure as ONE ``field="_error"`` line
     with no label, which would drop the failed case from every accuracy
     denominator. Such lines are expanded at read time to one failure line
-    per labelled field of the case (error-inclusive denominator, P3). The
+    per labelled field of the case (error-inclusive denominator). The
     labelled field list comes from the same file: cases in a group share
     the schema, so the group's canonical labelled lines name the fields.
 
     # SHORTCUT: legacy single-line _error format; remove when the M5 rerun
-    # (P7) replaces these folders with the per-field failure format.
+    # (the M5 rerun replaces these folders with the per-field failure format.)
     """
     p = Path(path)
     if p.suffix == ".gz":
@@ -83,7 +83,7 @@ def _expand_legacy_error_lines(records: list[dict]) -> list[dict]:
     which need the real class.
 
     # SHORTCUT: legacy single-line _error format; remove when the M5 rerun
-    # (P7) replaces these folders with the per-field failure format.
+    # (the M5 rerun replaces these folders with the per-field failure format.)
     """
     if not any(r.get("field") == "_error" and r.get("error") for r in records):
         return records
@@ -181,7 +181,7 @@ def field_accuracy(records: list[dict]) -> float | None:
     """Unconditional field accuracy: correct / labelled, invalid counts wrong.
 
     Canonical lines only: rotation rows (order probes) never enter the
-    headline accuracy (P2).
+    headline accuracy.
     """
     labelled = _labelled(_canonical_lines(records))
     if not labelled:
@@ -192,7 +192,7 @@ def field_accuracy(records: list[dict]) -> float | None:
 def case_exact_match(records: list[dict]) -> float | None:
     """Share of cases where every labelled field is correct (invalid = wrong).
 
-    Canonical lines only (P2).
+    Canonical lines only.
     """
     by_case: dict[str, list[dict]] = defaultdict(list)
     for record in _canonical_lines(records):
@@ -211,7 +211,7 @@ def macro_by(records: list[dict], key: str) -> dict[str, float]:
     """Macro (per-group unweighted mean) field accuracy grouped by ``key``.
 
     Records whose ``key`` is None are skipped (a null workflow is no group).
-    Canonical lines only (P2).
+    Canonical lines only.
     """
     grouped: dict[str, list[dict]] = defaultdict(list)
     for record in _canonical_lines(records):
@@ -229,7 +229,7 @@ def macro_by(records: list[dict], key: str) -> dict[str, float]:
 def majority_class_baseline(records: list[dict]) -> dict[str, float]:
     """Per-field accuracy of always predicting the modal labelled value.
 
-    Canonical lines only (P2); multi labels compare as sets, so element
+    Canonical lines only; multi labels compare as sets, so element
     order never splits one value into two classes.
     """
     by_field: dict[str, list[dict]] = defaultdict(list)
@@ -250,7 +250,7 @@ def majority_class_baseline(records: list[dict]) -> dict[str, float]:
 def brier_score(records: list[dict]) -> float | None:
     """Multiclass Brier: mean over fields of sum over choices of (p - y)^2.
 
-    Canonical lines only (P2): a rotation's distribution is an order probe,
+    Canonical lines only: a rotation's distribution is an order probe,
     not an independent trial.
     """
     scores = []
@@ -301,7 +301,7 @@ def _record_distribution(record: dict) -> dict[str, float] | None:
 def correctness_auroc(records: list[dict]) -> float | None:
     """AUROC of confidence predicting correctness (rank-statistic, no numpy).
 
-    Labelled canonical lines only (P2); pairs with equal confidence count
+    Labelled canonical lines only; pairs with equal confidence count
     0.5. Returns None without both classes.
     """
     scored = [
@@ -329,7 +329,7 @@ def ece_equal_mass(records: list[dict], bins: int = 5) -> float | None:
     """Descriptive ECE over ``bins`` equal-mass confidence bins.
 
     Empty-sample safety: returns None when there is nothing to measure.
-    Canonical lines only (P2).
+    Canonical lines only.
     """
     scored = [
         (float(r["probability"]), 1.0 if _valid_correct(r) else 0.0)
@@ -356,7 +356,7 @@ def ece_equal_mass(records: list[dict], bins: int = 5) -> float | None:
 def multi_jaccard(records: list[dict]) -> float | None:
     """Mean Jaccard similarity of multi predictions (invalid => 0.0).
 
-    Canonical lines only (P2); already set-based, so element order is
+    Canonical lines only; already set-based, so element order is
     irrelevant by construction.
     """
     scores = []
@@ -401,7 +401,7 @@ def balanced_accuracy(records: list[dict]) -> dict[str, float | None]:
     with no labelled records are skipped, and a field whose every class lacks
     support yields None. Predictions are counted for the predicted class
     (invalid predictions never contribute to any class's recall). Canonical
-    lines only (P2).
+    lines only.
     """
     by_field: dict[str, Counter] = defaultdict(Counter)
     support: dict[str, Counter] = defaultdict(Counter)
@@ -430,8 +430,7 @@ def macro_f1(records: list[dict]) -> dict[str, float | None]:
 
     For each class: precision = TP / predicted, recall = TP / labelled, F1 =
     2PR/(P+R) (0 when both are 0). The class mean ignores classes with no
-    labelled records; a field with none yields None. Canonical lines only
-    (P2).
+    labelled records; a field with none yields None. Canonical lines only.
     """
     tp: dict[str, Counter] = defaultdict(Counter)
     predicted: dict[str, Counter] = defaultdict(Counter)
@@ -460,7 +459,7 @@ def macro_f1(records: list[dict]) -> dict[str, float | None]:
     return result
 
 
-# ------------------------------------------------------- ordinal (W6-B1)
+# ------------------------------------------------------- ordinal
 
 
 def _ordinal_lines(records: list[dict]) -> list[tuple[str, dict, list[str], dict]]:
@@ -468,7 +467,7 @@ def _ordinal_lines(records: list[dict]) -> list[tuple[str, dict, list[str], dict
 
     A line is ordinal when the schema declared it ordered (the prediction
     line carries ``ordinal_choices``) — unordered fields never enter the
-    ordinal metrics. F3: STRICT pairing — a line that carries
+    ordinal metrics. STRICT pairing — a line that carries
     ``ordinal_choices`` but no ``ordinal`` record is a contract violation
     (every track now emits both), never a silently-skipped row.
     """
@@ -500,7 +499,7 @@ def _level_index(choices: list[str], value) -> int | None:
 
 
 def ordinal_mae(records: list[dict]) -> dict[str, float | None]:
-    """Per ordered-enum field: mean |argmax_level - gold_level| (W6-B1).
+    """Per ordered-enum field: mean |argmax_level - gold_level|.
 
     The DECIDED value's distance from the gold level on the scale — the
     headline ordinal error. Unordered fields are absent (never zero-filled);
@@ -521,7 +520,7 @@ def ordinal_mae(records: list[dict]) -> dict[str, float | None]:
 
 
 def ordinal_mae_expected(records: list[dict]) -> dict[str, float | None]:
-    """Per ordered-enum field: mean |expected_index - gold_level| (W6-B1).
+    """Per ordered-enum field: mean |expected_index - gold_level|.
 
     The DISTRIBUTION's mean position vs gold — the soft ordinal error the
     hard argmax MAE cannot express (a 50/50 split between levels 0 and 2
@@ -682,7 +681,7 @@ def mean_tvd_across_permutations(records: list[dict]) -> dict[str, float]:
 def tie_rate(records: list[dict]) -> float | None:
     """Share of scored records whose top-two log_scores are exactly equal.
 
-    Canonical lines only (P2).
+    Canonical lines only.
     """
     scored = [
         r
@@ -708,7 +707,7 @@ def risk_coverage_curve(records: list[dict], points: int = 10) -> list[dict]:
     Records are sorted by confidence descending (tie-break: stable order);
     at each coverage the prefix risk is computed. Uncovered records count as
     neither right nor wrong — they are simply not yet included. Canonical
-    lines only (P2).
+    lines only.
     """
     scored = sorted(
         (
@@ -734,7 +733,7 @@ def risk_coverage_curve(records: list[dict], points: int = 10) -> list[dict]:
 # ------------------------------------------------------------------ bootstrap
 
 
-# ------------------------------------------------------------- W6-B6b stats
+# ------------------------------------------------------- statistics
 
 
 def wilson_interval(k: int, n: int, z: float = 1.96) -> dict | None:
@@ -743,7 +742,7 @@ def wilson_interval(k: int, n: int, z: float = 1.96) -> dict | None:
     Used ONLY where cases are independent and unstratified — one Bernoulli
     decision per case. For correlated fields, balanced sampling, macro-
     averaged tasks, or paired comparisons, use ``cluster_bootstrap_ci`` or
-    ``mcnemar_exact`` instead (B6 statistics: Wilson is fine for a single
+    ``mcnemar_exact`` instead (Wilson is fine for a single
     Bernoulli per independent case, not sufficient otherwise).
 
     Returns None when ``n`` is 0 (no interval, not a vacuous [0,0]).
@@ -787,7 +786,7 @@ def cluster_bootstrap_ci(
     Returns None when there are too few cases (< 2) or the metric is None on
     the full set. A metric that is None on some resamples is skipped (the
     interval reflects the cases where it is defined). Canonical lines only
-    (P2): rotation rows are order probes, never resampled trials.
+    Rotation rows are order probes, never resampled trials.
     """
     records = _canonical_lines(records)
     by_case: dict[str, list[dict]] = defaultdict(list)
@@ -869,7 +868,7 @@ def paired_bootstrap_difference(
     the accuracy difference in each resample. Returns the point estimate
     (accuracy_a - accuracy_b), the percentile CI, and the exact McNemar
     test on the discordance counts. Canonical lines only on both sides
-    (P2): a rotation row is not an independent trial of its condition.
+    A rotation row is not an independent trial of its condition.
     """
     records_a = _canonical_lines(records_a)
     records_b = _canonical_lines(records_b)
@@ -936,7 +935,7 @@ def valid_accuracy(records: list[dict]) -> float | None:
     invalid-prediction rate — if they're equal, every prediction was valid.
     This is NOT a duplicate of field_accuracy: field_accuracy counts invalid
     as wrong (denominator = all labelled); valid_accuracy excludes them
-    (denominator = labelled AND valid). Canonical lines only (P2).
+    (denominator = labelled AND valid). Canonical lines only.
     """
     valid_labelled = [r for r in _labelled(_canonical_lines(records)) if r.get("valid", True)]
     if not valid_labelled:
@@ -992,7 +991,7 @@ def typesafe_agreement(records: list[dict]) -> dict:
     flagged ambiguous (meta.ambiguous from the fetcher), the subset closest
     to TypeSafe's own presentation; it is None when every field is flagged.
     Records with no label are excluded from all rates; ``n_cases`` counts
-    distinct case_ids among the labelled lines. Canonical lines only (P2):
+    distinct case_ids among the labelled lines. Canonical lines only:
     ``n_fields``/``n_cases`` count canonical answers, never rotation probes.
     """
     lines = [r for r in _typesafe_lines(records) if _is_canonical(r) and _labelled([r])]
@@ -1021,7 +1020,7 @@ def tvd_vs_consensus(records: list[dict]) -> dict:
     Our distribution is the same one the calibration metrics use (softmax
     over ``log_scores`` at T=1, or ``per_option`` for multi); the reference
     is the fetcher's ``consensus`` distribution carried on the line. Lines
-    without either side are skipped. Canonical lines only (P2). Returns
+    without either side are skipped. Canonical lines only. Returns
     ``{"overall": float, "by_workflow": {...}}`` (both absent when no line
     qualifies).
     """
@@ -1104,7 +1103,7 @@ def constraint_violation_rate(records: list[dict], schema=None) -> dict | None:
     """Fraction of cases with ≥1 constraint violation, and per-constraint-type
     breakdown. Returns None when no case carries constraints.
 
-    W5b-11: the compiled path ONLY — no dict-walking dual path. Each case's
+    The compiled path ONLY — no dict-walking dual path. Each case's
     constraints compile ONCE (jevmlx.constraints.compile_constraints) and
     evaluation is ``compiled.<kind>.satisfied(case_preds)``. ``schema`` is
     the StructuredSchema to compile against (compile needs the field
@@ -1112,7 +1111,7 @@ def constraint_violation_rate(records: list[dict], schema=None) -> dict | None:
     """
     from jevmlx.constraints import ConstraintError, compile_constraints
 
-    records = _canonical_lines(records)  # P2: rotation rows are order probes
+    records = _canonical_lines(records)  # rotation rows are order probes
     preds = _case_predictions(records)
     constraints_by_case = _case_constraints(records)
     if not constraints_by_case:
@@ -1130,7 +1129,7 @@ def constraint_violation_rate(records: list[dict], schema=None) -> dict | None:
         compiled = compile_constraints(constraints, schema)
         case_preds = preds.get(case_id, {})
         case_violated = False
-        # W5b-11: evaluation is by INDEX inside the compiled objects; the
+        # Evaluation is by INDEX inside the compiled objects; the
         # name-keyed entry point is CompiledConstraints.satisfied (the
         # members' satisfied() take an index-keyed map). One compile-level
         # call per case; per-type counting walks the same members with the
@@ -1160,7 +1159,7 @@ def constraint_violation_rate(records: list[dict], schema=None) -> dict | None:
 def child_accuracy_given_parent_correct(records: list[dict]) -> dict | None:
     """For each implies/requires_parent constraint, child field accuracy
     among cases where the parent was predicted correctly. Canonical lines
-    only (P2). Returns None when no such constraints exist."""
+    only. Returns None when no such constraints exist."""
     records = _canonical_lines(records)
     preds = _case_predictions(records)
     labels = _case_labels(records)
@@ -1204,7 +1203,7 @@ def oracle_parent_gap(records: list[dict]) -> dict | None:
     Records carry ``oracle_prediction`` (the child's value when the true parent
     is teacher-forced in eval). The gap = oracle_acc - predicted_acc; a positive
     gap means conditioning on the true parent helps the child. Canonical
-    lines only (P2).
+    lines only.
 
     Returns None when no records carry ``oracle_prediction``.
     """
@@ -1260,7 +1259,7 @@ def oracle_parent_gap(records: list[dict]) -> dict | None:
 def exact_record_accuracy(records: list[dict], schema=None) -> float | None:
     """Fraction of cases where EVERY labelled field is correct AND no
     constraint is violated. Stricter than case_exact_match (which ignores
-    constraints). Canonical lines only (P2). Returns None when no cases
+    constraints). Canonical lines only. Returns None when no cases
     carry labels."""
     by_case: dict[str, list[dict]] = defaultdict(list)
     for r in _canonical_lines(records):
@@ -1276,7 +1275,7 @@ def exact_record_accuracy(records: list[dict], schema=None) -> float | None:
         if not labelled or not all(_valid_correct(r) for r in labelled):
             continue
         # If this case has constraints, they must all be satisfied too
-        # (W5b-11: compiled path only — compile once, satisfied by index).
+        # (compiled path only — compile once, satisfied by index).
         constraints = constraints_by_case.get(case_id, [])
         if constraints:
             from jevmlx.constraints import ConstraintError as _ce
@@ -1309,7 +1308,7 @@ def compute_metrics(records: list[dict], schema=None) -> dict:
 
     Missing-data safety: a metric that cannot be computed (no labelled rows,
     no confidences, no log_scores) is simply absent rather than zero-filled.
-    ``schema`` compiles the constraint-based metrics (W5b-11: the compiled
+    ``schema`` compiles the constraint-based metrics (the compiled
     path only); without it those metrics are absent from the result rather
     than silently dict-walked.
     """
@@ -1317,10 +1316,10 @@ def compute_metrics(records: list[dict], schema=None) -> dict:
     accuracy = field_accuracy(records)
     if accuracy is not None:
         metrics["accuracy"] = accuracy
-    # W6-B6b: per-field accuracy with Wilson intervals (independent-case
+    # Per-field accuracy with Wilson intervals (independent-case
     # Bernoulli per field). Canonical lines only — permutation rows (choice
     # rotations) would inflate n by ~3x and narrow the interval ~1.7x, and
-    # are order probes, not independent trials (P2: filter shared with the
+    # are order probes, not independent trials (filter shared with the
     # metric functions via _canonical_lines). The report's per-field table
     # shows the interval or 'n too small'.
     by_field: dict[str, list[dict]] = defaultdict(list)
@@ -1338,7 +1337,7 @@ def compute_metrics(records: list[dict], schema=None) -> dict:
         per_field_ci.append(entry)
     if per_field_ci:
         metrics["per_field_accuracy"] = per_field_ci
-    # W6-B6b: valid-only accuracy (denominator = labelled AND valid lines;
+    # Valid-only accuracy (denominator = labelled AND valid lines;
     # invalid predictions excluded). The gap to field_accuracy (failure-
     # inclusive: invalid counts as wrong) is the invalid-prediction rate.
     va = valid_accuracy(records)
@@ -1377,7 +1376,7 @@ def compute_metrics(records: list[dict], schema=None) -> dict:
     tvds = mean_tvd_across_permutations(records)
     if tvds:
         metrics["mean_tvd"] = tvds
-    # W6-B6b: case-cluster bootstrap CIs (B=2000, seed fixed, resample
+    # Case-cluster bootstrap CIs (B=2000, seed fixed, resample
     # cases not lines) on accuracy, macro-F1, NLL, Brier, ECE. This is the
     # DEFAULT CI everywhere fields are correlated within a case or sampling
     # is balanced. The old accuracy_cluster_bootstrap (1000 draws) is
@@ -1416,7 +1415,7 @@ def compute_metrics(records: list[dict], schema=None) -> dict:
     agreement = typesafe_agreement(records)
     if agreement:
         metrics["agreement"] = agreement
-    # W6-B1: per-workflow accuracy for datasets that carry a ``workflow`` key
+    # Per-workflow accuracy for datasets that carry a ``workflow`` key
     # (jabr's task_id, or any future dataset with per-group breakdown). This
     # is the GENERAL metric (macro-by-workflow field accuracy); the TypeSafe-
     # specific ``agreement.by_workflow`` is a separate, narrower metric.
@@ -1427,8 +1426,8 @@ def compute_metrics(records: list[dict], schema=None) -> dict:
     tvd = tvd_vs_consensus(records)
     if tvd:
         metrics["tvd_vs_consensus"] = tvd
-    # Dependent-schema metrics (EV1: review Q1 'The correct diagnostic').
-    # W5b-11: compiled path only — they need the schema to compile against;
+    # Dependent-schema metrics (the dependency-aware diagnostics).
+    # Compiled path only — they need the schema to compile against;
     # absent schema => absent metric (never a silent dict-walk fallback).
     exact_record = exact_record_accuracy(records, schema)
     if exact_record is not None:
@@ -1442,14 +1441,14 @@ def compute_metrics(records: list[dict], schema=None) -> dict:
         metrics["child_accuracy_given_parent_correct"] = child_acc
     # oracle_parent_gap: child accuracy under the TRUE parent (teacher-forced)
     # vs under the predicted parent. Requires oracle_prediction in records
-    # (W3-D part 2: evalrun runs a conditioned pass with the true parent).
+    # (evalrun runs a conditioned pass with the true parent).
     oracle = oracle_parent_gap(records)
     if oracle:
         metrics["oracle_parent_gap"] = oracle
     flips = order_flip_rate(records)
     if flips:
         metrics["order_flip_rate"] = flips
-    # W6-B1: ordinal metrics for ordered-enum fields (absent when none).
+    # Ordinal metrics for ordered-enum fields (absent when none).
     o_mae = ordinal_mae(records)
     if o_mae:
         metrics["ordinal_mae"] = o_mae

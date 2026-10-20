@@ -1,6 +1,6 @@
-"""W5c-10: per-layer bisect of the batched gap drift.
+"""Per-layer bisect of the batched gap drift.
 
-The fp32 decision head (W5c-8, PR #70) did NOT collapse the plateau
+The fp32 decision head (PR #70) did NOT collapse the plateau
 (d_gap 0.064 at M=112 vs 0.0625 quantized). So the drift enters BEFORE
 the LM head: the final hidden state itself differs by batch shape. This
 bisect localizes WHERE in the transformer body the drift first appears
@@ -331,7 +331,7 @@ def run_bisect(
 
 
 # ---------------------------------------------------------------------------
-# W5c-10 follow-ups (fp32 body): width curve, relative diff, GEMM isolation
+# Follow-ups (fp32 body): width curve, relative diff, GEMM isolation
 # ---------------------------------------------------------------------------
 
 WIDTH_CURVE = (16, 24, 32, 48, 56, 64, 84, 112, 128)
@@ -802,7 +802,7 @@ def followup_cache_and_mask_info(
 
 
 # ---------------------------------------------------------------------------
-# W5c-10: in-situ vs recomputed op isolation (L00-L05)
+# In-situ vs recomputed op isolation (L00-L05)
 # ---------------------------------------------------------------------------
 
 
