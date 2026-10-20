@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
@@ -412,6 +413,28 @@ def test_serve_decides_over_http(fake_engine, preset_files, monkeypatch):
     assert started.wait(timeout=10), "serve did not start"
 
     port = captured["server"].server_port
+
+    # Issue #186: the port binds BEFORE warm-up completes (serve boots the
+    # handler, loads the engine, runs the warm-up forward and gc.collect(),
+    # and only THEN calls mark_ready — /decide answers 503 "server is
+    # warming up" until that point). Under a full-suite run the boot window
+    # easily exceeds the time the next statement needs (a bloated session
+    # heap makes gc.collect() slow), so the immediate /decide POST raced the
+    # warm-up and failed with HTTP 503. Wait on the real readiness signal
+    # the server already exposes — /ready flips 503 -> 200 exactly when
+    # /decide can answer — instead of racing it.
+    deadline = time.monotonic() + 30.0
+    while True:
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/ready", timeout=5) as resp:
+                if resp.status == 200:
+                    break
+        except urllib.error.HTTPError as e:
+            if e.code != 503:
+                raise
+        if time.monotonic() > deadline:
+            raise AssertionError("serve did not become /ready within 30s")
+        time.sleep(0.05)
 
     payload = json.dumps(
         {
