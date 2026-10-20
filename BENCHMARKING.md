@@ -61,7 +61,7 @@ each subsequent run starts from a clean combo dir (the prior run's output
 is removed) so only the last run's predictions are kept — 'last one kept'
 semantics, no cross-run contamination.
 
-### Watching a run (W6-UI)
+### Watching a run
 
 A many-hour bench/m5 run is blind without a watcher. `jevmlx watch` is a
 read-only dashboard that renders from the files the run already writes — the
@@ -116,8 +116,7 @@ automatically. The page renders client-side and has, top to bottom:
 - **FAILURE DIAGNOSIS**: the first failed step's argv, stdout tail, and
   error; previous failures of the run are collapsed in a `<details>`.
 - **AGGREGATES SO FAR**: field accuracy (parallel labels + naive), exact
-  record, time per case (parallel + naive), parity counts (pass / fail /
-  fail), cases scored.
+  record, time per case (parallel + naive), parity counts (pass / fail), cases scored.
 - **RESULTS**: one row per combo (model × dataset × scorer × track) with
   the same columns as the README leaderboard (field accuracy + Wilson CI,
   majority, exact, parity status word (PASS/FAIL), time/case, calls, cases, A/B Δ).
@@ -177,7 +176,7 @@ Paste `SUMMARY.md` into the PR description and link the machine specs
   fails fast if any registered lock is missing after build — before any model
   loads — so a broken lock is one error, not a per-combo `OSError` after an
   8-minute model load.
-  Perturbation kinds (W6-B2): four context-side (`ws` whitespace
+  Perturbation kinds: four context-side (`ws` whitespace
   normalisation, `preamble` neutral preamble, `numfmt` number reformatting,
   `shuffle` block-order shuffle) plus two label-preserving SCHEMA kinds —
   `optrev` (reverse every enum field's option order; labels are option
@@ -185,7 +184,7 @@ Paste `SUMMARY.md` into the PR description and link the machine specs
   description with an evidence-grounding instruction). All are deterministic;
   `perturbation_flip_rate` picks up every kind via `group_id` +
   `meta.perturbation` with no metric change.
-- Public gold datasets (W6-B5, pass `--datasets` `ag_news`, `boolq`,
+- Public gold datasets (pass `--datasets` `ag_news`, `boolq`,
   `sst5`, or view-suffixed names like `ag_news.balanced`; a bare name
   runs both views): AG News (4-class topic enum), BoolQ (yes/no reading
   comprehension), SST-5 (ordinal 0-4 sentiment). Each is PINNED to a
@@ -201,7 +200,7 @@ Paste `SUMMARY.md` into the PR description and link the machine specs
   drawn from rows the balanced view did NOT take, so calibration rows
   are never the reported diagnostic rows — the view NLL/Brier/ECE
   describe). Pass `--datasets authored144,perturbations108` for the two
-  OpenJev datasets (W6-B2): `authored144` (144 rows, 36 groups × 4 variants,
+  OpenJev datasets: `authored144` (144 rows, 36 groups × 4 variants,
   3-way evidence interpretation — `supported`/`insufficient`/`contradicted`)
   and `perturbations108` (108 rows, split `rebase_stability`, 36 base rows
   × 3 label-preserving perturbation variants — `option_reversal`,
@@ -230,7 +229,7 @@ Paste `SUMMARY.md` into the PR description and link the machine specs
   Mapping: `dbb1ff1f04a0bce4b20817e4c09eae2b5a3d2ad3` →
   `4f74bd87fd19509aa6b019175b59aad2733a0b7f`. `check_results` does not
   fail on a git_sha absent from history (it never resolved the sha).
-- **jabr classifier-benchmark** (W6-B1, pass `--datasets jabr`): a
+- **jabr classifier-benchmark** (pass `--datasets jabr`): a
   public-domain (CC0) benchmark from
   https://github.com/jabr/classifier-benchmark — 8 classification tasks /
   78 cases covering the three System One primitives: `choice`
@@ -244,7 +243,7 @@ Paste `SUMMARY.md` into the PR description and link the machine specs
   package we do not depend on; we parse the source with `ast`
   the fetcher downloads the PINNED commit sha from raw.githubusercontent.com,
   verifies its sha256 against a hardcoded expectation (fail-closed on
-  mismatch, same F5 rule as the HF datasets), and parses it with the `ast`
+  mismatch, the same fail-closed rule as the HF datasets), and parses it with the `ast`
   module — never `exec`. Each case carries `workflow = task_id` so the
   report's `per_workflow_accuracy` carries per-task accuracy, and the
   leaderboard renders a separate jabr table with 8 per-task columns.
@@ -257,7 +256,7 @@ Paste `SUMMARY.md` into the PR description and link the machine specs
 
 ## What NOT to commit
 
-## RAM model (W5c-13, #79)
+## RAM model (#79)
 
 Activity Monitor's "used" during a `jevmlx bench` run is NOT `weights ×
 number of cases`. It is three things, summed:
@@ -275,22 +274,22 @@ number of cases`. It is three things, summed:
    bucket 3 stays; it is NOT returned to macOS until `mx.metal.clear_cache()`.
 
 The single-model `jevmlx bench --model <one>` path goes through `run_bench`,
-which (before W5c-13) only cleared the Metal cache in its `finally` — once
-after ALL combos. W5c-13 clears it **after every combo**, resets the peak
-memory counter at combo start, and logs the three Metal counters (peak /
+which clears the Metal cache **after every combo** (it once only cleared
+in its `finally`, after ALL combos), resets the peak memory counter at combo
+start, and logs the three Metal counters (peak /
 active / cache) per combo into the bench log and the combo's `run.json`
 `memory` block. The model is still loaded once and kept; only the GPU
 leftover is released. `run_bench_models` (multi-model) already cleared
 between models; that is unchanged.
 
-W5c-14 adds a **cache cap** (`--metal-cache-gb`, default 8): at `run_bench`
+A **cache cap** (`--metal-cache-gb`, default 8): at `run_bench`
 start `mx.metal.set_cache_limit` makes the allocator evict freed buffers
 above the cap instead of hoarding them — so inside a long combo (typesafe,
 426+ cases with rotations) the Metal allocator can no longer hoard ~94 GB
 and push the machine into swap. The cap is recorded in each combo's
 `run.json` `memory` block as `metal_cache_limit_bytes`.
 
-W5c-16 adds a **heartbeat** (`--heartbeat-every`, default 25, 0 disables):
+A **heartbeat** (`--heartbeat-every`, default 25, 0 disables):
 the per-case eval loop prints `[heartbeat] <combo> cases_done=N pred_lines=M
 elapsed_s=S peak=X active=Y cache=Z` every N completed cases (reusing the
 same GB formatting as the `[memory]` line) and appends the same fields as
@@ -309,7 +308,7 @@ not validated by the results-check CI job; they document one-off
 diagnostic measurements (batched drift matrix, kernel-shape probes) that
 accompany a PR but are not part of the results ledger.
 
-`benchmarks/two_stage.py` (B11) measures whether coarse→fine two-stage
+`benchmarks/two_stage.py` measures whether coarse→fine two-stage
 choice (pick a category group, then pick within it) is more accurate or
 faster than a single trie-constrained pass on 255-option enums. Output:
 `two_stage.{json,md}` in the same probes folder.
@@ -319,16 +318,17 @@ faster than a single trie-constrained pass on 255-option enums. Output:
 - [ ] Folder contains only the bench output (predictions, run.json,
       report.json/.md, dataset lock files, SUMMARY.md, folder README)
 - [ ] `parity.json` in the model folder — records the passing slow parity
-      test (W1-A batch vs chunked log_score agreement, single-context)
-      AND the batched matrix (W5-D findings 40/42: batched-vs-independent
+      test (batch vs chunked log_score agreement, single-context)
+      AND the batched matrix (batched-vs-independent
       finals plus the raw pre-rescore row-logit gate). A model cannot
       enter the README leaderboard without it; `check_results` rejects a
       payload without `max_raw_row_drift_nats` / `max_gap_drift_nats` as
-      pre-v2. The gate is FAIL-CLOSED at the fixed atol (review: no
-      widening): winners identical, single-context drift, batched pairwise
-      GAP drift and top-two margin drift — all under atol. Raw-logit drift
-      is a DIAGNOSTIC only (raw logits carry an arbitrary additive
-      offset). Schema:
+      pre-v2. The gate checks DECISIONS, not raw numbers (issue #184):
+      PASS = every field's batched winner equals the batch=1 winner AND no
+      escaped near-tie; the drift quantities (raw-row, pairwise gap,
+      top-two margin, logp — in nats and in fp16 ulps of the measured
+      logit magnitude) are batch-kernel lattice noise, reported as
+      diagnostics and never gated. Schema:
       `{"model": "...", "test": "test_w1a_...", "passed": false,
       "max_abs_drift_nats": 0.044, "max_raw_row_drift_nats": 0.125,
       "max_gap_drift_nats": 0.070, "max_margin_drift_nats": 0.063,
@@ -336,29 +336,24 @@ faster than a single trie-constrained pass on 255-option enums. Output:
       "atol": 0.05, "rescore_gate": {...}, "environment": {...},
       "status": "PASS", "run_at": "..."}`
 
-      P4/I7 (D6): ``status`` is the REPORTING word — PASS, DRIFT, or FAIL.
-      The GATE (``passed``) is unchanged (DRIFT and FAIL both set ``passed:
-      false``). PASS = all drifts < atol. DRIFT = some drift >= atol but
-      winners identical on all cases and no escaped near-tie (batch-shape
-      noise, not a real divergence); the measured max drift is reported as
-      is. FAIL = a winner changed, or an escaped near-tie. There is no
-      envelope-band term — a band computed from the run's own max drift
-      can never fail, so it tested nothing.
+      ``status`` is the reporting word — exactly PASS or FAIL. The gate
+      (``passed``) follows it: FAIL sets ``passed: false``. PASS = every
+      field's batched winner equals the batch=1 winner AND no escaped
+      near-tie (every field whose margin sat inside the engine's rescore
+      band was actually rescored). FAIL = a winner differs, or an escaped
+      near-tie. A scored payload still carrying status DRIFT is
+      pre-contract and rejected with a regenerate hint; a payload without
+      a scoring key is UNVERIFIED (pre-F9) in the leaderboard. The drift
+      numbers ride the payload as diagnostics only.
       ``check_results --check-parity`` prints the status word and one
       sentence; the leaderboard shows the status word in the Parity column.
 
-      **Publishability** (parity-gates): a model with status PASS (the
-      decision-based contract, issue #184; a scored DRIFT payload is
-      pre-contract and rejected — regenerate; pre-F9 payloads without a
-      scoring key show UNVERIFIED (pre-F9))
-      is publishable — it appears in the leaderboard (DRIFT shows the word
-      + max drift in the Parity column) and ``check_results --check-parity``
-      returns OK (DRIFT with an informational note). Status FAIL (a winner
-      changed, or an escaped near-tie) is excluded from the leaderboard
-      and ``check_results`` returns FAIL. ``parity.passed`` semantics
-      (issue #184, the decision-based contract): PASS = every field's
-      batched winner equals the batch=1 winner AND no escaped near-tie;
-      the drift numbers are diagnostics in nats + fp16 ulps, never gated.
+      **Publishability** (parity-gates): a model with status PASS is
+      publishable — it appears in the leaderboard and ``check_results
+      --check-parity`` returns OK. Status FAIL (a winner changed, or an
+      escaped near-tie) is excluded from the leaderboard and
+      ``check_results`` returns FAIL. A pre-F9 payload without a scoring
+      key shows UNVERIFIED (pre-F9) in the leaderboard's Parity column.
 - [ ] `SUMMARY.md` pasted into the PR description
 - [ ] Machine specs (chip, RAM, macOS) mentioned in the PR body
 - [ ] No hand-edited numbers — recompute instead of fixing up
@@ -404,11 +399,10 @@ reruns everything). Per-step logs land in `<out>/<step-id>.log`. Interrupted
 runs resume; the gate step keeps a half-finished evening from wasting GPU time
 on a broken environment.
 
-### A/B install contract (B12, issue #63)
+### A/B install contract (issue #63)
 
-The A/B setup used to run `uv pip install -e .[dev]` with cwd = the main
-repo, so the A/B venv got MAIN's jevmlx and every A/B measured main twice.
-Two guards make that impossible to repeat:
+Two guards make sure the A/B venv gets the A/B branch's jevmlx, never the
+main repo's (an install with cwd = the main repo measures main twice):
 
 - The install runs `-e <ab-worktree>[dev,bench]` with cwd=<ab-worktree> —
   the worktree path is absolute, never relative to the caller's cwd. After
@@ -433,7 +427,7 @@ lines. A flag the A/B branch's bench/invariance do not expose fails that
 step loudly (argparse error in the step log) — it is never silently
 dropped.
 
-**macOS idle sleep** (W5c-15): on darwin the runbook re-execs under
+**macOS idle sleep**: on darwin the runbook re-execs under
 `caffeinate -dimsu` so macOS does not idle-sleep mid-run (during the M5 7B
 smoke it did, and Metal parks while wall time runs). The `sleep_blocked`
 flag is recorded in `RUNBOOK.md`'s header. Opt out with `--allow-sleep`.
@@ -448,18 +442,20 @@ hardcodes a model id. So when the M5 parity step runs `pytest -m slow` with
 `MODEL_ID=<parity model>`, every slow test exercises THAT model — not the
 0.5B dev default.
 
-Tolerances are model-sensitive: `PARITY_ATOL` (== `INSTABILITY_BAND = 5e-2`)
-is the batch-vs-chunked log_score drift measured on the 0.5B dev model.
-Larger models (1.5B, 7B) see higher raw drift from Metal batch-shape matmul
-variation, so `test_w4b_parity.py::test_parity_real_model_twin` (which runs
-all four bundled presets and asserts `< PARITY_ATOL`) is **default-model-
-only** — it skips when `MODEL_ID` is not the 0.5B default. The W1-A / T4
-batch-vs-chunked parity tests use the same tolerance but only on the two
-`fintech_fraud` / `support_triage` presets (smaller drift), so they stay on
-all models; if a parity model ever drifts past `PARITY_ATOL` there, raise
-the constant in `jevmlx/engine.py` (it is shared by the engine's tie flag).
+Tolerances are decision-based (issue #184): the parity gate checks
+WINNERS (winners identical + no escaped near-tie), never raw drifts — the
+recorded drift numbers are fp16 lattice noise of the batched kernels
+(4-8 ulp steps), reported as diagnostics in nats + ulps and never gated.
+`test_w4b_parity.py::test_parity_real_model_twin` (which runs all four
+bundled presets and asserts the DECISION invariant) is **default-model-
+only** — it skips when `MODEL_ID` is not the 0.5B default (the drift
+magnitudes were characterized on the 0.5B; larger models see higher raw
+drift from Metal batch-shape matmul variation, and the M5 parity step
+injects those models via MODEL_ID env). The batch-vs-chunked parity tests
+run on the two `fintech_fraud` / `support_triage` presets (smaller drift)
+and stay on all models; they also assert the decision invariant.
 
-## Statistics (W6-B6b)
+## Statistics
 
 Every accuracy number in `report.json` and the markdown summary carries a
 confidence interval. No interval = the row says "n too small" rather than

@@ -28,8 +28,8 @@ trust the code over this document when they drift.
 | [`jevmlx/openai_slots.py`](jevmlx/openai_slots.py) | OpenAI-compatible slot backend: one request per option, top-k logprobs with an explicit floor and a `truncated` flag. |
 | [`jevmlx/bench.py`](jevmlx/bench.py) | Dataset × scorer × track matrix runner writing results directories; writes `parity.json` per model folder right after the engine load. |
 | [`jevmlx/log.py`](jevmlx/log.py) | Logging configuration (`-v`, `JEVMLX_LOG=json`). |
-| [`jevmlx/timing.py`](jevmlx/timing.py) | W5b-8 event ledger for engine timing (`Ledger`, `Interval`, `SpanError`): non-overlapping named spans in two phases (`prior`, `main`), with `Ledger.derived_flat` deriving today's `*_ms` result keys (`plan_compile_ms`, `prefill_ms`, `cache_broadcast_ms`, composite `suffix_eval_ms`, `lm_head_gather_ms`, `second_pass_ms`, `prior_ms`, `elapsed_ms`, `total_ms`) and `Ledger.batched_views` producing `group_wall` / `per_item_amortized` / `per_item_end_to_end`. Pure Python, no mlx import. W5b-14: ADOPTED by the engine — every stage records ledger spans and the result dict's `*_ms` keys are pure `derived_flat()` derivations; the ad-hoc `*_ms` accumulators are gone. |
-| [`jevmlx/adapters.py`](jevmlx/adapters.py) | W6-1 LM-head adapters (`LMHeadAdapter` protocol, `adapter_for`, `UnsupportedModelError`, `list_supported_model_types`): backbone/lm_head split per installed mlx_lm family (untied `lm_head`, tied `embed_tokens.as_linear`, gemma3 always-head, biased phi head, mistral3 delegation). Registry-only — NO engine wiring yet; engine call sites adopt it in W6-2+. |
+| [`jevmlx/timing.py`](jevmlx/timing.py) | Event ledger for engine timing (`Ledger`, `Interval`, `SpanError`): non-overlapping named spans in two phases (`prior`, `main`), with `Ledger.derived_flat` deriving today's `*_ms` result keys (`plan_compile_ms`, `prefill_ms`, `cache_broadcast_ms`, composite `suffix_eval_ms`, `lm_head_gather_ms`, `second_pass_ms`, `prior_ms`, `elapsed_ms`, `total_ms`) and `Ledger.batched_views` producing `group_wall` / `per_item_amortized` / `per_item_end_to_end`. Pure Python, no mlx import. ADOPTED by the engine — every stage records ledger spans and the result dict's `*_ms` keys are pure `derived_flat()` derivations; the ad-hoc `*_ms` accumulators are gone. |
+| [`jevmlx/adapters.py`](jevmlx/adapters.py) | LM-head adapters (`LMHeadAdapter` protocol, `adapter_for`, `UnsupportedModelError`, `list_supported_model_types`): backbone/lm_head split per installed mlx_lm family (untied `lm_head`, tied `embed_tokens.as_linear`, gemma3 always-head, biased phi head, mistral3 delegation). Registry-only — NO engine wiring yet; an engine change adopts the call sites. |
 | [`benchmarks/to_jsonl.py`](benchmarks/to_jsonl.py) | Bundled `cases.json` → eval JSONL (+ lock). |
 | [`benchmarks/typesafe/fetch.py`](benchmarks/typesafe/fetch.py) | TypeSafe public pages → eval JSONL (+ lock, `benchmark_only`). |
 | [`benchmarks/perturb.py`](benchmarks/perturb.py) | Deterministic label-preserving context perturbations. |
@@ -42,7 +42,7 @@ trust the code over this document when they drift.
 | [`benchmarks/compat.py`](benchmarks/compat.py) | Model compatibility table (latency/memory) generator. |
 | [`benchmarks/naive_vs_parallel.py`](benchmarks/naive_vs_parallel.py) | Quick parallel-vs-naive side-by-side comparison. |
 | [`benchmarks/m5.py`](benchmarks/m5.py) | One-command M5 runbook: doctor gate → slow parity per model → quality bench → invariance → timing → remaining parity models → optional `--ab-branch` A/B worktree → `SUMMARY.md` comparison. Steps are subprocesses logged into `<out>/RUNBOOK.md`; idempotent via output markers (`--fresh` reruns); step planner and summary builder are pure functions. |
-| [`benchmarks/probe.py`](benchmarks/probe.py) | W6-2 prep probes, standalone (no engine wiring): `slope` fits the per-row peak-memory slope per width bin (B=1/2/4/8 at widths 4/8/16/32 under `mx.reset_peak_memory`) and `adapters` compares `adapter.lm_head(adapter.backbone(x)[:, pos])` vs `model(x)[:, pos]` on bundled preset rows. |
+| [`benchmarks/probe.py`](benchmarks/probe.py) | Standalone memory/adapters probes (no engine wiring): `slope` fits the per-row peak-memory slope per width bin (B=1/2/4/8 at widths 4/8/16/32 under `mx.reset_peak_memory`) and `adapters` compares `adapter.lm_head(adapter.backbone(x)[:, pos])` vs `model(x)[:, pos]` on bundled preset rows. |
 
 ## The Engine object
 
@@ -57,7 +57,7 @@ callers pass around:
 | `profile` | the `PromptProfile` probed once at load (system-role support + template kwargs from the resolved id) |
 | `vocab_size` / `weight_bytes` | the logits-slab sizing + memory-budget inputs |
 | `cache_capabilities` | the cache classes the model's layers produce (the `merge` broadcast gate reads them) |
-| `width_slope` | the MEASURED B=1/B=2 tiling slope (W5-D), read by `_width_bin_max_rows` |
+| `width_slope` | the MEASURED B=1/B=2 tiling slope, read by `_width_bin_max_rows` |
 
 Every per-model property is resolved exactly once, here. The hot paths read
 `engine.profile` / `engine.vocab_size` / `engine.weight_bytes` /
@@ -153,7 +153,7 @@ result dict  {parsed_json, field_telemetry, prompt_sha256, full timing
   ├──► api.Decision / FieldResult        (Python)
   └──► evalrun predictions.jsonl lines   (eval) / CLI table       (decide)
 
-scalar decisions (W5-B, PR #45): every scoring path — normal batched pass,
+scalar decisions (PR #45): every scoring path — normal batched pass,
 batch=1 rescore, dependency rescore, oracle rescore — produces a
 ScalarEvidence (per-choice T=1 log-scores + legal-mass logs, source_shape
 'batch' | 'batch1' | 'dependency' | 'oracle'), and every decision goes
@@ -164,13 +164,16 @@ telemetry (evidence_source included); Candidate is a typed value + its
 score-key ('true'/'false' for booleans — conflating the scored and typed
 representations turned True into "true" in reconciled assignments).
 
-batched (decide_many): run_parallel_generation_batched prefills each
-context, builds the rows ONCE, then processes context groups built
-INCREMENTALLY from actual cumulative cache bytes + projected suffix cost
-(contexts sorted by prompt length); ONE merged scoring pass per group with
-per-row cache slots; prior computed ONCE per call; per-result timing keys
+batched (decide_many): run_parallel_generation_batched forms context
+groups from CHEAP prompt-length estimates (no prefills), then processes
+each group in turn: prefill the group's contexts, build the rows ONCE,
+one merged scoring pass per group with per-row cache slots, assemble,
+then DROP the group's KV caches before the next group prefills (peak
+live caches = one group, not all N contexts). Groups form incrementally
+inside the measured memory budget (contexts sorted by prompt length);
+prior computed ONCE per call; per-result timing keys
 group_wall_ms / per_item_amortized_ms / per_item_end_to_end_ms /
-contexts_per_pass (the ACTUAL group size). W5b-14 GAP A: one Ledger PER
+contexts_per_pass (the ACTUAL group size). One Ledger PER
 CONTEXT — each result's flat `*_ms` keys derive from that context's own
 ledger (its prefill span + its assembly-side spans), so prefill_ms is
 never the batch-wide sum; the group's merged scoring pass lives on the
@@ -178,12 +181,12 @@ per-GROUP ledger ONLY (no fabricated per-context spans) and the amortized
 share is the ONE derived number `per_item_amortized_ms`, computed once
 from the group ledger via `Ledger.batched_views`.
 `per_item_end_to_end_ms` = the context's own prefill span + the
-amortized group share + its own assembly span (sum of intervals, N6 — a
+amortized group share + its own assembly span (sum of intervals — a
 context in group k never carries other groups' wall time; the shared
 `prior_ms` is reported separately, not added). Because the per-context ledgers carry no
 request span, their flat `elapsed_ms` is the top-level main-span sum of
 that context's own spans (single-context requests have a `request` span
-and report true wall); the shared `prior_ms` (request ledger, finding 26)
+and report true wall); the shared `prior_ms` (request ledger)
 is passed into `derived_flat(prior_ms=...)` so every result reports it
 and `total_ms == elapsed_ms + prior_ms` holds everywhere.
 
@@ -200,27 +203,27 @@ load).
 
 | Key | Meaning |
 |---|---|
-| `elapsed_ms` | W5b-14: the top-level `request` ledger span — true wall time for the decision (excludes the prior pass; plan/prefill/scoring/assembly are its children, so nothing double-counts). |
-| `prior_ms` / `prefill_ms` / `plan_compile_ms` / `cache_broadcast_ms` / `suffix_eval_ms` / `lm_head_gather_ms` / `total_ms` | The honest timing split (W5b-14: ledger-derived — one measurement per interval, no overlapping accumulators): the neutral prior pass (a `prior`-phase `prior_pass` span; ~0 when the prior cache hits, 0.0 when `prior_correction` is off), prefill, plan compilation (plan cache makes it ~0 warm), the per-chunk cache merge/broadcast spans (distinct from the forwards; `cache_broadcast_ms`), the batched suffix (`suffix_eval_ms` = the cache_merge + transformer + gather composite, marked derived), the decision gather inside the suffix window (`lm_head_gather_ms`), and everything (`total_ms == elapsed_ms + prior_ms`). A failed forward/gather (Metal retry, W5-D finding 30) records NO interval — the ledger drops the span the exception unwinds through; the parents survive (only spans nested INSIDE the failing span are dropped). |
+| `elapsed_ms` | the top-level `request` ledger span — true wall time for the decision (excludes the prior pass; plan/prefill/scoring/assembly are its children, so nothing double-counts). |
+| `prior_ms` / `prefill_ms` / `plan_compile_ms` / `cache_broadcast_ms` / `suffix_eval_ms` / `lm_head_gather_ms` / `total_ms` | The honest timing split (ledger-derived — one measurement per interval, no overlapping accumulators): the neutral prior pass (a `prior`-phase `prior_pass` span; ~0 when the prior cache hits, 0.0 when `prior_correction` is off), prefill, plan compilation (plan cache makes it ~0 warm), the per-chunk cache merge/broadcast spans (distinct from the forwards; `cache_broadcast_ms`), the batched suffix (`suffix_eval_ms` = the cache_merge + transformer + gather composite, marked derived), the decision gather inside the suffix window (`lm_head_gather_ms`), and everything (`total_ms == elapsed_ms + prior_ms`). A failed forward/gather (Metal allocation retry) records NO interval — the ledger drops the span the exception unwinds through; the parents survive (only spans nested INSIDE the failing span are dropped). |
 | `second_pass_ms` / `rerun_fields` / `rerun_rows` | The `depends_on` second pass: wall time, which fields were re-decided, how many conditioned rows ran (0.0/[] when no `depends_on`). |
-| `per_item_end_to_end_ms` | W5c-3: the honest per-request end-to-end latency — own prefill span + own assembly span, derived from CLOSED ledger spans as `elapsed_ms - plan_compile_ms` (on the single ledger the top-level `request` span minus the plan span is exactly prefill + scoring + assembly; the batched per-context ledgers derive the same interval-set definition for their own key — the assembly span is not closed yet inside `finalize_public_result`, so `last_interval("assembly")` is unavailable by design). Same key the batched path reports per context; `check_results` requires it on every parallel line, `leaderboard._per_item_end_to_end_ms` reads it. |
-| `padded_token_positions` | W3-R: total suffix token positions including right padding — sum of (chunk width x chunk rows), the tiling shape the forwards actually ran at. |
+| `per_item_end_to_end_ms` | the honest per-request end-to-end latency — own prefill span + own assembly span, derived from CLOSED ledger spans as `elapsed_ms - plan_compile_ms` (on the single ledger the top-level `request` span minus the plan span is exactly prefill + scoring + assembly; the batched per-context ledgers derive the same interval-set definition for their own key — the assembly span is not closed yet inside `finalize_public_result`, so `last_interval("assembly")` is unavailable by design). Same key the batched path reports per context; `check_results` requires it on every parallel line, `leaderboard._per_item_end_to_end_ms` reads it. |
+| `padded_token_positions` | total suffix token positions including right padding — sum of (chunk width x chunk rows), the tiling shape the forwards actually ran at. |
 | `rescored_fields` | Fields whose batched result was replaced by the batch=1 canonical rescore. |
 | `total_tokens_generated` | Always 0: no text is generated. |
-| `peak_active_bytes` / `peak_incremental_bytes` | W5-D finding 32: absolute Metal peak since the last `mx.reset_peak_memory()`, and the INCREMENTAL peak over the request's starting active memory (the old single number could describe an earlier request or the warmup). |
+| `peak_active_bytes` / `peak_incremental_bytes` | absolute Metal peak since the last `mx.reset_peak_memory()`, and the INCREMENTAL peak over the request's starting active memory (the old single number could describe an earlier request or the warmup). |
 | `sequential_forward_passes` | 1, or the chunk count from the width-bin memory budget. |
-| `failed_attempts` | W5-D finding 30: Metal allocation failures that were retried at a smaller chunk size (`ScoreRowsResult.failed_attempts`). Never folded into `sequential_forward_passes` — a pass is a forward that produced rows. |
+| `failed_attempts` | Metal allocation failures that were retried at a smaller chunk size (`ScoreRowsResult.failed_attempts`). Never folded into `sequential_forward_passes` — a pass is a forward that produced rows. |
 | `schema_match` | Always True (keys/enums guaranteed by construction). |
 | `confidence_model` | `"slots"` or `"labels"`. |
-| `prompt_sha256` / `prompt_version` | SHA-256 over the full prompt token ids; the version is read from `engine.PROMPT_VERSION` (v8) — never a literal elsewhere. |
-| `probability_status` | W5b-13: a SUMMARY over the per-field semantics records — one clause per distinct (score_source, temperature, calibrator_id, prior_mode) group with its field count. Not authoritative for any single field; the per-field truth is `field_telemetry[..]['semantics']`. An empty group set raises (every engine path sets records). |
+| `prompt_sha256` / `prompt_version` | SHA-256 over the full prompt token ids; the version is read from `engine.PROMPT_VERSION` — never a literal elsewhere. |
+| `probability_status` | a SUMMARY over the per-field semantics records — one clause per distinct (score_source, temperature, calibrator_id, prior_mode) group with its field count. Not authoritative for any single field; the per-field truth is `field_telemetry[..]['semantics']`. An empty group set raises (every engine path sets records). |
 | `prior_correction` / `constraints_applied` | Whether the prior pass ran / case-level constraints were applied. |
 | `reconciled_fields` | Fields whose value changed under constrained MAP. |
 | `parsed_json` | `{field: {"value": …, "prob": …}}`. |
 | `field_telemetry` | `{field: entry}` — see next table. |
 | `num_fields` | Field count. |
 
-Batched-only keys (`run_parallel_generation_batched`, every result): `group_wall_ms` (merged scoring + assembly of the group — prefill is per context in `prefill_ms`, since the grouping loop needs the prefill sizes BEFORE it can form groups), `per_item_amortized_ms` (group wall / group size — the ONE amortized number, from `Ledger.batched_views`), `contexts_per_pass` (the ACTUAL group size — the final partial group reports its own smaller size). `per_item_end_to_end_ms` is NO LONGER batched-only (W5c-3): the single path derives it from the ledger too (see the table row above); the batched version keeps its N6 definition — the context's OWN prefill span + the amortized group share + its OWN assembly span — a sum of intervals, so a context in group k never carries other groups' wall time (the shared `prior_ms` is reported separately, not added). With `prior_correction=True` the neutral pass is computed ONCE per call on the request ledger and every result reports the shared `prior_ms` (`total_ms` includes it). Batched per-context ledgers carry no `request` span, so their flat `elapsed_ms` is the top-level main-span sum of that context's own spans (single-context requests have the `request` span and report true wall). |
+Batched-only keys (`run_parallel_generation_batched`, every result): `group_wall_ms` (merged scoring + assembly of the group — each group's contexts are prefilled when the group runs, in `prefill_ms`), `per_item_amortized_ms` (group wall / group size — the ONE amortized number, from `Ledger.batched_views`), `contexts_per_pass` (the ACTUAL group size — the final partial group reports its own smaller size). `per_item_end_to_end_ms` (both paths, see the table row above) — the batched version's definition: the context's OWN prefill span + the amortized group share + its OWN assembly span — a sum of intervals, so a context in group k never carries other groups' wall time (the shared `prior_ms` is reported separately, not added). With `prior_correction=True` the neutral pass is computed ONCE per call on the request ledger and every result reports the shared `prior_ms` (`total_ms` includes it). Batched per-context ledgers carry no `request` span, so their flat `elapsed_ms` is the top-level main-span sum of that context's own spans (single-context requests have the `request` span and report true wall). |
 
 ### `field_telemetry` entry — built in `run_parallel_generation`'s field loop (multi), scalar branch, and the `<field>#count` branch
 
@@ -240,12 +243,12 @@ Batched-only keys (`run_parallel_generation_batched`, every result): `group_wall
 | `top_choices` | Top (choice, probability) pairs, most probable first (top 5). |
 | `rows` | Rows the field consumed (0 for cardinality-1 fields). |
 | `tie` / `rescored` | Scalar: whether the corrected top-two log-score gap is inside `INSTABILITY_BAND` after any rescore (subsumes exact-equality ties), and whether the batch=1 rescore replaced the batched result. Multi: `rescored` when any option's corrected log-odds or the count row's corrected bucket gap was inside the band and rescored. |
-| `rescore_band_nats` / `drift_envelope_nats` | W5c-9: the decision band this field's rescore trigger used (`INSTABILITY_BAND + E_bound`, rounded up to the 1/64-nat lattice) and the envelope bound E_bound itself. `drift_envelope_nats` is None when no envelope rode (constant-band paths). NOT the parity atol — the parity contract stays 0.05 on d_gap (ARCHITECTURE design decision 10). |
-| `evidence_source` | Scalar only (W5-B, PR #45): which scoring path produced the final evidence — `batch` (batched pass), `batch1` (canonical rescore replaced it), `dependency` (second pass), `oracle` (forced re-score). Rides on scalar entries and on second-pass re-decides. |
-| `semantics` | W5b-13: the per-field semantics record (coerced to frozen `api.FieldSemantics` at the public boundary): `score_source` (`batched`/`rescored_batch1`/`dependency`/`oracle`), `temperature` actually applied (None for count rows and calibrated multi selections), `calibrator_id` (bundle identity when a fitted calibrator set the selection), `prior_mode` (`off`/`neutral_v1`), `constraint_changed` (a reconciler overrode the raw winner — an actual selection change, not merely a binding constraint), `dependency_rescored`. REQUIRED on every entry — `_build_field_results` raises without it. |
+| `rescore_band_nats` / `drift_envelope_nats` | the decision band this field's rescore trigger used (`INSTABILITY_BAND + E_bound`, rounded up to the 1/64-nat lattice) and the envelope bound E_bound itself. `drift_envelope_nats` is None when no envelope rode (constant-band paths). NOT the parity gate — the parity contract checks decisions (winners identical + no escaped near-tie, issue #184); the drift numbers are diagnostics. |
+| `evidence_source` | Scalar only (PR #45): which scoring path produced the final evidence — `batch` (batched pass), `batch1` (canonical rescore replaced it), `dependency` (second pass), `oracle` (forced re-score). Rides on scalar entries and on second-pass re-decides. |
+| `semantics` | the per-field semantics record (coerced to frozen `api.FieldSemantics` at the public boundary): `score_source` (`batched`/`rescored_batch1`/`dependency`/`oracle`), `temperature` actually applied (None for count rows and calibrated multi selections), `calibrator_id` (bundle identity when a fitted calibrator set the selection), `prior_mode` (`off`/`neutral_v1`), `constraint_changed` (a reconciler overrode the raw winner — an actual selection change, not merely a binding constraint), `dependency_rescored`. REQUIRED on every entry — `_build_field_results` raises without it. |
 | `legal_mass` | Probability the model assigned to the union of allowed continuations at the winner's branch point(s), against the full vocabulary = sum(exp(z_allowed)) / sum(exp(z_vocab)). Per-branch leakage signal — the constrained distribution can confidently pick A over B even when almost all unconstrained mass is on a reasoning token/newline/label text. Product over the winner's branch path (scalar); per-option Y/N branches (multi); the count row has its own (`legal_mass` + `min_option_legal_mass` on the `<field>#count` entry). 1.0 for cardinality-1 fields (nothing branched). Always computed. Raw, pre-prior-correction logits. |
-| `legal_mass_logs` | Per-choice (scalar) / per-option (multi) natural-log legal-mass product along the branch path, keyed by the real choice/option string. Raw, T=1. Calibration feature for the abstention model. The legal-mass callback is LOG-space end to end (W5-D finding 37: `score_trie`'s `legal_mass_at_node` returns natural-log floats; the trie stays MLX-free). |
-| `min_option_legal_mass` / `mean_log_legal_mass` | Multi only (W5-D finding 38): cardinality-free field-level stats replacing the old underflowing, cardinality-confounded product as the headline numbers — the worst option's legal mass in probability space, and the mean per-option log mass (additive, stable). The per-option logs stay on `legal_mass_logs`. |
+| `legal_mass_logs` | Per-choice (scalar) / per-option (multi) natural-log legal-mass product along the branch path, keyed by the real choice/option string. Raw, T=1. Calibration feature for the abstention model. The legal-mass callback is LOG-space end to end (`score_trie`'s `legal_mass_at_node` returns natural-log floats; the trie stays MLX-free). |
+| `min_option_legal_mass` / `mean_log_legal_mass` | Multi only: cardinality-free field-level stats replacing the old underflowing, cardinality-confounded product as the headline numbers — the worst option's legal mass in probability space, and the mean per-option log mass (additive, stable). The per-option logs stay on `legal_mass_logs`. |
 | `oracle_prediction` / `oracle_log_scores` | Present only under `oracle_overrides` (DAG evaluation): the field was forced to the given value and re-scored conditioned on it. |
 | `prior_log_scores` / `prior_corrected` (scalar) / `prior_option_pairs` / `prior_corrected` (multi) | Present only under `prior_correction`: the neutral-context prior the field's scores were corrected against. |
 
@@ -263,7 +266,7 @@ Batched-only keys (`run_parallel_generation_batched`, every result): `group_wall
 | `model` | `"slots"` or `"labels"`. |
 | `alternatives` | Top 3 (choice, probability) pairs; multi: per-option (option, P(yes)) sorted desc. |
 | `reason` | None, `"none_of_above"` (caller opted in via `allow_none_of_above=True`, model picked the explicit opt-out → None), or `"abstain"` (`abstain_below_margin` set and the field's margin — `probability_margin` scalar / `threshold_distance` multi — fell below the cut; value withheld from the validated instance, raw kept for provenance). The single source of truth — no separate abstain flag. |
-| `semantics` | Frozen `api.FieldSemantics` (W5b-13): how THIS field's reported probabilities were produced — score_source, the temperature actually applied, the calibrator bundle id, prior_mode, constraint_changed, dependency_rescored. Required, kw-only; coerced from the telemetry record, never None. |
+| `semantics` | Frozen `api.FieldSemantics`: how THIS field's reported probabilities were produced — score_source, the temperature actually applied, the calibrator bundle id, prior_mode, constraint_changed, dependency_rescored. Required, kw-only; coerced from the telemetry record, never None. |
 
 ### Case-level constraints — `constraints.py`, applied by `_constrained_map`
 
@@ -275,12 +278,12 @@ Batched-only keys (`run_parallel_generation_batched`, every result): `group_wall
 
 `check_constraint` is the one evaluator, shared by the
 engine's MAP reconciliation and `evalmetrics.constraint_violation_rate`;
-`validate_constraints` checks shapes up front. W5-B (PR #45) added
+`validate_constraints` checks shapes up front. PR #45 added
 `validate_constraints_for_schema`: the engine calls it at the top of
 `run_parallel_generation` — BEFORE any model work — so unknown constraint
 types, unknown fields, out-of-domain values, and implies/requires_parent/
-excludes on multi fields all fail loudly at call time (review 13:
-case-level constraints cannot be reconciled on multi fields today;
+excludes on multi fields all fail loudly at call time (case-level
+constraints cannot be reconciled on multi fields today;
 exclusivity is the supported multi shape). The neutral prior pass runs
 with constraints=None, so validation never fires twice. After the
 dependency pass's final MAP re-run, a still-violating assignment raises
@@ -299,7 +302,7 @@ Types: `mutually_exclusive` / `at_most_one` / `at_most_k` (k),
 `at_least_one`, `at_least_k` (k), `exact_k` (k), `implies` (`if_option` →
 `then_option`).
 
-**W5-C**: there are NO syntactic contradiction rules. Satisfiability is
+**Contradictions**: there are NO syntactic contradiction rules. Satisfiability is
 decided by running the SAME feasibility solver the engine uses
 (`setcons.is_feasible`, no scores, empty proposal); a constraint set with no
 feasible selection raises `SchemaCompileError` at compile time. Sets that
@@ -320,7 +323,7 @@ already a multi-second Python loop; the compiler surfaces it as a
 per component: a 64-option field whose largest component has 12 options is
 fine.
 
-**Count + set precedence (W5-C)**: a trusted count enters the SAME solver
+**Count + set precedence**: a trusted count enters the SAME solver
 run as the schema's set constraints — bucket 0–3 as `exact_k`, bucket 4
 (`"4"` means four or more) as `at_least_k(k=4)`, never a separate
 reconciler that the set solver can erase. Schema constraints are HARD
@@ -330,7 +333,7 @@ at WARNING) and the per-option threshold rule decides. The count row lives
 in `internal_telemetry` keyed `<field>#count` — never `field_telemetry`, so
 `Decision.fields` cannot see internal rows.
 
-**Calibration bundle (W5-C)**: `CalibrationBundle` is the one typed object
+**Calibration bundle**: `CalibrationBundle` is the one typed object
 
 ```python
 {
@@ -354,7 +357,7 @@ multi calibrator was fitted on (`"off"` = raw evidence log-odds,
 `"neutral_v1"` = prior-corrected log-odds); fit and apply must use the same
 input.
 
-**Abstention contract (W5-C)**: `abstain_below_margin` requires every field
+**Abstention contract**: `abstain_below_margin` requires every field
 of the target model to be Optional (`X | None`); enforced at `decide()`
 START with a `TypeError` naming the first offending field — a withheld
 field maps to `None`, so a non-Optional field would otherwise fail Pydantic
@@ -394,55 +397,52 @@ states (decision-based contract, issue #184): PASS = every field's batched
 winner equals the batch=1 winner AND no escaped near-tie (every field whose
 margin sat inside the engine's rescore band was actually rescored); FAIL =
 a winner differs, or an escaped near-tie. The drift numbers are fp16-lattice
-noise of the batched kernels (measured 2-8 ulp steps at decision-logit
+noise of the batched kernels (measured 4-8 ulp steps at decision-logit
 magnitudes of abs(x) ~ 20; the old absolute 0.05-nat tolerance sat inside
 that noise and failed by construction) — they are reported in nats + ulps
 and NEVER gate. A scored payload with status DRIFT is
 pre-contract and rejected with a regenerate hint (no dead compatibility
-path); pre-F9 payloads without a scoring key keep the UNVERIFIED (pre-F9)
+path); payloads from before per-scorer parity keep the UNVERIFIED (pre-F9)
 display.
 
 One check, two consumers: the slow parity test and the bench share
 `check_scoring_parity`. A model without a passing `parity.json` gets
 `parity_failed` rows in SUMMARY.md (`summarize_results._model_parity_note`,
 which also gates a MISSING parity.json) and cannot enter the README compat
-table. W5 (PR #48) made the gate v2-aware: a parity.json without
+table. PR #48 made the gate v2-aware: a parity.json without
 `max_raw_row_drift_nats` is pre-v2 and FAILS with a regenerate hint, and a
 failing payload names its stages via the shared
-`_parity_failed_stages` (winners flipped / final log-score drift ≥ atol /
-raw pre-rescore row-logit drift ≥ atol) plus the max drifts and atol;
+`_parity_failed_stages` (winners flipped / rescore-gate escape — a
+reference near-tie the production run did not rescore) plus the max drifts
+and atol;
 `check_results.check_parity` uses the same classifier.
 
 ### Batched parity matrix — `parity.check_batched_parity`
 
-The W1-A gate only exercised `run_parallel_generation`, so a `decide_many`
+The original scoring-parity gate only exercised `run_parallel_generation`, so a `decide_many`
 bug passed it. `check_batched_parity` runs each case at 1/2/4 contexts,
 equal and mixed prompt lengths, and compares RAW row logits BEFORE the
-near-tie rescore (W5-D finding 42: one scoring pass per context through the
+near-tie rescore (one scoring pass per context through the
 shared `_score_rows` at identical chunk shapes vs the batched group's rows —
 so a batch-1 rescore cannot mask raw batch drift), final decisions (parsed
 values + log_scores), and prior on/off (`prior_correction=True` computes the
 shared prior and must still match decide-per-context). Returns the
 `check_scoring_parity` shape plus `max_raw_row_drift_nats` and a
 per-case `max_raw_row_drift_nats`. Parity cases use the bundled presets'
-REAL contexts (W5-D finding 41: `bundled_preset_specs` returns the whole
+REAL contexts (`bundled_preset_specs` returns the whole
 preset; `_case_context` falls back to a stable filler only for bare test
 schemas).
 
-Why the residual drift is not an LM-head rounding problem: PR #70 tried one
-candidate fix — a TRUE fp32 head for decision positions (dequantize
-the quantized LM head once at load, matmul the body's final hidden states
-against the fp32 weight; an `astype(float32)` on the quantized kernel's
-input does not count, a known MLX path still yields fp16-grid results). On
-the 0.5B the batched gap drift did NOT collapse: d_gap max 0.036 at M=8,
-~0.06 at M=16-32, 0.064 at M=112 — the same plateau the quantized head
-shows (winners identical at every M; 545 MB extra head weights, ~11%
-latency overhead at M=112). The divergence starts in the transformer BODY
-(batched attention/MLP kernels pick different fp16 rounding by shape), and
-the fp32 head faithfully reproduces those drifting hidden states into
-logits — exact equality needs same-shape execution, not a wider head. If a
-follow-up is ever wanted, `benchmarks/layer_bisect.py` exists for layer
-bisection.
+Why the residual drift is not an LM-head rounding problem: PR #70 tried
+an fp32 head for decision positions (dequantized head weight, matmul in
+fp32). The batched gap drift did NOT collapse (d_gap max 0.036 at M=8,
+~0.06 at M=16-32, 0.064 at M=112; winners identical at every M) — the
+divergence starts in the transformer BODY (batched attention/MLP kernels
+pick different fp16 rounding by shape) and the fp32 head faithfully
+reproduces those drifting hidden states into logits. Exact equality needs
+same-shape execution, not a wider head — which is why the parity gate
+compares DECISIONS instead of raw numbers (issue #184). If a follow-up is
+ever wanted, `benchmarks/layer_bisect.py` exists for layer bisection.
 
 ### Eval `cases.jsonl` line — writers: `to_jsonl.py`, `typesafe/fetch.py`
 
@@ -491,11 +491,13 @@ engine split, `peak_active_bytes`, `padded_token_positions`,
 contract v2 adds `peak_incremental_bytes` + `failed_attempts` —
 check_results.REQUIRED `RUN_TIMING_KEYS`). Batched-path runs also land
 `group_wall_ms` / `per_item_amortized_ms` / `per_item_end_to_end_ms`
-(check_results `BATCHED_TIMING_KEYS`, required together when present).
+(check_results `BATCHED_TIMING_KEYS` — the first two required together
+when present; `per_item_end_to_end_ms` is its own key, required on every
+parallel line).
 Same calls the predictions came from — no second run. Naive/openai tracks
 write none (no engine split exists there).
 
-**W5c-7 item 5 (timing segment isolation)**: timing.json carries a
+**Timing segment isolation**: timing.json carries a
 `segment` counter (0 on a fresh run, incremented on each `--resume`)
 and a `segment_id` (`{run_id}#{segment}`). `check_results` requires
 `segment_id` when `segment > 0`; the report/leaderboard read per-item
@@ -503,7 +505,7 @@ timings only from the LATEST segment and never pool across segments —
 a resumed run's timings are from a different process/machine-state and
 are not comparable.
 
-### Crash-safe resumable eval (`jevmlx/resume.py`) — W5c-7 / B6 part 1
+### Crash-safe resumable eval (`jevmlx/resume.py`)
 
 Four concerns in one module:
 
@@ -574,11 +576,15 @@ conversion: same shape with empty `sources` plus `fetched_at`.
   a fitted calibrator runs. For multi fields `probability` is `None` — the
   engine does not claim a field-level probability for an option set
   (per-option decisions only).
-- **One tolerance number.** `engine.INSTABILITY_BAND` (5e-2 nats) is the
-  single source of truth for batch-shape FP noise; the test suite re-exports
-  it as `PARITY_ATOL` and `parity.json` records it as `atol`. Near-tie
-  rescoring, the parity test, the memory probe, and the parity producer all
-  read the same constant — no second tolerance literal anywhere.
+- **One near-tie constant.** `engine.INSTABILITY_BAND` (5e-2 nats) is the
+  single source of truth for what counts as a near-tie (the margin band
+  that must be rescored); the test suite re-exports it as `PARITY_ATOL` and
+  `parity.json` records it as `atol`. The parity gate itself checks
+  DECISIONS (issue #184): winners identical + no escaped near-tie; the
+  recorded drift numbers are diagnostics and never gate. Near-tie
+  rescoring, the parity gate's near-tie detection, the memory probe, and
+  the parity producer all read the same constant — no second tolerance
+  literal anywhere.
 - **One parity implementation.** The slow test and the bench's
   `parity.json` producer call the same `jevmlx/parity.py` function; recorded
   parity and tested parity cannot drift apart.
@@ -592,27 +598,26 @@ conversion: same shape with empty `sources` plus `fetched_at`.
   and `set_constraints` are exposed as read-only mappings/tuples
   (`_freeze_plan` / `MappingProxyType`). A schema is compiled once and
   shared across engines, threads, and plan caches — in-place mutation would
-  silently invalidate every cached plan keyed to it. `api` no longer
-  re-exports `models.*`: aliases resolve via `jevmlx.models.resolve_model`
-  (imported by the engine) and `jevmlx.models` is the public home of
-  `MODEL_ALIASES`/`DEFAULT_MODEL`.
+  silently invalidate every cached plan keyed to it. `jevmlx.models` is the public home of
+  `MODEL_ALIASES`/`DEFAULT_MODEL`; aliases resolve via
+  `jevmlx.models.resolve_model` (imported by the engine).
 - **Prompt version read, never written.** `PROMPT_VERSION` lives once in
   `jevmlx.engine`; every consumer (result dict, prior cache key, parity
   payload) reads it.
 - **One serializer.** `jevmlx.json_text.json_text` (`ensure_ascii=False`) is
-  the only sanctioned JSON rendering for prompt and candidate text (W5-A
-  finding 39): the stdlib default escaped non-ASCII labels in candidate
-  compilation while prompts showed the real characters, so the scorer judged
-  tokenizations the model never saw.
+  the only sanctioned JSON rendering for prompt and candidate text (the
+  stdlib default escaped non-ASCII labels in candidate compilation while
+  prompts showed the real characters, so the scorer judged tokenizations
+  the model never saw).
 - **The compiled plan owns the prompt.** `to_schema_str(mode, tokenizer=…)`
-  renders the aliases THE COMPILED PLAN scored for this tokenizer (W5-A
-  finding 1) — prompt and scorer can never disagree about the protocol.
+  renders the aliases THE COMPILED PLAN scored for this tokenizer — prompt
+  and scorer can never disagree about the protocol.
   `alias_for_index` survives only for the OpenAI adapter's per-field
   requests, which bypass the plan.
 - **The context cannot impersonate its own fence.** `_context_block` fences
   the context with a sha256-derived nonce tag (`_context_nonce`): open and
   close fences match per context, and an interior `CONTEXT>>>` line cannot
-  close the block early (W5-A finding 44).
+  close the block early.
 - **The prior cache is identity-keyed.** `_prior_cache_key` carries
   id(model)/id(tokenizer) with live weakref verification on every hit (an id
   can be reused after free), plus the neutral prompt's full sha256 (the plan
@@ -621,7 +626,7 @@ conversion: same shape with empty `sources` plus `fetched_at`.
   non-weak-referenceable tokenizers are simply not cached.
 - **Retry is per chunk and honest.** A Metal allocation failure halves that
   chunk and retries; later chunks in the same bucket still run
-  (`_score_rows`, W5-D finding 30). Retries surface as `failed_attempts`,
+  (`_score_rows`). Retries surface as `failed_attempts`,
   never as `sequential_forward_passes`.
 - **No backward compatibility.** Changes replace: old paths, keys, flags and
   names are deleted with their callers and tests in the same change. No
@@ -683,7 +688,7 @@ conversion: same shape with empty `sources` plus `fetched_at`.
 7. **Identity-keyed plan cache.** Compiled plans are cached per tokenizer
    object identity (weakref, evicted on death) so repeated decisions skip
    recompilation without leaking tokenizers — and two equal-but-distinct
-   tokenizers never share a plan. **P5: an option-plan cache**
+   tokenizers never share a plan. An option-plan cache
    (`_OPTION_PLAN_CACHE`) sits below the plan cache: the tokenizer-invariant
    part of a scalar field's slot plan (aliases, shared_ids, remainders — the
    output of `_search_codebook` + `tokenizer.encode`) is keyed on
@@ -700,17 +705,19 @@ conversion: same shape with empty `sources` plus `fetched_at`.
    `dataset.lock.json`, `run.json`, and `parity.json` exist so any number in
    a report can be traced to the exact prompt, data, and parity state that
    produced it.
-10. **Rescore band vs parity contract (W5c-9).** The near-tie rescore's
-   trigger and the parity gate share ONE measured quantity (d_gap) but are
-   two DIFFERENT thresholds, deliberately: the parity gate stays at the
-   fixed `INSTABILITY_BAND` (0.05 nats, fail-closed — widening it would
-   bless drift instead of catching it), while the rescore trigger WIDENS to
-   `INSTABILITY_BAND + E_bound(M)` from the persisted drift envelope
-   (`jevmlx/driftenv.py`: records keyed by model/revision/quantization/
+10. **Rescore band vs parity gate.** The near-tie rescore's
+   trigger and the parity gate share ONE measured quantity (d_gap) but use
+   it differently, deliberately: the parity gate checks DECISIONS — every
+   field's batched winner equals the batch=1 winner and no reference
+   near-tie (a field inside the fixed `INSTABILITY_BAND`) escaped without
+   being rescored (issue #184; the drift quantities are fp16 lattice noise,
+   reported as diagnostics and never gated) — while the rescore trigger
+   WIDENS to `INSTABILITY_BAND + E_bound(M)` from the persisted drift
+   envelope (`jevmlx/driftenv.py`: records keyed by model/revision/quantization/
    mlx-version/chip/dtype + a shape bucket of M; written by
    `benchmarks/driftprobe.py`, by `parity_report`, and by the load-time
    16-row canary when nothing is recorded). The gate quantity is ONE m
-   everywhere (P4): the prior-corrected top-two log-score gap at T=1 for
+   everywhere: the prior-corrected top-two log-score gap at T=1 for
    scalar fields and count rows, |corrected yes/no log-odds| for multi
    options — rescore iff the evidence is batched and m <= band;
    temperature is applied only to reported probabilities and never gates.
@@ -719,7 +726,8 @@ conversion: same shape with empty `sources` plus `fetched_at`.
    near-tie is always one the engine rescored. Too low a band costs a wrong
    winner (a reference near tie escaping the canonical batch=1 shape — the
    measured `code_security/is_vulnerability` escape); too high costs only
-   throughput. The band protects DECISIONS; parity protects HONEST
-   PROBABILITIES. Per-field telemetry carries `rescore_band_nats` (the
+   throughput. The band protects DECISIONS; parity protects the same
+   decisions, independently re-derived at the canonical batch=1 shape.
+   Per-field telemetry carries `rescore_band_nats` (the
    band the decision used) and `drift_envelope_nats` (E_bound) so every
    decision's trigger is auditable; `FieldSemantics` is unchanged.

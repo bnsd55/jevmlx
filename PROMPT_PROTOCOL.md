@@ -83,7 +83,7 @@ CONTEXT:C<16-hex>>>
 ```
 
 Both fences carry the sha256-derived nonce `C + sha256(context)[:16]`
-(`_context_nonce`, W5-A finding 44; the `risk_enum_bool` case's nonce is
+(`_context_nonce`; the `risk_enum_bool` case's nonce is
 `C389525abe2404839`). A context that itself contains
 `CONTEXT>>>` can no longer close the block early: the open and close
 fences always match, and no interior line can impersonate the closer.
