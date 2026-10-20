@@ -19,32 +19,32 @@
 
 | metric | value |
 | --- | --- |
-| accuracy | 0.5417 [0.4560, 0.6250] (case_cluster_bootstrap) |
+| accuracy | 0.5833 [0.4444, 0.7083] (case_cluster_bootstrap) |
 | majority baseline (mean over fields) | 0.5139 |
-| exact record | 0.0000 |
-| case_exact_match | 0.0000 |
-| brier | 0.9415 [0.8274, 1.0599] (case_cluster_bootstrap) |
-| correctness_auroc | 0.7190 |
-| ece_5bin_equal_mass | 0.3714 |
-| tie_rate | 0.0093 |
+| exact record | 0.2917 |
+| case_exact_match | 0.2917 |
+| brier | 0.8772 [0.6666, 1.0913] (case_cluster_bootstrap) |
+| correctness_auroc | 0.7242 |
+| ece_5bin_equal_mass | 0.3335 |
+| tie_rate | 0.0000 |
 | any_flip_rate[action] | 0.3833 |
 | any_flip_rate[category] | 0.3833 |
 | any_flip_rate[fraud] | 0.0167 |
 | any_flip_rate[needs_human] | 0.0167 |
 | any_flip_rate[priority] | 0.3667 |
 | any_flip_rate[risk] | 0.5167 |
-| balanced_accuracy[action] | 0.4074 |
-| balanced_accuracy[category] | 0.3889 |
-| balanced_accuracy[fraud] | 0.8056 |
-| balanced_accuracy[needs_human] | 0.6548 |
-| balanced_accuracy[priority] | 0.4537 |
-| balanced_accuracy[risk] | 0.2979 |
-| macro_f1[action] | 0.3915 |
-| macro_f1[category] | 0.3618 |
-| macro_f1[fraud] | 0.8489 |
-| macro_f1[needs_human] | 0.5734 |
-| macro_f1[priority] | 0.4573 |
-| macro_f1[risk] | 0.2745 |
+| balanced_accuracy[action] | 0.4444 |
+| balanced_accuracy[category] | 0.3542 |
+| balanced_accuracy[fraud] | 0.8333 |
+| balanced_accuracy[needs_human] | 0.6429 |
+| balanced_accuracy[priority] | 0.4444 |
+| balanced_accuracy[risk] | 0.2500 |
+| macro_f1[action] | 0.3750 |
+| macro_f1[category] | 0.2611 |
+| macro_f1[fraud] | 0.8737 |
+| macro_f1[needs_human] | 0.5556 |
+| macro_f1[priority] | 0.4259 |
+| macro_f1[risk] | 0.1471 |
 | mean_tvd[action] | 0.3658 |
 | mean_tvd[category] | 0.3706 |
 | mean_tvd[fraud] | 0.0131 |
@@ -57,7 +57,7 @@
 | order_flip_rate[needs_human] | 0.0167 |
 | order_flip_rate[priority] | 0.3667 |
 | order_flip_rate[risk] | 0.5167 |
-| valid_accuracy | 0.5417 |
+| valid_accuracy | 0.5833 |
 
 ## Per-field accuracy
 

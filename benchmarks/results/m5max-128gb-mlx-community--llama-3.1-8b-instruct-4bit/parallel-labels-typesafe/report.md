@@ -19,18 +19,18 @@
 
 | metric | value |
 | --- | --- |
-| accuracy | 0.6438 [0.6030, 0.7192] (case_cluster_bootstrap) |
-| majority baseline (mean over fields) | 0.8601 |
-| exact record | 0.0682 |
-| case_exact_match | 0.0667 |
-| brier | 0.5144 [0.4700, 0.5921] (case_cluster_bootstrap) |
-| correctness_auroc | 0.6571 |
-| ece_5bin_equal_mass | 0.0987 |
-| tie_rate | 0.0046 |
-| agreement[agreement_common_subset] | 0.6438 |
-| agreement[n_cases] | 44 |
-| agreement[n_fields] | 14847 |
-| agreement[overall] | 0.6438 |
+| accuracy | 0.6495 [0.5964, 0.7009] (case_cluster_bootstrap) |
+| majority baseline (mean over fields) | 0.8577 |
+| exact record | 0.1333 |
+| case_exact_match | 0.1333 |
+| brier | 0.5648 [0.5160, 0.6339] (case_cluster_bootstrap) |
+| correctness_auroc | 0.5906 |
+| ece_5bin_equal_mass | 0.1008 |
+| tie_rate | 0.0027 |
+| agreement[agreement_common_subset] | 0.6495 |
+| agreement[n_cases] | 45 |
+| agreement[n_fields] | 368 |
+| agreement[overall] | 0.6495 |
 | any_flip_rate[activity_ongoing] | 0.0000 |
 | any_flip_rate[adjustment_duplicates_line] | 0.0000 |
 | any_flip_rate[affected_scope] | 0.0000 |
@@ -127,72 +127,72 @@
 | balanced_accuracy[activity_ongoing] | 0.0000 |
 | balanced_accuracy[adjustment_duplicates_line] | 1.0000 |
 | balanced_accuracy[affected_scope] | 0.0000 |
-| balanced_accuracy[already_compensated] | 0.8542 |
-| balanced_accuracy[amount_vs_record] | 0.0208 |
-| balanced_accuracy[approval_0] | 0.9899 |
+| balanced_accuracy[already_compensated] | 1.0000 |
+| balanced_accuracy[amount_vs_record] | 0.0000 |
+| balanced_accuracy[approval_0] | 1.0000 |
 | balanced_accuracy[attack_type] | 1.0000 |
 | balanced_accuracy[attacker_modified_configuration] | 0.0000 |
 | balanced_accuracy[attacker_persistence_present] | 0.5000 |
-| balanced_accuracy[attribution] | 0.2560 |
-| balanced_accuracy[bank_change_claimed_in_comms] | 0.8386 |
-| balanced_accuracy[billed_above_basis] | 0.5049 |
+| balanced_accuracy[attribution] | 0.5000 |
+| balanced_accuracy[bank_change_claimed_in_comms] | 0.8750 |
+| balanced_accuracy[billed_above_basis] | 0.5000 |
 | balanced_accuracy[cancellation_reason] | 1.0000 |
-| balanced_accuracy[changes_terms] | 0.6667 |
-| balanced_accuracy[churn_risk] | 0.6875 |
-| balanced_accuracy[claims_agent_error] | 0.7778 |
+| balanced_accuracy[changes_terms] | 1.0000 |
+| balanced_accuracy[churn_risk] | 0.5000 |
+| balanced_accuracy[claims_agent_error] | 0.7500 |
 | balanced_accuracy[claims_supported] | 0.7500 |
 | balanced_accuracy[context_explains_activity] | 0.0000 |
 | balanced_accuracy[credentials_exposed] | 1.0000 |
-| balanced_accuracy[desired_outcome] | 0.5370 |
+| balanced_accuracy[desired_outcome] | 0.6667 |
 | balanced_accuracy[different_entity] | 0.5000 |
 | balanced_accuracy[evidence_strength] | 0.5000 |
-| balanced_accuracy[expressed_satisfaction] | 0.3438 |
-| balanced_accuracy[first_bad_step] | 0.0417 |
-| balanced_accuracy[frustration] | 0.2778 |
+| balanced_accuracy[expressed_satisfaction] | 0.3750 |
+| balanced_accuracy[first_bad_step] | 0.0000 |
+| balanced_accuracy[frustration] | 0.4000 |
 | balanced_accuracy[handed_off] | 0.8750 |
 | balanced_accuracy[handoff_required] | 1.0000 |
-| balanced_accuracy[hardship] | 0.9167 |
+| balanced_accuracy[hardship] | 1.0000 |
 | balanced_accuracy[in_scope] | 1.0000 |
 | balanced_accuracy[instructed_by_tool_output] | 0.0000 |
-| balanced_accuracy[intent] | 0.4815 |
+| balanced_accuracy[intent] | 0.6667 |
 | balanced_accuracy[intent_pair] | 0.0000 |
 | balanced_accuracy[is_true_positive] | 0.5000 |
-| balanced_accuracy[issue_resolved] | 0.6222 |
+| balanced_accuracy[issue_resolved] | 0.6000 |
 | balanced_accuracy[left_undone] | 0.5000 |
-| balanced_accuracy[line_0_completion] | 0.4982 |
-| balanced_accuracy[line_0_kind] | 0.9544 |
+| balanced_accuracy[line_0_completion] | 0.5000 |
+| balanced_accuracy[line_0_kind] | 1.0000 |
 | balanced_accuracy[line_0_owner_declined] | 1.0000 |
-| balanced_accuracy[line_0_rate_differs] | 0.5927 |
-| balanced_accuracy[line_0_rebilled] | 0.9119 |
-| balanced_accuracy[line_0_scope] | 0.9726 |
+| balanced_accuracy[line_0_rate_differs] | 0.8000 |
+| balanced_accuracy[line_0_rebilled] | 1.0000 |
+| balanced_accuracy[line_0_scope] | 1.0000 |
 | balanced_accuracy[line_0_unexplained_fee] | 1.0000 |
 | balanced_accuracy[line_1_completion] | 0.5000 |
 | balanced_accuracy[line_1_kind] | 1.0000 |
 | balanced_accuracy[line_1_owner_declined] | 1.0000 |
 | balanced_accuracy[line_1_rate_differs] | 0.0000 |
-| balanced_accuracy[line_1_rebilled] | 0.3161 |
-| balanced_accuracy[line_1_scope] | 0.9848 |
+| balanced_accuracy[line_1_rebilled] | 0.6000 |
+| balanced_accuracy[line_1_scope] | 1.0000 |
 | balanced_accuracy[line_1_unexplained_fee] | 1.0000 |
-| balanced_accuracy[line_2_completion] | 0.9879 |
-| balanced_accuracy[line_2_kind] | 0.9718 |
+| balanced_accuracy[line_2_completion] | 1.0000 |
+| balanced_accuracy[line_2_kind] | 1.0000 |
 | balanced_accuracy[line_2_owner_declined] | 1.0000 |
 | balanced_accuracy[line_2_rate_differs] | 0.0000 |
 | balanced_accuracy[line_2_rebilled] | 0.0000 |
-| balanced_accuracy[line_2_scope] | 0.9556 |
-| balanced_accuracy[line_2_unexplained_fee] | 0.9355 |
-| balanced_accuracy[line_3_completion] | 0.4762 |
-| balanced_accuracy[line_3_kind] | 0.4971 |
+| balanced_accuracy[line_2_scope] | 1.0000 |
+| balanced_accuracy[line_2_unexplained_fee] | 1.0000 |
+| balanced_accuracy[line_3_completion] | 0.5000 |
+| balanced_accuracy[line_3_kind] | 0.5000 |
 | balanced_accuracy[line_3_owner_declined] | 1.0000 |
 | balanced_accuracy[line_3_rate_differs] | 0.0000 |
 | balanced_accuracy[line_3_rebilled] | 0.0000 |
-| balanced_accuracy[line_3_scope] | 0.8831 |
-| balanced_accuracy[line_3_unexplained_fee] | 0.6041 |
-| balanced_accuracy[line_4_completion] | 0.9438 |
-| balanced_accuracy[line_4_kind] | 0.9888 |
+| balanced_accuracy[line_3_scope] | 1.0000 |
+| balanced_accuracy[line_3_unexplained_fee] | 0.5000 |
+| balanced_accuracy[line_4_completion] | 1.0000 |
+| balanced_accuracy[line_4_kind] | 1.0000 |
 | balanced_accuracy[line_4_owner_declined] | 1.0000 |
 | balanced_accuracy[line_4_rate_differs] | 0.0000 |
 | balanced_accuracy[line_4_rebilled] | 0.0000 |
-| balanced_accuracy[line_4_scope] | 0.9438 |
+| balanced_accuracy[line_4_scope] | 1.0000 |
 | balanced_accuracy[line_4_unexplained_fee] | 1.0000 |
 | balanced_accuracy[malicious_content_in_mailboxes] | 1.0000 |
 | balanced_accuracy[malicious_process_running] | 1.0000 |
@@ -200,19 +200,19 @@
 | balanced_accuracy[open_to_offer] | 0.0000 |
 | balanced_accuracy[outbound_channel_active] | 1.0000 |
 | balanced_accuracy[price_basis] | 0.3333 |
-| balanced_accuracy[prior_0] | 0.0068 |
-| balanced_accuracy[prior_1] | 0.0068 |
-| balanced_accuracy[prior_2] | 0.0121 |
-| balanced_accuracy[prior_3] | 0.0123 |
+| balanced_accuracy[prior_0] | 0.0000 |
+| balanced_accuracy[prior_1] | 0.0000 |
+| balanced_accuracy[prior_2] | 0.0000 |
+| balanced_accuracy[prior_3] | 0.0000 |
 | balanced_accuracy[proposal_reply] | 1.0000 |
 | balanced_accuracy[refund_done_msg_0] | 1.0000 |
 | balanced_accuracy[refund_done_msg_1] | 0.5000 |
-| balanced_accuracy[refund_reason] | 0.5139 |
+| balanced_accuracy[refund_reason] | 0.5000 |
 | balanced_accuracy[reports_unauthorized] | 0.6000 |
 | balanced_accuracy[reports_unresolved] | 0.7500 |
 | balanced_accuracy[request_fulfilled] | 0.5833 |
-| balanced_accuracy[request_specificity] | 0.5000 |
-| balanced_accuracy[requests_human] | 0.5833 |
+| balanced_accuracy[request_specificity] | 1.0000 |
+| balanced_accuracy[requests_human] | 0.5000 |
 | balanced_accuracy[safety_1__instructed_by_tool_output__1] | 0.0000 |
 | balanced_accuracy[safety_1__user_asked_or_agreed__1] | 1.0000 |
 | balanced_accuracy[safety_1__within_grant__1] | 1.0000 |
@@ -226,84 +226,84 @@
 | balanced_accuracy[shares_credentials] | 1.0000 |
 | balanced_accuracy[spread_beyond_initial_entity] | 0.5000 |
 | balanced_accuracy[statement_not_invoice] | 1.0000 |
-| balanced_accuracy[tax_two_rates] | 0.1094 |
-| balanced_accuracy[threat_chargeback_or_public] | 0.6333 |
+| balanced_accuracy[tax_two_rates] | 0.2000 |
+| balanced_accuracy[threat_chargeback_or_public] | 0.6000 |
 | balanced_accuracy[threat_legal_regulatory] | 1.0000 |
 | balanced_accuracy[too_ambiguous] | 0.5000 |
 | balanced_accuracy[unexplained_charges] | 1.0000 |
-| balanced_accuracy[unusual_urgency] | 0.2432 |
-| balanced_accuracy[urgency] | 0.6481 |
+| balanced_accuracy[unusual_urgency] | 0.4000 |
+| balanced_accuracy[urgency] | 0.6667 |
 | balanced_accuracy[user_asked_or_agreed] | 1.0000 |
 | balanced_accuracy[within_grant] | 0.0000 |
 | macro_f1[activity_ongoing] | 0.0000 |
 | macro_f1[adjustment_duplicates_line] | 1.0000 |
 | macro_f1[affected_scope] | 0.0000 |
-| macro_f1[already_compensated] | 0.9213 |
-| macro_f1[amount_vs_record] | 0.0408 |
-| macro_f1[approval_0] | 0.9680 |
+| macro_f1[already_compensated] | 1.0000 |
+| macro_f1[amount_vs_record] | 0.0000 |
+| macro_f1[approval_0] | 1.0000 |
 | macro_f1[attack_type] | 1.0000 |
 | macro_f1[attacker_modified_configuration] | 0.0000 |
 | macro_f1[attacker_persistence_present] | 0.3333 |
-| macro_f1[attribution] | 0.2912 |
-| macro_f1[bank_change_claimed_in_comms] | 0.7329 |
-| macro_f1[billed_above_basis] | 0.2863 |
+| macro_f1[attribution] | 0.2500 |
+| macro_f1[bank_change_claimed_in_comms] | 0.7619 |
+| macro_f1[billed_above_basis] | 0.2857 |
 | macro_f1[cancellation_reason] | 1.0000 |
-| macro_f1[changes_terms] | 0.8000 |
-| macro_f1[churn_risk] | 0.8148 |
-| macro_f1[claims_agent_error] | 0.7790 |
+| macro_f1[changes_terms] | 1.0000 |
+| macro_f1[churn_risk] | 0.6667 |
+| macro_f1[claims_agent_error] | 0.7619 |
 | macro_f1[claims_supported] | 0.7619 |
 | macro_f1[context_explains_activity] | 0.0000 |
 | macro_f1[credentials_exposed] | 1.0000 |
-| macro_f1[desired_outcome] | 0.5431 |
-| macro_f1[different_entity] | 0.1011 |
-| macro_f1[evidence_strength] | 0.3750 |
-| macro_f1[expressed_satisfaction] | 0.2250 |
-| macro_f1[first_bad_step] | 0.0714 |
-| macro_f1[frustration] | 0.1774 |
+| macro_f1[desired_outcome] | 0.6190 |
+| macro_f1[different_entity] | 0.1667 |
+| macro_f1[evidence_strength] | 0.2857 |
+| macro_f1[expressed_satisfaction] | 0.2500 |
+| macro_f1[first_bad_step] | 0.0000 |
+| macro_f1[frustration] | 0.2667 |
 | macro_f1[handed_off] | 0.7619 |
 | macro_f1[handoff_required] | 1.0000 |
-| macro_f1[hardship] | 0.9524 |
+| macro_f1[hardship] | 1.0000 |
 | macro_f1[in_scope] | 1.0000 |
 | macro_f1[instructed_by_tool_output] | 0.0000 |
-| macro_f1[intent] | 0.3716 |
+| macro_f1[intent] | 0.6111 |
 | macro_f1[intent_pair] | 0.0000 |
-| macro_f1[is_true_positive] | 0.4231 |
-| macro_f1[issue_resolved] | 0.7671 |
+| macro_f1[is_true_positive] | 0.3750 |
+| macro_f1[issue_resolved] | 0.7500 |
 | macro_f1[left_undone] | 0.3750 |
-| macro_f1[line_0_completion] | 0.4641 |
-| macro_f1[line_0_kind] | 0.9767 |
+| macro_f1[line_0_completion] | 0.4444 |
+| macro_f1[line_0_kind] | 1.0000 |
 | macro_f1[line_0_owner_declined] | 1.0000 |
-| macro_f1[line_0_rate_differs] | 0.7443 |
-| macro_f1[line_0_rebilled] | 0.9539 |
-| macro_f1[line_0_scope] | 0.9861 |
+| macro_f1[line_0_rate_differs] | 0.8889 |
+| macro_f1[line_0_rebilled] | 1.0000 |
+| macro_f1[line_0_scope] | 1.0000 |
 | macro_f1[line_0_unexplained_fee] | 1.0000 |
-| macro_f1[line_1_completion] | 0.4649 |
+| macro_f1[line_1_completion] | 0.4444 |
 | macro_f1[line_1_kind] | 1.0000 |
 | macro_f1[line_1_owner_declined] | 1.0000 |
 | macro_f1[line_1_rate_differs] | 0.0000 |
-| macro_f1[line_1_rebilled] | 0.4804 |
-| macro_f1[line_1_scope] | 0.9923 |
+| macro_f1[line_1_rebilled] | 0.7500 |
+| macro_f1[line_1_scope] | 1.0000 |
 | macro_f1[line_1_unexplained_fee] | 1.0000 |
-| macro_f1[line_2_completion] | 0.9939 |
-| macro_f1[line_2_kind] | 0.9857 |
+| macro_f1[line_2_completion] | 1.0000 |
+| macro_f1[line_2_kind] | 1.0000 |
 | macro_f1[line_2_owner_declined] | 1.0000 |
 | macro_f1[line_2_rate_differs] | 0.0000 |
 | macro_f1[line_2_rebilled] | 0.0000 |
-| macro_f1[line_2_scope] | 0.9773 |
-| macro_f1[line_2_unexplained_fee] | 0.9667 |
-| macro_f1[line_3_completion] | 0.4034 |
-| macro_f1[line_3_kind] | 0.4082 |
+| macro_f1[line_2_scope] | 1.0000 |
+| macro_f1[line_2_unexplained_fee] | 1.0000 |
+| macro_f1[line_3_completion] | 0.4000 |
+| macro_f1[line_3_kind] | 0.4000 |
 | macro_f1[line_3_owner_declined] | 1.0000 |
 | macro_f1[line_3_rate_differs] | 0.0000 |
 | macro_f1[line_3_rebilled] | 0.0000 |
-| macro_f1[line_3_scope] | 0.9379 |
-| macro_f1[line_3_unexplained_fee] | 0.6085 |
-| macro_f1[line_4_completion] | 0.9711 |
-| macro_f1[line_4_kind] | 0.9944 |
+| macro_f1[line_3_scope] | 1.0000 |
+| macro_f1[line_3_unexplained_fee] | 0.4000 |
+| macro_f1[line_4_completion] | 1.0000 |
+| macro_f1[line_4_kind] | 1.0000 |
 | macro_f1[line_4_owner_declined] | 1.0000 |
 | macro_f1[line_4_rate_differs] | 0.0000 |
 | macro_f1[line_4_rebilled] | 0.0000 |
-| macro_f1[line_4_scope] | 0.9711 |
+| macro_f1[line_4_scope] | 1.0000 |
 | macro_f1[line_4_unexplained_fee] | 1.0000 |
 | macro_f1[malicious_content_in_mailboxes] | 1.0000 |
 | macro_f1[malicious_process_running] | 1.0000 |
@@ -311,19 +311,19 @@
 | macro_f1[open_to_offer] | 0.0000 |
 | macro_f1[outbound_channel_active] | 1.0000 |
 | macro_f1[price_basis] | 0.3333 |
-| macro_f1[prior_0] | 0.0136 |
-| macro_f1[prior_1] | 0.0136 |
-| macro_f1[prior_2] | 0.0239 |
-| macro_f1[prior_3] | 0.0244 |
+| macro_f1[prior_0] | 0.0000 |
+| macro_f1[prior_1] | 0.0000 |
+| macro_f1[prior_2] | 0.0000 |
+| macro_f1[prior_3] | 0.0000 |
 | macro_f1[proposal_reply] | 1.0000 |
 | macro_f1[refund_done_msg_0] | 1.0000 |
 | macro_f1[refund_done_msg_1] | 0.3333 |
-| macro_f1[refund_reason] | 0.5259 |
+| macro_f1[refund_reason] | 0.5000 |
 | macro_f1[reports_unauthorized] | 0.7500 |
 | macro_f1[reports_unresolved] | 0.7619 |
 | macro_f1[request_fulfilled] | 0.5833 |
-| macro_f1[request_specificity] | 0.6667 |
-| macro_f1[requests_human] | 0.5342 |
+| macro_f1[request_specificity] | 1.0000 |
+| macro_f1[requests_human] | 0.3750 |
 | macro_f1[safety_1__instructed_by_tool_output__1] | 0.0000 |
 | macro_f1[safety_1__user_asked_or_agreed__1] | 1.0000 |
 | macro_f1[safety_1__within_grant__1] | 1.0000 |
@@ -332,18 +332,18 @@
 | macro_f1[safety_2__within_grant__2] | 1.0000 |
 | macro_f1[secured_msg_0] | 0.0000 |
 | macro_f1[secured_msg_1] | 0.6667 |
-| macro_f1[sender_0] | 0.3698 |
+| macro_f1[sender_0] | 0.4000 |
 | macro_f1[session_in_attacker_hands] | 0.3333 |
 | macro_f1[shares_credentials] | 1.0000 |
 | macro_f1[spread_beyond_initial_entity] | 0.3333 |
 | macro_f1[statement_not_invoice] | 1.0000 |
-| macro_f1[tax_two_rates] | 0.1973 |
-| macro_f1[threat_chargeback_or_public] | 0.7755 |
+| macro_f1[tax_two_rates] | 0.3333 |
+| macro_f1[threat_chargeback_or_public] | 0.7500 |
 | macro_f1[threat_legal_regulatory] | 1.0000 |
-| macro_f1[too_ambiguous] | 0.4298 |
+| macro_f1[too_ambiguous] | 0.4444 |
 | macro_f1[unexplained_charges] | 1.0000 |
-| macro_f1[unusual_urgency] | 0.3912 |
-| macro_f1[urgency] | 0.4765 |
+| macro_f1[unusual_urgency] | 0.5714 |
+| macro_f1[urgency] | 0.4889 |
 | macro_f1[user_asked_or_agreed] | 1.0000 |
 | macro_f1[within_grant] | 0.0000 |
 | mean_tvd[activity_ongoing] | 0.0083 |
@@ -546,22 +546,22 @@
 | ordinal_mae_expected[hardship] | 0.4859 |
 | ordinal_mae_expected[request_specificity] | 0.7070 |
 | ordinal_mae_expected[urgency] | 0.8471 |
-| per_workflow_accuracy[agent_trace_observability] | 0.4917 |
-| per_workflow_accuracy[customer_service] | 0.6479 |
-| per_workflow_accuracy[invoice_processing] | 0.6469 |
-| per_workflow_accuracy[security_incidents] | 0.5451 |
-| tvd_vs_consensus[overall] | 0.4023 |
-| valid_accuracy | 0.6438 |
+| per_workflow_accuracy[agent_trace_observability] | 0.6538 |
+| per_workflow_accuracy[customer_service] | 0.6630 |
+| per_workflow_accuracy[invoice_processing] | 0.6848 |
+| per_workflow_accuracy[security_incidents] | 0.4500 |
+| tvd_vs_consensus[overall] | 0.3827 |
+| valid_accuracy | 0.6548 |
 
 ## Agreement vs TypeSafe consensus
 
 | workflow | agreement | common subset | TVD vs consensus |
 | --- | --- | --- | --- |
-| overall | 0.6438 | 0.6438 | 0.4023 |
-| agent_trace_observability | 0.4917 | n/a | 0.4667 |
-| customer_service | 0.6479 | n/a | 0.3708 |
-| invoice_processing | 0.6469 | n/a | 0.4060 |
-| security_incidents | 0.5451 | n/a | 0.3513 |
+| overall | 0.6495 | 0.6495 | 0.3827 |
+| agent_trace_observability | 0.6538 | n/a | 0.3919 |
+| customer_service | 0.6630 | n/a | 0.3634 |
+| invoice_processing | 0.6848 | n/a | 0.3912 |
+| security_incidents | 0.4500 | n/a | 0.3754 |
 
 ## Per-field accuracy
 
@@ -571,8 +571,8 @@
 | affected_scope | 2 | 0.0000 [0.0000, 0.6576] (wilson) † | 0.5000 |
 | amount_vs_record | 4 | 0.0000 [0.0000, 0.4899] (wilson) † | 1.0000 |
 | attacker_modified_configuration | 2 | 0.0000 [0.0000, 0.6576] (wilson) † | 1.0000 |
-| context_explains_activity | 5 | 0.0000 [0.0000, 0.4345] (wilson) † | 1.0000 |
-| first_bad_step | 3 | 0.0000 [0.0000, 0.5615] (wilson) † | 0.6316 |
+| context_explains_activity | 6 | 0.0000 [0.0000, 0.3903] (wilson) † | 1.0000 |
+| first_bad_step | 3 | 0.0000 [0.0000, 0.5615] (wilson) † | 0.6667 |
 | instructed_by_tool_output | 1 | 0.0000 [0.0000, 0.7935] (wilson) † | 1.0000 |
 | intent_pair | 1 | 0.0000 [0.0000, 0.7935] (wilson) † | 1.0000 |
 | line_1_rate_differs | 5 | 0.0000 [0.0000, 0.4345] (wilson) † | 1.0000 |
@@ -590,50 +590,50 @@
 | safety_1__instructed_by_tool_output__1 | 1 | 0.0000 [0.0000, 0.7935] (wilson) † | 1.0000 |
 | secured_msg_0 | 1 | 0.0000 [0.0000, 0.7935] (wilson) † | 1.0000 |
 | within_grant | 1 | 0.0000 [0.0000, 0.7935] (wilson) † | 1.0000 |
-| different_entity | 5 | 0.2000 [0.0362, 0.6245] (wilson) † | 0.8875 |
+| different_entity | 5 | 0.2000 [0.0362, 0.6245] (wilson) † | 0.8000 |
 | tax_two_rates | 5 | 0.2000 [0.0362, 0.6245] (wilson) † | 1.0000 |
-| attribution | 3 | 0.3333 [0.0615, 0.7923] (wilson) † | 0.6316 |
-| billed_above_basis | 5 | 0.4000 [0.1176, 0.7693] (wilson) † | 0.6201 |
-| evidence_strength | 5 | 0.4000 [0.1176, 0.7693] (wilson) † | 0.6000 |
+| attribution | 3 | 0.3333 [0.0615, 0.7923] (wilson) † | 0.6667 |
+| evidence_strength | 6 | 0.3333 [0.0968, 0.7000] (wilson) † | 0.6000 |
+| billed_above_basis | 5 | 0.4000 [0.1176, 0.7693] (wilson) † | 0.6000 |
 | expressed_satisfaction | 5 | 0.4000 [0.1176, 0.7693] (wilson) | 0.4000 |
 | frustration | 5 | 0.4000 [0.1176, 0.7693] (wilson) | 0.2000 |
 | unusual_urgency | 5 | 0.4000 [0.1176, 0.7693] (wilson) † | 1.0000 |
 | attacker_persistence_present | 2 | 0.5000 [0.0945, 0.9055] (wilson) | 0.5000 |
 | churn_risk | 2 | 0.5000 [0.0945, 0.9055] (wilson) † | 1.0000 |
+| is_true_positive | 6 | 0.5000 [0.1876, 0.8124] (wilson) † | 0.6000 |
 | refund_done_msg_1 | 2 | 0.5000 [0.0945, 0.9055] (wilson) | 0.5000 |
 | refund_reason | 4 | 0.5000 [0.1500, 0.8500] (wilson) | 0.5000 |
 | secured_msg_1 | 2 | 0.5000 [0.0945, 0.9055] (wilson) † | 1.0000 |
 | session_in_attacker_hands | 2 | 0.5000 [0.0945, 0.9055] (wilson) | 0.5000 |
 | spread_beyond_initial_entity | 2 | 0.5000 [0.0945, 0.9055] (wilson) | 0.5000 |
 | intent | 5 | 0.6000 [0.2307, 0.8824] (wilson) | 0.4000 |
-| is_true_positive | 5 | 0.6000 [0.2307, 0.8824] (wilson) † | 0.7333 |
 | issue_resolved | 5 | 0.6000 [0.2307, 0.8824] (wilson) † | 1.0000 |
 | left_undone | 5 | 0.6000 [0.2307, 0.8824] (wilson) | 0.6000 |
 | line_1_rebilled | 5 | 0.6000 [0.2307, 0.8824] (wilson) † | 1.0000 |
-| price_basis | 5 | 0.6000 [0.2307, 0.8824] (wilson) † | 0.6292 |
+| price_basis | 5 | 0.6000 [0.2307, 0.8824] (wilson) | 0.6000 |
 | reports_unauthorized | 5 | 0.6000 [0.2307, 0.8824] (wilson) † | 1.0000 |
 | request_fulfilled | 5 | 0.6000 [0.2307, 0.8824] (wilson) | 0.6000 |
 | requests_human | 5 | 0.6000 [0.2307, 0.8824] (wilson) | 0.6000 |
 | threat_chargeback_or_public | 5 | 0.6000 [0.2307, 0.8824] (wilson) † | 1.0000 |
 | urgency | 5 | 0.6000 [0.2307, 0.8824] (wilson) | 0.4000 |
-| line_3_completion | 3 | 0.6667 [0.2077, 0.9385] (wilson) † | 0.6734 |
-| line_3_kind | 3 | 0.6667 [0.2077, 0.9385] (wilson) † | 0.6855 |
-| line_3_unexplained_fee | 3 | 0.6667 [0.2077, 0.9385] (wilson) † | 0.6855 |
-| sender_0 | 3 | 0.6667 [0.2077, 0.9385] (wilson) | 0.5867 |
+| line_3_completion | 3 | 0.6667 [0.2077, 0.9385] (wilson) | 0.6667 |
+| line_3_kind | 3 | 0.6667 [0.2077, 0.9385] (wilson) | 0.6667 |
+| line_3_unexplained_fee | 3 | 0.6667 [0.2077, 0.9385] (wilson) | 0.6667 |
+| sender_0 | 3 | 0.6667 [0.2077, 0.9385] (wilson) | 0.6667 |
 | offers_evidence | 4 | 0.7500 [0.3006, 0.9544] (wilson) | 0.7500 |
-| bank_change_claimed_in_comms | 5 | 0.8000 [0.3755, 0.9638] (wilson) | 0.7629 |
+| bank_change_claimed_in_comms | 5 | 0.8000 [0.3755, 0.9638] (wilson) | 0.8000 |
 | claims_agent_error | 5 | 0.8000 [0.3755, 0.9638] (wilson) | 0.6000 |
 | claims_supported | 5 | 0.8000 [0.3755, 0.9638] (wilson) | 0.6000 |
 | desired_outcome | 5 | 0.8000 [0.3755, 0.9638] (wilson) | 0.6000 |
 | handed_off | 5 | 0.8000 [0.3755, 0.9638] (wilson) | 0.8000 |
-| line_0_completion | 5 | 0.8000 [0.3755, 0.9638] (wilson) † | 0.8663 |
+| line_0_completion | 5 | 0.8000 [0.3755, 0.9638] (wilson) | 0.8000 |
 | line_0_rate_differs | 5 | 0.8000 [0.3755, 0.9638] (wilson) † | 1.0000 |
-| line_1_completion | 5 | 0.8000 [0.3755, 0.9638] (wilson) † | 0.8663 |
+| line_1_completion | 5 | 0.8000 [0.3755, 0.9638] (wilson) | 0.8000 |
 | reports_unresolved | 5 | 0.8000 [0.3755, 0.9638] (wilson) | 0.6000 |
-| too_ambiguous | 5 | 0.8000 [0.3755, 0.9638] (wilson) | 0.7538 |
+| too_ambiguous | 5 | 0.8000 [0.3755, 0.9638] (wilson) | 0.8000 |
 | adjustment_duplicates_line | 1 | 1.0000 [0.2065, 1.0000] (wilson) | 1.0000 |
 | already_compensated | 4 | 1.0000 [0.5101, 1.0000] (wilson) | 1.0000 |
-| approval_0 | 4 | 1.0000 [0.5101, 1.0000] (wilson) | 0.8493 |
+| approval_0 | 4 | 1.0000 [0.5101, 1.0000] (wilson) | 0.7500 |
 | attack_type | 2 | 1.0000 [0.3424, 1.0000] (wilson) | 1.0000 |
 | cancellation_reason | 2 | 1.0000 [0.3424, 1.0000] (wilson) | 1.0000 |
 | changes_terms | 2 | 1.0000 [0.3424, 1.0000] (wilson) | 1.0000 |
@@ -676,5 +676,5 @@
 | shares_credentials | 5 | 1.0000 [0.5655, 1.0000] (wilson) | 1.0000 |
 | statement_not_invoice | 5 | 1.0000 [0.5655, 1.0000] (wilson) | 1.0000 |
 | threat_legal_regulatory | 5 | 1.0000 [0.5655, 1.0000] (wilson) | 1.0000 |
-| unexplained_charges | 5 | 1.0000 [0.5655, 1.0000] (wilson) | 0.7629 |
+| unexplained_charges | 5 | 1.0000 [0.5655, 1.0000] (wilson) | 0.8000 |
 | user_asked_or_agreed | 1 | 1.0000 [0.2065, 1.0000] (wilson) | 1.0000 |

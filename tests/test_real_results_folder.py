@@ -68,27 +68,37 @@ def test_naive_row_exact_values():
 
 
 def test_labels_row_exact_values():
-    """parallel-labels-typesafe: 82.1% accuracy, DRIFT (0.078), 0.6s, 45 (1 error)."""
+    """parallel-labels-typesafe: 72.8% accuracy, UNVERIFIED (pre-F9), 0.6s, 45 (3 error).
+
+    P3 recompute: canonical-only accuracy (0.8213 counted 3x rotation
+    lines); the legacy case failure expands to 3 per-field error lines.
+    F9 (c): the committed parity.json predates per-scorer parity, so the
+    Parity column reads UNVERIFIED (pre-F9) until the m5 rerun.
+    """
     rows = _rows_for_7b()
     labels = next(r for r in rows if r["scorer"] == "labels")
-    assert labels["accuracy"] == pytest.approx(0.8213, abs=0.001)
-    assert labels["parity_status"] == "DRIFT"
-    assert labels["parity_max_drift"] == pytest.approx(0.078, abs=0.001)
+    assert labels["accuracy"] == pytest.approx(0.7283, abs=0.001)
+    assert labels["parity_status"] == "UNVERIFIED (pre-F9)"
+    assert labels["parity_max_drift"] == 0.0  # no drift number for a pre-F9 artifact
     assert labels["time_per_case_s"] == pytest.approx(0.586, abs=0.01)
     assert labels["cases"] == 45
-    assert labels["error_count"] == 1
+    assert labels["error_count"] == 1  # ONE failed case; the legacy expansion made 3 lines
 
 
 def test_slots_row_exact_values():
-    """parallel-slots-typesafe: 63.2% accuracy, DRIFT (0.078), 0.6s, 45 (1 error)."""
+    """parallel-slots-typesafe: 62.0% accuracy, UNVERIFIED (pre-F9), 0.6s, 45 (3 error).
+
+    P3 recompute: canonical-only accuracy; the legacy case failure expands
+    to 3 per-field error lines. F9 (c): pre-F9 parity -> UNVERIFIED (pre-F9).
+    """
     rows = _rows_for_7b()
     slots = next(r for r in rows if r["scorer"] == "slots")
-    assert slots["accuracy"] == pytest.approx(0.6322, abs=0.001)
-    assert slots["parity_status"] == "DRIFT"
-    assert slots["parity_max_drift"] == pytest.approx(0.078, abs=0.001)
+    assert slots["accuracy"] == pytest.approx(0.6196, abs=0.001)
+    assert slots["parity_status"] == "UNVERIFIED (pre-F9)"
+    assert slots["parity_max_drift"] == 0.0  # no drift number for a pre-F9 artifact
     assert slots["time_per_case_s"] == pytest.approx(0.633, abs=0.01)
     assert slots["cases"] == 45
-    assert slots["error_count"] == 1
+    assert slots["error_count"] == 1  # ONE failed case; the legacy expansion made 3 lines
 
 
 def test_each_model_renders_own_three_rows():
@@ -126,16 +136,20 @@ def test_all_combos_pass_check_results():
 
 @pytest.mark.slow
 def test_error_summary_matches_expected_counts():
-    """The errors summary: naive_local-slots-typesafe has 7 error lines;
-    parallel-{labels,slots}-typesafe each have 1. The bundled/perturbed
-    combos have 0.
+    """Error-LINE counts read through the loader: naive_local-slots-typesafe
+    has 7 field-level error lines; parallel-{labels,slots}-typesafe have 3
+    each (the ONE legacy case failure expands to one line per labelled
+    field). Failed-CASE counts stay 1 — see the leaderboard cases column.
+    The bundled/perturbed combos have 0.
 
     Marked slow: same decompression cost as test_all_combos_pass_check_results.
     """
     results = check_root(_7B_FOLDER)
     error_counts = {folder.name: len(_error_lines_in_folder(folder)) for folder, _, _ in results}
+    # P3: the one legacy case failure in each parallel-typesafe combo expands
+    # to 3 per-field failure lines at read time (1 _error -> 3 fields).
     assert error_counts.get("naive_local-slots-typesafe") == 7
-    assert error_counts.get("parallel-labels-typesafe") == 1
-    assert error_counts.get("parallel-slots-typesafe") == 1
+    assert error_counts.get("parallel-labels-typesafe") == 3
+    assert error_counts.get("parallel-slots-typesafe") == 3
     for combo in ("naive_local-slots-bundled", "parallel-labels-bundled", "parallel-slots-bundled"):
         assert error_counts.get(combo) == 0, f"{combo}: expected 0 errors"

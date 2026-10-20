@@ -13,6 +13,13 @@ from jevmlx.engine import run_parallel_generation
 from jevmlx.schema import StructuredSchema
 
 
+def _prob_margin(probs: list[float]) -> float:
+    """Top-two probability gap (the old probability-space near-tie quantity,
+    inlined — the engine gate now keys on the corrected log-score gap m)."""
+    ordered = sorted(probs, reverse=True)
+    return ordered[0] - ordered[1] if len(ordered) > 1 else float("inf")
+
+
 def test_one_choice_enum_returns_prob_one_without_rows():
     """R2: cardinality-1 enum -> P=1.0 in the engine, no crash, no rows."""
     model = FakeModel()
@@ -1070,7 +1077,7 @@ def test_post_prior_near_tie_rescores_even_when_raw_margin_is_wide():
     does not fire (raw gap too wide) and the field escapes — the parity
     escaped_near_tie count is 1. With the fix, the rescore fires.
     """
-    from jevmlx.engine import INSTABILITY_BAND, _near_tie_margin
+    from jevmlx.engine import INSTABILITY_BAND
     from jevmlx.trie import softmax as _softmax
 
     class PostPriorNearTieModel(FakeModel):
@@ -1118,16 +1125,16 @@ def test_post_prior_near_tie_rescores_even_when_raw_margin_is_wide():
     assert result["rescored_fields"] == ["pick"]
     assert result["field_telemetry"]["pick"]["rescored"] is True
 
-    # Verify the helper: a probability list with a small top-2 gap has a
+    # Verify the quantity: a probability list with a small top-2 gap has a
     # small margin; a wide gap has a large one.
     probs_tie = _softmax([0.0, 0.0])  # [0.5, 0.5] — exact tie
-    assert _near_tie_margin(probs_tie) == 0.0
+    assert _prob_margin(probs_tie) == 0.0
 
     probs_decisive = _softmax([2.0, 0.0])  # ~[0.88, 0.12]
-    assert _near_tie_margin(probs_decisive) > INSTABILITY_BAND
+    assert _prob_margin(probs_decisive) > INSTABILITY_BAND
 
     # A single-choice field has inf margin.
-    assert _near_tie_margin([1.0]) == float("inf")
+    assert _prob_margin([1.0]) == float("inf")
 
 
 def test_decisive_raw_and_final_margin_never_rescores():
@@ -1175,13 +1182,11 @@ def test_four_choice_sub_0_05_margin_rescores():
     sub-0.05 probability margin (the top two choices are close in
     probability). Batch=1 gives a decisive winner.
     """
-    from jevmlx.engine import _near_tie_margin
-
     # Verify the counterexample directly: p1=0.30, p2=0.26, rest=0.44
     # margin = 0.04 < 0.05 -> near-tie
     probs = [0.30, 0.26, 0.22, 0.22]
-    assert _near_tie_margin(probs) == pytest.approx(0.04)
-    assert _near_tie_margin(probs) < 0.05  # near-tie
+    assert _prob_margin(probs) == pytest.approx(0.04)
+    assert _prob_margin(probs) < 0.05  # near-tie
 
     # The old nats-based approach would give log(0.30) - log(0.26) = 0.143
     # which is > 0.094 (the typical band) -> NOT a near-tie -> escape.
@@ -1222,3 +1227,295 @@ def test_four_choice_sub_0_05_margin_rescores():
     # The rescore fired — the final probability margin was < 0.05.
     assert result["rescored_fields"] == ["pick"]
     assert result["field_telemetry"]["pick"]["rescored"] is True
+
+
+# ------------------------------------------------------- P4 corrected gate --
+
+
+class _CorrectedGapModel(FakeModel):
+    """Batch>1: the top two choices sit 0.115 nats apart (inside the 0.125
+    test band) while the probability margin stays ABOVE 0.05 (the root
+    factor shrinks the softmax gap). Batch=1 (canonical): the other choice
+    wins decisively. The two shapes share the root boost (+3.0), so the
+    root is never in the top-two gap — the gate quantity is the split gap.
+    """
+
+    def __init__(self, vocab_size: int = 64):
+        super().__init__(vocab_size=vocab_size)
+
+    def __call__(self, tokens, cache=None):
+        batch, _seq_len = tokens.shape
+        out = super().__call__(tokens, cache=cache)
+        # Labels mode: root [5, 8] (A-family vs D), split [6, 7] (B vs C).
+        if batch == 1:
+            out[:, :, 5] += 3.0
+            out[:, :, 6] += 0.5
+        else:
+            out[:, :, 5] += 3.0
+            out[:, :, 7] += 0.115
+        return out
+
+
+def test_corrected_gap_inside_band_rescores_even_when_prob_margin_wide():
+    """P4 T1: the rescore gate is the corrected top-two log-score gap m
+    against the DECISION band (rescore_band_nats = INSTABILITY_BAND +
+    E_bound = 0.125 nats on the test envelope) — not p1 - p2 < 0.05 in
+    probability space. A field whose corrected gap (0.115 nats) is inside
+    the band but whose probability margin (~0.0547, the root factor
+    shrinks the softmax gap) is above 0.05 must rescore. Today's gate
+    compares the probability margin to 0.05 and the escape ships."""
+    model = _CorrectedGapModel(vocab_size=64)
+    tokenizer = FakeTokenizer()
+    schema = StructuredSchema(
+        {"pick": {"type": "enum", "description": "d", "choices": ["AB", "AC", "D"]}}
+    )
+    result = run_parallel_generation(make_engine(model, tokenizer), "ctx", schema, scoring="labels")
+    assert result["rescored_fields"] == ["pick"]
+    assert result["parsed_json"]["pick"]["value"] == "AB"
+    assert result["field_telemetry"]["pick"]["rescored"] is True
+    # The canonical evidence is decisive (0.5 nats), so tie is False.
+    assert result["field_telemetry"]["pick"]["tie"] is False
+
+
+def test_rescore_gate_temperature_invariant():
+    """P4 T2: the gate keys on the T=1 corrected log-score gap — the same
+    evidence at T=1 and T=5 reaches the SAME gate decision (temperature is
+    applied only to the reported probabilities and never gates)."""
+    schema = StructuredSchema(
+        {"pick": {"type": "enum", "description": "d", "choices": ["AB", "AC", "D"]}}
+    )
+    r1 = run_parallel_generation(
+        make_engine(_CorrectedGapModel(vocab_size=64), FakeTokenizer()),
+        "ctx",
+        schema,
+        scoring="labels",
+        temperature=1.0,
+    )
+    r5 = run_parallel_generation(
+        make_engine(_CorrectedGapModel(vocab_size=64), FakeTokenizer()),
+        "ctx",
+        schema,
+        scoring="labels",
+        temperature=5.0,
+    )
+    assert r1["rescored_fields"] == r5["rescored_fields"] == ["pick"]
+    assert r1["parsed_json"]["pick"]["value"] == r5["parsed_json"]["pick"]["value"] == "AB"
+    assert r1["field_telemetry"]["pick"]["rescored"] is True
+    assert r5["field_telemetry"]["pick"]["rescored"] is True
+
+
+def _built_multi_dispatch(model, tokenizer, choices):
+    """A real built plan + batched dispatch for one multi field (the same
+    machinery parity's raw stage uses), for gate-level unit tests."""
+    from jevmlx.engine import (
+        _build_schema_rows,
+        _prefill,
+        _score_rows,
+        dispatch_rows,
+        field_rows_of,
+    )
+    from jevmlx.timing import Ledger
+
+    schema = StructuredSchema({"tags": {"type": "multi", "description": "d", "choices": choices}})
+    engine = make_engine(model, tokenizer)
+    built = _build_schema_rows(schema, engine.tokenizer, "slots")
+    pf = _prefill(engine.model, engine.tokenizer, "ctx", schema, Ledger(), "slots", engine.profile)
+    scored = _score_rows(
+        engine.model,
+        pf.cache,
+        built["rows"],
+        built["row_decision"],
+        engine.vocab_size,
+        built["pad_id"],
+        max(1, len(built["rows"])),
+        Ledger(),
+    )
+    dispatch = dispatch_rows(built, scored)
+    return engine, built, dispatch, field_rows_of(built)["tags"], pf.cache
+
+
+def test_multi_rescore_gate_keys_on_corrected_log_odds():
+    """P4 T3: the multi option gate keys on |corrected log-odds| (yes - no
+    after prior correction) — never the raw pair. An option whose RAW pair
+    is wide (0.3 nats, outside the band) but whose corrected log-odds sits
+    inside the band (0.01) must rescore; the reverse (raw inside, corrected
+    decisive) must not."""
+    from jevmlx.engine import _rescore_multi_options
+    from jevmlx.timing import Ledger
+
+    tokenizer = FakeTokenizer()
+    # Option x: raw [0.30, 0.0] (outside the 0.125 band), prior [0.29, 0.0]
+    # -> corrected 0.01 (inside). Option y: raw [0.05, 0.0] (inside raw),
+    # prior [-1.0, 0.0] -> corrected 1.05 (decisive).
+    engine, built, dispatch, fr, cache = _built_multi_dispatch(
+        FakeModel(vocab_size=64), tokenizer, ["x", "y"]
+    )
+    x_ridx, y_ridx = fr.option_idxs
+    dispatch.option_pair[x_ridx] = [0.30, 0.0]
+    dispatch.option_pair[y_ridx] = [0.05, 0.0]
+    prior_pairs = {"x": [0.29, 0.0], "y": [-1.0, 0.0]}
+    rescored_oids, ran = _rescore_multi_options(
+        engine.model,
+        cache,
+        built,
+        dispatch,
+        fr.option_idxs,
+        ["x", "y"],
+        prior_pairs,
+        engine.vocab_size,
+        built["pad_id"],
+        Ledger(),
+        (0.125, None),
+    )
+    # Only x crosses in CORRECTED space; the rescore replaced its raw pair
+    # with the canonical (batch=1) measurement (zeros model -> [0, 0]).
+    assert rescored_oids == [0]
+    assert ran is True
+    assert dispatch.option_pair[x_ridx] == [0.0, 0.0]
+    assert dispatch.option_pair[y_ridx] == [0.05, 0.0]
+
+
+def test_multi_rescore_gate_without_prior_is_raw_log_odds():
+    """P4 T3 (control): with no prior the corrected log-odds IS the raw
+    yes/no gap — the band applies to it directly."""
+    from jevmlx.engine import _rescore_multi_options
+    from jevmlx.timing import Ledger
+
+    tokenizer = FakeTokenizer()
+    engine, built, dispatch, fr, cache = _built_multi_dispatch(
+        FakeModel(vocab_size=64), tokenizer, ["x", "y"]
+    )
+    x_ridx, y_ridx = fr.option_idxs
+    dispatch.option_pair[x_ridx] = [0.30, 0.0]  # outside the band
+    dispatch.option_pair[y_ridx] = [0.05, 0.0]  # inside the band
+    rescored_oids, ran = _rescore_multi_options(
+        engine.model,
+        cache,
+        built,
+        dispatch,
+        fr.option_idxs,
+        ["x", "y"],
+        None,
+        engine.vocab_size,
+        built["pad_id"],
+        Ledger(),
+        (0.125, None),
+    )
+    assert rescored_oids == [1]
+    assert ran is True
+    assert dispatch.option_pair[y_ridx] == [0.0, 0.0]
+    assert dispatch.option_pair[x_ridx] == [0.30, 0.0]
+
+
+def test_count_row_near_tie_rescored_at_batch1():
+    """P4 T4: the count row gets the SAME near-tie rule as scalars and
+    multi options — a corrected top-two bucket gap inside the decision band
+    (0.125 nats on the test envelope) rescores the row at batch=1 and
+    records the field in rescored_fields. Today the count row has no gate
+    at all: nothing ever rescores it."""
+    from conftest import CountCodeModel, _Mod97Tokenizer
+
+    schema = StructuredSchema(
+        {"flags": {"type": "multi", "description": "d", "choices": ["x", "y", "z"]}}
+    )
+    # Count buckets '0'/'1' sit 0.01 nats apart — inside the band. The Y/N
+    # rows are decisive (|yes - no| = 4): only the count row can rescore.
+    model = CountCodeModel(
+        count_bias={"0": 0.30, "1": 0.31}, yes_logit=2.0, no_logit=-2.0, vocab_size=128
+    )
+    result = run_parallel_generation(make_engine(model, _Mod97Tokenizer()), "ctx", schema)
+    assert result["rescored_fields"] == ["flags"]
+    assert result["field_telemetry"]["flags"]["rescored"] is True
+
+    # Control: a decisive count gap (4 nats) never rescores.
+    model = CountCodeModel(
+        count_bias={"0": -1.0, "1": 3.0}, yes_logit=2.0, no_logit=-2.0, vocab_size=128
+    )
+    result = run_parallel_generation(make_engine(model, _Mod97Tokenizer()), "ctx", schema)
+    assert result["rescored_fields"] == []
+
+
+def test_count_rescore_gate_corrected_and_dispatch_replacement():
+    """P4 T4 (unit): _rescore_count_row gates on the PRIOR-CORRECTED
+    top-two bucket gap and replaces the batched count logits in the
+    dispatch with the canonical batch=1 measurement."""
+    from jevmlx.engine import _rescore_count_row
+    from jevmlx.schema import count_key
+    from jevmlx.timing import Ledger
+
+    tokenizer = FakeTokenizer()
+    engine, built, dispatch, fr, cache = _built_multi_dispatch(
+        FakeModel(vocab_size=64), tokenizer, ["x", "y", "z"]
+    )
+    assert len(fr.count_idxs) == 1  # single-node count trie: one row
+    ridx = fr.count_idxs[0]
+    bi = next(iter(dispatch.count_node_logits[ridx]))
+    p = built["field_plans"]["tags"]
+
+    # Case B — raw inside the band, corrected OUTSIDE: prior '1' = -0.30
+    # widens the corrected gap to 0.31 -> no rescore, dispatch untouched.
+    dispatch.count_node_logits[ridx] = {bi: [0.30, 0.31, 0.0, 0.0, 0.0]}
+    prior_wide = {count_key("tags"): {"log_scores": {"1": -0.30}}}
+    ran = _rescore_count_row(
+        engine.model,
+        cache,
+        built,
+        dispatch,
+        fr,
+        p,
+        prior_wide,
+        engine.vocab_size,
+        built["pad_id"],
+        Ledger(),
+        (0.125, None),
+    )
+    assert ran is False
+    assert dispatch.count_node_logits[ridx] == {bi: [0.30, 0.31, 0.0, 0.0, 0.0]}
+
+    # Case A — prior narrows the gap into the band: raw '0' leads by 0.30
+    # (outside the band), prior '0' = 0.29 makes the corrected scores
+    # [0.01, 0.0, ...] -> gap 0.01 <= band -> rescore, and the dispatch now
+    # carries the canonical (batch=1) logits (zeros model -> all zero).
+    dispatch.count_node_logits[ridx] = {bi: [0.30, 0.0, 0.0, 0.0, 0.0]}
+    prior = {count_key("tags"): {"log_scores": {"0": 0.29}}}
+    ran = _rescore_count_row(
+        engine.model,
+        cache,
+        built,
+        dispatch,
+        fr,
+        p,
+        prior,
+        engine.vocab_size,
+        built["pad_id"],
+        Ledger(),
+        (0.125, None),
+    )
+    assert ran is True
+    assert dispatch.count_node_logits[ridx] == {bi: [0.0, 0.0, 0.0, 0.0, 0.0]}
+
+
+def test_T4_normal_path_emits_decision_part():
+    """P9 T4 (api half): a field the MAP never touches still carries the
+    DECISION numbers — probability_margin = P(returned) - max P(other) and
+    the winner-first top-3 alternatives — computed by the ONE helper the
+    MAP path reuses. Main's telemetry has neither key (KeyError)."""
+    model = FakeModel()
+    tokenizer = FakeTokenizer()
+    schema = StructuredSchema(
+        {"action": {"type": "enum", "description": "d", "choices": ["A", "B"]}}
+    )
+    result = run_parallel_generation(make_engine(model, tokenizer), "ctx", schema, scoring="slots")
+    telemetry = result["field_telemetry"]["action"]
+    # Uniform fake logits: P(A) = P(B) = 0.5, margin 0, tie inside the band.
+    assert telemetry["probability_margin"] == pytest.approx(0.0)
+    assert telemetry["tie"] is True
+    assert telemetry["alternatives"] == [
+        {"choice": "A", "probability": pytest.approx(0.5)},
+        {"choice": "B", "probability": pytest.approx(0.5)},
+    ]
+    # Distribution keys untouched by the decision part.
+    assert telemetry["top_choices"] == [
+        {"choice": "A", "probability": pytest.approx(0.5)},
+        {"choice": "B", "probability": pytest.approx(0.5)},
+    ]

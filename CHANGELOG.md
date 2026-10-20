@@ -2,6 +2,71 @@
 
 ## Unreleased
 
+- parity: ONE parity payload per scorer (F9). The pre-F9 parity.json mixed
+  slots raw rows with labels final decisions and proved parity for neither.
+  The scorer now flows through every parity call: raw rows, final
+  decisions, batched and single-context. The batch writes one artifact per
+  scorer (parity.json for the default scorer, parity-<scorer>.json for the
+  others), and check_parity requires EVERY artifact to pass. A payload
+  that does not record its scorer is rejected by every reader (no silent
+  default) — the four committed model folders carry pre-F9 payloads and
+  fail the gate until the m5 parity step regenerates them per scorer.
+  The batched raw-row comparison now covers EVERY context copy of the
+  merged pass (main compared only rows 0..R-1, the first copy). Multi
+  fields contribute per-option corrected log-odds drift and count rows
+  their log-score drift, with the same atol contract as scalar fields
+  (main skipped them entirely: log_scores is None -> continue).
+
+- engine: decide_many prefills one CONTEXT GROUP at a time (staged
+  prefill, F10). Groups still form in prompt-length order inside the same
+  measured memory budget, but from CHEAP length estimates instead of
+  prefills: one probe prefill of the shortest context measures the KV
+  bytes per prealloc step (mlx_lm KVCache preallocates in fixed steps,
+  default 256 tokens) and `ceil(tokens/step) * block_bytes` reproduces the
+  old cache-byte arithmetic exactly — same groups, same shapes, byte-
+  identical results (golden test vs main). Each group is prefilled, scored
+  with one merged pass, assembled, then its KV caches are DROPPED before
+  the next group prefills, so peak live caches = one group instead of all
+  N contexts. One debug line per group (contexts, rows, prefill tokens).
+
+- metrics: every headline metric now counts CANONICAL answer lines only.
+  evalrun writes one line per (case, field, permutation); rotation lines
+  (`permutation="rotN:<field>"`) are order probes. field_accuracy,
+  agreement_common_subset, by_workflow, case_exact_match, Wilson/bootstrap
+  CIs, paired comparisons, calibration, balanced accuracy, macro F1, Brier,
+  log loss, tie rate, risk-coverage and the constraint metrics filter to
+  canonical lines INSIDE the metric functions (not at call sites), so raw
+  predictions.jsonl is always safe to pass. Rotation lines feed only the
+  order-sensitivity metrics (any_flip_rate, mean_tvd_across_permutations,
+  order_flip_rate, perturbation_flip_rate). This removes the ~3x rotation
+  inflation that dominated the published headline accuracy (e.g. 0.8213
+  over 14,847 lines vs 0.7342 over the 365 canonical lines).
+
+- metrics: error-inclusive denominator. A case-level failure now emits one
+  error line per labelled field of the case (fields derived from the case's
+  own labels) instead of a single `_error` marker line, so a wholesale
+  failure counts every labelled field as WRONG in accuracy, exact match and
+  agreement denominators. A case with no labels keeps the `_error` marker.
+
+- metrics: multi-select correctness compares SETS, not lists —
+  `["a", "b"]` and `["b", "a"]` are the same answer (values_equal,
+  shared by evalrun's per-line `correct` and the metric comparisons).
+
+- build: gitignore `.venv-*/` so a worktree-local venv with a non-default
+  name is excluded from sdists (an included venv symlink made
+  `uv build` fail with "unsafe symbolic-link target ... is absolute").
+
+- deps: declare jinja2 (engine.py imports jinja2.exceptions.TemplateError; it
+  was only present as a transitive dep of mlx-lm) and bound mlx-lm to the
+  tested range `>=0.31.3,<0.33`. mlx-lm #1778 (first in 0.32.0) made cache
+  `state` return the FULL state — KVCache from (keys, values) to
+  (keys, values, offset) — which broke driftprobe's fixed 2-field unpack
+  ("too many values to unpack") on any fresh dependency resolve. driftprobe
+  now reads keys and values by index (offset keeps its own attribute
+  comparison), compatible with both arities; the full offline suite passes
+  on mlx-lm 0.31.3 and 0.32.2. To move past <0.33: rerun the offline suite
+  on the new minor and extend the bound only when green.
+
 - ci: the slow model-test workflow is manual-dispatch only. The shared macOS
   runner GPU is not stable enough for model tests (Metal command-buffer
   timeouts, NaN logits observed), so the workflow no longer triggers on push

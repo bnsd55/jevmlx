@@ -255,16 +255,31 @@ def _local_rows(results_root: Path) -> list[dict]:
             parity = json.loads(parity_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
+        # F9 decision (c): a payload with no scorer field is a KNOWN legacy
+        # shape, recognized explicitly (never defaulted, never passed —
+        # check_parity still rejects it). The model row STAYS in the table
+        # (its accuracy numbers are independent of parity); the Parity
+        # column shows UNVERIFIED (pre-F9) instead of a drift number, because
+        # the legacy artifact mixed slots raw rows with labels decisions and
+        # its drift numbers mean nothing. A legacy payload whose recorded
+        # status is FAIL stays excluded (a winner change is a real
+        # divergence under any scorer).
+        # SHORTCUT: pre-F9 parity artifacts; remove when the M5 rerun (P7)
+        # writes per-scorer parity.
         parity_status = parity.get("status", "PASS")
         if parity_status not in ("PASS", "DRIFT"):
             continue
-        # The max drift for the Parity column (DRIFT rows show it; PASS
-        # rows show 0 / the measured value, which is < atol).
-        parity_max_drift = max(
-            parity.get("max_abs_drift_nats", 0.0) or 0.0,
-            parity.get("max_gap_drift_nats", 0.0) or 0.0,
-            parity.get("max_margin_drift_nats", 0.0) or 0.0,
-        )
+        if "scoring" not in parity:
+            parity_status = "UNVERIFIED (pre-F9)"
+            parity_max_drift = 0.0
+        else:
+            # The max drift for the Parity column (DRIFT rows show it; PASS
+            # rows show 0 / the measured value, which is < atol).
+            parity_max_drift = max(
+                parity.get("max_abs_drift_nats", 0.0) or 0.0,
+                parity.get("max_gap_drift_nats", 0.0) or 0.0,
+                parity.get("max_margin_drift_nats", 0.0) or 0.0,
+            )
         for combo in sorted(p for p in machine_dir.iterdir() if p.is_dir()):
             report_path = combo / "report.json"
             if not report_path.exists():
@@ -304,10 +319,12 @@ def _local_rows(results_root: Path) -> list[dict]:
                 if run_counts_cases is not None
                 else (n_cases if n_cases is not None else n_fields)
             )
-            # Count error lines (scoring failures) for the row note.
-            from benchmarks.check_results import _error_lines_in_folder
+            # Count FAILED CASES (distinct case_ids with an error line) for
+            # the row note — not error lines: a legacy case failure expands
+            # to one line per labelled field (P3), so line counts overstate.
+            from benchmarks.check_results import _failed_cases_in_folder
 
-            error_count = len(_error_lines_in_folder(combo))
+            error_count = _failed_cases_in_folder(combo)
             # W6-B1: for non-TypeSafe datasets (jabr), the per-workflow
             # breakdown comes from per_workflow_accuracy (general metric),
             # and the overall accuracy from metrics["accuracy"].

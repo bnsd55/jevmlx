@@ -952,3 +952,171 @@ def test_naive_raw_text_truncated_to_4000_chars():
     out = _truncate_raw_text(long)
     assert len(out) == _RAW_TEXT_TRUNCATE + len("...[truncated 500 chars]")
     assert out.endswith("...[truncated 500 chars]")
+
+
+# ------------- P5 (F2): the eval never silently retries or swallows -------
+
+
+def _constrained_case():
+    return {
+        "id": "wf/case-c",
+        "schema": {
+            "action": {
+                "type": "enum",
+                "description": "priority",
+                "choices": ["P1", "P2"],
+            }
+        },
+        "context": "ctx",
+        "labels": {"action": "P1"},
+        "constraints": [{"type": "implies", "parent": "action", "child": "action", "mapping": {}}],
+        "split": "holdout",
+        "meta": {},
+        "workflow": "wf",
+        "source": "s",
+        "group_id": "g",
+    }
+
+
+def test_T1_typeerror_inside_decide_fn_is_a_case_failure(tmp_path):
+    """P5 T1: a decide_fn that ACCEPTS constraints but raises TypeError
+    inside (scoring/MLX) is a case FAILURE through the P2 error path —
+    never an unconstrained retry that turns the case into a success.
+    Main retries without constraints and journals an unconstrained result."""
+    calls = []
+
+    def decide_fn(schema_dict, context, constraints=None):
+        calls.append(constraints)
+        if constraints:
+            raise TypeError("boom inside scoring")
+        return {"action": {"prediction": "P2", "type": "enum"}}
+
+    run = evalrun.run_eval(
+        [_constrained_case()],
+        decide_fn,
+        track="parallel",
+        model="fake/model",
+        out_dir=str(tmp_path),
+        run_id="r1",
+    )
+    assert run["counts"]["cases"] == 1
+    lines = _read_lines(tmp_path / "predictions.jsonl")
+    # One failure line per labelled field (P2) — no unconstrained success.
+    assert [line["field"] for line in lines] == ["action"]
+    assert "TypeError" in lines[0]["error"]
+    assert lines[0]["prediction"] is None
+    # Called exactly once, WITH the constraints.
+    assert len(calls) == 1 and calls[0] == _constrained_case()["constraints"]
+
+
+def test_T2_two_arg_decide_fn_with_constrained_case_fails_at_start(tmp_path):
+    """P5 T2: a 2-arg decide_fn + a case carrying constraints is a
+    configuration error at run start, naming the decide_fn — the run never
+    silently drops the constraints. Main retried unconstrained and
+    completed the run."""
+
+    def decide_fn(schema_dict, context):
+        return {"action": {"prediction": "P1", "type": "enum"}}
+
+    with pytest.raises(ValueError, match="does not accept `constraints`"):
+        evalrun.run_eval(
+            [_constrained_case()],
+            decide_fn,
+            track="parallel",
+            model="fake/model",
+            out_dir=str(tmp_path),
+            run_id="r1",
+        )
+    assert not (tmp_path / "predictions.jsonl").exists()
+
+
+def test_T3_oracle_pass_failure_is_recorded_not_dropped(tmp_path):
+    """P5 T3: an exception inside the oracle pass is recorded on the case's
+    prediction lines (oracle_error) and logged — never `pass`. Main dropped
+    the oracle result on TypeError and CRASHED the run on anything else."""
+    import logging
+
+    def decide_fn(schema_dict, context, constraints=None, oracle_overrides=None):
+        if oracle_overrides is not None:
+            raise RuntimeError("oracle boom")
+        return {"child": {"prediction": "NEW", "type": "enum"}}
+
+    case = {
+        "id": "wf/case-o",
+        "schema": {
+            "parent": {"type": "enum", "description": "d", "choices": ["A", "B"]},
+            "child": {
+                "type": "enum",
+                "description": "d",
+                "choices": ["NEW", "OLD"],
+                "depends_on": "parent",
+            },
+        },
+        "context": "ctx",
+        "labels": {"parent": "A", "child": "NEW"},
+        "split": "holdout",
+        "meta": {},
+        "workflow": "wf",
+        "source": "s",
+        "group_id": "g",
+    }
+    records = []
+    handler = logging.Handler()
+    handler.emit = lambda record: records.append(record.getMessage())
+    ologger = logging.getLogger("jevmlx.evalrun")
+    ologger.addHandler(handler)
+    try:
+        evalrun.run_eval(
+            [case],
+            decide_fn,
+            track="parallel",
+            model="fake/model",
+            out_dir=str(tmp_path),
+            run_id="r1",
+        )
+    finally:
+        ologger.removeHandler(handler)
+    lines = _read_lines(tmp_path / "predictions.jsonl")
+    # The case still completes (predictions journaled) AND the oracle
+    # failure rides the covered field's line + the log.
+    assert [line["field"] for line in lines] == ["child"]
+    assert lines[0].get("oracle_error") == "RuntimeError:oracle boom"
+    assert lines[0]["oracle_prediction"] is None
+    assert any("oracle pass failed" in msg for msg in records)
+
+
+def test_T3b_two_arg_decide_fn_with_oracle_case_fails_at_start(tmp_path):
+    """P5: the same upfront rule for `oracle_overrides` — a 2-arg decide_fn
+    + a dependency case needing the oracle pass fails at start."""
+
+    def decide_fn(schema_dict, context):
+        return {"child": {"prediction": "NEW", "type": "enum"}}
+
+    case = {
+        "id": "wf/case-o2",
+        "schema": {
+            "parent": {"type": "enum", "description": "d", "choices": ["A", "B"]},
+            "child": {
+                "type": "enum",
+                "description": "d",
+                "choices": ["NEW", "OLD"],
+                "depends_on": "parent",
+            },
+        },
+        "context": "ctx",
+        "labels": {"parent": "A", "child": "NEW"},
+        "split": "holdout",
+        "meta": {},
+        "workflow": "wf",
+        "source": "s",
+        "group_id": "g",
+    }
+    with pytest.raises(ValueError, match="does not accept `oracle_overrides`"):
+        evalrun.run_eval(
+            [case],
+            decide_fn,
+            track="parallel",
+            model="fake/model",
+            out_dir=str(tmp_path),
+            run_id="r1",
+        )

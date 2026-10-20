@@ -14,8 +14,11 @@ from __future__ import annotations
 
 import math
 
+import pytest
+from conftest import make_field_semantics
+
 from jevmlx.constraints import compile_constraints
-from jevmlx.engine import _constrained_map
+from jevmlx.engine import _constrained_map, reconcile_case_constraints
 from jevmlx.schema import StructuredSchema
 
 
@@ -196,3 +199,170 @@ def test_reconciled_fields_in_telemetry():
     reconciled, changed = _constrained_map(field_log_scores, field_values, compiled, schema)
     assert "subtype" in changed
     assert reconciled["subtype"] == "refund"
+
+
+# ------------------------- P9 (F7 part 1): the record reports what it returns
+
+
+def _state(parsed, telemetry):
+    from jevmlx.engine import AssembledState
+
+    return AssembledState(
+        parsed_json=parsed,
+        field_telemetry=telemetry,
+        rescored_fields=(),
+    )
+
+
+def _scalar_tel(value, probability, log_scores, **extra):
+    """A finalized scalar telemetry entry (distribution + old decision
+    numbers, pre-MAP shape — no probability_margin/alternatives yet)."""
+    ranked = sorted(log_scores.items(), key=lambda kv: -kv[1])
+    entry = {
+        "value": value,
+        "type": "enum",
+        "probability": probability,
+        "cardinality": len(log_scores),
+        "log_scores": dict(log_scores),
+        "top_choices": [{"choice": c, "probability": math.exp(ls)} for c, ls in ranked],
+        "rows": 2,
+        "tie": False,
+        "rescored": False,
+        "legal_mass": 1.0,
+        "semantics": make_field_semantics(),
+    }
+    entry.update(extra)
+    return entry
+
+
+def test_T1_boolean_map_change_reports_returned_value():
+    """P9 T1 (the F7 probe): model winners are (allow, false); the implies
+    constraint forces flag=True. The record must report the RETURNED value:
+    probability = P(true), a negative probability_margin, the top OTHER
+    choice as alternatives — while the distribution keys stay untouched.
+    Main kept the old argmax's probability (str(True)='True' misses the
+    'true' key) and never touched margin/tie/alternatives."""
+    constraints = [
+        {
+            "type": "implies",
+            "parent": "gate",
+            "child": "flag",
+            "mapping": {"allow": [True], "deny": [True, False]},
+        }
+    ]
+    schema = StructuredSchema(
+        {
+            "gate": {"type": "enum", "description": "d", "choices": ["allow", "deny"]},
+            "flag": {"type": "boolean", "description": "d"},
+        }
+    )
+    compiled = compile_constraints(constraints, schema)
+    gate_tel = _scalar_tel("allow", 0.9, {"allow": math.log(0.9), "deny": math.log(0.1)})
+    flag_tel = _scalar_tel(False, 0.9, {"true": math.log(0.1), "false": math.log(0.9)})
+    flag_tel["type"] = "boolean"
+    input_tel = {"gate": gate_tel, "flag": flag_tel}
+    state = _state(
+        {"gate": {"value": "allow", "prob": 0.9}, "flag": {"value": False, "prob": 0.9}},
+        input_tel,
+    )
+    out = reconcile_case_constraints(state, constraints, schema, compiled)
+
+    assert out.parsed_json["flag"]["value"] is True
+    ft = out.field_telemetry["flag"]
+    assert ft["value"] is True
+    assert ft["probability"] == pytest.approx(0.1)  # P(true), not the old 0.9
+    assert out.parsed_json["flag"]["prob"] == pytest.approx(0.1)
+    assert ft["log_score_margin"] == pytest.approx(math.log(0.1) - math.log(0.9))
+    assert ft["probability_margin"] == pytest.approx(0.1 - 0.9)  # negative: forced
+    assert ft["tie"] is False  # |log 0.1 - log 0.9| = 2.2 nats, far outside the band
+    # Competitors of the returned value: the top OTHER choices.
+    assert [a["choice"] for a in ft["alternatives"]] == ["false"]
+    assert ft["alternatives"][0]["probability"] == pytest.approx(0.9)
+    # Distribution keys untouched.
+    assert ft["log_scores"] == input_tel["flag"]["log_scores"]
+    assert ft["top_choices"] == input_tel["flag"]["top_choices"]
+    assert ft["semantics"]["constraint_changed"] is True
+    # The untouched parent: no decision numbers injected, no changed flag.
+    assert out.field_telemetry["gate"] is input_tel["gate"]
+    assert out.field_telemetry["gate"]["semantics"]["constraint_changed"] is False
+    assert out.reconciled_fields == ("flag",)
+
+
+def test_T3_enum_map_change_reports_returned_value():
+    """P9 T3: same checks for a plain enum (the str(val) lookup path) —
+    subtype bug -> refund under intent=billing."""
+    constraints = [
+        {
+            "type": "implies",
+            "parent": "intent",
+            "child": "subtype",
+            "mapping": {"billing": ["refund"], "technical": ["bug", "refund", "dispute"]},
+        }
+    ]
+    schema = StructuredSchema(
+        {
+            "intent": {"type": "enum", "description": "d", "choices": ["billing", "technical"]},
+            "subtype": {
+                "type": "enum",
+                "description": "d",
+                "choices": ["refund", "dispute", "bug"],
+            },
+        }
+    )
+    compiled = compile_constraints(constraints, schema)
+    scores = {"refund": math.log(0.2), "dispute": math.log(0.3), "bug": math.log(0.5)}
+    subtype_tel = _scalar_tel("bug", 0.5, scores)
+    input_tel = {"subtype": subtype_tel}
+    state = _state(
+        {"intent": {"value": "billing", "prob": 1.0}, "subtype": {"value": "bug", "prob": 0.5}},
+        input_tel,
+    )
+    out = reconcile_case_constraints(state, constraints, schema, compiled)
+
+    assert out.parsed_json["subtype"]["value"] == "refund"
+    ft = out.field_telemetry["subtype"]
+    assert ft["probability"] == pytest.approx(0.2)  # P(refund)
+    assert out.parsed_json["subtype"]["prob"] == pytest.approx(0.2)
+    assert ft["log_score_margin"] == pytest.approx(math.log(0.2) - math.log(0.5))
+    assert ft["probability_margin"] == pytest.approx(0.2 - 0.5)  # best OTHER is bug
+    assert ft["tie"] is False
+    assert [a["choice"] for a in ft["alternatives"]] == ["bug", "dispute"]
+    assert ft["alternatives"][0]["probability"] == pytest.approx(0.5)
+    assert ft["log_scores"] == scores  # distribution untouched
+    assert ft["top_choices"] == input_tel["subtype"]["top_choices"]
+    assert ft["semantics"]["constraint_changed"] is True
+    assert out.reconciled_fields == ("subtype",)
+
+
+def test_T4_unchanged_field_telemetry_identical():
+    """P9 T4 (MAP half): a field the MAP did NOT change is untouched — no
+    decision numbers injected, every key identical (the normal-path numbers
+    already came from the ONE helper at finalize time)."""
+    constraints = [
+        {
+            "type": "implies",
+            "parent": "gate",
+            "child": "flag",
+            "mapping": {"allow": [True], "deny": [True, False]},
+        }
+    ]
+    schema = StructuredSchema(
+        {
+            "gate": {"type": "enum", "description": "d", "choices": ["allow", "deny"]},
+            "flag": {"type": "boolean", "description": "d"},
+        }
+    )
+    compiled = compile_constraints(constraints, schema)
+    gate_tel = _scalar_tel("allow", 0.9, {"allow": math.log(0.9), "deny": math.log(0.1)})
+    # Model winner already satisfies the constraint: no change.
+    flag_tel = _scalar_tel(True, 0.1, {"true": math.log(0.1), "false": math.log(0.9)})
+    flag_tel["type"] = "boolean"
+    input_tel = {"gate": gate_tel, "flag": flag_tel}
+    state = _state(
+        {"gate": {"value": "allow", "prob": 0.9}, "flag": {"value": True, "prob": 0.1}},
+        input_tel,
+    )
+    out = reconcile_case_constraints(state, constraints, schema, compiled)
+    assert out.reconciled_fields == ()
+    assert dict(out.field_telemetry) == input_tel
+    assert dict(out.parsed_json) == state.parsed_json

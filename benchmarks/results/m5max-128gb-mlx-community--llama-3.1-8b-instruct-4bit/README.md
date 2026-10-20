@@ -6,6 +6,3 @@ scorer, dataset) combination, each holding `predictions.jsonl`,
 the top level. `SUMMARY.md` is the one-glance table.
 
 Commit this folder and nothing else (no caches, no model weights).
-
-Predictions were gzipped (`predictions.jsonl.gz`) to keep the folder
-under the 5 MB commit limit; decompress with `gunzip` to inspect.

@@ -38,12 +38,20 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "dirs=${{ inputs.results-dir }}" >> "$GITHUB_OUTPUT"
           else
-            # One folder per changed predictions.jsonl, deduplicated, relative.
+            # One COMBO folder per changed file under benchmarks/results —
+            # ANY changed file: a derived-only PR (report.json / SUMMARY.md /
+            # README.md) never touches predictions.jsonl. Map each file to
+            # the combo level check_results expects and dedupe. Never pass
+            # an empty list: if nothing maps, check the whole root.
             dirs=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- 'benchmarks/results/**' \
-              | grep -E 'predictions\.jsonl(\.gz)?$' \
-              | xargs -n1 dirname \
+              | while read -r f; do
+                  case "$f" in
+                    benchmarks/results/*/*/*) dirname "$f" ;;  # combo folder
+                  esac
+                done \
               | sort -u \
               | tr '\n' ' ')
+            [ -n "$(echo $dirs | tr -d ' ')" ] || dirs="benchmarks/results"
             echo "dirs=$dirs" >> "$GITHUB_OUTPUT"
           fi
 

@@ -27,6 +27,7 @@ from pydantic import BaseModel
 
 from jevmlx.calibrate import CalibrationBundle
 from jevmlx.engine import (
+    _decision_score_key,
     load_engine,
     run_parallel_generation,
     run_parallel_generation_batched,
@@ -178,17 +179,20 @@ class FieldResult:
     Attributes:
         value: The decided value (engine-side: str for enums, bool for
             booleans, list[str] for multi).
-        score: Log P of the winning choice (constrained-path log score);
+        score: Log P of the RETURNED choice (constrained-path log score);
             0.0 for multi fields (no field-level log score exists).
-        log_score_margin: Scalar fields only: top-1 minus top-2 log score at
-            T=1 (decision units: log odds). None for multi fields.
-        probability_margin: Scalar fields only: top-1 minus top-2
-            probability (post-temperature). None for multi fields.
+        log_score_margin: Scalar fields only: the returned value's log-score
+            gap to its best competitor at T=1 (decision units: log odds) —
+            negative when a constraint forced a lower-ranked value. None
+            for multi fields.
+        probability_margin: Scalar fields only: P(returned value) - max
+            P(other choice) (post-temperature) — negative when a constraint
+            forced a lower-ranked value. None for multi fields.
         threshold_distance: Multi fields only: min |P(yes) - threshold|
             over the field's options — how close the closest yes/no decision
             sat to the selection cut. None for scalar fields.
-        probability: P of the winner — constrained-path probability in
-            both scoring modes. In [0, 1]; None for multi fields (no
+        probability: P of the returned value — constrained-path probability
+            in both scoring modes. In [0, 1]; None for multi fields (no
             field-level probability is claimed).
         calibrated: True only after a fitted calibrator has been applied to
             ``probability``. The engine never calibrates; this is False in
@@ -196,9 +200,11 @@ class FieldResult:
         model: Which scoring model produced the probability: "slots"
             (neutral aliases through the token trie; the default) or
             "labels" (real choice text through the token trie).
-        alternatives: Top 3 (choice, probability) pairs, most probable
-            first. For multi fields: all per-option (option, P(yes)) pairs
-            sorted by P(yes) descending.
+        alternatives: The returned value's competitors — top 3 (choice,
+            probability) pairs, most probable first; the distribution's top
+            3 when the returned value is the model's favorite, else the top
+            3 choices OTHER than the returned value. For multi fields: all
+            per-option (option, P(yes)) pairs sorted by P(yes) descending.
         reason: Why the field carries no decided value, or None when it
             does. "none_of_above": the caller opted in via
             ``allow_none_of_above=True`` and the model picked the explicit
@@ -427,15 +433,22 @@ def _build_field_results(
     """Build Decision.fields from the engine's field_telemetry.
 
     Telemetry contract per field: ``log_scores`` ({choice: log P}, enum and
-    boolean fields only), ``probability`` (P of the winner), ``top_choices"
-    (top 5 {choice, probability}). Multi fields carry ``per_option`` (P(yes)
+    boolean fields only), ``probability`` (P of the returned value),
+    ``top_choices" (top 5 {choice, probability}) plus the engine's DECISION
+    numbers about the RETURNED value (P9): ``score`` derives from
+    ``log_scores`` through the one value→key lookup (booleans score under
+    "true"/"false"), ``log_score_margin`` is the returned value's log-score
+    gap to its best competitor, ``probability_margin`` is P(returned) - max
+    P(other choice) — negative when a constraint forced a lower-ranked
+    value — and ``alternatives`` are the returned value's competitors. Multi
+    fields carry ``per_option`` (P(yes)
     per option), ``margin`` (min |P(yes) - threshold|) and no field-level
     probability (None — an exact-set probability is not claimed); their
     alternatives are the per-option pairs sorted by P(yes).
 
     Margins are unit-split (bug 14): scalar fields get ``log_score_margin``
-    (top1-top2 at T=1 log scores) and ``probability_margin`` (top1-top2
-    post-temperature); multi fields get ``threshold_distance`` from the
+    (the returned value's gap at T=1 log scores) and ``probability_margin``
+    (post-temperature); multi fields get ``threshold_distance`` from the
     engine's ``margin``. No field carries more than one of the three.
 
     Abstention (W2-D): with ``abstain_below_margin`` set, a scalar field
@@ -449,19 +462,24 @@ def _build_field_results(
         probability = telemetry["probability"]
         log_scores: dict[str, float] | None = telemetry.get("log_scores")
         if log_scores:
-            ranked = sorted(log_scores.items(), key=lambda kv: -kv[1])
-            score = ranked[0][1]
-            log_score_margin = ranked[0][1] - ranked[1][1] if len(ranked) > 1 else 0.0
-            # Probability margin: top1-top2 of the post-temperature
-            # distribution, from the same ranking as the log scores.
-            probs_sorted = [entry["probability"] for entry in telemetry.get("top_choices", [])]
-            probability_margin = probs_sorted[0] - probs_sorted[1] if len(probs_sorted) > 1 else 0.0
+            # P9: the score of the RETURNED value — through the ONE
+            # value→key lookup (booleans score under "true"/"false"), not
+            # the independent argmax. On the normal path the returned value
+            # IS the argmax and this is the same number main reported.
+            score = log_scores[_decision_score_key(telemetry["value"])]
+            # The engine's DECISION numbers about the returned value (P9:
+            # every log_scores telemetry entry carries them — finalize,
+            # MAP, dependency/oracle waves, count row, cardinality-1).
+            # Negative margins mean a constraint forced a lower-ranked
+            # value; the distribution's numbers live in top_choices.
+            log_score_margin = telemetry["log_score_margin"]
+            probability_margin = telemetry["probability_margin"]
             threshold_distance = None
-            # Top 3 by probability, from top_choices (same ranking as log
-            # scores; probabilities are monotone in the log scores).
+            # The returned value's competitors (the engine's DECISION
+            # alternatives: the distribution's top 3 when the returned
+            # value is the favorite, else the top 3 OTHER choices).
             alternatives = tuple(
-                (entry["choice"], entry["probability"])
-                for entry in telemetry.get("top_choices", [])[:3]
+                (entry["choice"], entry["probability"]) for entry in telemetry["alternatives"]
             )
         else:
             per_option = telemetry.get("per_option") or {}
