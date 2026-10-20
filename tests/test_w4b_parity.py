@@ -112,21 +112,37 @@ def test_parity_report_fails_when_winners_flip(tmp_path):
     assert payload["passed"] is False
     assert payload["status"] == "FAIL"  # P4/I7: winners changed
     assert payload["winners_identical"] is False
-    on_disk = json.loads((tmp_path / "parity.json").read_text(encoding="utf-8"))
+    # F9: one artifact per scorer — a slots payload writes parity-slots.json.
+    on_disk = json.loads((tmp_path / "parity-slots.json").read_text(encoding="utf-8"))
     assert on_disk["passed"] is False
+    assert on_disk["scoring"] == "slots"
 
 
-def test_parity_report_drift_when_winners_identical_and_large_drift(tmp_path):
+def test_parity_report_drift_when_winners_identical_and_large_drift(monkeypatch, tmp_path):
     """D6: DRIFT = winners identical + no escaped near-tie, regardless of
     the drift size. The old envelope-band term was self-referential (the
     band was round_up(0.05 + THIS run's own max gap drift), so the band
     check could never fail) — removed; the measured drift is reported as
-    is. _DriftingModel under the default scoring keeps winners identical
-    while the batched drift far exceeds atol."""
+    is. The drift is injected at the check boundary: the branch under test
+    is the status decision, not the drift mechanism (covered by
+    test_batched_parity_matrix_catches_row_drift)."""
+    import jevmlx.parity as parity_mod
     from jevmlx.parity import write_parity_json
 
+    big_drift = {
+        "winners_identical": True,
+        "max_abs_drift_nats": 0.078,
+        "max_raw_row_drift_nats": 0.09,
+        "max_gap_drift_nats": 0.078,
+        "max_logp_drift_nats": 0.078,
+        "max_margin_drift_nats": 0.063,
+        "max_merged_rows": 8,
+        "per_case": {},
+    }
+    monkeypatch.setattr(parity_mod, "check_batched_parity", lambda engine, cases, **kw: big_drift)
+
     payload = write_parity_json(
-        make_engine(_DriftingModel(), _CountTokenizer()), "fake/drift", tmp_path, _cases()
+        make_engine(_StableModel(), _CountTokenizer()), "fake/drift", tmp_path, _cases()
     )
     assert payload["winners_identical"] is True
     assert (
@@ -155,6 +171,7 @@ def test_parity_report_drift_without_band_term_accepts_old_payload(tmp_path):
     old = {
         "model": "old/model",
         "test": PARITY_TEST_NAME,
+        "scoring": "labels",  # F9: payloads record their scorer
         "passed": False,
         "status": "DRIFT",
         "max_abs_drift_nats": 0.078,
@@ -312,7 +329,7 @@ def test_parity_real_model_twin(engine):
     ]
 
 
-def test_parity_report_carries_v2_keys_and_passes_check_parity(tmp_path):
+def test_parity_report_carries_v2_keys_and_passes_check_parity(monkeypatch, tmp_path):
     """W5c-1: parity_report runs BOTH checks — the payload carries the v2
     key set (the gated decomposition: max_gap_drift_nats +
     max_margin_drift_nats) and check_results.check_parity accepts it (no
@@ -344,11 +361,29 @@ def test_parity_report_carries_v2_keys_and_passes_check_parity(tmp_path):
     # batch-shape noise inside the envelope band, winners identical — which
     # is now publishable, so check_parity returns OK for it. A real FAIL
     # requires winners_identical=False; that path is covered by
-    # test_failed_parity_fails in test_check_results.py.)
+    # test_failed_parity_fails in test_check_results.py.) The drift is
+    # injected at the check boundary (same as the D6 test): the branch
+    # under test is check_parity's DRIFT handling, not the drift mechanism.
+    import jevmlx.parity as parity_mod
+
+    big_drift = {
+        "winners_identical": True,
+        "max_abs_drift_nats": 0.078,
+        "max_raw_row_drift_nats": 0.09,
+        "max_gap_drift_nats": 0.078,
+        "max_logp_drift_nats": 0.078,
+        "max_margin_drift_nats": 0.063,
+        "max_merged_rows": 8,
+        "per_case": {},
+    }
+    monkeypatch.setattr(parity_mod, "check_batched_parity", lambda engine, cases, **kw: big_drift)
     drift_dir = tmp_path.parent / "drift"
     drift_dir.mkdir()
     write_parity_json(
-        make_engine(_DriftingModel(), _CountTokenizer()), "fake/drift", drift_dir, _cases()
+        make_engine(_StableModel(), _CountTokenizer()),
+        "fake/drift",
+        drift_dir,
+        _cases(),
     )
     on_disk = json.loads((drift_dir / "parity.json").read_text(encoding="utf-8"))
     assert on_disk["passed"] is False

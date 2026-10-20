@@ -91,6 +91,49 @@ def bundled_preset_specs() -> list[tuple[str, dict]]:
     return specs
 
 
+def _corrected_option_odds(tel: dict) -> dict[str, float] | None:
+    """Per-option corrected log-odds (P8) — the multi decision coordinate.
+
+    z = raw (yes - no) minus the prior difference when a prior pair exists,
+    the SAME number the multi selection consumes. None when the telemetry
+    carries no option pairs (not a multi field).
+    """
+    pairs = tel.get("option_logit_pairs")
+    if not pairs:
+        return None
+    priors = tel.get("prior_option_pairs") or {}
+    return {
+        opt: (pair[0] - pair[1]) - ((priors[opt][0] - priors[opt][1]) if opt in priors else 0.0)
+        for opt, pair in pairs.items()
+    }
+
+
+def _multi_and_count_drift(
+    fname: str, full_tel: dict, again_tel: dict, full_int: dict, again_int: dict
+) -> float:
+    """Multi + count-row drift for one field (F9): the per-option corrected
+    log-odds drift and the count row's log-score drift, the same quantities
+    the engine's rescore gate keys on. Returns 0.0 when neither side has
+    the telemetry (not a multi field).
+    """
+    drift = 0.0
+    z_full = _corrected_option_odds(full_tel)
+    z_again = _corrected_option_odds(again_tel)
+    if z_full is not None and z_again is not None:
+        if set(z_full) != set(z_again):
+            return float("inf")  # option set changed: a real divergence
+        drift = max(drift, max(abs(z_full[o] - z_again[o]) for o in z_full))
+    # Count rows live in internal_telemetry under '<field>#count' with
+    # scalar-type log_scores — compare them like any scalar field.
+    ls_f = (full_int.get(f"{fname}#count") or {}).get("log_scores")
+    ls_a = (again_int.get(f"{fname}#count") or {}).get("log_scores")
+    if ls_f and ls_a:
+        if set(ls_f) != set(ls_a):
+            return float("inf")
+        drift = max(drift, max(abs(ls_f[c] - ls_a[c]) for c in ls_f))
+    return drift
+
+
 def check_scoring_parity(
     engine: Any,
     cases: list[tuple[str, dict]] | None = None,
@@ -149,10 +192,24 @@ def check_scoring_parity(
                     winners_identical = False
             # log_scores agree within the band (FP drift only).
             for fname, tel in full["field_telemetry"].items():
+                again_tel = again["field_telemetry"].get(fname, {})
                 ls_full = tel.get("log_scores")
                 if ls_full is None:
+                    # F9: multi fields contribute their per-option corrected
+                    # log-odds drift — never measured before, so a batch
+                    # drift on a multi option passed parity silently.
+                    multi_drift = _multi_and_count_drift(
+                        fname,
+                        tel,
+                        again_tel,
+                        full.get("internal_telemetry", {}),
+                        again.get("internal_telemetry", {}),
+                    )
+                    if multi_drift == float("inf"):
+                        winners_identical = False
+                    case_drift = max(case_drift, multi_drift)
                     continue
-                ls_again = again["field_telemetry"].get(fname, {}).get("log_scores")
+                ls_again = again_tel.get("log_scores")
                 if ls_again is None or set(ls_full) != set(ls_again):
                     winners_identical = False
                     continue
@@ -329,9 +386,10 @@ def parity_report(
     """
 
     from jevmlx.engine import INSTABILITY_BAND, PROMPT_VERSION
+    from jevmlx.models import DEFAULT_SCORING
 
     result = check_scoring_parity(engine, cases, max_rows_options, scoring=scoring)
-    batched = check_batched_parity(engine, cases)
+    batched = check_batched_parity(engine, cases, scoring=scoring)
     winners_identical = bool(result["winners_identical"] and batched["winners_identical"])
     # Single-context W1-A drift (the invariant that predates the matrix).
     max_abs_drift = result["max_abs_drift_nats"]
@@ -377,6 +435,11 @@ def parity_report(
         status = "FAIL"
     return {
         "model": model_id,
+        # F9: the scorer this payload covers. One payload per scorer — the
+        # pre-F9 payload mixed slots raw rows with labels final decisions
+        # and proved parity for neither. Readers reject a payload without
+        # this key (no silent default).
+        "scoring": scoring or DEFAULT_SCORING,
         "prompt_version": PROMPT_VERSION,
         "max_abs_drift_nats": round(max_abs_drift, 6),
         "max_raw_row_drift_nats": round(max_raw_drift, 6),
@@ -422,8 +485,18 @@ def write_parity_json(
     ``check_parity`` (PR #29) reads the file back."""
     from pathlib import Path
 
+    from jevmlx.models import DEFAULT_SCORING
+
     payload = parity_report(engine, model_id, cases, scoring=scoring)
-    out = Path(out_dir) / "parity.json"
+    # F9: one artifact per scorer. The default scorer keeps the canonical
+    # name (the README compat gate reads parity.json); any other scorer
+    # gets its own file.
+    name = (
+        "parity.json"
+        if payload["scoring"] == DEFAULT_SCORING
+        else f"parity-{payload['scoring']}.json"
+    )
+    out = Path(out_dir) / name
     out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return payload
 
@@ -517,6 +590,7 @@ def check_batched_parity(
     cases: list[tuple[str, dict]] | None = None,
     context_counts: tuple[int, ...] = (1, 2, 4),
     prior_correction: bool = False,
+    scoring: str | None = None,
 ) -> dict[str, Any]:
     """Batched-vs-independent parity matrix (W5-D findings 40/42).
 
@@ -528,8 +602,14 @@ def check_batched_parity(
       pass per context through the shared _score_rows at identical chunk
       shapes — batched results re-keyed per context — against the
       independent path's rows. Final decisions are compared separately so
-      a batch-1 rescore cannot mask raw batch drift.
-    - Final decisions (parsed values + log_scores) batched vs independent.
+      a batch-1 rescore cannot mask raw batch drift. F9: the rows are the
+      payload scorer's rows (``scoring``, default the engine default) —
+      they were hardcoded "slots", so a labels payload proved nothing
+      about its own rows.
+    - Final decisions (parsed values + log_scores) batched vs independent,
+      at the SAME scorer. F9: multi fields contribute their per-option
+      corrected log-odds drift and count rows their log-score drift, with
+      the same atol contract as scalar fields.
     - prior on/off (prior_correction=True computes the shared prior and
       must still match decide-per-context).
 
@@ -549,6 +629,12 @@ def check_batched_parity(
 
     if cases is None:
         cases = bundled_preset_specs()
+
+    # F9: the payload scorer everywhere — raw rows AND final decisions.
+    # Never a hardcoded scorer inside parity.
+    from jevmlx.models import DEFAULT_SCORING
+
+    scoring = scoring or DEFAULT_SCORING
 
     # W5c-1 review section 2: raw logits carry an arbitrary additive
     # offset, so uncentered d_raw is a DIAGNOSTIC, not a correctness gate.
@@ -588,7 +674,7 @@ def check_batched_parity(
     for case_id, preset in cases:
         schema = _make_schema(case_id, preset["schema"])
         context = _case_context(case_id, preset)
-        built = _build_schema_rows(schema, engine.tokenizer, "slots")
+        built = _build_schema_rows(schema, engine.tokenizer, scoring)
         built_cache[case_id] = built
 
         # --- RAW row logits (finding 42): score the SAME rows for one
@@ -602,7 +688,7 @@ def check_batched_parity(
             from jevmlx.timing import Ledger
 
             pf = _prefill(
-                engine.model, engine.tokenizer, context, schema, Ledger(), "slots", engine.profile
+                engine.model, engine.tokenizer, context, schema, Ledger(), scoring, engine.profile
             )
             # Reference: the CANONICAL batch=1 shape (one row per forward) —
             # the same shape the near-tie rescore trusts.
@@ -634,19 +720,25 @@ def check_batched_parity(
                 Ledger(),
                 cache_slots=cache_slots,
             )
-            for ridx in range(len(built["rows"])):
-                ref_vals = ref.row_logits.get(ridx)
-                got_vals = batched.row_logits.get(ridx)
-                if ref_vals is None or got_vals is None:
-                    winners_identical = False
-                    continue
-                dr, dg, dl = _decomp(ref_vals, got_vals)
-                raw_drift = max(raw_drift, dr)
-                gap_drift = max(gap_drift, dg)
-                logp_drift = max(logp_drift, dl)
-                margin_drift = max(
-                    margin_drift, abs(_top_two_margin(ref_vals) - _top_two_margin(got_vals))
-                )
+            # F9: EVERY context copy is compared against the batch=1
+            # reference — not only the first copy (rows R..n_ctx*R of the
+            # merged pass were never looked at).
+            n_rows = len(built["rows"])
+            for copy in range(n_ctx):
+                for ridx in range(n_rows):
+                    ref_vals = ref.row_logits.get(ridx)
+                    got_vals = batched.row_logits.get(copy * n_rows + ridx)
+                    if ref_vals is None or got_vals is None:
+                        winners_identical = False
+                        continue
+                    dr, dg, dl = _decomp(ref_vals, got_vals)
+                    raw_drift = max(raw_drift, dr)
+                    gap_drift = max(gap_drift, dg)
+                    logp_drift = max(logp_drift, dl)
+                    margin_drift = max(
+                        margin_drift,
+                        abs(_top_two_margin(ref_vals) - _top_two_margin(got_vals)),
+                    )
         max_raw_drift = max(max_raw_drift, raw_drift)
         max_gap_drift = max(max_gap_drift, gap_drift)
         max_logp_drift = max(max_logp_drift, logp_drift)
@@ -660,7 +752,9 @@ def check_batched_parity(
         mixed = [context + f" Additional evidence block {i}." for i in range(n_ctx)]
         for ctx_list in (contexts, mixed):
             independent = [
-                run_parallel_generation(engine, c, schema, prior_correction=prior_correction)
+                run_parallel_generation(
+                    engine, c, schema, prior_correction=prior_correction, scoring=scoring
+                )
                 for c in ctx_list
             ]
             batched_results = run_parallel_generation_batched(
@@ -668,16 +762,30 @@ def check_batched_parity(
                 ctx_list,
                 schema,
                 prior_correction=prior_correction,
+                scoring=scoring,
             )
             for ind, bat in zip(independent, batched_results, strict=True):
                 for fname, entry in ind["parsed_json"].items():
                     if bat["parsed_json"].get(fname, {}).get("value") != entry["value"]:
                         winners_identical = False
                 for fname, tel in ind["field_telemetry"].items():
+                    bat_tel = bat["field_telemetry"].get(fname, {})
                     ls_ind = tel.get("log_scores")
                     if ls_ind is None:
+                        # F9: multi per-option corrected log-odds drift + the
+                        # count row's log-score drift — same atol contract.
+                        multi_drift = _multi_and_count_drift(
+                            fname,
+                            tel,
+                            bat_tel,
+                            ind.get("internal_telemetry", {}),
+                            bat.get("internal_telemetry", {}),
+                        )
+                        if multi_drift == float("inf"):
+                            winners_identical = False
+                        case_drift = max(case_drift, multi_drift)
                         continue
-                    ls_bat = bat["field_telemetry"].get(fname, {}).get("log_scores")
+                    ls_bat = bat_tel.get("log_scores")
                     if ls_bat is None or set(ls_ind) != set(ls_bat):
                         winners_identical = False
                         continue

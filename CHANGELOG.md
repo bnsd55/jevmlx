@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- parity: ONE parity payload per scorer (F9). The pre-F9 parity.json mixed
+  slots raw rows with labels final decisions and proved parity for neither.
+  The scorer now flows through every parity call: raw rows, final
+  decisions, batched and single-context. The batch writes one artifact per
+  scorer (parity.json for the default scorer, parity-<scorer>.json for the
+  others), and check_parity requires EVERY artifact to pass. A payload
+  that does not record its scorer is rejected by every reader (no silent
+  default) — the four committed model folders carry pre-F9 payloads and
+  fail the gate until the m5 parity step regenerates them per scorer.
+  The batched raw-row comparison now covers EVERY context copy of the
+  merged pass (main compared only rows 0..R-1, the first copy). Multi
+  fields contribute per-option corrected log-odds drift and count rows
+  their log-score drift, with the same atol contract as scalar fields
+  (main skipped them entirely: log_scores is None -> continue).
+
 - metrics: every headline metric now counts CANONICAL answer lines only.
   evalrun writes one line per (case, field, permutation); rotation lines
   (`permutation="rotN:<field>"`) are order probes. field_accuracy,
