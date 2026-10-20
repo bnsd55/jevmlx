@@ -187,6 +187,19 @@ def test_ordinal_keys_accepted(tmp_path):
     assert ok, problems
 
 
+def test_oracle_error_addon_key_passes(tmp_path):
+    """oracle_error is an optional add-on key (the oracle pass's exception,
+    written on the case's canonical lines when it raises) — a folder whose
+    lines carry it passes the contract."""
+    folder = tmp_path / "combo"
+    rec = _record()
+    rec["oracle_error"] = "RuntimeError:oracle boom"
+    rec2 = _record(case_id="c2", label="LOW", prediction="HIGH", correct=False, probability=0.3)
+    _write_valid(folder, records=[rec, rec2])
+    ok, problems = check_folder(folder)
+    assert ok, problems
+
+
 def test_unknown_key_still_fails(tmp_path):
     """An unrecognized key (not in the contract, not in the optional add-on
     list) is still a contract violation."""
