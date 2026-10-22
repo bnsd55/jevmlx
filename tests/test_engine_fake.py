@@ -1454,8 +1454,11 @@ def test_count_rescore_gate_corrected_and_dispatch_replacement():
 
     # Case B — raw inside the band, corrected OUTSIDE: prior '1' = -0.30
     # widens the corrected gap to 0.31 -> no rescore, dispatch untouched.
+    # (P12: a prior carries every count code — the rest at 0.0 here.)
     dispatch.count_node_logits[ridx] = {bi: [0.30, 0.31, 0.0, 0.0, 0.0]}
-    prior_wide = {count_key("tags"): {"log_scores": {"1": -0.30}}}
+    prior_wide = {
+        count_key("tags"): {"log_scores": {"0": 0.0, "1": -0.30, "2": 0.0, "3": 0.0, "4": 0.0}}
+    }
     ran = _rescore_count_row(
         engine.model,
         cache,
@@ -1477,7 +1480,7 @@ def test_count_rescore_gate_corrected_and_dispatch_replacement():
     # [0.01, 0.0, ...] -> gap 0.01 <= band -> rescore, and the dispatch now
     # carries the canonical (batch=1) logits (zeros model -> all zero).
     dispatch.count_node_logits[ridx] = {bi: [0.30, 0.0, 0.0, 0.0, 0.0]}
-    prior = {count_key("tags"): {"log_scores": {"0": 0.29}}}
+    prior = {count_key("tags"): {"log_scores": {"0": 0.29, "1": 0.0, "2": 0.0, "3": 0.0, "4": 0.0}}}
     ran = _rescore_count_row(
         engine.model,
         cache,

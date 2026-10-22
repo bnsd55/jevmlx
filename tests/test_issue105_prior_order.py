@@ -1,11 +1,19 @@
-"""Issue #105 reproduction: does prior_correction reintroduce option-order
-dependence in labels mode?
+"""Issue #105 / P12: the prior is measured under the same presentation as
+the evidence.
 
-6 cases, 1 enum (risk_tier: low/medium/high) with choice_descriptions,
-ordered=False, 3 option orderings. Only the order changes between runs.
+History: issue #105 reported order-dependent decisions under prior
+correction; the first fix canonicalized (sorted) the schema for the prior
+pass, sharing one prior across orderings. P12 (F8) replaces that: sorting
+made the prior measure "dog under a different alias" than the evidence
+scored, so the subtraction did not cancel position bias. The prior is now
+measured under EXACTLY the evidence presentation (same schema, same choice
+order, same alias per choice; only the context is neutral), and each
+presentation gets its own cache entry.
 
-Runs under the slow marker (loads a real model). Mirrors the contributor's
-public repro (github.com/imaddde867/jev-position-test) but is self-contained.
+The 6-case grid (3 orderings, labels/slots, prior on/off) mirrors the
+contributor's public repro (github.com/imaddde867/jev-position-test) and
+runs under the slow marker (loads a real model). The fake-engine tests
+here are the root-cause tests and run offline.
 
 Usage:
     MODEL_ID=mlx-community/Qwen2.5-1.5B-Instruct-4bit \
@@ -18,6 +26,7 @@ import os
 from typing import Literal
 
 import pytest
+from conftest import FakeModel
 from pydantic import BaseModel, Field
 
 import jevmlx
@@ -132,6 +141,118 @@ def _slot_distribution(results: dict[str, dict[str, str]]) -> dict[int, int]:
     return dist
 
 
+# ----------------------------- P12: prior under the evidence presentation --
+
+
+class _AliasBiasModel(FakeModel):
+    """FakeModel +2.0 logits at the alias-'A' token (the fake tokenizer's
+    ord(c) % 60 id): in slots mode the row candidate for the FIRST alias
+    scores higher, so prior numbers depend on which alias a choice sits at
+    (the presentation)."""
+
+    def __call__(self, tokens, cache=None):
+        out = super().__call__(tokens, cache)
+        return out.at[:, :, ord("A") % 60].add(2.0)
+
+
+NEUTRAL = "(no context provided)"
+
+
+def _enum_schema(choices):
+    from jevmlx.schema import StructuredSchema
+
+    return StructuredSchema(
+        {"risk": {"type": "enum", "description": "tier", "choices": list(choices)}}
+    )
+
+
+def test_T1_prior_measured_under_evidence_presentation_slots():
+    """P12 T1 (the F8 probe, slots): the prior for a choice is measured
+    under the EXACT presentation the evidence used — same schema object,
+    same alias per choice. Evidence ["dog", "cat"] binds dog to alias 'A';
+    the prior must measure dog under alias 'A'. Main canonicalized the
+    schema first, measuring dog under its SORTED-position alias 'B'."""
+    from conftest import make_engine
+
+    from jevmlx.engine import _get_or_compute_prior, run_parallel_generation
+
+    schema = _enum_schema(["dog", "cat"])
+    engine = make_engine(_AliasBiasModel())
+    prior = _get_or_compute_prior(engine, schema, "slots", None, NEUTRAL)
+    # The expected numbers: one manual neutral pass over the SAME schema —
+    # the evidence presentation.
+    manual = run_parallel_generation(
+        engine, NEUTRAL, schema, temperature=1.0, scoring="slots", _prior_mode=True
+    )
+    assert prior["risk"]["log_scores"] == manual["field_telemetry"]["risk"]["log_scores"]
+
+
+def test_T2_rotated_presentation_gets_own_prior_entry():
+    """P12 T2: each rotation is its own presentation — its own prior cache
+    entry, computed once, cached. Main shared ONE canonical entry across
+    orderings (with the sorted presentation's numbers)."""
+    from conftest import make_engine
+
+    from jevmlx.engine import _PRIOR_CACHE, _get_or_compute_prior
+
+    engine = make_engine(_AliasBiasModel())
+    _PRIOR_CACHE.clear()
+    priors = {}
+    for order in [("dog", "cat"), ("cat", "dog")]:
+        schema = _enum_schema(order)
+        priors[order] = _get_or_compute_prior(engine, schema, "slots", None, NEUTRAL)["risk"][
+            "log_scores"
+        ]
+    # One entry per presentation, not one per choice set.
+    assert len(_PRIOR_CACHE) == 2
+    # The alias-position bias makes the per-presentation priors differ.
+    assert priors[("dog", "cat")] != priors[("cat", "dog")]
+
+
+def test_T3_apply_prior_missing_choice_raises():
+    """P12 T3: a prior missing a choice raises, naming the field and the
+    choice — never a silent correction by an implicit 0.0 (main subtracted
+    prior_scores.get(c, 0.0))."""
+    from jevmlx.engine import _apply_prior
+
+    with pytest.raises(ValueError, match="'risk'.*'dog'"):
+        _apply_prior([-0.1, -2.0], ["dog", "cat"], {"log_scores": {"cat": -0.5}}, "risk")
+
+
+def test_T4_neutral_prompt_lists_choices_in_evidence_order():
+    """P12 T4 (labels): the neutral pass runs on the EVIDENCE schema, so
+    the neutral prompt lists the choices in the evidence order (the spy
+    captures the schema the neutral pass actually used). Main passed a
+    sorted canonical schema."""
+    from conftest import make_engine
+
+    import jevmlx.engine as eng
+    from jevmlx.engine import _get_or_compute_prior
+
+    captured = []
+    real = eng.run_parallel_generation
+
+    def spy(*a, **k):
+        captured.append(a[2] if len(a) > 2 else k["schema"])
+        return real(*a, **k)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(eng, "run_parallel_generation", spy)
+    try:
+        engine = make_engine()
+        schema = _enum_schema(["dog", "cat"])
+        _get_or_compute_prior(engine, schema, "labels", None, NEUTRAL)
+    finally:
+        monkeypatch.undo()
+    assert captured, "the neutral pass must run"
+    # The neutral pass used the EVIDENCE schema — same object, same order.
+    assert captured[0] is schema
+    assert captured[0].fields["risk"].choices == ("dog", "cat")
+
+
+# ------------------------------------------------------------- slow grid ---
+
+
 @pytest.mark.slow
 @_skip_in_ci
 def test_issue105_reproduce_table(capsys):
@@ -154,88 +275,33 @@ def test_issue105_reproduce_table(capsys):
         print(f"| {label:<30} | {flips}/6 | {dist[1]}/{dist[2]}/{dist[3]} |")
 
     # The assertion is informational — we print the table. The root cause
-    # test (order-invariant prior) is separate.
+    # test (per-presentation priors) is separate.
     assert True
-
-
-def test_canonicalized_for_prior_sorts_enum_choices():
-    """StructuredSchema.canonicalized_for_prior returns a schema with enum
-    choices sorted; booleans/multi unaffected; no-op when already sorted."""
-    from jevmlx.schema import StructuredSchema
-
-    schema = StructuredSchema(
-        {
-            "risk_tier": {
-                "name": "risk_tier",
-                "type": "enum",
-                "description": "tier",
-                "choices": ["high", "low", "medium"],
-                "choice_descriptions": {
-                    "low": "low",
-                    "medium": "med",
-                    "high": "high",
-                },
-            }
-        }
-    )
-    canon = schema.canonicalized_for_prior()
-    assert canon.fields["risk_tier"].choices == ("high", "low", "medium")
-    # Already sorted -> no-op (returns self).
-    assert canon.canonicalized_for_prior() is canon
-    # Boolean field is untouched.
-    bool_schema = StructuredSchema(
-        {"flag": {"name": "flag", "type": "boolean", "description": "f"}}
-    )
-    assert bool_schema.canonicalized_for_prior() is bool_schema
-
-
-def test_prior_is_order_invariant_on_fake_engine(monkeypatch):
-    """Issue #105 fix: the prior computed by _get_or_compute_prior is
-    IDENTICAL for all orderings of the same choice set (the prior cache
-    has one entry, applied by choice name). Tested on the fake engine so
-    no model load is needed."""
-    from conftest import make_engine
-
-    from jevmlx.api import _prepare_schema
-    from jevmlx.engine import _PRIOR_CACHE, _get_or_compute_prior
-
-    engine = make_engine()
-    _PRIOR_CACHE.clear()
-    NEUTRAL = ""
-    priors = {}
-    for order_name, order in ORDERS.items():
-        schema = _prepare_schema(_model_cls(order), allow_none_of_above=False)
-        prior = _get_or_compute_prior(engine, schema, "labels", None, NEUTRAL)
-        priors[order_name] = prior["risk_tier"]["log_scores"]
-    # All three orderings produce the SAME prior (by choice name).
-    assert priors["low_med_high"] == priors["high_med_low"] == priors["med_high_low"], (
-        f"prior differs across orderings: {priors}"
-    )
-    # One cache entry for all three orderings.
-    assert len(_PRIOR_CACHE) == 1
 
 
 @pytest.mark.slow
 @_skip_in_ci
-def test_prior_corrected_labels_order_invariant_on_15b():
-    """Issue #105 slow: with prior_correction=True and labels scoring, the
-    canonical-prior fix reduces order-dependent flips on the 1.5B.
+def test_prior_corrected_labels_order_stability_on_15b():
+    """Issue #105 slow, P12 mechanism: with prior_correction=True and
+    labels scoring, order-dependent flips on the 1.5B stay at the
+    pre-P12 level or better. The MECHANISM changed (per-presentation
+    priors instead of a shared canonical prior — the prior now cancels the
+    model's position bias exactly for each ordering), but the promise is
+    the same: prior correction must not make order flips WORSE.
 
     Pinned to ``ISSUE105_MODEL`` (mlx-community/Qwen2.5-1.5B-Instruct-4bit),
-    NOT conftest.MODEL_ID — the ``<= 1`` flip threshold was measured on the
-    1.5B. The 0.5B default flips the scam case to 'low' (3/6) and fails this
+    NOT conftest.MODEL_ID — the flip threshold was measured on the 1.5B.
+    The 0.5B default flips the scam case to 'low' (3/6) and fails this
     gate; that is a model-capacity difference, not a regression. Run with::
 
         MODEL_ID=mlx-community/Qwen2.5-1.5B-Instruct-4bit \
             .venv/bin/python -m pytest tests/test_issue105_prior_order.py \
             -m slow -p no:cacheprovider -o "addopts="
 
-    Before the fix: 2/6 cases flipped (the prior itself was order-dependent).
-    After: at most 1/6 (residual evidence-pass position sensitivity on a
-    thin-content case — the fix removed the PRIOR's order dependence, not
-    the model's inherent evidence-position sensitivity, which is a separate,
-    harder problem). The fake-engine test asserts exact invariance; this
-    slow test guards the improvement does not regress past 1.
+    Under the canonical-prior fix: at most 1/6 flips (residual
+    evidence-pass position sensitivity on a thin-content case). The
+    fake-engine tests above assert the presentation rule; this slow test
+    guards the flip gate.
     """
     results = _run_grid("labels", prior_correction=True)
     flips = _count_flips(results)
@@ -243,8 +309,7 @@ def test_prior_corrected_labels_order_invariant_on_15b():
     for case_name, by_order in results.items():
         print(f"  {case_name}: {by_order}")
     assert flips <= 1, (
-        f"prior_correction flipped {flips}/6 cases across orderings "
-        f"(expected <= 1 after the canonical-prior fix): {results}"
+        f"prior_correction flipped {flips}/6 cases across orderings (expected <= 1): {results}"
     )
 
 
